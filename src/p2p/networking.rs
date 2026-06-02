@@ -62,7 +62,7 @@ const IMMEDIATE_STATUS_SYNC_BATCH: u32 = 8;
 const MAX_STATUS_SYNC_BATCH: u32 = 16;
 const MAX_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 16;
 const MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS: u32 = 8;
-const MAX_SUPPORT_PEER_DEEP_SYNC_LAG: u64 = 2_048;
+const MAX_SUPPORT_PEER_DEEP_SYNC_LAG: u64 = 64_000;
 const MAX_P2P_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const BLOCK_SYNC_RESPONSE_WRITE_TIMEOUT_SECS: u64 = 1;
 const VALIDATOR_SUPPORT_SYNC_RESPONSE_WRITE_TIMEOUT_MILLIS: u64 = 500;
@@ -5514,11 +5514,32 @@ fn apply_block_batch(
         return 0;
     }
 
+    blocks.sort_by_key(|block| block.block_index);
+    blocks.dedup_by(|left, right| left.block_index == right.block_index && left.hash == right.hash);
+
     let qc_by_hash = quorum_certificates
         .into_iter()
         .map(|qc| (qc.block_hash.clone(), qc))
         .collect::<HashMap<_, _>>();
-    for block in &blocks {
+
+    let locally_matching_prefix = {
+        let chain = blockchain.lock().unwrap();
+        blocks
+            .iter()
+            .filter(|block| {
+                chain
+                    .block_at_height(block.block_index)
+                    .map(|local| local.hash == block.hash)
+                    .unwrap_or(false)
+            })
+            .map(|block| block.hash.clone())
+            .collect::<HashSet<_>>()
+    };
+
+    for block in blocks
+        .iter()
+        .filter(|block| !locally_matching_prefix.contains(&block.hash))
+    {
         if let Err(error) = verify_network_commit_certificate(block, qc_by_hash.get(&block.hash)) {
             warn!(
                 "p2p",
@@ -5548,9 +5569,6 @@ fn apply_block_batch(
     for block in &blocks {
         confirmed_hashes.extend(transaction_hashes(&block.transactions));
     }
-
-    blocks.sort_by_key(|block| block.block_index);
-    blocks.dedup_by(|left, right| left.block_index == right.block_index && left.hash == right.hash);
 
     let (applied, applied_blocks, rollback_height, tip_height, snapshot) = {
         let mut chain = blockchain.lock().unwrap();
@@ -7469,6 +7487,11 @@ mod tests {
 
         assert!(support_peer_sync_request_is_too_deep(
             Some(&support_peer),
+            250_000,
+            11_666
+        ));
+        assert!(!support_peer_sync_request_is_too_deep(
+            Some(&support_peer),
             50_000,
             11_666
         ));
@@ -8159,6 +8182,45 @@ mod tests {
             chain.block_at_height(5).map(|block| block.hash.clone()),
             Some(block5.hash.clone())
         );
+    }
+
+    #[test]
+    fn apply_block_batch_accepts_qc_less_matching_overlap_before_new_blocks() {
+        clear_legacy_canonical_locks_for_tests();
+        let mut chain = BlockChain::new();
+        let genesis = Block::new_with_timestamp(
+            0,
+            Vec::new(),
+            "genesis-parent".to_string(),
+            "genesis".to_string(),
+            0,
+            1_700_000_000,
+        );
+        chain.add_block(genesis.clone());
+        let block1 = test_block(&genesis, 1, "validator-a", 1);
+        let block2 = test_block(&block1, 2, "validator-b", 2);
+        let block3 = test_block(&block2, 3, "validator-c", 3);
+        let block4 = test_block(&block3, 4, "validator-d", 4);
+        chain.add_block(block1.clone());
+        chain.add_block(block2.clone());
+        chain.add_block(block3.clone());
+
+        let blockchain = Arc::new(Mutex::new(chain));
+        let applied = apply_block_batch(
+            &blockchain,
+            vec![block2.clone(), block3.clone(), block4.clone()],
+            vec![test_quorum_certificate(&block4)],
+        );
+        assert_eq!(applied, 1);
+
+        let chain = blockchain.lock().unwrap();
+        assert_eq!(chain.last().map(|block| block.block_index), Some(4));
+        assert_eq!(
+            chain.block_at_height(4).map(|block| block.hash.clone()),
+            Some(block4.hash.clone())
+        );
+        drop(chain);
+        clear_legacy_canonical_locks_for_tests();
     }
 
     #[test]

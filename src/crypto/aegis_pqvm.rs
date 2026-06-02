@@ -365,6 +365,29 @@ impl AegisPqvmSigner {
         ))
     }
 
+    pub fn register_existing_keypair(
+        &mut self,
+        uma_id: &str,
+        public_key: PQCPublicKey,
+        private_key: PQCPrivateKey,
+        roles: Vec<AegisPqKeyRole>,
+        active_from_epoch: Epoch,
+    ) -> Result<AegisPqKeyId, AegisPqvmError> {
+        self.ensure_initialized()?;
+        if public_key.key_id != private_key.public_key_id {
+            return Err(AegisPqvmError(
+                "Aegis public/private key identifiers do not match".to_string(),
+            ));
+        }
+        Ok(self.registry.register_keypair(
+            uma_id,
+            public_key,
+            private_key,
+            roles,
+            active_from_epoch,
+        ))
+    }
+
     pub fn verifier(&self) -> AegisPqvmVerifier {
         AegisPqvmVerifier {
             registry: self.registry.clone(),

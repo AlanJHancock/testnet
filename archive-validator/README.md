@@ -4,7 +4,9 @@ This package installs a non-consensus Archive Validator Node for Synergy Testnet
 
 Protocol role: `ARCHIVE_OBSERVER`
 
-The archive node verifies finalized chain data, stores full archival data, creates signed snapshots every 10,000 finalized blocks, and serves verified snapshots to new validators and self-healing validators. It never votes, never proposes, never aggregates QCs, and never counts toward quorum.
+The archive node verifies finalized chain data, stores full archival data, creates role-specific signed snapshots, chunks zstd archives at 512 MiB, retains verified snapshots by class, and serves verified snapshots to new validators, self-healing validators, relayers, RPC nodes, and indexers. It never votes, never proposes, never aggregates QCs, and never counts toward quorum.
+
+Required snapshot classes: `validator-pruned`, `support-relayer`, `support-rpc`, `indexer-replay`, `indexer-full`, and `archive-full`.
 
 Linux install:
 
@@ -14,14 +16,15 @@ cd archive-validator
 sudo ./setup-archive-validator.sh --chain-id 1264 --network-id synergy-testnet-v2 --genesis-file ./config/genesis.testnet.json.template --expected-genesis-hash <hash> --yes
 ```
 
-macOS install:
+Apple Silicon M4 internal teammate handoff:
 
 ```bash
-unzip synergy-archive-validator-testnet-v2-macos-universal.zip
-sudo installer -pkg SynergyArchiveValidator.pkg -target /
-sudo /usr/local/synergy/bin/synergy-archive status
+unzip synergy-archive-validator-testnet-v2-macos-m4.zip
+cd synergy-archive-validator-testnet-v2-macos-m4
+sudo ./setup-archive-validator-m4.sh --public-host <archive-node-public-host> --yes
+sudo ./verify-archive-validator-m4.sh
 ```
 
-The macOS zip is valid only when it contains a signed, notarized, and stapled `SynergyArchiveValidator.pkg`. Do not distribute raw unsigned scripts as the macOS installer.
+The M4 zip includes the Apple Silicon archive runtime, the Aegis CLI, the archive snapshot control plane, checksums, launchd persistence, policy, and handoff instructions. It is an internal operations handoff artifact. A public macOS installer still requires a signed, notarized, and stapled package.
 
 Private keys are not included. Aegis PQC archive peer and snapshot signing identities must be generated or referenced through `aegis-pqvm`.

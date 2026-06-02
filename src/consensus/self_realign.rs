@@ -19,10 +19,17 @@ pub const EXPECTED_GENESIS_HASH: &str =
     "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789";
 pub const GENESIS_VALIDATOR_COUNT: usize = 5;
 pub const GENESIS_QUORUM_THRESHOLD: usize = 4;
-pub const DEFAULT_SNAPSHOT_INTERVAL_BLOCKS: u64 = 500;
+pub const DEFAULT_SNAPSHOT_INTERVAL_BLOCKS: u64 = 5_000;
 pub const DEFAULT_SNAPSHOT_INTERVAL_SECS: u64 = 15 * 60;
-pub const DEFAULT_SNAPSHOT_RETENTION_COUNT: usize = 3;
+pub const DEFAULT_SNAPSHOT_RETENTION_COUNT: usize = 2;
 pub const DEFAULT_SHADOW_OBSERVATION_BLOCKS: u64 = 500;
+
+pub const SNAPSHOT_CLASS_VALIDATOR_PRUNED: &str = "validator-pruned";
+pub const SNAPSHOT_CLASS_SUPPORT_RELAYER: &str = "support-relayer";
+pub const SNAPSHOT_CLASS_SUPPORT_RPC: &str = "support-rpc";
+pub const SNAPSHOT_CLASS_INDEXER_FULL: &str = "indexer-full";
+pub const SNAPSHOT_CLASS_INDEXER_REPLAY: &str = "indexer-replay";
+pub const SNAPSHOT_CLASS_ARCHIVE_FULL: &str = "archive-full";
 
 const SNAPSHOT_MANIFEST_VERSION: u32 = 1;
 const SNAPSHOT_STATE_ROOT_DOMAIN: &[u8] = b"SYNERGY_SNAPSHOT_STATE_ROOT_V1";
@@ -40,6 +47,57 @@ const SNAPSHOT_ALLOWED_FILES: &[&str] = &[
 
 pub fn launch_snapshot_allowed_files() -> &'static [&'static str] {
     SNAPSHOT_ALLOWED_FILES
+}
+
+pub fn normalize_snapshot_class(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        SNAPSHOT_CLASS_VALIDATOR_PRUNED => Some(SNAPSHOT_CLASS_VALIDATOR_PRUNED),
+        SNAPSHOT_CLASS_SUPPORT_RELAYER => Some(SNAPSHOT_CLASS_SUPPORT_RELAYER),
+        SNAPSHOT_CLASS_SUPPORT_RPC => Some(SNAPSHOT_CLASS_SUPPORT_RPC),
+        SNAPSHOT_CLASS_INDEXER_FULL => Some(SNAPSHOT_CLASS_INDEXER_FULL),
+        SNAPSHOT_CLASS_INDEXER_REPLAY => Some(SNAPSHOT_CLASS_INDEXER_REPLAY),
+        SNAPSHOT_CLASS_ARCHIVE_FULL => Some(SNAPSHOT_CLASS_ARCHIVE_FULL),
+        _ => None,
+    }
+}
+
+pub fn default_snapshot_class() -> String {
+    SNAPSHOT_CLASS_VALIDATOR_PRUNED.to_string()
+}
+
+pub fn default_allowed_restore_roles() -> Vec<String> {
+    vec!["validator".to_string()]
+}
+
+pub fn default_allowed_restore_roles_for_class(snapshot_class: &str) -> Option<Vec<String>> {
+    let roles = match normalize_snapshot_class(snapshot_class)? {
+        SNAPSHOT_CLASS_VALIDATOR_PRUNED => {
+            vec!["validator", "onboarding_validator", "quarantined_validator"]
+        }
+        SNAPSHOT_CLASS_SUPPORT_RELAYER => vec!["relayer"],
+        SNAPSHOT_CLASS_SUPPORT_RPC => vec!["rpc", "rpc_gateway"],
+        SNAPSHOT_CLASS_INDEXER_FULL | SNAPSHOT_CLASS_INDEXER_REPLAY => {
+            vec!["indexer", "explorer", "atlas_indexer", "explorer_indexer"]
+        }
+        SNAPSHOT_CLASS_ARCHIVE_FULL => vec!["archive", "archive_validator", "snapshot_authority"],
+        _ => return None,
+    };
+    Some(roles.into_iter().map(str::to_string).collect())
+}
+
+pub fn normalize_snapshot_role(role: &str) -> String {
+    role.trim()
+        .to_ascii_lowercase()
+        .replace('-', "_")
+        .replace(' ', "_")
+}
+
+pub fn snapshot_class_allows_role(snapshot_class: &str, role: &str) -> bool {
+    let Some(defaults) = default_allowed_restore_roles_for_class(snapshot_class) else {
+        return false;
+    };
+    let role = normalize_snapshot_role(role);
+    defaults.iter().any(|allowed| allowed == &role)
 }
 const SNAPSHOT_FORBIDDEN_PATH_FRAGMENTS: &[&str] = &[
     "config",
@@ -156,6 +214,10 @@ pub struct SnapshotManifest {
     pub chain_id_hex: String,
     pub network_id: String,
     pub genesis_hash: String,
+    #[serde(default = "default_snapshot_class")]
+    pub snapshot_class: String,
+    #[serde(default = "default_allowed_restore_roles")]
+    pub allowed_restore_roles: Vec<String>,
     pub snapshot_height: u64,
     pub snapshot_block_hash: String,
     pub parent_hash: String,
@@ -197,6 +259,8 @@ pub struct SignedSnapshotManifest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotBuildInput {
     pub state_dir: PathBuf,
+    pub snapshot_class: String,
+    pub allowed_restore_roles: Vec<String>,
     pub snapshot_height: u64,
     pub snapshot_block_hash: String,
     pub parent_hash: String,
@@ -223,6 +287,8 @@ pub struct SnapshotVerificationPolicy {
     pub expected_chain_id: u64,
     pub expected_network_id: String,
     pub expected_genesis_hash: String,
+    pub expected_snapshot_class: Option<String>,
+    pub target_role: Option<String>,
     pub required_quorum: u64,
     pub expected_genesis_validator_count: usize,
     pub current_finalized_height: Option<u64>,
@@ -237,6 +303,8 @@ impl Default for SnapshotVerificationPolicy {
             expected_chain_id: SYNERGY_TESTNET_V2_CHAIN_ID,
             expected_network_id: SYNERGY_TESTNET_V2_NETWORK_ID.to_string(),
             expected_genesis_hash: EXPECTED_GENESIS_HASH.to_string(),
+            expected_snapshot_class: None,
+            target_role: None,
             required_quorum: GENESIS_QUORUM_THRESHOLD as u64,
             expected_genesis_validator_count: GENESIS_VALIDATOR_COUNT,
             current_finalized_height: None,
@@ -253,6 +321,8 @@ pub struct SnapshotVerificationReport {
     pub fail_closed: bool,
     pub errors: Vec<String>,
     pub manifest_hash: Option<String>,
+    pub snapshot_class: String,
+    pub allowed_restore_roles: Vec<String>,
     pub snapshot_height: u64,
     pub committed_qc_height: u64,
     pub committed_qc_hash: String,
@@ -829,12 +899,37 @@ pub fn create_snapshot_manifest(input: SnapshotBuildInput) -> Result<SnapshotMan
         Some(root) if !root.trim().is_empty() => Some(root),
         _ => Some(snapshot_state_root_digest(&files)?),
     };
+    let snapshot_class = normalize_snapshot_class(&input.snapshot_class)
+        .ok_or_else(|| format!("unsupported snapshot class {}", input.snapshot_class))?
+        .to_string();
+    let allowed_restore_roles = if input.allowed_restore_roles.is_empty() {
+        default_allowed_restore_roles_for_class(&snapshot_class)
+            .ok_or_else(|| format!("unsupported snapshot class {snapshot_class}"))?
+    } else {
+        input
+            .allowed_restore_roles
+            .iter()
+            .map(|role| normalize_snapshot_role(role))
+            .collect::<Vec<_>>()
+    };
+    if allowed_restore_roles.is_empty() {
+        return Err("snapshot manifest requires at least one allowed restore role".to_string());
+    }
+    for role in &allowed_restore_roles {
+        if !snapshot_class_allows_role(&snapshot_class, role) {
+            return Err(format!(
+                "snapshot class {snapshot_class} is not compatible with restore role {role}"
+            ));
+        }
+    }
     Ok(SnapshotManifest {
         manifest_version: SNAPSHOT_MANIFEST_VERSION,
         chain_id: SYNERGY_TESTNET_V2_CHAIN_ID,
         chain_id_hex: "0x4f0".to_string(),
         network_id: SYNERGY_TESTNET_V2_NETWORK_ID.to_string(),
         genesis_hash: EXPECTED_GENESIS_HASH.to_string(),
+        snapshot_class,
+        allowed_restore_roles,
         snapshot_height: input.snapshot_height,
         snapshot_block_hash: input.snapshot_block_hash,
         parent_hash: input.parent_hash,
@@ -910,6 +1005,51 @@ pub fn verify_signed_snapshot_manifest(
         .eq_ignore_ascii_case(&policy.expected_genesis_hash)
     {
         errors.push("snapshot manifest wrong genesis_hash".to_string());
+    }
+    let normalized_class = match normalize_snapshot_class(&manifest.snapshot_class) {
+        Some(snapshot_class) => snapshot_class.to_string(),
+        None => {
+            errors.push(format!(
+                "snapshot manifest unsupported snapshot_class {}",
+                manifest.snapshot_class
+            ));
+            manifest.snapshot_class.clone()
+        }
+    };
+    if let Some(expected_class) = policy.expected_snapshot_class.as_deref() {
+        match normalize_snapshot_class(expected_class) {
+            Some(expected) if expected == normalized_class => {}
+            Some(expected) => errors.push(format!(
+                "snapshot class mismatch: expected {expected}, got {normalized_class}"
+            )),
+            None => errors.push(format!(
+                "snapshot verification policy requested unsupported class {expected_class}"
+            )),
+        }
+    }
+    if manifest.allowed_restore_roles.is_empty() {
+        errors.push("snapshot manifest has no allowed restore roles".to_string());
+    }
+    for role in &manifest.allowed_restore_roles {
+        let normalized_role = normalize_snapshot_role(role);
+        if !snapshot_class_allows_role(&normalized_class, &normalized_role) {
+            errors.push(format!(
+                "snapshot class {normalized_class} is not compatible with restore role {normalized_role}"
+            ));
+        }
+    }
+    if let Some(target_role) = policy.target_role.as_deref() {
+        let target_role = normalize_snapshot_role(target_role);
+        if !manifest
+            .allowed_restore_roles
+            .iter()
+            .map(|role| normalize_snapshot_role(role))
+            .any(|allowed| allowed == target_role)
+        {
+            errors.push(format!(
+                "snapshot target role {target_role} is not allowed for class {normalized_class}"
+            ));
+        }
     }
     if manifest.quorum_threshold != policy.required_quorum {
         errors.push("snapshot manifest wrong quorum threshold".to_string());
@@ -1013,6 +1153,12 @@ pub fn verify_signed_snapshot_manifest(
         fail_closed: !errors.is_empty(),
         errors,
         manifest_hash,
+        snapshot_class: normalized_class,
+        allowed_restore_roles: manifest
+            .allowed_restore_roles
+            .iter()
+            .map(|role| normalize_snapshot_role(role))
+            .collect(),
         snapshot_height: manifest.snapshot_height,
         committed_qc_height: manifest.qc_evidence.committed_qc_height,
         committed_qc_hash: manifest.qc_evidence.committed_qc_hash.clone(),
@@ -1522,6 +1668,8 @@ mod tests {
         let (mut signer, key_id, public) = signer();
         let manifest = create_snapshot_manifest(SnapshotBuildInput {
             state_dir: state_dir(),
+            snapshot_class: SNAPSHOT_CLASS_VALIDATOR_PRUNED.to_string(),
+            allowed_restore_roles: vec!["validator".to_string()],
             snapshot_height: 100,
             snapshot_block_hash: "block-hash".to_string(),
             parent_hash: "parent-hash".to_string(),
@@ -1568,6 +1716,46 @@ mod tests {
         assert!(report.success, "{:?}", report.errors);
         assert!(report.manifest_signature_verified);
         assert!(report.file_checksums_verified);
+        assert_eq!(report.snapshot_class, SNAPSHOT_CLASS_VALIDATOR_PRUNED);
+        assert_eq!(report.allowed_restore_roles, vec!["validator".to_string()]);
+    }
+
+    #[test]
+    fn snapshot_verification_enforces_class_and_target_role() {
+        let signed = signed_manifest();
+        let wrong_class = verify_signed_snapshot_manifest(
+            &signed,
+            &SnapshotVerificationPolicy {
+                expected_snapshot_class: Some(SNAPSHOT_CLASS_SUPPORT_RPC.to_string()),
+                target_role: Some("rpc".to_string()),
+                ..SnapshotVerificationPolicy::default()
+            },
+            None,
+        );
+        assert!(!wrong_class.success);
+        assert!(wrong_class
+            .errors
+            .iter()
+            .any(|error| error.contains("snapshot class mismatch")));
+        assert!(wrong_class
+            .errors
+            .iter()
+            .any(|error| error.contains("snapshot target role rpc is not allowed")));
+
+        let wrong_target = verify_signed_snapshot_manifest(
+            &signed,
+            &SnapshotVerificationPolicy {
+                expected_snapshot_class: Some(SNAPSHOT_CLASS_VALIDATOR_PRUNED.to_string()),
+                target_role: Some("indexer".to_string()),
+                ..SnapshotVerificationPolicy::default()
+            },
+            None,
+        );
+        assert!(!wrong_target.success);
+        assert!(wrong_target
+            .errors
+            .iter()
+            .any(|error| error.contains("snapshot target role indexer is not allowed")));
     }
 
     #[test]
@@ -1692,6 +1880,8 @@ mod tests {
         let (mut signer, key_id, public) = signer();
         let manifest = create_snapshot_manifest(SnapshotBuildInput {
             state_dir: root.clone(),
+            snapshot_class: SNAPSHOT_CLASS_VALIDATOR_PRUNED.to_string(),
+            allowed_restore_roles: vec!["validator".to_string()],
             snapshot_height: 100,
             snapshot_block_hash: "block-hash".to_string(),
             parent_hash: "parent-hash".to_string(),

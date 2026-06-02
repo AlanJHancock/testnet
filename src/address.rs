@@ -114,6 +114,17 @@ pub fn generate_generic_address(prefix: &str, public_key: &str) -> String {
     derive_address_from_bytes(prefix, &key_bytes_from_str(public_key))
 }
 
+/// Returns true when `address` is the canonical SNTS-01 address for the raw
+/// public-key bytes and the address's own Bech32m prefix.
+pub fn address_matches_public_key(address: &str, public_key_bytes: &[u8]) -> bool {
+    let Ok((prefix, _, variant)) = bech32::decode(address) else {
+        return false;
+    };
+    variant == Variant::Bech32m
+        && is_valid_address(address)
+        && derive_address_from_bytes(&prefix, public_key_bytes) == address
+}
+
 /// Generates the protocol-controlled FeeCollector address with the `synf` prefix.
 pub fn generate_fee_collector_address(seed: &str) -> String {
     derive_address_from_bytes("synf", seed.as_bytes())
@@ -250,6 +261,13 @@ mod tests {
             "wallet address must pass is_valid_address: {}",
             addr
         );
+    }
+
+    #[test]
+    fn wallet_address_matches_raw_public_key_bytes() {
+        let addr = generate_wallet_address(ZERO_KEY_HEX);
+        assert!(address_matches_public_key(&addr, ZERO_KEY_BYTES));
+        assert!(!address_matches_public_key(&addr, &[1u8; 32]));
     }
 
     #[test]

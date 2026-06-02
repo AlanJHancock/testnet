@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import platform
@@ -49,6 +50,8 @@ EMBEDDED_WALLETS = {
     }
 }
 
+BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -86,6 +89,65 @@ def load_wallet(label: str) -> dict:
     wallet["private_key_hex"] = base64.b64decode(wallet["private_key"]).hex()
     wallet["public_key_hex"] = base64.b64decode(wallet["public_key"]).hex()
     return wallet
+
+
+def _bech32_polymod(values: list[int]) -> int:
+    checksum = 1
+    generators = [0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3]
+    for value in values:
+        top = checksum >> 25
+        checksum = ((checksum & 0x1FFFFFF) << 5) ^ value
+        for index, generator in enumerate(generators):
+            if (top >> index) & 1:
+                checksum ^= generator
+    return checksum
+
+
+def _bech32_hrp_expand(prefix: str) -> list[int]:
+    return [ord(char) >> 5 for char in prefix] + [0] + [ord(char) & 31 for char in prefix]
+
+
+def _bech32m_checksum(prefix: str, data: list[int]) -> list[int]:
+    value = _bech32_polymod(_bech32_hrp_expand(prefix) + data + [0] * 6) ^ 0x2BC830A3
+    return [(value >> (5 * (5 - index))) & 31 for index in range(6)]
+
+
+def _extract_base32_values(value: bytes, count: int) -> list[int]:
+    values = []
+    for index in range(count):
+        bit_offset = index * 5
+        byte_index = bit_offset // 8
+        bit_index = bit_offset % 8
+        if bit_index <= 3:
+            item = (value[byte_index] >> (3 - bit_index)) & 0x1F
+        else:
+            high = (value[byte_index] << (bit_index - 3)) & 0x1F
+            low = value[byte_index + 1] >> (11 - bit_index) if byte_index + 1 < len(value) else 0
+            item = high | low
+        values.append(item)
+    return values
+
+
+def derive_wallet_address(public_key_bytes: bytes) -> str:
+    prefix = "synw"
+    digest = hashlib.sha3_256(public_key_bytes).digest()
+    data = _extract_base32_values(digest, 41 - len(prefix) - 1 - 6)
+    return prefix + "1" + "".join(BECH32_CHARSET[value] for value in data + _bech32m_checksum(prefix, data))
+
+
+def wallet_public_summary(label: str) -> dict:
+    wallet = load_wallet(label)
+    public_key_bytes = bytes.fromhex(wallet["public_key_hex"])
+    derived_address = derive_wallet_address(public_key_bytes)
+    return {
+        "label": label,
+        "address": wallet["address"],
+        "address_derivation_match": derived_address == wallet["address"],
+        "public_key_encoding_at_rest": "base64",
+        "public_key_transport_encoding": "hex",
+        "public_key_bytes": len(public_key_bytes),
+        "public_key_sha256": hashlib.sha256(public_key_bytes).hexdigest(),
+    }
 
 
 def format_snrg(nwei: int) -> str:
@@ -250,6 +312,62 @@ class NonceTracker:
 def command_list_wallets(_args: argparse.Namespace) -> int:
     for label, wallet in EMBEDDED_WALLETS.items():
         print(f"{label} {wallet['address']}")
+    return 0
+
+
+def command_preflight(args: argparse.Namespace) -> int:
+    reports = []
+    for label in args.wallets or sorted(EMBEDDED_WALLETS):
+        report = wallet_public_summary(label)
+        try:
+            report["public_rpc_balance_nwei"] = int(
+                rpc_call(args.rpc_url, "synergy_getTokenBalance", [report["address"], "SNRG"])["result"] or 0
+            )
+            report["public_rpc_nonce"] = int(
+                rpc_call(args.rpc_url, "synergy_getAccountNonce", [report["address"]])["result"] or 0
+            )
+        except Exception as exc:
+            report["public_rpc_error"] = str(exc)
+        reports.append(report)
+    print_json({
+        "rpc_url": args.rpc_url,
+        "wallets": reports,
+    })
+    return 0 if all(report["address_derivation_match"] and "public_rpc_error" not in report for report in reports) else 1
+
+
+def command_build_preview(args: argparse.Namespace) -> int:
+    sender = load_wallet(args.from_wallet)
+    receiver = wallet_label_or_address(args.to)
+    amount_nwei = amount_to_nwei(args.amount_snrg, args.amount_nwei)
+    nonce = NonceTracker(args.rpc_url, args.nonce_mode).next_nonce(args.from_wallet, sender["address"])
+    unsigned = build_unsigned_tx(
+        sender,
+        receiver,
+        amount_nwei,
+        nonce,
+        args.gas_price,
+        args.gas_limit,
+        args.algo,
+        data=args.data,
+    )
+    signed = sign_tx(resolve_wallet_cli(args.wallet_cli), sender, unsigned, args.algo)
+    canonical_json = json.dumps(signed, sort_keys=True, separators=(",", ":")).encode()
+    print_json({
+        "submitted": False,
+        "sender": sender["address"],
+        "receiver": receiver,
+        "amount_nwei": amount_nwei,
+        "nonce": nonce,
+        "chain_id": signed["chain_id"],
+        "network_id": signed["network_id"],
+        "signature_algorithm": signed["signature_algorithm"],
+        "signature_bytes": len(signed["signature"]),
+        "signer_public_key_bytes": len(bytes.fromhex(signed["signer_public_key"])),
+        "signer_public_key_address_derivation_match": wallet_public_summary(args.from_wallet)["address_derivation_match"],
+        "submitted_json_fields": sorted(signed),
+        "submitted_json_sha256": hashlib.sha256(canonical_json).hexdigest(),
+    })
     return 0
 
 
@@ -522,6 +640,19 @@ def parse_args() -> argparse.Namespace:
 
     p = sub.add_parser("list-wallets", help="List embedded testnet wallet aliases and addresses")
     p.set_defaults(func=command_list_wallets)
+
+    p = sub.add_parser("preflight", help="Check embedded sender public keys, derivation, public balances, and nonces")
+    p.add_argument("--wallets", nargs="*", choices=sorted(EMBEDDED_WALLETS))
+    p.add_argument("--rpc-url", default=os.environ.get("SYNERGY_RPC_URL", DEFAULT_RPC_URL))
+    p.set_defaults(func=command_preflight)
+
+    p = sub.add_parser("build-preview", help="Sign a transaction preview without submitting it")
+    p.add_argument("--from", dest="from_wallet", choices=sorted(EMBEDDED_WALLETS), required=True)
+    p.add_argument("--to", required=True, help="Recipient address, faucet, or token-sales")
+    p.add_argument("--amount-snrg", default="1")
+    p.add_argument("--amount-nwei", type=int, default=None)
+    add_common_tx_args(p)
+    p.set_defaults(func=command_build_preview)
 
     p = sub.add_parser("chain-id", help="Print expected Testnet chain ID and RPC-reported node info")
     p.add_argument("--rpc-url", default=os.environ.get("SYNERGY_RPC_URL", DEFAULT_RPC_URL))

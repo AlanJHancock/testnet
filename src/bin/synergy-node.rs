@@ -101,6 +101,8 @@ fn run() -> Result<(), String> {
                 ),
                 source_role: arg_value(&args, "--source-role"),
                 conflict_height_hash: arg_value(&args, "--conflict-height-hash"),
+                snapshot_class: arg_value(&args, "--snapshot-class"),
+                allowed_restore_roles: arg_values(&args, "--allowed-role"),
             };
             match synergy_testnet::consensus::diagnostics::create_snapshot_with_options(options) {
                 Ok(report) => print_json(report)?,
@@ -117,9 +119,13 @@ fn run() -> Result<(), String> {
                 .or_else(|| arg_value(&args, "--manifest-path"))
                 .ok_or_else(|| "verify-snapshot requires --manifest <path>".to_string())?;
             let snapshot_root = arg_value(&args, "--snapshot-root");
-            let report = synergy_testnet::consensus::diagnostics::verify_snapshot(
+            let report = synergy_testnet::consensus::diagnostics::verify_snapshot_with_options(
                 &manifest,
                 snapshot_root.as_deref(),
+                synergy_testnet::consensus::diagnostics::VerifySnapshotOptions {
+                    snapshot_class: arg_value(&args, "--snapshot-class"),
+                    target_role: arg_value(&args, "--target-role"),
+                },
             )?;
             print_json(report)?;
         }
@@ -241,11 +247,11 @@ fn run() -> Result<(), String> {
             println!("  synergy-node recover-transient-vote-locks --chain-id 1264 --network-id synergy-testnet-v2 [--finalized-height <height>] [--min-age-secs <seconds>]");
             println!("  synergy-node self-heal --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node sync-from-canonical-peer --chain-id 1264 --network-id synergy-testnet-v2 --canonical-height <height> --canonical-hash <hash> --source-qc-aegis-pqc-verified --parent-continuity-verified --state-root-matches --source-peer-not-quarantined [--source-peer <id>]");
-            println!("  synergy-node create-snapshot --chain-id 1264 --network-id synergy-testnet-v2 --source-node-majority-branch-proven [--source-role GENESIS_VALIDATOR] [--conflict-height-hash <hash>]");
+            println!("  synergy-node create-snapshot --chain-id 1264 --network-id synergy-testnet-v2 --source-node-majority-branch-proven [--source-role GENESIS_VALIDATOR] [--snapshot-class validator-pruned|support-relayer|support-rpc|indexer-replay|indexer-full|archive-full] [--allowed-role <role> ...] [--conflict-height-hash <hash>]");
             println!(
                 "  synergy-node list-snapshots --chain-id 1264 --network-id synergy-testnet-v2"
             );
-            println!("  synergy-node verify-snapshot --manifest <path> --chain-id 1264 --network-id synergy-testnet-v2 [--snapshot-root <dir>]");
+            println!("  synergy-node verify-snapshot --manifest <path> --chain-id 1264 --network-id synergy-testnet-v2 [--snapshot-root <dir>] [--snapshot-class <class>] [--target-role <role>]");
             println!("  synergy-node self-heal-from-snapshot --manifest <path> --chain-id 1264 --network-id synergy-testnet-v2 [--snapshot-root <dir>]");
             println!("  synergy-node quarantine-stopped-validator --chain-id 1264 --network-id synergy-testnet-v2 --target-stopped --operator-approved-containment --quorum-majority-height <height> --quorum-majority-hash <hash> [--local-conflicting-height <height>] [--local-conflicting-hash <hash>]");
             println!("  synergy-node start-shadow-observe --chain-id 1264 --network-id synergy-testnet-v2 [--required-blocks <blocks>]");

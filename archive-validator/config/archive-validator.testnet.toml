@@ -15,9 +15,11 @@ fail_closed_on_verification_error = true
 
 [snapshots]
 enabled = true
-snapshot_interval_blocks = 10000
+snapshot_interval_blocks = 5000
 compression = "zstd"
-chunk_size_bytes = 67108864
+chunk_size_bytes = 536870912
+retain_verified_snapshots_per_class = 2
+snapshot_classes = ["validator-pruned", "support-relayer", "support-rpc", "indexer-replay", "indexer-full", "archive-full"]
 publish_catalog = true
 sign_manifests = true
 sign_catalog = true

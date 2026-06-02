@@ -2867,7 +2867,7 @@ impl ProofOfSynergy {
 
     fn validate_transaction_detailed(
         tx: &crate::transaction::Transaction,
-        pqc_manager: &Arc<Mutex<PQCManager>>,
+        _pqc_manager: &Arc<Mutex<PQCManager>>,
     ) -> Result<(), String> {
         if !crate::address::is_valid_address(&tx.sender) {
             return Err("invalid sender address".to_string());
@@ -2896,35 +2896,16 @@ impl ProofOfSynergy {
                     "Aegis PQVM transaction carrier validation failed: {error}"
                 ));
             }
-        } else if let Some(public_key) = Self::get_transaction_public_key(&tx.sender) {
-            let pqc = pqc_manager.lock().unwrap();
-            // Use raw_hash() for signature verification (without prefix)
-            let message_bytes = match hex::decode(tx.raw_hash()) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    return Err(format!(
-                        "transaction raw hash decode failed during signature verification: {error}"
-                    ))
-                }
-            };
-
-            let signature_obj = crate::crypto::pqc::PQCSignature {
-                algorithm: crate::crypto::pqc::PQCAlgorithm::FNDSA,
-                signature_data: tx.signature.clone(),
-                message_hash: message_bytes.clone(),
-                public_key_id: public_key.key_id.clone(),
-                created_at: tx.timestamp,
-            };
-
-            let signature_valid = pqc
-                .verify(&public_key, &signature_obj, &message_bytes)
-                .unwrap_or(false);
-
-            if !signature_valid {
-                return Err("transaction signature verification failed".to_string());
-            }
         } else {
-            return Err("sender public key is unavailable".to_string());
+            tx.verify_embedded_signature()
+                .map_err(|error| format!("transaction signature verification failed: {error}"))?;
+            if let Some(public_key) = Self::get_transaction_public_key(&tx.sender) {
+                if tx.signer_public_key != public_key.key_data {
+                    return Err(
+                        "signer public key does not match registered sender public key".to_string(),
+                    );
+                }
+            }
         }
 
         // 2. Verify sender balance via token manager to reflect on-chain state

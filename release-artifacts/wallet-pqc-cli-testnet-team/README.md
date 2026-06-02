@@ -62,12 +62,22 @@ python3 ./synergy-testnet-tx.py atlas-dag --view topology --limit 25
 Wallet checks:
 
 ```bash
+python3 ./synergy-testnet-tx.py preflight
 python3 ./synergy-testnet-tx.py balance faucet
 python3 ./synergy-testnet-tx.py balance token-sales
 python3 ./synergy-testnet-tx.py balance validator-rewards
 python3 ./synergy-testnet-tx.py nonce faucet
 python3 ./synergy-testnet-tx.py nonce token-sales
 python3 ./synergy-testnet-tx.py nonce validator-rewards
+```
+
+`preflight` prints public-key encoding, public-key fingerprint, address-derivation match, public RPC balance, and nonce without printing any private key. Before submitting a controlled probe, build and sign the exact transport envelope without broadcasting it:
+
+```bash
+python3 ./synergy-testnet-tx.py build-preview \
+  --from token-sales \
+  --to faucet \
+  --amount-nwei 1
 ```
 
 Transaction lookup:

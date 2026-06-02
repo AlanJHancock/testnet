@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+apply-verified-support-snapshot.sh \
+  --distribution-manifest <distribution-manifest.json> \
+  --snapshot-root <extracted-snapshot-root> \
+  --snapshot-class <support-relayer|support-rpc|indexer-replay|indexer-full> \
+  --target-role <relayer|rpc|indexer> \
+  --target-data-dir <data-dir> \
+  --evidence-path <dir> \
+  --rollback-path <dir> \
+  --confirm-target-stopped
+USAGE
+}
+
+distribution_manifest=""
+snapshot_root=""
+snapshot_class=""
+target_role=""
+target_data_dir=""
+evidence_path=""
+rollback_path=""
+confirm_target_stopped=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --distribution-manifest) distribution_manifest="$2"; shift 2 ;;
+    --snapshot-root) snapshot_root="$2"; shift 2 ;;
+    --snapshot-class) snapshot_class="$2"; shift 2 ;;
+    --target-role) target_role="$2"; shift 2 ;;
+    --target-data-dir) target_data_dir="$2"; shift 2 ;;
+    --evidence-path) evidence_path="$2"; shift 2 ;;
+    --rollback-path) rollback_path="$2"; shift 2 ;;
+    --confirm-target-stopped) confirm_target_stopped=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+if [[ -z "$distribution_manifest" || -z "$snapshot_root" || -z "$snapshot_class" || -z "$target_role" || -z "$target_data_dir" || -z "$evidence_path" || -z "$rollback_path" ]]; then
+  usage >&2
+  exit 2
+fi
+if [[ "$confirm_target_stopped" != "true" ]]; then
+  echo "refusing support snapshot apply without --confirm-target-stopped" >&2
+  exit 3
+fi
+case "$snapshot_class:$target_role" in
+  support-relayer:relayer|support-rpc:rpc|indexer-replay:indexer|indexer-full:indexer) ;;
+  *) echo "snapshot class $snapshot_class is not compatible with target role $target_role" >&2; exit 4 ;;
+esac
+if [[ ! -f "$distribution_manifest" || ! -d "$snapshot_root" || ! -d "$target_data_dir" ]]; then
+  echo "manifest, snapshot root, or target data dir is missing" >&2
+  exit 5
+fi
+
+mkdir -p "$evidence_path/target-before" "$evidence_path/source" "$rollback_path"
+
+python3 - "$distribution_manifest" "$snapshot_root" "$snapshot_class" "$target_role" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text())
+snapshot_root = Path(sys.argv[2])
+snapshot_class = sys.argv[3]
+target_role = sys.argv[4]
+if manifest.get("snapshot_class") != snapshot_class:
+    raise SystemExit("distribution snapshot class mismatch")
+if target_role not in (manifest.get("allowed_restore_roles") or []):
+    raise SystemExit("target role not allowed by distribution manifest")
+if manifest.get("chain_id") != 1264:
+    raise SystemExit("wrong chain_id")
+if manifest.get("network_id") != "synergy-testnet-v2":
+    raise SystemExit("wrong network_id")
+if manifest.get("genesis_hash") != "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789":
+    raise SystemExit("wrong genesis_hash")
+if (manifest.get("qc_vote_count") or 0) < 4:
+    raise SystemExit("QC vote count below quorum")
+for name in ["chain.json", "canonical_locks.json", "committed_qcs.jsonl", "validator_registry.json", "token_state.json"]:
+    if not (snapshot_root / name).exists():
+        raise SystemExit(f"snapshot missing required state file: {name}")
+print(json.dumps({
+    "support_snapshot_manifest_accepted": True,
+    "snapshot_class": snapshot_class,
+    "target_role": target_role,
+    "snapshot_height": manifest.get("snapshot_height"),
+    "snapshot_block_hash": manifest.get("snapshot_block_hash"),
+}, sort_keys=True))
+PY
+
+snapshot_height="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["snapshot_height"])' "$distribution_manifest")"
+snapshot_block_hash="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["snapshot_block_hash"])' "$distribution_manifest")"
+
+allowed_files=(
+  chain.json
+  canonical_locks.json
+  canonical_locks.jsonl
+  committed_blocks.jsonl
+  committed_qcs.json
+  committed_qcs.jsonl
+  dag_state.json
+  validator_registry.json
+  token_state.json
+  account_state.json
+  state_checkpoint.json
+)
+
+for file in "${allowed_files[@]}"; do
+  source="$snapshot_root/$file"
+  target="$target_data_dir/$file"
+  if [[ ! -f "$source" ]]; then
+    continue
+  fi
+  case "$file" in
+    *config*|node.env|*.env|*key*|*identity*|*wireguard*|*wg0*|*tls*|*credential*|*secret*|*password*|*genesis*|*quorum*)
+      echo "refusing forbidden state file: $file" >&2
+      exit 6
+      ;;
+  esac
+  sha256sum "$source" >> "$evidence_path/source/source-sha256.txt"
+  if [[ -f "$target" ]]; then
+    cp -p "$target" "$evidence_path/target-before/$file"
+    cp -p "$target" "$rollback_path/$file"
+    sha256sum "$target" >> "$evidence_path/target-before/target-sha256.txt"
+  fi
+  tmp="$target.tmp-support-snapshot-$$"
+  if [[ "$file" == "chain.json" ]]; then
+    python3 - "$source" "$tmp" "$snapshot_height" "$snapshot_block_hash" <<'PY'
+import json
+import sys
+
+source_path, target_path, snapshot_height_raw, snapshot_hash = sys.argv[1:5]
+snapshot_height = int(snapshot_height_raw)
+
+
+def iter_objects(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        depth = 0
+        in_string = False
+        escaped = False
+        collecting = False
+        buffer = []
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            for char in chunk:
+                if not collecting:
+                    if char == "{":
+                        collecting = True
+                        depth = 1
+                        in_string = False
+                        escaped = False
+                        buffer = ["{"]
+                    continue
+
+                buffer.append(char)
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        in_string = False
+                    continue
+
+                if char == '"':
+                    in_string = True
+                elif char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                    if depth == 0:
+                        collecting = False
+                        yield "".join(buffer)
+                        buffer = []
+        if collecting:
+            raise SystemExit("chain.json ended while reading a block object")
+
+
+kept = 0
+last_height = None
+last_hash = None
+with open(target_path, "w", encoding="utf-8") as output:
+    output.write("[")
+    first = True
+    for raw in iter_objects(source_path):
+        block = json.loads(raw)
+        height = block.get("block_index")
+        if height is None:
+            height = block.get("height")
+        if height is None:
+            raise SystemExit("chain.json block is missing block_index/height")
+        height = int(height)
+        if height > snapshot_height:
+            break
+        if not first:
+            output.write(",")
+        json.dump(block, output, separators=(",", ":"))
+        first = False
+        kept += 1
+        last_height = height
+        last_hash = block.get("hash") or block.get("block_hash")
+    output.write("]")
+
+if kept == 0:
+    raise SystemExit("bounded chain.json would be empty")
+if last_height != snapshot_height:
+    raise SystemExit(
+        f"bounded chain.json ended at height {last_height}, expected {snapshot_height}"
+    )
+if last_hash != snapshot_hash:
+    raise SystemExit(
+        f"bounded chain.json hash {last_hash} does not match snapshot hash {snapshot_hash}"
+    )
+print(
+    json.dumps(
+        {
+            "bounded_chain_json": True,
+            "kept_blocks": kept,
+            "last_height": last_height,
+            "last_hash": last_hash,
+        },
+        sort_keys=True,
+    )
+)
+PY
+  else
+    cp -p "$source" "$tmp"
+  fi
+  mv "$tmp" "$target"
+  sha256sum "$target" >> "$evidence_path/target-after-sha256.txt"
+done
+
+support_marker_files=(
+  validator_quarantine.json
+  validator_quarantine_peer_evidence.json
+  self_heal_status.json
+)
+
+for marker in "${support_marker_files[@]}"; do
+  target="$target_data_dir/$marker"
+  if [[ ! -f "$target" ]]; then
+    continue
+  fi
+  case "$marker" in
+    *config*|node.env|*.env|*key*|*identity*|*wireguard*|*wg0*|*tls*|*credential*|*secret*|*password*|*genesis*|*quorum*)
+      echo "refusing forbidden support marker: $marker" >&2
+      exit 7
+      ;;
+  esac
+  cp -p "$target" "$evidence_path/target-before/$marker"
+  cp -p "$target" "$rollback_path/$marker"
+  sha256sum "$target" >> "$evidence_path/target-before/support-marker-sha256.txt"
+  rm -f "$target"
+  printf '%s\n' "$marker" >> "$evidence_path/support-markers-removed.txt"
+done
+
+cp -p "$distribution_manifest" "$evidence_path/distribution-manifest.json"
+echo "support_snapshot_apply_complete=true evidence_path=$evidence_path rollback_path=$rollback_path keys_or_configs_copied=false"

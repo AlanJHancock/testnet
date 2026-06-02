@@ -133,6 +133,20 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
         .map(|pair| pair[1].clone())
 }
 
+fn arg_values(args: &[String], name: &str) -> Vec<String> {
+    let equals_prefix = format!("{name}=");
+    let mut values = args
+        .iter()
+        .filter_map(|arg| arg.strip_prefix(&equals_prefix).map(str::to_string))
+        .collect::<Vec<_>>();
+    values.extend(
+        args.windows(2)
+            .filter(|pair| pair[0] == name)
+            .map(|pair| pair[1].clone()),
+    );
+    values
+}
+
 fn arg_flag(args: &[String], name: &str) -> bool {
     args.iter().any(|arg| arg == name)
 }
@@ -265,6 +279,8 @@ fn run_offline_snapshot_command(args: &[String], command: &str) -> Result<bool, 
                 ),
                 source_role: arg_value(args, "--source-role"),
                 conflict_height_hash: arg_value(args, "--conflict-height-hash"),
+                snapshot_class: arg_value(args, "--snapshot-class"),
+                allowed_restore_roles: arg_values(args, "--allowed-role"),
             };
             let report = crate::consensus::diagnostics::create_snapshot_with_options(options)?;
             print_json_value(report);
@@ -277,9 +293,13 @@ fn run_offline_snapshot_command(args: &[String], command: &str) -> Result<bool, 
                 .or_else(|| arg_value(args, "--manifest-path"))
                 .ok_or_else(|| "verify-snapshot requires --manifest <path>".to_string())?;
             let snapshot_root = arg_value(args, "--snapshot-root");
-            let report = crate::consensus::diagnostics::verify_snapshot(
+            let report = crate::consensus::diagnostics::verify_snapshot_with_options(
                 &manifest,
                 snapshot_root.as_deref(),
+                crate::consensus::diagnostics::VerifySnapshotOptions {
+                    snapshot_class: arg_value(args, "--snapshot-class"),
+                    target_role: arg_value(args, "--target-role"),
+                },
             )?;
             print_json_value(report);
             Ok(true)
@@ -866,6 +886,9 @@ fn print_usage(binary_name: &str, expected_profile: Option<&RoleProfile>) {
     eprintln!("    --source-workspace <PATH>  Source workspace for offline create/list/verify");
     eprintln!("    --source-node-majority-branch-proven");
     eprintln!("    --source-role GENESIS_VALIDATOR");
+    eprintln!("    --snapshot-class validator-pruned|support-relayer|support-rpc|indexer-replay|indexer-full|archive-full");
+    eprintln!("    --allowed-role <role> [--allowed-role <role> ...]");
+    eprintln!("    --target-role <role>");
     eprintln!("    --manifest <PATH> [--snapshot-root <DIR>]");
     eprintln!("    --target-stopped --operator-approved-containment --quorum-majority-height <H> --quorum-majority-hash <HASH>");
     eprintln!("    --canonical-height <H> --canonical-hash <HASH> --source-qc-aegis-pqc-verified --parent-continuity-verified --state-root-matches --source-peer-not-quarantined");

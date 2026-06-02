@@ -404,6 +404,9 @@ mod tests {
         hash_contract_deploy_body, DigitalSignature, Sign, SignaturePurpose, SynQAddress,
         SynQPublicKey, SynQSignature, SynQSigningPayload,
     };
+    use sha2::{Digest, Sha256};
+    use std::fs;
+    use std::path::PathBuf;
 
     const TEST_NOW: u64 = 1_800_000_000;
     const TEST_EXPIRY: u64 = 4_102_444_800;
@@ -687,5 +690,105 @@ mod tests {
         let summary = report.synq_verification.expect("summary exists");
         assert_eq!(summary.domain, "SYNQ_CONTRACT_CALL_V1");
         assert!(report.admission_result.ready);
+    }
+
+    #[test]
+    #[ignore = "requires SYNQ_LANGUAGE_ROOT and generated Counter artifacts"]
+    fn counter_artifacts_pass_pqsynq_then_existing_pqvm_admission() {
+        let root = PathBuf::from(
+            std::env::var("SYNQ_LANGUAGE_ROOT")
+                .expect("set SYNQ_LANGUAGE_ROOT to the local synq-language workspace"),
+        );
+        let bytecode = fs::read(root.join("contracts/Counter.compiled.synq"))
+            .expect("read generated Counter bytecode");
+        let abi =
+            fs::read(root.join("contracts/Counter.abi.json")).expect("read generated Counter ABI");
+        let manifest = fs::read(root.join("contracts/Counter.manifest.json"))
+            .expect("read generated Counter manifest");
+
+        let bytecode_hash = sha256(&bytecode);
+        let abi_hash = sha256(&abi);
+        let manifest_hash = sha256(&manifest);
+        let manifest_json: serde_json::Value =
+            serde_json::from_slice(&manifest).expect("parse generated Counter manifest");
+        assert_eq!(manifest_json["bytecode_hash"], hex::encode(bytecode_hash));
+        assert_eq!(manifest_json["abi_hash"], hex::encode(abi_hash));
+        assert_eq!(manifest_json["required_chain_id"], 1264);
+
+        let signer = Sign::mldsa65();
+        let (public_key_bytes, private_key_bytes) = signer.keygen().expect("keygen");
+        let public_key = SynQPublicKey::new(public_key_bytes);
+        let signer_address =
+            derive_synq_address(&public_key, AlgorithmId::MlDsa65, &NetworkId::testnet())
+                .expect("derive signer address");
+        let constructor_args_hash = sha256(&[]);
+        let payload_hash = hash_contract_deploy_body(
+            &bytecode_hash,
+            &manifest_hash,
+            &abi_hash,
+            signer_address.as_bytes(),
+            &constructor_args_hash,
+        );
+        let signing_payload = SynQSigningPayload {
+            domain_tag: DomainTag::SynqContractDeployV1,
+            chain_id: ChainId::testnet_1264(),
+            network_id: NetworkId::testnet(),
+            protocol_version: 1,
+            algorithm_id: AlgorithmId::MlDsa65,
+            signature_purpose: SignaturePurpose::ContractDeploy,
+            nonce: 1,
+            not_before_unix: 0,
+            expiration_unix: TEST_EXPIRY,
+            signer_address,
+            payload_hash,
+        };
+        let signature = signer
+            .detached_sign(
+                &canonicalize_signing_payload(&signing_payload).expect("canonical deploy"),
+                &private_key_bytes,
+            )
+            .expect("sign deploy");
+        let deploy = ContractDeployEnvelope {
+            signing_payload,
+            public_key,
+            signature: SynQSignature::new(signature),
+            bytecode_hash,
+            manifest_hash,
+            abi_hash,
+            constructor_args_hash,
+        };
+        let payload =
+            encode_synq_admission_carrier(&deploy_carrier(&deploy, SYNERGY_TESTNET_V2_NETWORK_ID))
+                .expect("encode carrier");
+        let report = crate::aegis_tx_tool::sign_with_new_aegis_transaction_key(
+            crate::aegis_tx_tool::AegisTxBuildOptions {
+                payload,
+                write_set_hint: vec!["synq-counter-deploy".to_string()],
+                ..crate::aegis_tx_tool::AegisTxBuildOptions::default()
+            },
+        )
+        .expect("outer pqvm admission succeeds");
+        let summary = report.synq_verification.expect("summary exists");
+
+        assert_eq!(summary.bytecode_hash, Some(bytecode_hash));
+        assert_eq!(summary.manifest_hash, Some(manifest_hash));
+        assert_eq!(summary.abi_hash, Some(abi_hash));
+        assert_eq!(summary.domain, "SYNQ_CONTRACT_DEPLOY_V1");
+        assert!(report.admission_result.ready);
+        println!("counter_bytecode_hash={}", hex::encode(bytecode_hash));
+        println!("counter_abi_hash={}", hex::encode(abi_hash));
+        println!("counter_manifest_hash={}", hex::encode(manifest_hash));
+        println!("pqsynq_domain={}", summary.domain);
+        println!(
+            "pqvm_outer_admission_ready={}",
+            report.admission_result.ready
+        );
+    }
+
+    fn sha256(bytes: &[u8]) -> [u8; 32] {
+        let digest = Sha256::digest(bytes);
+        let mut hash = [0_u8; 32];
+        hash.copy_from_slice(&digest);
+        hash
     }
 }

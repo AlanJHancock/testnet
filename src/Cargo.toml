@@ -77,6 +77,14 @@ name = "synergy-archive"
 path = "bin/synergy-archive.rs"
 
 [[bin]]
+name = "synergy-archive-validator-node"
+path = "bin/synergy-archive-validator-node.rs"
+
+[[bin]]
+name = "aegis-pqvm"
+path = "bin/aegis-pqvm.rs"
+
+[[bin]]
 name = "synergy-node"
 path = "bin/synergy-node.rs"
 

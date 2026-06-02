@@ -8,6 +8,10 @@ use crate::synergy_types::{
 };
 use serde::{Deserialize, Serialize};
 
+pub const ARCHIVE_SNAPSHOT_INTERVAL_BLOCKS: u64 = 5_000;
+pub const ARCHIVE_SNAPSHOT_CHUNK_SIZE_BYTES: u64 = 512 * 1024 * 1024;
+pub const ARCHIVE_SNAPSHOT_RETENTION_PER_CLASS: usize = 2;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ArchiveNodeStatus {
@@ -37,6 +41,8 @@ pub struct ArchiveValidatorConfig {
     pub network_id: NetworkId,
     pub role: String,
     pub snapshot_interval_blocks: u64,
+    pub snapshot_chunk_size_bytes: u64,
+    pub retain_verified_snapshots_per_class: usize,
     pub fail_closed_on_verification_error: bool,
     pub archive_peer_key_role: AegisPqKeyRole,
     pub snapshot_signing_key_role: AegisPqKeyRole,
@@ -48,7 +54,9 @@ impl ArchiveValidatorConfig {
             chain_id: ChainId::synergy_testnet_v2(),
             network_id: NetworkId::synergy_testnet_v2(),
             role: "ARCHIVE_OBSERVER".to_string(),
-            snapshot_interval_blocks: 10_000,
+            snapshot_interval_blocks: ARCHIVE_SNAPSHOT_INTERVAL_BLOCKS,
+            snapshot_chunk_size_bytes: ARCHIVE_SNAPSHOT_CHUNK_SIZE_BYTES,
+            retain_verified_snapshots_per_class: ARCHIVE_SNAPSHOT_RETENTION_PER_CLASS,
             fail_closed_on_verification_error: true,
             archive_peer_key_role: AegisPqKeyRole::ArchivePeer,
             snapshot_signing_key_role: AegisPqKeyRole::ArchiveSnapshotSigner,
@@ -63,8 +71,16 @@ impl ArchiveValidatorConfig {
                 "archive validator package must use a non-consensus archive role".to_string(),
             );
         }
-        if self.snapshot_interval_blocks != 10_000 {
-            return Err("testnet archive snapshot interval must be 10000 blocks".to_string());
+        if self.snapshot_interval_blocks != ARCHIVE_SNAPSHOT_INTERVAL_BLOCKS {
+            return Err("testnet archive snapshot interval must be 5000 blocks".to_string());
+        }
+        if self.snapshot_chunk_size_bytes != ARCHIVE_SNAPSHOT_CHUNK_SIZE_BYTES {
+            return Err("testnet archive snapshot chunks must be 512 MiB".to_string());
+        }
+        if self.retain_verified_snapshots_per_class != ARCHIVE_SNAPSHOT_RETENTION_PER_CLASS {
+            return Err(
+                "testnet archive must retain the latest 2 verified snapshots per class".to_string(),
+            );
         }
         if !self.fail_closed_on_verification_error {
             return Err("archive validator must fail closed on verification error".to_string());
@@ -310,7 +326,7 @@ mod tests {
             archive_node_aegis_key_id: key_id.clone(),
             snapshot_signing_key_id: key_id,
             created_at_unix_ms: 0,
-            snapshot_interval_blocks: 10_000,
+            snapshot_interval_blocks: ARCHIVE_SNAPSHOT_INTERVAL_BLOCKS,
             previous_snapshot_height: Height(0),
             previous_snapshot_manifest_hash: Hash::zero(),
             content_root: Hash::from_domain_bytes("content", b"snapshot"),
@@ -318,7 +334,7 @@ mod tests {
             state_db_format_version: "v1".to_string(),
             block_store_format_version: "v1".to_string(),
             compression_algorithm: "zstd".to_string(),
-            chunk_size_bytes: 67_108_864,
+            chunk_size_bytes: ARCHIVE_SNAPSHOT_CHUNK_SIZE_BYTES,
             total_uncompressed_bytes: 1,
             total_compressed_bytes: 1,
             required_replay_start_height: Height(10_001),

@@ -1348,6 +1348,8 @@ fn handle_json_rpc(
                 .unwrap_or(false),
                 source_role: rpc_string_param(&params, "source_role", 1),
                 conflict_height_hash: rpc_string_param(&params, "conflict_height_hash", 2),
+                snapshot_class: rpc_string_param(&params, "snapshot_class", 3),
+                allowed_restore_roles: Vec::new(),
             };
             match crate::consensus::diagnostics::create_snapshot_with_options(options) {
                 Ok(report) => report,
@@ -6655,9 +6657,11 @@ mod tests {
             transaction.validate_for_admission().is_valid,
             "transaction must pass ingress admission first"
         );
-        assert_eq!(
-            ProofOfSynergy::validate_transaction_for_mempool(&transaction),
-            Err("sender public key is unavailable".to_string())
+        let error = ProofOfSynergy::validate_transaction_for_mempool(&transaction)
+            .expect_err("unfunded transaction must fail runtime validation");
+        assert!(
+            error.starts_with("insufficient SNRG balance for transaction"),
+            "embedded sender key must pass signature verification before the balance check: {error}"
         );
 
         {

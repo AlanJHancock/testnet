@@ -172,6 +172,9 @@ impl Transaction {
         if self.signature.is_empty() {
             return Err("Transaction signature is missing".to_string());
         }
+        if !crate::address::address_matches_public_key(&self.sender, &self.signer_public_key) {
+            return Err("Transaction signer public key does not derive sender address".to_string());
+        }
         let algorithm = parse_algorithm_name(&self.signature_algorithm)?;
         let public_key = PQCPublicKey {
             algorithm,
@@ -654,8 +657,9 @@ mod tests {
         let (public_key, private_key) = manager
             .generate_keypair(PQCAlgorithm::FNDSA)
             .expect("test keypair should generate");
+        let sender = crate::address::generate_wallet_address(&hex::encode(&public_key.key_data));
         let mut tx = Transaction::new(
-            "sender123".to_string(),
+            sender,
             "receiver456".to_string(),
             1000,
             1,
@@ -685,6 +689,11 @@ mod tests {
         let mut missing_key = tx;
         missing_key.signer_public_key.clear();
         assert!(!missing_key.validate_for_admission().is_valid);
+
+        let mut wrong_sender = missing_key;
+        wrong_sender.signer_public_key = public_key.key_data;
+        wrong_sender.sender = crate::address::generate_wallet_address(&hex::encode([9u8; 32]));
+        assert!(!wrong_sender.validate_for_admission().is_valid);
     }
 
     #[test]

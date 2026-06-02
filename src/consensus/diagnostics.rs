@@ -4,11 +4,12 @@ use crate::consensus::consensus_algorithm::ProofOfSynergy;
 use crate::consensus::dual_quorum::DualQuorumConsensus;
 use crate::consensus::self_realign::{
     apply_chain_state_wipe_plan, build_chain_state_wipe_plan, build_snapshot_restore_plan,
-    fail_closed_mutation_response, launch_snapshot_allowed_files, sign_snapshot_manifest,
-    verify_signed_snapshot_manifest, QuarantineMarker, RealignmentState, ShadowDecisionRecord,
-    ShadowObservation, SignedSnapshotManifest, SnapshotBuildInput, SnapshotQcEvidence,
-    SnapshotSchedule, SnapshotVerificationPolicy, ValidatorDutyGate, WipeApplyPreconditions,
-    DEFAULT_SHADOW_OBSERVATION_BLOCKS,
+    default_allowed_restore_roles_for_class, fail_closed_mutation_response,
+    launch_snapshot_allowed_files, sign_snapshot_manifest, verify_signed_snapshot_manifest,
+    QuarantineMarker, RealignmentState, ShadowDecisionRecord, ShadowObservation,
+    SignedSnapshotManifest, SnapshotBuildInput, SnapshotQcEvidence, SnapshotSchedule,
+    SnapshotVerificationPolicy, ValidatorDutyGate, WipeApplyPreconditions,
+    DEFAULT_SHADOW_OBSERVATION_BLOCKS, SNAPSHOT_CLASS_VALIDATOR_PRUNED,
 };
 use crate::crypto::aegis_pqvm::AegisPqvmSigner;
 use crate::synergy_types::{AegisPqKeyRole, Epoch};
@@ -56,6 +57,14 @@ pub struct CreateSnapshotOptions {
     pub source_node_majority_branch_proven: bool,
     pub source_role: Option<String>,
     pub conflict_height_hash: Option<String>,
+    pub snapshot_class: Option<String>,
+    pub allowed_restore_roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VerifySnapshotOptions {
+    pub snapshot_class: Option<String>,
+    pub target_role: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -102,6 +111,8 @@ struct BlockSummary {
     height: u64,
     hash: String,
     parent_hash: String,
+    validator_id: String,
+    transactions_root: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -483,10 +494,16 @@ fn find_block_at_height(value: &Value, height: u64) -> Option<BlockSummary> {
             let hash = string_field(value, &["hash", "block_hash"])?;
             let parent_hash = string_field(value, &["parent_hash", "previous_hash", "parentHash"])
                 .unwrap_or_default();
+            let validator_id =
+                string_field(value, &["validator_id", "validator"]).unwrap_or_default();
+            let transactions_root =
+                string_field(value, &["transactions_root", "tx_root"]).unwrap_or_default();
             return Some(BlockSummary {
                 height,
                 hash,
                 parent_hash,
+                validator_id,
+                transactions_root,
             });
         }
         for child in object.values() {
@@ -541,12 +558,17 @@ fn read_blocks_in_height_range(
         };
         let parent_hash = string_field(value, &["parent_hash", "previous_hash", "parentHash"])
             .unwrap_or_default();
+        let validator_id = string_field(value, &["validator_id", "validator"]).unwrap_or_default();
+        let transactions_root =
+            string_field(value, &["transactions_root", "tx_root"]).unwrap_or_default();
         blocks.insert(
             height,
             BlockSummary {
                 height,
                 hash,
                 parent_hash,
+                validator_id,
+                transactions_root,
             },
         );
         Ok(blocks.len() >= expected)
@@ -599,6 +621,9 @@ fn read_latest_block_summary() -> Result<BlockSummary, String> {
         };
         let parent_hash = string_field(value, &["parent_hash", "previous_hash", "parentHash"])
             .unwrap_or_default();
+        let validator_id = string_field(value, &["validator_id", "validator"]).unwrap_or_default();
+        let transactions_root =
+            string_field(value, &["transactions_root", "tx_root"]).unwrap_or_default();
         if latest
             .as_ref()
             .map(|block: &BlockSummary| height > block.height)
@@ -608,6 +633,8 @@ fn read_latest_block_summary() -> Result<BlockSummary, String> {
                 height,
                 hash,
                 parent_hash,
+                validator_id,
+                transactions_root,
             });
         }
         Ok(false)
@@ -802,10 +829,26 @@ fn env_truthy(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn snapshot_source_node_id() -> String {
+    std::env::var("SYNERGY_SNAPSHOT_SOURCE_NODE_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(crate::config::resolve_runtime_validator_address)
+        .unwrap_or_else(|| "unknown-validator".to_string())
+}
+
+#[derive(Debug)]
+struct SnapshotCanonicalLockMaterialization {
+    block: BlockSummary,
+    qc_vote_count: u64,
+}
+
 fn copy_snapshot_state_files(
     data_dir: &Path,
     snapshot_dir: &Path,
     snapshot_height: u64,
+    materialized_lock: Option<&SnapshotCanonicalLockMaterialization>,
 ) -> Result<usize, String> {
     fs::create_dir_all(snapshot_dir).map_err(|error| {
         format!(
@@ -832,7 +875,7 @@ fn copy_snapshot_state_files(
     if copied == 0 {
         return Err("snapshot source contains no launch-approved chain/state files".to_string());
     }
-    constrain_snapshot_metadata_to_height(snapshot_dir, snapshot_height)?;
+    constrain_snapshot_metadata_to_height(snapshot_dir, snapshot_height, materialized_lock)?;
     Ok(copied)
 }
 
@@ -863,6 +906,7 @@ fn qc_height_from_json(value: &Value) -> Option<u64> {
 fn constrain_snapshot_metadata_to_height(
     snapshot_dir: &Path,
     snapshot_height: u64,
+    materialized_lock: Option<&SnapshotCanonicalLockMaterialization>,
 ) -> Result<(), String> {
     let canonical_path = snapshot_dir.join("canonical_locks.json");
     if canonical_path.is_file() {
@@ -885,9 +929,34 @@ fn constrain_snapshot_metadata_to_height(
                 .unwrap_or(false)
         });
         if !canonical_map.contains_key(&snapshot_height.to_string()) {
-            return Err(format!(
-                "snapshot canonical_locks.json has no canonical lock at snapshot height {snapshot_height}"
-            ));
+            let Some(lock) = materialized_lock else {
+                return Err(format!(
+                    "snapshot canonical_locks.json has no canonical lock at snapshot height {snapshot_height}"
+                ));
+            };
+            if lock.block.height != snapshot_height {
+                return Err(format!(
+                    "snapshot canonical lock materialization height {} does not match snapshot height {snapshot_height}",
+                    lock.block.height
+                ));
+            }
+            canonical_map.insert(
+                snapshot_height.to_string(),
+                json!({
+                    "height": snapshot_height,
+                    "hash": lock.block.hash,
+                    "block_hash": lock.block.hash,
+                    "parent_hash": lock.block.parent_hash,
+                    "validator_id": lock.block.validator_id,
+                    "transactions_root": lock.block.transactions_root,
+                    "qc_block_hash": lock.block.hash,
+                    "qc_hash": lock.block.hash,
+                    "written_at_unix_secs": now_secs(),
+                    "qc_vote_count": lock.qc_vote_count,
+                    "finality_source": "verified_committed_qc",
+                    "snapshot_only_materialized": true,
+                }),
+            );
         }
         fs::write(
             &canonical_path,
@@ -2005,6 +2074,18 @@ pub fn create_snapshot() -> Result<Value, String> {
         source_node_majority_branch_proven: env_truthy("SYNERGY_SNAPSHOT_MAJORITY_BRANCH_PROVEN"),
         source_role: std::env::var("SYNERGY_SNAPSHOT_SOURCE_ROLE").ok(),
         conflict_height_hash: std::env::var("SYNERGY_SNAPSHOT_CONFLICT_HEIGHT_HASH").ok(),
+        snapshot_class: std::env::var("SYNERGY_SNAPSHOT_CLASS").ok(),
+        allowed_restore_roles: std::env::var("SYNERGY_SNAPSHOT_ALLOWED_ROLES")
+            .ok()
+            .map(|roles| {
+                roles
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|role| !role.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -2039,29 +2120,37 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
         return Err("latest committed QC is not verified through Aegis/PQC quorum".to_string());
     }
     let snapshot_height = qc.height;
-    let canonical_lock_hash = canonical_lock_at_height(snapshot_height).ok_or_else(|| {
-        format!(
-            "missing canonical lock at latest committed QC height {}; refusing snapshot creation",
-            snapshot_height
-        )
-    })?;
     let block = if persisted_chain_tip.height == snapshot_height {
         persisted_chain_tip
     } else {
         read_block_at_height(snapshot_height)?
     };
-    if block.hash != canonical_lock_hash {
-        return Err(format!(
-            "canonical lock hash {} does not match block hash {} at height {}",
-            canonical_lock_hash, block.hash, snapshot_height
-        ));
-    }
     if qc.hash != block.hash {
         return Err(format!(
             "latest committed QC hash {} does not match finalized block hash {} at height {}",
             qc.hash, block.hash, snapshot_height
         ));
     }
+    let (canonical_lock_hash, canonical_lock_source, materialized_lock) =
+        match canonical_lock_at_height(snapshot_height) {
+            Some(hash) => {
+                if block.hash != hash {
+                    return Err(format!(
+                        "canonical lock hash {} does not match block hash {} at height {}",
+                        hash, block.hash, snapshot_height
+                    ));
+                }
+                (hash, "canonical_locks.json".to_string(), None)
+            }
+            None => (
+                block.hash.clone(),
+                "verified_committed_qc_snapshot_materialization".to_string(),
+                Some(SnapshotCanonicalLockMaterialization {
+                    block: block.clone(),
+                    qc_vote_count: qc.vote_count,
+                }),
+            ),
+        };
     let max_snapshot_lag = SnapshotSchedule::launch_default().interval_finalized_blocks;
     if latest_canonical_lock_height.saturating_sub(snapshot_height) > max_snapshot_lag {
         return Err(format!(
@@ -2097,14 +2186,16 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
             snapshot_dir.display()
         )
     })?;
-    copy_snapshot_state_files(&data_dir, &snapshot_dir, snapshot_height)?;
+    copy_snapshot_state_files(
+        &data_dir,
+        &snapshot_dir,
+        snapshot_height,
+        materialized_lock.as_ref(),
+    )?;
 
     let mut signer = AegisPqvmSigner::initialize_required().map_err(|error| error.to_string())?;
-    let signer_uma = format!(
-        "snapshot-source:{}",
-        crate::config::resolve_runtime_validator_address()
-            .unwrap_or_else(|| "unknown-validator".to_string())
-    );
+    let source_node_id = snapshot_source_node_id();
+    let signer_uma = format!("snapshot-source:{source_node_id}");
     let signing_key_id = signer
         .generate_and_register_key(
             &signer_uma,
@@ -2115,8 +2206,19 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
     let signer_public_key = signer
         .public_key_record(&signing_key_id)
         .map_err(|error| error.to_string())?;
+    let snapshot_class = options
+        .snapshot_class
+        .unwrap_or_else(|| SNAPSHOT_CLASS_VALIDATOR_PRUNED.to_string());
+    let allowed_restore_roles = if options.allowed_restore_roles.is_empty() {
+        default_allowed_restore_roles_for_class(&snapshot_class)
+            .ok_or_else(|| format!("unsupported snapshot class {snapshot_class}"))?
+    } else {
+        options.allowed_restore_roles
+    };
     let manifest = crate::consensus::self_realign::create_snapshot_manifest(SnapshotBuildInput {
         state_dir: snapshot_dir.clone(),
+        snapshot_class,
+        allowed_restore_roles,
         snapshot_height: block.height,
         snapshot_block_hash: block.hash.clone(),
         parent_hash: block.parent_hash.clone(),
@@ -2134,8 +2236,7 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
             relayers_rpc_support_counted_toward_quorum: false,
         },
         active_validator_set: active_validator_set.clone(),
-        source_node_id: crate::config::resolve_runtime_validator_address()
-            .unwrap_or_else(|| "unknown-validator".to_string()),
+        source_node_id,
         source_role: options
             .source_role
             .unwrap_or_else(|| "GENESIS_VALIDATOR".to_string()),
@@ -2186,6 +2287,8 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
         "persisted_chain_tip_height": persisted_chain_tip_height,
         "persisted_chain_tip_hash": persisted_chain_tip_hash,
         "selected_committed_qc_height": qc.height,
+        "snapshot_canonical_lock_source": canonical_lock_source,
+        "snapshot_canonical_lock_materialized_in_artifact": materialized_lock.is_some(),
         "latest_canonical_lock_height": latest_canonical_lock_height,
         "latest_canonical_lock_hash": latest_canonical_lock_hash,
         "snapshot_path": snapshot_dir,
@@ -2209,15 +2312,26 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
 }
 
 pub fn verify_snapshot(manifest_path: &str, snapshot_root: Option<&str>) -> Result<Value, String> {
+    verify_snapshot_with_options(
+        manifest_path,
+        snapshot_root,
+        VerifySnapshotOptions::default(),
+    )
+}
+
+pub fn verify_snapshot_with_options(
+    manifest_path: &str,
+    snapshot_root: Option<&str>,
+    options: VerifySnapshotOptions,
+) -> Result<Value, String> {
     require_local_testnet_v2()?;
     let manifest_path = PathBuf::from(manifest_path);
     let signed = read_signed_snapshot_manifest(&manifest_path)?;
     let snapshot_root = resolved_snapshot_root(&manifest_path, snapshot_root)?;
-    let report = verify_signed_snapshot_manifest(
-        &signed,
-        &SnapshotVerificationPolicy::default(),
-        Some(&snapshot_root),
-    );
+    let mut policy = SnapshotVerificationPolicy::default();
+    policy.expected_snapshot_class = options.snapshot_class;
+    policy.target_role = options.target_role;
+    let report = verify_signed_snapshot_manifest(&signed, &policy, Some(&snapshot_root));
     let mut value = serde_json::to_value(&report)
         .map_err(|error| format!("serialize snapshot verification report: {error}"))?;
     if report.success {
@@ -2252,7 +2366,11 @@ pub fn self_heal_from_snapshot(
     let snapshot_root = resolved_snapshot_root(&manifest_path_buf, snapshot_root)?;
     let verification_report = verify_signed_snapshot_manifest(
         &signed,
-        &SnapshotVerificationPolicy::default(),
+        &SnapshotVerificationPolicy {
+            expected_snapshot_class: Some(SNAPSHOT_CLASS_VALIDATOR_PRUNED.to_string()),
+            target_role: Some("validator".to_string()),
+            ..SnapshotVerificationPolicy::default()
+        },
         Some(&snapshot_root),
     );
     if !verification_report.success {
@@ -2987,15 +3105,16 @@ mod tests {
         read_block_at_height, read_latest_block_summary, rejoin_eligibility,
         request_rejoin_with_options, self_heal_from_snapshot, shadow_status,
         snapshot_metadata_consistency_report, start_shadow_observe_with_options,
-        sync_from_canonical_peer_with_options, CreateSnapshotOptions, OperatorQuarantineOptions,
-        RejoinRequestOptions, StartShadowObserveOptions, SyncFromCanonicalPeerOptions,
+        sync_from_canonical_peer_with_options, BlockSummary, CreateSnapshotOptions,
+        OperatorQuarantineOptions, RejoinRequestOptions, SnapshotCanonicalLockMaterialization,
+        StartShadowObserveOptions, SyncFromCanonicalPeerOptions,
         DIAGNOSTIC_STALE_TRANSIENT_VOTE_LOCK_SECS,
     };
     use crate::block::{Block, BlockChain};
     use crate::config::NodeConfig;
     use crate::consensus::self_realign::{
         create_snapshot_manifest, sign_snapshot_manifest, QuarantineMarker, SnapshotBuildInput,
-        SnapshotQcEvidence,
+        SnapshotQcEvidence, SNAPSHOT_CLASS_VALIDATOR_PRUNED,
     };
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager};
@@ -3175,6 +3294,8 @@ mod tests {
         };
         let manifest = create_snapshot_manifest(SnapshotBuildInput {
             state_dir: snapshot_root.clone(),
+            snapshot_class: SNAPSHOT_CLASS_VALIDATOR_PRUNED.to_string(),
+            allowed_restore_roles: vec!["validator".to_string()],
             snapshot_height: 100,
             snapshot_block_hash: "snapshot-block-hash".to_string(),
             parent_hash: "snapshot-parent-hash".to_string(),
@@ -3453,7 +3574,7 @@ mod tests {
         fs::write(data_dir.join("runtime.bin"), b"binary").unwrap();
         let snapshot_dir = root.join("snapshot");
 
-        let copied = copy_snapshot_state_files(&data_dir, &snapshot_dir, 10).unwrap();
+        let copied = copy_snapshot_state_files(&data_dir, &snapshot_dir, 10, None).unwrap();
 
         assert_eq!(copied, 2);
         assert!(snapshot_dir.join("chain.json").exists());
@@ -3489,7 +3610,7 @@ mod tests {
         .unwrap();
         let snapshot_dir = root.join("snapshot");
 
-        copy_snapshot_state_files(&data_dir, &snapshot_dir, 10).unwrap();
+        copy_snapshot_state_files(&data_dir, &snapshot_dir, 10, None).unwrap();
 
         let locks: Value =
             serde_json::from_slice(&fs::read(snapshot_dir.join("canonical_locks.json")).unwrap())
@@ -3499,6 +3620,77 @@ mod tests {
         let qcs = fs::read_to_string(snapshot_dir.join("committed_qcs.jsonl")).unwrap();
         assert!(qcs.contains("h10"));
         assert!(!qcs.contains("h11"));
+    }
+
+    #[test]
+    fn snapshot_copy_materializes_missing_lock_from_verified_qc_without_mutating_source() {
+        let root = test_runtime_root("snapshot-copy-materialized-lock");
+        let data_dir = root.join("data");
+        fs::write(data_dir.join("chain.json"), b"chain").unwrap();
+        fs::write(
+            data_dir.join("canonical_locks.json"),
+            json!({"9": {"height": 9, "hash": "h9"}}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            data_dir.join("committed_qcs.jsonl"),
+            json!({
+                "block_hash": "h10",
+                "qc": {
+                    "block_hash": "h10",
+                    "votes": [{"block_index": 10}]
+                }
+            })
+            .to_string()
+                + "\n",
+        )
+        .unwrap();
+        let snapshot_dir = root.join("snapshot");
+        let materialized_lock = SnapshotCanonicalLockMaterialization {
+            block: BlockSummary {
+                height: 10,
+                hash: "h10".to_string(),
+                parent_hash: "h9".to_string(),
+                validator_id: "validator-10".to_string(),
+                transactions_root: "tx-root-10".to_string(),
+            },
+            qc_vote_count: 4,
+        };
+
+        copy_snapshot_state_files(&data_dir, &snapshot_dir, 10, Some(&materialized_lock)).unwrap();
+
+        let source_locks: Value =
+            serde_json::from_slice(&fs::read(data_dir.join("canonical_locks.json")).unwrap())
+                .unwrap();
+        assert!(source_locks.get("10").is_none());
+        let snapshot_locks: Value =
+            serde_json::from_slice(&fs::read(snapshot_dir.join("canonical_locks.json")).unwrap())
+                .unwrap();
+        let lock = snapshot_locks
+            .get("10")
+            .expect("snapshot-local materialized lock should exist");
+        assert_eq!(lock.get("block_hash").and_then(Value::as_str), Some("h10"));
+        assert_eq!(
+            lock.get("validator_id").and_then(Value::as_str),
+            Some("validator-10")
+        );
+        assert_eq!(
+            lock.get("transactions_root").and_then(Value::as_str),
+            Some("tx-root-10")
+        );
+        assert!(lock
+            .get("written_at_unix_secs")
+            .and_then(Value::as_u64)
+            .is_some());
+        assert_eq!(
+            lock.get("finality_source").and_then(Value::as_str),
+            Some("verified_committed_qc")
+        );
+        assert_eq!(
+            lock.get("snapshot_only_materialized")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
     }
 
     #[test]
