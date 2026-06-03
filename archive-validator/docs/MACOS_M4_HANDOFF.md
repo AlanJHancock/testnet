@@ -39,12 +39,28 @@ under:
 ```
 
 The installer verifies the packaged checksums and Apple Silicon executables,
-installs `zstd` through Homebrew if required, creates the archive Aegis identity
-locally, installs three launchd services, and starts them persistently:
+installs `zstd` through Homebrew if required, removes quarantine attributes from
+the package and installed payloads, sets root-owned executable and LaunchDaemon
+permissions, ad-hoc signs the installed executables, creates the archive Aegis
+identity locally, installs three launchd services, bootstraps/enables/kickstarts
+them, and fails closed unless the services stay running with the required
+listeners:
 
 - `io.synergynetwork.archive-validator`
 - `io.synergynetwork.archive-snapshot-api`
 - `io.synergynetwork.archive-snapshot-worker`
+
+Required listener proof at install/verify time:
+
+- archive P2P: `127.0.0.1:5622`
+- snapshot API: `0.0.0.0:48640`
+- archive qRPC: `127.0.0.1:5640`
+- archive WS: `127.0.0.1:5660`
+- archive metrics: `127.0.0.1:6030`
+
+`archive_validator_verify_ok=true` is printed only after the verifier proves the
+installed payload signatures/permissions, launchd running state, required
+listeners, and a live `synergy_getLatestBlock` qRPC response.
 
 The archive node syncs chain state into:
 
@@ -83,8 +99,10 @@ backs up the existing workspace data, restores the bootstrap data into:
 /Volumes/Synergy_Archive/archive-validator/workspace/data
 ```
 
-Then it restarts the archive node and snapshot worker. After restore, prove
-local qRPC height/hash parity before enabling publication:
+Then it restarts and kickstarts the archive node, snapshot API, and snapshot
+worker. `archive_bootstrap_restore_ok=true` is printed only after the restored
+archive qRPC returns `synergy_getLatestBlock`. After restore, preserve local qRPC
+height/hash parity before enabling publication:
 
 ```bash
 curl -s http://127.0.0.1:5640/ \
@@ -161,7 +179,10 @@ system services:
 ./run-isolated-mac-acceptance.sh
 ```
 
-The isolated run verifies installer behavior, installed checksums, Aegis PQC
-sign/verify, archive-role qRPC startup, signed catalog publication, zstd chunk
-reassembly, runtime receiver verification, wrong-class rejection, resumable HTTP
-range serving, staging-path denial, and launchd plist syntax.
+The isolated run verifies installer behavior, installed checksums/signatures,
+launchd-equivalent startup using the rendered plist `ProgramArguments`, required
+alternate-port listeners, live qRPC latest-block response, worker fail-closed
+pending majority proof, Aegis PQC sign/verify, archive-role qRPC startup, signed
+catalog publication, zstd chunk reassembly, runtime receiver verification,
+wrong-class rejection, resumable HTTP range serving, staging-path denial, and
+launchd plist syntax.

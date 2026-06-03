@@ -5,7 +5,7 @@
   <key>Label</key><string>io.synergynetwork.archive-snapshot-api</string>
   <key>ProgramArguments</key>
   <array>
-    <string>__BIN_ROOT__/synergy-archive</string><string>serve</string>
+    <string>__PYTHON3__</string><string>__BIN_ROOT__/synergy-archive</string><string>serve</string>
     <string>--root</string><string>__APP_ROOT__</string>
     <string>--publish-root</string><string>__PUBLISH_ROOT__</string>
     <string>--runtime</string><string>__BIN_ROOT__/synergy-archive-validator-node</string>

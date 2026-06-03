@@ -387,7 +387,15 @@ mod tests {
             "macos/uninstall-macos.sh",
             "macos/entitlements.plist",
             "macos/README-GATEKEEPER.md",
+            "macos-m4/setup-archive-validator-m4.sh",
+            "macos-m4/verify-archive-validator-m4.sh",
+            "macos-m4/restore-archive-bootstrap-m4.sh",
+            "macos-m4/run-isolated-mac-acceptance.sh",
+            "macos-m4/launchd/io.synergynetwork.archive-validator.plist.in",
+            "macos-m4/launchd/io.synergynetwork.archive-snapshot-api.plist.in",
+            "macos-m4/launchd/io.synergynetwork.archive-snapshot-worker.plist.in",
             "docs/MACOS_INSTALL.md",
+            "docs/MACOS_M4_HANDOFF.md",
             "docs/SNAPSHOT_VERIFICATION.md",
             "bin/README.md",
         ] {
@@ -423,6 +431,90 @@ mod tests {
             assert!(
                 macos_script.contains(required),
                 "macOS package script must require {required}"
+            );
+        }
+
+        let m4_package_script = std::fs::read_to_string(
+            root.join("package-archive-validator-macos-m4.sh"),
+        )
+        .expect("m4 package script");
+        for required in [
+            "xattr -dr com.apple.quarantine",
+            "codesign --force --sign -",
+            "codesign --verify",
+            "synergy-archive-validator-testnet-v2-macos-m4-storage-volume.zip",
+        ] {
+            assert!(
+                m4_package_script.contains(required),
+                "M4 package builder must contain {required}"
+            );
+        }
+
+        let m4_setup =
+            std::fs::read_to_string(root.join("macos-m4/setup-archive-validator-m4.sh"))
+                .expect("m4 setup script");
+        for required in [
+            "STORAGE_VOLUME_REL=\"/Volumes/Synergy_Archive\"",
+            "STORAGE_ROOT_REL=\"${STORAGE_VOLUME_REL}/archive-validator\"",
+            "xattr -dr com.apple.quarantine",
+            "codesign --force --sign -",
+            "launchctl kickstart -k",
+            "wait_for_tcp 127.0.0.1 5622 archive_p2p",
+            "wait_for_qrpc_latest_block 5640",
+            "required archive storage volume is not mounted",
+        ] {
+            assert!(
+                m4_setup.contains(required),
+                "M4 setup script must contain {required}"
+            );
+        }
+
+        let m4_verify =
+            std::fs::read_to_string(root.join("macos-m4/verify-archive-validator-m4.sh"))
+                .expect("m4 verify script");
+        for required in [
+            "assert_no_quarantine",
+            "assert_codesign_valid",
+            "assert_launchd_running",
+            "wait_for_tcp 127.0.0.1",
+            "wait_for_qrpc_latest_block",
+            "archive_validator_verify_ok=true",
+        ] {
+            assert!(
+                m4_verify.contains(required),
+                "M4 verifier must contain {required}"
+            );
+        }
+
+        let m4_restore =
+            std::fs::read_to_string(root.join("macos-m4/restore-archive-bootstrap-m4.sh"))
+                .expect("m4 restore script");
+        for required in [
+            "launchctl kickstart -k",
+            "wait_for_qrpc_latest_block",
+            "io.synergynetwork.archive-snapshot-api",
+            "archive_bootstrap_restore_ok=true",
+        ] {
+            assert!(
+                m4_restore.contains(required),
+                "M4 restore script must contain {required}"
+            );
+        }
+
+        let m4_acceptance =
+            std::fs::read_to_string(root.join("macos-m4/run-isolated-mac-acceptance.sh"))
+                .expect("m4 acceptance script");
+        for required in [
+            "start_plist_service",
+            "ProgramArguments",
+            "wait_for_tcp 127.0.0.1 45622 archive_p2p",
+            "wait_for_tcp 127.0.0.1 48641 snapshot_api",
+            "wait_for_tcp 127.0.0.1 46030 archive_metrics",
+            "snapshot_worker_pending_majority_proof_ok=true",
+        ] {
+            assert!(
+                m4_acceptance.contains(required),
+                "M4 acceptance must contain {required}"
             );
         }
     }

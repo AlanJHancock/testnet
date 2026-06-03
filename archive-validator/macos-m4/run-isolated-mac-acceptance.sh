@@ -15,12 +15,129 @@ mkdir -p "${EVIDENCE}"
 BACKGROUND_PIDS=()
 
 cleanup() {
+  stop_background_pids >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+stop_background_pids() {
   for pid in "${BACKGROUND_PIDS[@]}"; do
     kill "${pid}" >/dev/null 2>&1 || true
     wait "${pid}" 2>/dev/null || true
   done
+  BACKGROUND_PIDS=()
 }
-trap cleanup EXIT
+
+start_plist_service() {
+  local plist="$1"
+  local label="$2"
+  local pid_file="${EVIDENCE}/${label}.pid"
+  python3 - "${plist}" "${pid_file}" <<'PY'
+import os
+import plistlib
+import subprocess
+import sys
+from pathlib import Path
+
+plist_path = Path(sys.argv[1])
+pid_file = Path(sys.argv[2])
+with plist_path.open("rb") as handle:
+    config = plistlib.load(handle)
+args = config["ProgramArguments"]
+env = os.environ.copy()
+env.update(config.get("EnvironmentVariables") or {})
+cwd = config.get("WorkingDirectory")
+stdout_path = Path(config.get("StandardOutPath", os.devnull))
+stderr_path = Path(config.get("StandardErrorPath", os.devnull))
+stdout_path.parent.mkdir(parents=True, exist_ok=True)
+stderr_path.parent.mkdir(parents=True, exist_ok=True)
+stdout = stdout_path.open("ab")
+stderr = stderr_path.open("ab")
+process = subprocess.Popen(args, cwd=cwd or None, env=env, stdout=stdout, stderr=stderr)
+pid_file.write_text(str(process.pid) + "\n", encoding="utf-8")
+PY
+  local pid
+  pid="$(cat "${pid_file}")"
+  BACKGROUND_PIDS+=("${pid}")
+  echo "launchd_equivalent_started=${label} pid=${pid} plist=${plist}"
+}
+
+assert_pid_alive() {
+  local pid="$1"
+  local label="$2"
+  kill -0 "${pid}" >/dev/null 2>&1 || {
+    echo "launchd-equivalent service is not running: ${label} pid=${pid}" >&2
+    exit 1
+  }
+}
+
+wait_for_tcp() {
+  local host="$1"
+  local port="$2"
+  local label="$3"
+  for _ in {1..60}; do
+    if python3 - "${host}" "${port}" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+try:
+    with socket.create_connection((host, port), timeout=1.0):
+        pass
+except OSError:
+    raise SystemExit(1)
+PY
+    then
+      echo "listener_ok=${label}:${host}:${port}"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "listener did not appear in isolated launchd-equivalent acceptance: ${label} ${host}:${port}" >&2
+  return 1
+}
+
+wait_for_qrpc_latest_block() {
+  local port="$1"
+  local output="$2"
+  for _ in {1..60}; do
+    if python3 - "${port}" "${output}" <<'PY'
+import json
+import sys
+import urllib.request
+
+port, output = sys.argv[1:3]
+payload = json.dumps({
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "synergy_getLatestBlock",
+    "params": [],
+}).encode()
+request = urllib.request.Request(
+    f"http://127.0.0.1:{port}/",
+    data=payload,
+    headers={"Content-Type": "application/json"},
+)
+try:
+    with urllib.request.urlopen(request, timeout=2.0) as response:
+        value = json.loads(response.read().decode())
+except Exception:
+    raise SystemExit(1)
+if "result" not in value:
+    raise SystemExit(1)
+with open(output, "w", encoding="utf-8") as handle:
+    json.dump(value, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+    then
+      echo "archive_qrpc_latest_block_ok=true"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "qRPC latest block did not return in isolated launchd-equivalent acceptance" >&2
+  return 1
+}
 
 "${PACKAGE_ROOT}/setup-archive-validator-m4.sh" \
   --test-root "${TEST_ROOT}" \
@@ -30,7 +147,8 @@ trap cleanup EXIT
   --yes | tee "${EVIDENCE}/install.txt"
 "${PACKAGE_ROOT}/verify-archive-validator-m4.sh" \
   --test-root "${TEST_ROOT}" \
-  --skip-launchd-check | tee "${EVIDENCE}/verify.txt"
+  --skip-launchd-check \
+  --skip-listener-check | tee "${EVIDENCE}/verify.txt"
 
 [[ -d "${APP_ROOT}" ]]
 [[ -d "${APP_ROOT}/tmp" ]]
@@ -73,26 +191,36 @@ for before, after in {
 path.write_text(text, encoding="utf-8")
 PY
 
-SYNERGY_PROJECT_ROOT="${WORKSPACE}" \
-SYNERGY_CONFIG_PATH="${WORKSPACE}/config/node.toml" \
-  "${BIN_ROOT}/synergy-archive-validator-node" start \
-    --config "${WORKSPACE}/config/node.toml" \
-    > "${EVIDENCE}/archive-node.out" 2> "${EVIDENCE}/archive-node.err" &
-NODE_PID=$!
-BACKGROUND_PIDS+=("${NODE_PID}")
-for _ in {1..30}; do
-  if curl -fsS -H 'Content-Type: application/json' \
-    --data '{"jsonrpc":"2.0","id":1,"method":"synergy_getChainId","params":[]}' \
-    http://127.0.0.1:45640/ > "${EVIDENCE}/archive-node-qrpc.json"
-  then
-    break
-  fi
-  sleep 1
+start_plist_service \
+  "${TEST_ROOT}/Library/LaunchDaemons/io.synergynetwork.archive-validator.plist" \
+  io.synergynetwork.archive-validator
+start_plist_service \
+  "${TEST_ROOT}/Library/LaunchDaemons/io.synergynetwork.archive-snapshot-api.plist" \
+  io.synergynetwork.archive-snapshot-api
+start_plist_service \
+  "${TEST_ROOT}/Library/LaunchDaemons/io.synergynetwork.archive-snapshot-worker.plist" \
+  io.synergynetwork.archive-snapshot-worker
+wait_for_tcp 127.0.0.1 45622 archive_p2p
+wait_for_tcp 127.0.0.1 48641 snapshot_api
+wait_for_tcp 127.0.0.1 45640 archive_qrpc
+wait_for_tcp 127.0.0.1 45660 archive_ws
+wait_for_tcp 127.0.0.1 46030 archive_metrics
+wait_for_qrpc_latest_block 45640 "${EVIDENCE}/archive-node-qrpc-latest-block.json"
+for pid in "${BACKGROUND_PIDS[@]}"; do
+  assert_pid_alive "${pid}" launchd-equivalent-service
 done
-grep -q '"result"' "${EVIDENCE}/archive-node-qrpc.json"
-kill "${NODE_PID}" >/dev/null 2>&1 || true
-wait "${NODE_PID}" 2>/dev/null || true
-BACKGROUND_PIDS=()
+sleep 2
+grep -q 'worker failed closed' "${APP_ROOT}/logs/snapshot-worker.err.log"
+echo "snapshot_worker_pending_majority_proof_ok=true"
+"${PACKAGE_ROOT}/verify-archive-validator-m4.sh" \
+  --test-root "${TEST_ROOT}" \
+  --skip-launchd-check \
+  --p2p-port 45622 \
+  --qrpc-port 45640 \
+  --ws-port 45660 \
+  --metrics-port 46030 \
+  --snapshot-api-bind 127.0.0.1:48641 | tee "${EVIDENCE}/verify-launchd-equivalent.txt"
+stop_background_pids
 
 printf '{"acceptance":true}\n' > "${EVIDENCE}/payload.json"
 "${BIN_ROOT}/aegis-pqvm" sign-json \
@@ -177,14 +305,14 @@ fi
   --publish-root "${PUBLISH_ROOT}" \
   --runtime "${BIN_ROOT}/synergy-archive-validator-node" \
   --aegis "${BIN_ROOT}/aegis-pqvm" \
-  --bind 127.0.0.1:48641 > "${EVIDENCE}/snapshot-api.out" 2> "${EVIDENCE}/snapshot-api.err" &
+  --bind 127.0.0.1:48642 > "${EVIDENCE}/snapshot-api.out" 2> "${EVIDENCE}/snapshot-api.err" &
 API_PID=$!
 BACKGROUND_PIDS+=("${API_PID}")
 sleep 2
 [[ "$(curl -fsS -H 'Range: bytes=0-4' \
-  http://127.0.0.1:48641/testnet-1264/validator-pruned/snapshot-000000100/distribution-manifest.json \
+  http://127.0.0.1:48642/testnet-1264/validator-pruned/snapshot-000000100/distribution-manifest.json \
   | wc -c | tr -d ' ')" == "5" ]]
-curl -fsS http://127.0.0.1:48641/staging/not-public >/dev/null 2>&1 && {
+curl -fsS http://127.0.0.1:48642/staging/not-public >/dev/null 2>&1 && {
   echo "snapshot API exposed staging path" >&2
   exit 1
 }
