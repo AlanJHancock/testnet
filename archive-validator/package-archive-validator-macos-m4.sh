@@ -54,7 +54,7 @@ from datetime import datetime, timezone
 repo, output = sys.argv[1:3]
 def git(*args):
     return subprocess.check_output(["git", "-C", repo, *args], text=True).strip()
-dirty = git("status", "--short", "--", ".", ":(exclude)archive-validator/dist").splitlines()
+dirty = git("status", "--short", "--", ".", ":(exclude)archive-validator/dist", ":(exclude)dist").splitlines()
 payload = {
     "schema": "synergy-archive-macos-m4-source-provenance-v1",
     "built_at_utc": datetime.now(timezone.utc).isoformat(),
