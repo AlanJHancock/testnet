@@ -139,7 +139,14 @@ pub fn active_consensus_fork_migration() -> Result<Option<ConsensusForkMigration
     let path = match env_path {
         Some(value) => PathBuf::from(value),
         None => {
-            let default = PathBuf::from(DEFAULT_CONSENSUS_FORK_MIGRATION_PATH);
+            let project_root_path = env::var("SYNERGY_PROJECT_ROOT")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .map(|value| PathBuf::from(value).join(DEFAULT_CONSENSUS_FORK_MIGRATION_PATH));
+            let default = project_root_path
+                .filter(|path| path.is_file())
+                .unwrap_or_else(|| PathBuf::from(DEFAULT_CONSENSUS_FORK_MIGRATION_PATH));
             if !default.is_file() {
                 return Ok(None);
             }

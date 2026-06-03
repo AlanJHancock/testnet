@@ -1,6 +1,7 @@
 use crate::block::BlockChain;
 use crate::consensus::chain_durability::validate_chain_body_covers_canonical_lock;
 use crate::consensus::consensus_algorithm::ProofOfSynergy;
+use crate::consensus::consensus_fork;
 use crate::consensus::dual_quorum::DualQuorumConsensus;
 use crate::consensus::self_realign::{
     apply_chain_state_wipe_plan, build_chain_state_wipe_plan, build_snapshot_restore_plan,
@@ -815,6 +816,32 @@ fn active_genesis_validator_addresses() -> Result<Vec<String>, String> {
         ));
     }
     Ok(validators)
+}
+
+fn active_validator_addresses_for_snapshot_height(
+    snapshot_height: u64,
+) -> Result<Vec<String>, String> {
+    if let Some(migration) = consensus_fork::active_consensus_fork_migration()? {
+        if migration.applies_to_height(snapshot_height) {
+            migration.validate()?;
+            let validators = migration
+                .new_validator_registry
+                .iter()
+                .map(|validator| {
+                    validator.validate()?;
+                    Ok(validator.validator_address.clone())
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            if validators.len() != 5 {
+                return Err(format!(
+                    "post-fork active validator set has {} validator(s); expected 5",
+                    validators.len()
+                ));
+            }
+            return Ok(validators);
+        }
+    }
+    active_genesis_validator_addresses()
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -2159,7 +2186,7 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
         ));
     }
 
-    let active_validator_set = active_genesis_validator_addresses()?;
+    let active_validator_set = active_validator_addresses_for_snapshot_height(snapshot_height)?;
     let signer_set = qc.signers.clone();
     let signer_set_unique = signer_set.iter().collect::<BTreeSet<_>>().len() == signer_set.len();
     if !signer_set_unique {
@@ -2170,8 +2197,7 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
         .any(|signer| !active_validator_set.iter().any(|active| active == signer))
     {
         return Err(
-            "latest committed QC includes a signer outside the ACTIVE genesis validator set"
-                .to_string(),
+            "latest committed QC includes a signer outside the ACTIVE validator set".to_string(),
         );
     }
 
@@ -3100,18 +3126,20 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_snapshot_state_files, create_snapshot_with_options, diagnose_consensus_stall,
-        enforce_snapshot_retention, quarantine_status, quarantine_stopped_validator_with_options,
-        read_block_at_height, read_latest_block_summary, rejoin_eligibility,
-        request_rejoin_with_options, self_heal_from_snapshot, shadow_status,
-        snapshot_metadata_consistency_report, start_shadow_observe_with_options,
-        sync_from_canonical_peer_with_options, BlockSummary, CreateSnapshotOptions,
-        OperatorQuarantineOptions, RejoinRequestOptions, SnapshotCanonicalLockMaterialization,
-        StartShadowObserveOptions, SyncFromCanonicalPeerOptions,
-        DIAGNOSTIC_STALE_TRANSIENT_VOTE_LOCK_SECS,
+        active_validator_addresses_for_snapshot_height, copy_snapshot_state_files,
+        create_snapshot_with_options, diagnose_consensus_stall, enforce_snapshot_retention,
+        quarantine_status, quarantine_stopped_validator_with_options, read_block_at_height,
+        read_latest_block_summary, rejoin_eligibility, request_rejoin_with_options,
+        self_heal_from_snapshot, shadow_status, snapshot_metadata_consistency_report,
+        start_shadow_observe_with_options, sync_from_canonical_peer_with_options, BlockSummary,
+        CreateSnapshotOptions, OperatorQuarantineOptions, RejoinRequestOptions,
+        SnapshotCanonicalLockMaterialization, StartShadowObserveOptions,
+        SyncFromCanonicalPeerOptions, DIAGNOSTIC_STALE_TRANSIENT_VOTE_LOCK_SECS, EXPECTED_CHAIN_ID,
+        EXPECTED_NETWORK_ID,
     };
     use crate::block::{Block, BlockChain};
     use crate::config::NodeConfig;
+    use crate::consensus::consensus_fork;
     use crate::consensus::self_realign::{
         create_snapshot_manifest, sign_snapshot_manifest, QuarantineMarker, SnapshotBuildInput,
         SnapshotQcEvidence, SNAPSHOT_CLASS_VALIDATOR_PRUNED,
@@ -3183,6 +3211,39 @@ mod tests {
             toml::to_string_pretty(&config).expect("test config should serialize"),
         )
         .expect("test node config should be written");
+    }
+
+    fn install_test_consensus_fork(root: &Path, validators: &[String]) {
+        let registry = validators
+            .iter()
+            .enumerate()
+            .map(|(index, validator_address)| {
+                json!({
+                    "validator_address": validator_address,
+                    "consensus_key_type": "FN-DSA",
+                    "consensus_public_key": format!(
+                        "fn-dsa:{}",
+                        general_purpose::STANDARD.encode(format!("validator-{index}-fndsa-key"))
+                    ),
+                })
+            })
+            .collect::<Vec<_>>();
+        fs::write(
+            root.join("config/consensus-fork-migration.json"),
+            serde_json::to_vec_pretty(&json!({
+                "fork_height": 204216,
+                "parent_height": 204215,
+                "parent_hash": "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816",
+                "state_root": "test-state-root",
+                "old_consensus_algorithm": "ML-DSA-65",
+                "new_consensus_algorithm": "FN-DSA",
+                "new_validator_registry": registry,
+                "migration_reason": "test fork registry overlay",
+                "parser_mode": "fail_closed",
+            }))
+            .expect("test fork migration should serialize"),
+        )
+        .expect("test fork migration should be written");
     }
 
     fn operator_quarantine_options() -> OperatorQuarantineOptions {
@@ -4791,6 +4852,7 @@ mod tests {
         let previous_root = std::env::var("SYNERGY_PROJECT_ROOT").ok();
         let previous_config = std::env::var("SYNERGY_CONFIG_PATH").ok();
         let previous_genesis = std::env::var("SYNERGY_GENESIS_FILE").ok();
+        let previous_fork = std::env::var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV).ok();
         std::env::set_var("SYNERGY_PROJECT_ROOT", root);
         let config_path = root.join("config/node.toml");
         if config_path.exists() {
@@ -4799,6 +4861,7 @@ mod tests {
             std::env::remove_var("SYNERGY_CONFIG_PATH");
         }
         std::env::remove_var("SYNERGY_GENESIS_FILE");
+        std::env::remove_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV);
         let result = test();
         match previous_root {
             Some(value) => std::env::set_var("SYNERGY_PROJECT_ROOT", value),
@@ -4812,7 +4875,36 @@ mod tests {
             Some(value) => std::env::set_var("SYNERGY_GENESIS_FILE", value),
             None => std::env::remove_var("SYNERGY_GENESIS_FILE"),
         }
+        match previous_fork {
+            Some(value) => std::env::set_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV, value),
+            None => std::env::remove_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV),
+        }
         result
+    }
+
+    #[test]
+    fn post_fork_snapshot_active_set_uses_consensus_fork_registry() {
+        let _guard = DIAGNOSTICS_TEST_ENV_LOCK.lock().unwrap();
+        let root = test_runtime_root("post-fork-snapshot-active-set");
+        install_test_config(&root, EXPECTED_CHAIN_ID, EXPECTED_NETWORK_ID);
+        install_test_genesis(&root);
+        let fork_validators = (1..=5)
+            .map(|index| format!("synv1forktest{index}"))
+            .collect::<Vec<_>>();
+        install_test_consensus_fork(&root, &fork_validators);
+
+        let post_fork = with_runtime_root(&root, || {
+            active_validator_addresses_for_snapshot_height(204216)
+                .expect("post-fork active set should resolve from fork metadata")
+        });
+        assert_eq!(post_fork, fork_validators);
+
+        let pre_fork = with_runtime_root(&root, || {
+            active_validator_addresses_for_snapshot_height(204215)
+                .expect("pre-fork active set should resolve from genesis")
+        });
+        assert_eq!(pre_fork.len(), 5);
+        assert_ne!(pre_fork, post_fork);
     }
 
     #[test]
