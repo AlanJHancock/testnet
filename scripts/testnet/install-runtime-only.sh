@@ -7,13 +7,14 @@ workspace="${SYNERGY_WORKSPACE:-}"
 runtime="${SYNERGY_RUNTIME:-/tmp/synergy-testnet-linux-amd64.v13.0.1}"
 runtime_sha="${SYNERGY_RUNTIME_SHA:-f5a1cf5b96bd647ba8bf32a6372858c2e7a0e7bc66d8d129ab65c7461314d9d1}"
 start_after="${SYNERGY_START_AFTER:-true}"
+binary_name="${SYNERGY_BINARY_NAME:-synergy-testnet-linux-amd64}"
 
 if [[ -z "$workspace" || ! -d "$workspace" ]]; then
   echo "unable to resolve workspace for $node" >&2
   exit 2
 fi
 
-binary="$workspace/bin/synergy-testnet-linux-amd64"
+binary="$workspace/bin/$binary_name"
 test -f "$runtime"
 actual_runtime_sha="$(sha256sum "$runtime" | awk '{print $1}')"
 if [[ "$actual_runtime_sha" != "$runtime_sha" ]]; then
@@ -34,7 +35,7 @@ fi
 if [[ -x "$workspace/nodectl.sh" ]]; then
   (cd "$workspace" && ./nodectl.sh stop) || true
 fi
-for pid in $(pgrep -f "synergy-testnet-linux-amd64 start --config" || true); do
+for pid in $(pgrep -f "$binary_name start --config" || true); do
   proc_cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
   proc_exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
   if [[ "$proc_cwd" == "$workspace" || "$proc_exe" == "$workspace"/bin/* ]]; then
@@ -42,7 +43,7 @@ for pid in $(pgrep -f "synergy-testnet-linux-amd64 start --config" || true); do
   fi
 done
 sleep 2
-for pid in $(pgrep -f "synergy-testnet-linux-amd64 start --config" || true); do
+for pid in $(pgrep -f "$binary_name start --config" || true); do
   proc_cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
   proc_exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
   if [[ "$proc_cwd" == "$workspace" || "$proc_exe" == "$workspace"/bin/* ]]; then
@@ -63,10 +64,10 @@ if [[ "$start_after" == "true" ]]; then
     (cd "$workspace" && ./nodectl.sh start)
   else
     mkdir -p "$workspace/logs"
-    (cd "$workspace" && nohup ./bin/synergy-testnet-linux-amd64 start --config config/node.toml >> logs/manual-v13-start.log 2>&1 &)
+    (cd "$workspace" && nohup "./bin/$binary_name" start --config config/node.toml >> logs/manual-v13-start.log 2>&1 &)
   fi
 fi
 sleep 2
 pgrep -af "synergy-testnet" > "$backup/process/after.txt" || true
 
-echo "spreadsheet_row_used=true row=$row node=$node workspace=$workspace backup=$backup installed_runtime_sha=$installed_sha start_after=$start_after"
+echo "spreadsheet_row_used=true row=$row node=$node workspace=$workspace binary=$binary_name backup=$backup installed_runtime_sha=$installed_sha start_after=$start_after"
