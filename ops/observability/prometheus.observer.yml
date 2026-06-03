@@ -32,16 +32,10 @@ scrape_configs:
       - targets: ["10.69.0.5:6030"]
         labels: { role: validator, host: val5, instance_label: "Val5" }
 
-  - job_name: "synergy-observer"
-    metrics_path: /metrics
-    static_configs:
-      - targets: ["127.0.0.1:6030"]
-        labels: { role: observer, host: observer, instance_label: "Observer" }
-
   - job_name: "synergy-relayers"
     metrics_path: /metrics
     static_configs:
-      - targets: ["10.69.0.20:6030"]
+      - targets: ["10.69.0.201:6030"]
         labels: { role: relayer, host: relayer-1, instance_label: "Relayer-1" }
       - targets: ["10.69.0.202:6030"]
         labels: { role: relayer, host: relayer-2, instance_label: "Relayer-2" }
@@ -72,7 +66,7 @@ scrape_configs:
         labels: { role: validator, host: val4, instance_label: "Val4" }
       - targets: ["10.69.0.5:9100"]
         labels: { role: validator, host: val5, instance_label: "Val5" }
-      - targets: ["10.69.0.20:9100"]
+      - targets: ["10.69.0.201:9100"]
         labels: { role: relayer, host: relayer-1, instance_label: "Relayer-1" }
       - targets: ["10.69.0.202:9100"]
         labels: { role: relayer, host: relayer-2, instance_label: "Relayer-2" }

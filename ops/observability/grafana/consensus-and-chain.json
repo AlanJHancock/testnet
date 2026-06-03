@@ -40,7 +40,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(synergy_chain_height{job=\"synergy-validators\"})",
+          "expr": "max(synergy_block_height{job=\"synergy-validators\"})",
           "legendFormat": "",
           "instant": true
         }
@@ -96,7 +96,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "min(synergy_chain_height{job=\"synergy-validators\"})",
+          "expr": "min(synergy_block_height{job=\"synergy-validators\"})",
           "legendFormat": "",
           "instant": true
         }
@@ -152,7 +152,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(synergy_chain_height{job=\"synergy-validators\"}) - min(synergy_chain_height{job=\"synergy-validators\"})",
+          "expr": "max(synergy_block_height{job=\"synergy-validators\"}) - min(synergy_block_height{job=\"synergy-validators\"})",
           "legendFormat": "",
           "instant": true
         }
@@ -438,7 +438,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(synergy_chain_height{job=\"synergy-validators\"}[5m]) * 60",
+          "expr": "60 * rate(synergy_block_height{job=\"synergy-validators\"}[5m])",
           "legendFormat": "{{instance_label}}"
         }
       ],
@@ -579,7 +579,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "synergy_chain_height{job=\"synergy-validators\"}",
+          "expr": "synergy_block_height{job=\"synergy-validators\"}",
           "legendFormat": "{{instance_label}} local"
         },
         {
@@ -1252,7 +1252,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "synergy_sync_info{job=~\"synergy-validators|synergy-observer|synergy-relayers\"}",
+          "expr": "synergy_sync_info{job=~\"synergy-validators|synergy-relayers\"}",
           "legendFormat": "{{instance_label}}",
           "instant": true
         }
@@ -1302,6 +1302,264 @@
           "custom": {
             "align": "auto",
             "inspect": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 27,
+      "type": "stat",
+      "title": "Live Validators Reported",
+      "gridPos": {
+        "x": 0,
+        "y": 63,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(synergy_live_validators{job=\"synergy-validators\"})",
+          "legendFormat": "{{instance_label}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 28,
+      "type": "stat",
+      "title": "Validator Cluster Count",
+      "gridPos": {
+        "x": 6,
+        "y": 63,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(synergy_validator_clusters_total)",
+          "legendFormat": "{{instance_label}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Cluster Shuffle Total",
+      "gridPos": {
+        "x": 12,
+        "y": 63,
+        "w": 12,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance_label) (synergy_cluster_shuffle_total{job=\"synergy-validators\"})",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Cluster Shuffle Rate per Minute",
+      "gridPos": {
+        "x": 0,
+        "y": 70,
+        "w": 12,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "60 * rate(synergy_cluster_shuffle_total{job=\"synergy-validators\"}[5m])",
+          "legendFormat": "{{instance_label}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Ready Validators vs Total",
+      "gridPos": {
+        "x": 12,
+        "y": 70,
+        "w": 12,
+        "h": 7
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(synergy_status_ready_validators{job=\"synergy-validators\"})",
+          "legendFormat": "ready"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "total",
+          "expr": "max(synergy_validators_total{job=\"synergy-validators\"})"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "spanNulls": false,
+            "showPoints": "never"
           }
         },
         "overrides": []

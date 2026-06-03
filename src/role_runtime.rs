@@ -13,11 +13,14 @@ use crate::config::{
 };
 use crate::consensus::cartel_detection::{CartelDetectionEngine, WhistleblowerSystem};
 use crate::consensus::consensus_algorithm::ProofOfSynergy;
+use crate::consensus::consensus_fork;
 use crate::consensus::dao_governance::{DAOGovernance, SynergyOracle};
 use crate::consensus::dual_quorum::{EntropyBeacon, ValidatorRotation};
 use crate::consensus::self_realign::EXPECTED_GENESIS_HASH;
 use crate::consensus::synergy_score::SynergyScoreCalculator;
-use crate::consensus::validator_keys::load_local_validator_keypair;
+use crate::consensus::validator_keys::{
+    load_local_validator_keypair_for_height, validator_public_key_with_declared_algorithm,
+};
 use crate::crypto::pqc::PQCManager;
 use crate::genesis::canonical_genesis;
 use crate::logging::{init_logger, LogLevel};
@@ -752,11 +755,21 @@ fn ensure_local_validator_consensus_key_bound(config: &NodeConfig) -> Result<(),
         ));
     }
 
-    load_local_validator_keypair(&validator_address, &VALIDATOR_MANAGER)
+    let preflight_height = match consensus_fork::active_consensus_fork_migration() {
+        Ok(Some(migration)) => migration.fork_height,
+        Ok(None) => 0,
+        Err(error) => {
+            return Err(format!(
+                "local validator {validator_address} cannot load consensus fork metadata: {error}"
+            ));
+        }
+    };
+
+    load_local_validator_keypair_for_height(preflight_height, &validator_address, &VALIDATOR_MANAGER)
         .map(|_| ())
         .map_err(|error| {
             format!(
-                "local validator {validator_address} cannot load a canonical Aegis PQC consensus signing key: {error}"
+                "local validator {validator_address} cannot load a canonical Aegis PQC consensus signing key for height {preflight_height}: {error}"
             )
         })
 }
@@ -779,10 +792,22 @@ fn ensure_local_validator_record_available(validator_address: &str) -> Result<()
         ));
     };
 
+    let consensus_public_key = validator_public_key_with_declared_algorithm(
+        &genesis_validator.operator_address,
+        &genesis_validator.consensus_public_key,
+        &genesis_validator.consensus_key_type,
+    )
+    .map_err(|error| {
+        format!(
+            "canonical genesis validator {} has invalid consensus public key: {error}",
+            genesis_validator.operator_address
+        )
+    })?;
+
     VALIDATOR_MANAGER
         .register_validator(ValidatorRegistration {
             address: genesis_validator.operator_address.clone(),
-            public_key: genesis_validator.consensus_public_key.clone(),
+            public_key: consensus_public_key,
             name: genesis_validator.moniker.clone(),
             stake_amount: genesis_validator.stake_nwei,
             submitted_at: now_ts(),

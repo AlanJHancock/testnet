@@ -69,11 +69,23 @@ fn encrypt_passcode(passcode: &str, mnemonic: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_algorithm(value: Option<&String>) -> PQCAlgorithm {
-    match value.map(|v| v.as_str()) {
-        Some("mldsa") => PQCAlgorithm::MLDSA,
-        Some("slhdsa") => PQCAlgorithm::SLHDSA,
-        _ => PQCAlgorithm::FNDSA,
+fn parse_algorithm(value: Option<&String>) -> Result<PQCAlgorithm, String> {
+    let Some(value) = value else {
+        return Ok(PQCAlgorithm::FNDSA);
+    };
+
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "fndsa" | "fn-dsa" | "fn-dsa-512" | "fn-dsa-1024" | "falcon" | "falcon-1024" => {
+            Ok(PQCAlgorithm::FNDSA)
+        }
+        "mldsa" | "ml-dsa" | "ml-dsa-44" | "ml-dsa-65" | "ml-dsa-87" | "dilithium"
+        | "dilithium-65" => Ok(PQCAlgorithm::MLDSA),
+        "slhdsa" | "slh-dsa" => Ok(PQCAlgorithm::SLHDSA),
+        "pqc" | "aegis" => Err(format!(
+            "ambiguous PQC signing algorithm '{}'; use fndsa, mldsa, or slhdsa",
+            value
+        )),
+        other => Err(format!("unsupported PQC signing algorithm '{other}'")),
     }
 }
 
@@ -173,7 +185,11 @@ fn main() {
     match command.as_str() {
         "gen-keypair" => {
             let algo_idx = args.iter().position(|a| a == "--algo");
-            let algorithm = parse_algorithm(algo_idx.and_then(|idx| args.get(idx + 1)));
+            let algorithm = parse_algorithm(algo_idx.and_then(|idx| args.get(idx + 1)))
+                .unwrap_or_else(|err| {
+                    eprintln!("Error: {err}");
+                    std::process::exit(1);
+                });
             if let Err(err) = generate_keypair(algorithm) {
                 eprintln!("Error: {err}");
                 std::process::exit(1);
@@ -208,7 +224,11 @@ fn main() {
             if let (Some(pk_pos), Some(tx_pos)) = (pk_idx, tx_idx) {
                 let private_hex = args.get(pk_pos + 1).cloned().unwrap_or_default();
                 let tx_json = args.get(tx_pos + 1).cloned().unwrap_or_default();
-                let algo = parse_algorithm(algo_idx.and_then(|i| args.get(i + 1)));
+                let algo =
+                    parse_algorithm(algo_idx.and_then(|i| args.get(i + 1))).unwrap_or_else(|err| {
+                        eprintln!("Error: {err}");
+                        std::process::exit(1);
+                    });
 
                 if private_hex.is_empty() || tx_json.is_empty() {
                     eprintln!("private-key and tx payload are required");
@@ -232,7 +252,11 @@ fn main() {
             if let (Some(pk_pos), Some(msg_pos)) = (pk_idx, msg_idx) {
                 let private_b64 = args.get(pk_pos + 1).cloned().unwrap_or_default();
                 let message = args.get(msg_pos + 1).cloned().unwrap_or_default();
-                let algo = parse_algorithm(algo_idx.and_then(|i| args.get(i + 1)));
+                let algo =
+                    parse_algorithm(algo_idx.and_then(|i| args.get(i + 1))).unwrap_or_else(|err| {
+                        eprintln!("Error: {err}");
+                        std::process::exit(1);
+                    });
 
                 if private_b64.is_empty() || message.is_empty() {
                     eprintln!("private-key-b64 and message are required");
@@ -252,5 +276,29 @@ fn main() {
             usage();
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(value: &str) -> Result<PQCAlgorithm, String> {
+        parse_algorithm(Some(&value.to_string()))
+    }
+
+    #[test]
+    fn wallet_cli_normalizes_fndsa_aliases() {
+        assert_eq!(parse_algorithm(None).unwrap(), PQCAlgorithm::FNDSA);
+        assert_eq!(parse("fndsa").unwrap(), PQCAlgorithm::FNDSA);
+        assert_eq!(parse("fn-dsa").unwrap(), PQCAlgorithm::FNDSA);
+        assert_eq!(parse("falcon").unwrap(), PQCAlgorithm::FNDSA);
+    }
+
+    #[test]
+    fn wallet_cli_rejects_ambiguous_or_unknown_algorithms() {
+        assert!(parse("pqc").is_err());
+        assert!(parse("aegis").is_err());
+        assert!(parse("not-an-algorithm").is_err());
     }
 }

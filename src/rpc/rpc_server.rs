@@ -11,6 +11,7 @@ use crate::address::generate_cluster_address;
 use crate::block::BlockChain;
 use crate::consensus::chain_durability::recover_chain_and_validate_canonical;
 use crate::consensus::consensus_algorithm::ProofOfSynergy;
+use crate::consensus::consensus_fork;
 use crate::consensus::synergy_score::SynergyScoreCalculator;
 use crate::crypto::pqc::PQCManager;
 use crate::genesis::canonical_genesis;
@@ -564,16 +565,15 @@ pub fn prune_transaction_hashes_from_pool(confirmed_hashes: &HashSet<String>) ->
 }
 
 fn prune_invalid_transactions_from_pool() -> usize {
-    let invalid_transactions = {
-        let pool = TX_POOL.lock().unwrap();
-        pool.iter()
-            .filter_map(|transaction| {
-                ProofOfSynergy::validate_transaction_for_mempool(transaction)
-                    .err()
-                    .map(|reason| (transaction.hash(), transaction.sender.clone(), reason))
-            })
-            .collect::<Vec<_>>()
-    };
+    let pending_transactions = TX_POOL.lock().unwrap().clone();
+    let invalid_transactions = pending_transactions
+        .iter()
+        .filter_map(|transaction| {
+            ProofOfSynergy::validate_transaction_for_mempool(transaction)
+                .err()
+                .map(|reason| (transaction.hash(), transaction.sender.clone(), reason))
+        })
+        .collect::<Vec<_>>();
 
     if invalid_transactions.is_empty() {
         return 0;
@@ -1926,6 +1926,8 @@ fn handle_json_rpc(
                 "chain_state_hash": chain_state_hash
             })
         }
+
+        "synergy_getConsensusForkStatus" => consensus_fork::active_consensus_fork_status(),
 
         // Validator management
         "synergy_getValidators" => {
@@ -4432,6 +4434,7 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_getAttestations"
         | "synergy_nodeInfo"
         | "synergy_getDeterminismDigest"
+        | "synergy_getConsensusForkStatus"
         | "synergy_getValidators"
         | "synergy_getValidator"
         | "synergy_getTokenBalance"
@@ -5428,20 +5431,44 @@ fn parse_required_hex_or_bytes(
     }
 }
 
-fn normalize_signature_algorithm(value: Option<&str>) -> Result<String, RpcError> {
-    let normalized = value.unwrap_or("fndsa").trim().to_ascii_lowercase();
+fn normalize_signature_algorithm(
+    value: Option<&str>,
+    require_signature: bool,
+) -> Result<String, RpcError> {
+    let Some(value) = value else {
+        return if require_signature {
+            Err(RpcError::new(
+                -32602,
+                "Missing signatureAlgorithm; use fndsa explicitly",
+            ))
+        } else {
+            Ok("fndsa".to_string())
+        };
+    };
+    let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
-        "" | "fndsa" | "fn-dsa" | "fn-dsa-512" | "fn-dsa-1024" => Ok("fndsa".to_string()),
-        "mldsa" | "ml-dsa" | "ml-dsa-44" | "ml-dsa-65" | "ml-dsa-87" => Ok("mldsa".to_string()),
+        "" if require_signature => Err(RpcError::new(
+            -32602,
+            "Missing signatureAlgorithm; use fndsa explicitly",
+        )),
+        "" | "fndsa" | "fn-dsa" | "fn-dsa-512" | "fn-dsa-1024" | "falcon" | "falcon-1024" => {
+            Ok("fndsa".to_string())
+        }
+        "mldsa" | "ml-dsa" | "ml-dsa-44" | "ml-dsa-65" | "ml-dsa-87" | "dilithium"
+        | "dilithium-65" => Ok("mldsa".to_string()),
         "slhdsa" | "slh-dsa" | "slh-dsa-128s" | "slh-dsa-192s" | "slh-dsa-256s" => {
             Ok("slhdsa".to_string())
         }
-        _ => Err(RpcError::new(
+        "pqc" | "aegis" => Err(RpcError::new(
             -32602,
             format!(
-                "Unsupported signature algorithm '{}'",
-                value.unwrap_or_default()
+                "Ambiguous signature algorithm '{}'; use fndsa, mldsa, or slhdsa explicitly",
+                value
             ),
+        )),
+        _ => Err(RpcError::new(
+            -32602,
+            format!("Unsupported signature algorithm '{}'", value),
         )),
     }
 }
@@ -5538,6 +5565,7 @@ fn normalize_rpc_transaction(
             .signature_algorithm_alias
             .as_deref()
             .or(envelope.signature_algorithm.as_deref()),
+        require_signature,
     )?;
     let chain_id = parse_u64ish(envelope.chain_id.as_ref())?.unwrap_or(0);
     let network_id = envelope
@@ -6379,6 +6407,50 @@ mod tests {
         assert_eq!(normalized.transaction.signature_algorithm, "fndsa");
         assert_eq!(normalized.transaction.network_id, "synergy-testnet-v2");
         assert_eq!(normalized.chain_id, Some(0x1234));
+    }
+
+    #[test]
+    fn normalize_signed_transaction_requires_explicit_signature_algorithm() {
+        let envelope = json!({
+            "from": "syna1sender",
+            "to": "syna1receiver",
+            "value": 42,
+            "nonce": 7,
+            "gasLimit": 21000,
+            "maxFee": 1000,
+            "signature": "0x01020304",
+            "signerPublicKey": "0x05060708",
+            "chainId": "0x1234",
+            "networkId": "synergy-testnet-v2"
+        });
+
+        let error =
+            normalize_rpc_transaction(&envelope, true).expect_err("algorithm must be explicit");
+
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("Missing signatureAlgorithm"));
+    }
+
+    #[test]
+    fn normalize_transaction_rejects_ambiguous_signature_algorithm() {
+        let envelope = json!({
+            "from": "syna1sender",
+            "to": "syna1receiver",
+            "value": 42,
+            "nonce": 7,
+            "gasLimit": 21000,
+            "maxFee": 1000,
+            "signature": "0x01020304",
+            "signerPublicKey": "0x05060708",
+            "signatureAlgorithm": "pqc",
+            "chainId": "0x1234",
+            "networkId": "synergy-testnet-v2"
+        });
+
+        let error = normalize_rpc_transaction(&envelope, true).expect_err("algorithm is ambiguous");
+
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("Ambiguous signature algorithm"));
     }
 
     #[test]

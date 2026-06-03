@@ -1,5 +1,10 @@
 use crate::block::Block;
-use crate::consensus::validator_keys::parse_validator_public_key;
+use crate::consensus::consensus_fork::{
+    self, normalize_consensus_key_algorithm, parse_consensus_public_key_material,
+};
+use crate::consensus::validator_keys::{
+    parse_validator_public_key, parse_validator_public_key_with_declared_algorithm,
+};
 use crate::crypto::aegis_pqvm::{AegisPqvmKeyRegistry, AegisPqvmVerifier};
 use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPublicKey, PQCSignature};
 #[cfg(not(test))]
@@ -997,10 +1002,10 @@ fn verify_legacy_qc(
         ));
     }
 
-    let validators = load_legacy_active_genesis_validators(data_dir)?;
+    let height = legacy_qc_height(&qc)?;
+    let validators = load_legacy_active_genesis_validators(data_dir, height)?;
     let mut seen = BTreeSet::new();
     let mut signed_weight = 0.0f64;
-    let height = legacy_qc_height(&qc)?;
     let manager = PQCManager::new();
     for vote in &qc.votes {
         if vote.block_hash != qc.block_hash {
@@ -1103,13 +1108,14 @@ fn legacy_vote_signature_payload(vote: &LegacyVote) -> String {
 
 fn load_legacy_active_genesis_validators(
     data_dir: &Path,
+    consensus_height: u64,
 ) -> Result<std::collections::BTreeMap<String, LegacyValidator>, String> {
     let value = read_json(&data_dir.join("validator_registry.json"))?;
     let validators = value
         .get("validators")
         .and_then(Value::as_object)
         .ok_or_else(|| "validator_registry.json missing validators object".to_string())?;
-    let canonical_keys = canonical_genesis_consensus_keys()?;
+    let canonical_keys = canonical_consensus_keys_for_height(consensus_height)?;
     let mut active = std::collections::BTreeMap::new();
     let mut seen_canonical_keys = BTreeSet::new();
     for (address, record) in validators {
@@ -1119,7 +1125,22 @@ fn load_legacy_active_genesis_validators(
         }
         let public_key_text = get_string(record, &["public_key", "consensus_public_key"])
             .ok_or_else(|| format!("validator {address} is missing consensus public key"))?;
-        let public_key = parse_validator_public_key(address, &public_key_text)?;
+        let public_key = if let Some(algorithm_label) = get_string(
+            record,
+            &[
+                "consensus_key_type",
+                "public_key_algorithm",
+                "consensus_public_key_algorithm",
+            ],
+        ) {
+            parse_validator_public_key_with_declared_algorithm(
+                address,
+                &public_key_text,
+                &algorithm_label,
+            )?
+        } else {
+            parse_validator_public_key(address, &public_key_text)?
+        };
         if !canonical_keys.is_empty() && !canonical_keys.contains(&public_key.key_data) {
             return Err(format!(
                 "active validator {address} consensus public key is not in canonical genesis"
@@ -1153,15 +1174,34 @@ fn load_legacy_active_genesis_validators(
     Ok(active)
 }
 
+fn canonical_consensus_keys_for_height(consensus_height: u64) -> Result<BTreeSet<Vec<u8>>, String> {
+    if let Some(migration) = consensus_fork::active_consensus_fork_migration()? {
+        if migration.applies_to_height(consensus_height) {
+            let mut keys = BTreeSet::new();
+            for validator in &migration.new_validator_registry {
+                let (_, key_data) = parse_consensus_public_key_material(
+                    &validator.validator_address,
+                    &validator.consensus_public_key,
+                    Some(&validator.consensus_key_type),
+                )?;
+                keys.insert(key_data);
+            }
+            return Ok(keys);
+        }
+    }
+    canonical_genesis_consensus_keys()
+}
+
 fn canonical_genesis_consensus_keys() -> Result<BTreeSet<Vec<u8>>, String> {
     #[cfg(not(test))]
     {
         let genesis = canonical_genesis()?;
         let mut keys = BTreeSet::new();
         for validator in genesis.validators() {
-            let public_key = parse_validator_public_key(
+            let public_key = parse_validator_public_key_with_declared_algorithm(
                 &validator.validator_id,
                 &validator.consensus_public_key,
+                &validator.consensus_key_type,
             )?;
             keys.insert(public_key.key_data);
         }
@@ -1352,12 +1392,7 @@ fn bitmap_signer_indexes(bitmap: &[u8], validator_count: usize) -> Result<Vec<us
 }
 
 fn parse_algorithm(value: &str) -> Result<PQCAlgorithm, String> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "fndsa" | "fn-dsa" | "fn-dsa-1024" => Ok(PQCAlgorithm::FNDSA),
-        "mldsa" | "ml-dsa" | "ml-dsa-65" | "ml-dsa-87" => Ok(PQCAlgorithm::MLDSA),
-        "slhdsa" | "slh-dsa" => Ok(PQCAlgorithm::SLHDSA),
-        other => Err(format!("unsupported Aegis PQC algorithm: {other}")),
-    }
+    normalize_consensus_key_algorithm(value)
 }
 
 fn build_file_plan(

@@ -1,3 +1,6 @@
+use crate::consensus::consensus_fork::{
+    active_consensus_fork_migration, validate_snapshot_fork_metadata, ConsensusForkMigration,
+};
 use crate::crypto::aegis_pqvm::{
     AegisPqKeyLifecycleRecord, AegisPqvmSigner, AegisPqvmVerifier,
     SYNERGY_ARCHIVE_SNAPSHOT_MANIFEST_V1,
@@ -222,6 +225,8 @@ pub struct SnapshotManifest {
     pub snapshot_block_hash: String,
     pub parent_hash: String,
     pub state_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_fork: Option<ConsensusForkMigration>,
     pub canonical_lock_height: u64,
     pub canonical_lock_hash: String,
     pub qc_evidence: SnapshotQcEvidence,
@@ -934,6 +939,7 @@ pub fn create_snapshot_manifest(input: SnapshotBuildInput) -> Result<SnapshotMan
         snapshot_block_hash: input.snapshot_block_hash,
         parent_hash: input.parent_hash,
         state_root,
+        consensus_fork: active_consensus_fork_migration()?,
         canonical_lock_height: input.canonical_lock_height,
         canonical_lock_hash: input.canonical_lock_hash,
         qc_evidence: input.qc_evidence,
@@ -1130,6 +1136,11 @@ pub fn verify_signed_snapshot_manifest(
             Err(error) => errors.push(error),
         },
         None => errors.push("snapshot manifest missing finalized state root".to_string()),
+    }
+    if let Err(error) =
+        validate_snapshot_fork_metadata(manifest.snapshot_height, manifest.consensus_fork.as_ref())
+    {
+        errors.push(error);
     }
 
     let mut manifest_signature_verified = false;

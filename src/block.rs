@@ -5,7 +5,10 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPublicKey, PQCSignature};
+use crate::consensus::consensus_fork::{
+    normalize_consensus_key_algorithm, validate_consensus_key_algorithm_for_height,
+};
+use crate::crypto::pqc::{PQCManager, PQCPublicKey, PQCSignature};
 use crate::genesis::canonical_genesis;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,21 +128,9 @@ impl Block {
             );
         }
 
-        let algorithm = match self
-            .block_signature_algorithm
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "fndsa" | "fn-dsa" | "fn-dsa-1024" => PQCAlgorithm::FNDSA,
-            "mldsa" | "ml-dsa" | "ml-dsa-65" | "ml-dsa-87" => PQCAlgorithm::MLDSA,
-            "slhdsa" | "slh-dsa" => PQCAlgorithm::SLHDSA,
-            other => {
-                return Err(format!(
-                    "unsupported Aegis PQC block signature algorithm: {other}"
-                ))
-            }
-        };
+        let algorithm = normalize_consensus_key_algorithm(&self.block_signature_algorithm)
+            .map_err(|error| format!("unsupported Aegis PQC block signature algorithm: {error}"))?;
+        validate_consensus_key_algorithm_for_height(self.block_index, &algorithm)?;
 
         let public_key = PQCPublicKey {
             algorithm: algorithm.clone(),

@@ -146,7 +146,7 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "Observer Scrape Up",
+      "title": "Observer Host Scrape Up",
       "gridPos": {
         "x": 8,
         "y": 0,
@@ -160,7 +160,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(up{job=\"synergy-observer\"})",
+          "expr": "max(up{job=\"node_exporter_private\",host=\"observer\"})",
           "legendFormat": "",
           "instant": true
         }
@@ -396,8 +396,13 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "synergy_chain_height{job=~\"synergy-validators|synergy-observer|synergy-relayers|synergy-rpc-gateways|synergy-explorer\"}",
+          "expr": "synergy_block_height{job=\"synergy-validators\"}",
           "legendFormat": "{{instance_label}}"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "{{instance_label}}",
+          "expr": "synergy_chain_height{job=~\"synergy-relayers|synergy-rpc-gateways|synergy-explorer\"}"
         }
       ],
       "options": {
@@ -443,7 +448,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(synergy_chain_height{job=\"synergy-validators\"}[5m]) * 60",
+          "expr": "60 * rate(synergy_block_height{job=\"synergy-validators\"}[5m])",
           "legendFormat": "{{instance_label}}"
         }
       ],
@@ -725,7 +730,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "up{job=~\"synergy-validators|synergy-observer|synergy-relayers|synergy-rpc-gateways|synergy-explorer|node_exporter_private|node_exporter_public_roles|prometheus\"}",
+          "expr": "up{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|node_exporter_private|node_exporter_public_roles|prometheus\"}",
           "legendFormat": "{{instance_label}}",
           "instant": true
         }

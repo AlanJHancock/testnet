@@ -18,6 +18,7 @@ pub struct GenesisBalance {
 pub struct GenesisValidator {
     pub validator_id: String,
     pub operator_address: String,
+    pub consensus_key_type: String,
     pub consensus_public_key: String,
     pub moniker: String,
     pub stake_nwei: u64,
@@ -193,6 +194,7 @@ fn parse_validators(value: &Value) -> Result<Vec<GenesisValidator>, String> {
             Ok(GenesisValidator {
                 validator_id: required_string(entry, &["validator_id"])?,
                 operator_address: required_string(entry, &["operator_address"])?,
+                consensus_key_type: required_string(entry, &["consensus_key_type"])?,
                 consensus_public_key: required_string(entry, &["consensus_public_key"])?,
                 moniker: required_string(entry, &["moniker"])?,
                 stake_nwei: parse_u64(&required_string(entry, &["stake_nwei"])?)?,

@@ -1,15 +1,22 @@
 use crate::block::Block;
+use crate::consensus::consensus_fork::{
+    self, normalize_consensus_key_algorithm, validate_consensus_key_algorithm_for_height,
+};
 use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPrivateKey, PQCPublicKey, PQCSignature};
+use crate::genesis::canonical_genesis;
 use crate::validator::ValidatorManager;
 use base64::{engine::general_purpose, Engine as _};
 use lazy_static::lazy_static;
 use serde_json::Value;
 use sha3::{Digest, Sha3_256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+
+const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1952;
+const ML_DSA_65_PRIVATE_KEY_BYTES: usize = 4032;
 
 lazy_static! {
     static ref LOCAL_VALIDATOR_SIGNING_KEYS: Mutex<HashMap<String, (PQCPublicKey, PQCPrivateKey)>> =
@@ -33,12 +40,102 @@ pub fn expected_validator_public_key(
     let validator = validator_manager
         .get_validator(validator_address)
         .ok_or_else(|| format!("validator {validator_address} is not registered"))?;
-    parse_validator_public_key(validator_address, &validator.public_key)
+    parse_validator_public_key(validator_address, &validator.public_key).or_else(|error| {
+        if !error.contains("missing consensus key algorithm prefix") {
+            return Err(error);
+        }
+        parse_legacy_registry_public_key_with_genesis_algorithm(
+            validator_address,
+            &validator.public_key,
+        )
+    })
+}
+
+pub fn expected_validator_public_key_for_height(
+    height: u64,
+    validator_address: &str,
+    validator_manager: &ValidatorManager,
+) -> Result<PQCPublicKey, String> {
+    if let Some(fork_key) =
+        consensus_fork::validator_public_key_for_height(height, validator_address)?
+    {
+        return Ok(fork_key);
+    }
+    expected_validator_public_key(validator_address, validator_manager)
 }
 
 pub fn parse_validator_public_key(
     validator_address: &str,
     encoded: &str,
+) -> Result<PQCPublicKey, String> {
+    parse_validator_public_key_inner(validator_address, encoded, None)
+}
+
+pub fn parse_validator_public_key_with_declared_algorithm(
+    validator_address: &str,
+    encoded: &str,
+    algorithm_label: &str,
+) -> Result<PQCPublicKey, String> {
+    parse_validator_public_key_inner(validator_address, encoded, Some(algorithm_label))
+}
+
+pub fn validator_public_key_with_declared_algorithm(
+    validator_address: &str,
+    encoded: &str,
+    algorithm_label: &str,
+) -> Result<String, String> {
+    let public_key = parse_validator_public_key_with_declared_algorithm(
+        validator_address,
+        encoded,
+        algorithm_label,
+    )?;
+    Ok(format!(
+        "{}:{}",
+        consensus_algorithm_label(&public_key.algorithm),
+        general_purpose::STANDARD.encode(public_key.key_data)
+    ))
+}
+
+fn parse_legacy_registry_public_key_with_genesis_algorithm(
+    validator_address: &str,
+    encoded: &str,
+) -> Result<PQCPublicKey, String> {
+    let genesis = canonical_genesis()
+        .map_err(|error| format!("load canonical genesis for legacy validator key: {error}"))?;
+    let Some(genesis_validator) = genesis
+        .validators()
+        .iter()
+        .find(|validator| validator.operator_address == validator_address)
+    else {
+        return Err(format!(
+            "validator {validator_address} has an untyped consensus key and is not present in canonical genesis"
+        ));
+    };
+
+    let registry_key = parse_validator_public_key_with_declared_algorithm(
+        validator_address,
+        encoded,
+        &genesis_validator.consensus_key_type,
+    )?;
+    let canonical_key = parse_validator_public_key_with_declared_algorithm(
+        validator_address,
+        &genesis_validator.consensus_public_key,
+        &genesis_validator.consensus_key_type,
+    )?;
+    if registry_key.key_data != canonical_key.key_data
+        || registry_key.algorithm != canonical_key.algorithm
+    {
+        return Err(format!(
+            "validator {validator_address} untyped legacy registry key does not match canonical genesis"
+        ));
+    }
+    Ok(registry_key)
+}
+
+fn parse_validator_public_key_inner(
+    validator_address: &str,
+    encoded: &str,
+    declared_algorithm_label: Option<&str>,
 ) -> Result<PQCPublicKey, String> {
     let encoded = encoded.trim();
     if encoded.is_empty() {
@@ -47,7 +144,10 @@ pub fn parse_validator_public_key(
         ));
     }
 
-    let (algorithm, material) = split_algorithm_prefix(encoded);
+    let (algorithm, material) =
+        split_algorithm_prefix(encoded, declared_algorithm_label).map_err(|error| {
+            format!("validator {validator_address} consensus key algorithm is invalid: {error}")
+        })?;
     let key_data = decode_key_material(material).map_err(|error| {
         format!("validator {validator_address} consensus public key is invalid: {error}")
     })?;
@@ -70,12 +170,28 @@ pub fn verify_signer_key_matches_validator(
     signer_public_key: &[u8],
     validator_manager: &ValidatorManager,
 ) -> Result<PQCPublicKey, String> {
-    let expected = expected_validator_public_key(validator_address, validator_manager)?;
+    verify_signer_key_matches_validator_at_height(
+        0,
+        validator_address,
+        signer_public_key,
+        validator_manager,
+    )
+}
+
+pub fn verify_signer_key_matches_validator_at_height(
+    height: u64,
+    validator_address: &str,
+    signer_public_key: &[u8],
+    validator_manager: &ValidatorManager,
+) -> Result<PQCPublicKey, String> {
+    let expected =
+        expected_validator_public_key_for_height(height, validator_address, validator_manager)?;
     if signer_public_key != expected.key_data.as_slice() {
         return Err(format!(
             "signer public key does not match canonical consensus key for validator {validator_address}"
         ));
     }
+    validate_consensus_key_algorithm_for_height(height, &expected.algorithm)?;
     Ok(expected)
 }
 
@@ -87,12 +203,14 @@ pub fn verify_block_proposer_key_matches_validator(
         return Ok(());
     }
 
-    let expected = verify_signer_key_matches_validator(
+    let expected = verify_signer_key_matches_validator_at_height(
+        block.block_index,
         &block.validator_id,
         &block.proposer_public_key,
         validator_manager,
     )?;
     let block_algorithm = block_signature_algorithm(&block.block_signature_algorithm)?;
+    validate_consensus_key_algorithm_for_height(block.block_index, &block_algorithm)?;
     if block_algorithm != expected.algorithm {
         return Err(format!(
             "block proposer signature algorithm does not match canonical consensus key for validator {}",
@@ -107,7 +225,18 @@ pub fn sign_with_local_validator_key(
     message: &[u8],
     validator_manager: &ValidatorManager,
 ) -> Result<(PQCPublicKey, PQCSignature), String> {
-    let expected = expected_validator_public_key(validator_address, validator_manager)?;
+    sign_with_local_validator_key_for_height(0, validator_address, message, validator_manager)
+}
+
+pub fn sign_with_local_validator_key_for_height(
+    height: u64,
+    validator_address: &str,
+    message: &[u8],
+    validator_manager: &ValidatorManager,
+) -> Result<(PQCPublicKey, PQCSignature), String> {
+    let expected =
+        expected_validator_public_key_for_height(height, validator_address, validator_manager)?;
+    validate_consensus_key_algorithm_for_height(height, &expected.algorithm)?;
     let private_key = load_local_validator_private_key(validator_address, &expected)?;
     let mut pqc_manager = PQCManager::new();
     let signature = pqc_manager.sign(&private_key, message)?;
@@ -118,7 +247,17 @@ pub fn load_local_validator_keypair(
     validator_address: &str,
     validator_manager: &ValidatorManager,
 ) -> Result<(PQCPublicKey, PQCPrivateKey), String> {
-    let expected = expected_validator_public_key(validator_address, validator_manager)?;
+    load_local_validator_keypair_for_height(0, validator_address, validator_manager)
+}
+
+pub fn load_local_validator_keypair_for_height(
+    height: u64,
+    validator_address: &str,
+    validator_manager: &ValidatorManager,
+) -> Result<(PQCPublicKey, PQCPrivateKey), String> {
+    let expected =
+        expected_validator_public_key_for_height(height, validator_address, validator_manager)?;
+    validate_consensus_key_algorithm_for_height(height, &expected.algorithm)?;
     let private_key = load_local_validator_private_key(validator_address, &expected)?;
     Ok((expected, private_key))
 }
@@ -159,6 +298,7 @@ fn load_private_key_from_config(
     validator_address: &str,
     expected_public_key: &PQCPublicKey,
 ) -> Result<PQCPrivateKey, String> {
+    let mut errors = Vec::new();
     for key in [
         "SYNERGY_VALIDATOR_CONSENSUS_PRIVATE_KEY_B64",
         "SYNERGY_CONSENSUS_PRIVATE_KEY_B64",
@@ -166,20 +306,42 @@ fn load_private_key_from_config(
         if let Ok(value) = env::var(key) {
             let value = value.trim();
             if !value.is_empty() {
-                return private_key_from_encoded(expected_public_key, value, format!("env:{key}"));
+                match private_key_from_encoded(expected_public_key, value, format!("env:{key}"))
+                    .and_then(|private_key| {
+                        ensure_private_key_matches_public_key(
+                            validator_address,
+                            expected_public_key,
+                            &private_key,
+                        )?;
+                        Ok(private_key)
+                    }) {
+                    Ok(private_key) => return Ok(private_key),
+                    Err(error) => errors.push(error),
+                }
             }
         }
     }
 
-    for path in candidate_private_key_paths() {
+    for path in candidate_private_key_paths(expected_public_key) {
         if let Ok(encoded) = fs::read_to_string(&path) {
             let encoded = encoded.trim();
             if !encoded.is_empty() {
-                return private_key_from_encoded(
+                match private_key_from_encoded(
                     expected_public_key,
                     encoded,
                     path.display().to_string(),
-                );
+                )
+                .and_then(|private_key| {
+                    ensure_private_key_matches_public_key(
+                        validator_address,
+                        expected_public_key,
+                        &private_key,
+                    )?;
+                    Ok(private_key)
+                }) {
+                    Ok(private_key) => return Ok(private_key),
+                    Err(error) => errors.push(error),
+                }
             }
         }
     }
@@ -189,19 +351,35 @@ fn load_private_key_from_config(
             if let Ok(json) = serde_json::from_str::<Value>(&identity) {
                 for encoded in consensus_private_key_candidates(&json, &identity_path) {
                     if !encoded.trim().is_empty() {
-                        return private_key_from_encoded(
+                        match private_key_from_encoded(
                             expected_public_key,
                             encoded.trim(),
                             identity_path.display().to_string(),
-                        );
+                        )
+                        .and_then(|private_key| {
+                            ensure_private_key_matches_public_key(
+                                validator_address,
+                                expected_public_key,
+                                &private_key,
+                            )?;
+                            Ok(private_key)
+                        }) {
+                            Ok(private_key) => return Ok(private_key),
+                            Err(error) => errors.push(error),
+                        }
                     }
                 }
             }
         }
     }
 
+    let detail = if errors.is_empty() {
+        "no readable non-empty key candidates".to_string()
+    } else {
+        format!("candidate errors: {}", errors.join("; "))
+    };
     Err(format!(
-        "Aegis PQC consensus private key unavailable for validator {validator_address}; set SYNERGY_VALIDATOR_CONSENSUS_PRIVATE_KEY_FILE or SYNERGY_VALIDATOR_CONSENSUS_PRIVATE_KEY_B64"
+        "Aegis PQC consensus private key unavailable for validator {validator_address}; set SYNERGY_VALIDATOR_CONSENSUS_PRIVATE_KEY_FILE, SYNERGY_VALIDATOR_FNDSA_CONSENSUS_PRIVATE_KEY_FILE, or SYNERGY_VALIDATOR_CONSENSUS_PRIVATE_KEY_B64 ({detail})"
     ))
 }
 
@@ -229,6 +407,20 @@ fn ensure_private_key_matches_public_key(
     expected_public_key: &PQCPublicKey,
     private_key: &PQCPrivateKey,
 ) -> Result<(), String> {
+    if expected_public_key.algorithm != private_key.algorithm {
+        return Err(format!(
+            "Aegis PQC consensus private key algorithm does not match canonical public key for validator {validator_address}"
+        ));
+    }
+
+    if expected_public_key.algorithm == PQCAlgorithm::MLDSA {
+        return ensure_legacy_mldsa_key_material_is_well_formed(
+            validator_address,
+            expected_public_key,
+            private_key,
+        );
+    }
+
     let challenge = local_key_binding_challenge(validator_address, expected_public_key);
     let mut pqc_manager = PQCManager::new();
     let signature = pqc_manager.sign(private_key, &challenge).map_err(|error| {
@@ -252,6 +444,26 @@ fn ensure_private_key_matches_public_key(
         })
 }
 
+fn ensure_legacy_mldsa_key_material_is_well_formed(
+    validator_address: &str,
+    expected_public_key: &PQCPublicKey,
+    private_key: &PQCPrivateKey,
+) -> Result<(), String> {
+    if expected_public_key.key_data.len() != ML_DSA_65_PUBLIC_KEY_BYTES {
+        return Err(format!(
+            "Aegis PQC consensus ML-DSA public key for validator {validator_address} has {} bytes, expected {ML_DSA_65_PUBLIC_KEY_BYTES}",
+            expected_public_key.key_data.len()
+        ));
+    }
+    if private_key.key_data.len() != ML_DSA_65_PRIVATE_KEY_BYTES {
+        return Err(format!(
+            "Aegis PQC consensus ML-DSA private key for validator {validator_address} has {} bytes, expected {ML_DSA_65_PRIVATE_KEY_BYTES}",
+            private_key.key_data.len()
+        ));
+    }
+    Ok(())
+}
+
 fn local_key_binding_challenge(
     validator_address: &str,
     expected_public_key: &PQCPublicKey,
@@ -264,8 +476,40 @@ fn local_key_binding_challenge(
     hasher.finalize().to_vec()
 }
 
-fn candidate_private_key_paths() -> Vec<PathBuf> {
+fn candidate_private_key_paths(expected_public_key: &PQCPublicKey) -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push_path = |path: PathBuf| {
+        if seen.insert(path.clone()) {
+            paths.push(path);
+        }
+    };
+
+    if expected_public_key.algorithm == PQCAlgorithm::FNDSA {
+        for key in [
+            "SYNERGY_VALIDATOR_FNDSA_CONSENSUS_PRIVATE_KEY_FILE",
+            "SYNERGY_FNDSA_CONSENSUS_PRIVATE_KEY_FILE",
+        ] {
+            if let Ok(path) = env::var(key) {
+                push_private_key_path_variants(&mut push_path, path.trim());
+            }
+        }
+        if let Ok(Some(migration)) = consensus_fork::active_consensus_fork_migration() {
+            for path in fork_consensus_private_key_paths(migration.fork_height) {
+                push_private_key_path_variants(&mut push_path, &path);
+            }
+        }
+        for path in [
+            "config/validator/fndsa-consensus.private.key",
+            "config/validator/fndsa.private.key",
+            "keys/fndsa-consensus/private.key",
+            "keys/fndsa.private.key",
+            "keys/fndsa_private.key",
+        ] {
+            push_private_key_path_variants(&mut push_path, path);
+        }
+    }
+
     for key in [
         "SYNERGY_VALIDATOR_CONSENSUS_PRIVATE_KEY_FILE",
         "SYNERGY_CONSENSUS_PRIVATE_KEY_FILE",
@@ -273,19 +517,114 @@ fn candidate_private_key_paths() -> Vec<PathBuf> {
         "PRIVATE_KEY_FILE",
     ] {
         if let Ok(path) = env::var(key) {
-            let path = path.trim();
-            if !path.is_empty() {
-                paths.push(PathBuf::from(path));
+            push_private_key_path_variants(&mut push_path, path.trim());
+        }
+    }
+    for path in [
+        "config/validator/consensus.private.key",
+        "config/validator/consensus_private.key",
+        "config/validator/private_key.txt",
+        "keys/private.key",
+    ] {
+        push_private_key_path_variants(&mut push_path, path);
+    }
+    paths
+}
+
+fn fork_consensus_private_key_paths(fork_height: u64) -> [String; 2] {
+    [
+        format!("config/validator/fndsa-consensus-fork-{fork_height}/private.key"),
+        format!("keys/fndsa-consensus-fork-{fork_height}/private.key"),
+    ]
+}
+
+fn push_private_key_path_variants(push_path: &mut impl FnMut(PathBuf), raw_path: &str) {
+    if raw_path.is_empty() {
+        return;
+    }
+    let path = PathBuf::from(raw_path);
+    if path.is_absolute() {
+        push_path(path);
+        return;
+    }
+
+    push_path(path.clone());
+    for root in runtime_path_roots() {
+        push_path(root.join(&path));
+    }
+}
+
+fn runtime_path_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push_root = |root: PathBuf| {
+        if seen.insert(root.clone()) {
+            roots.push(root);
+        }
+    };
+
+    if let Ok(cwd) = env::current_dir() {
+        push_root(cwd);
+    }
+    for root in workspace_roots_from_config_args(env::args()) {
+        push_root(root);
+    }
+    if let Ok(exe) = env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            if bin_dir.file_name().and_then(|name| name.to_str()) == Some("bin") {
+                if let Some(workspace) = bin_dir.parent() {
+                    push_root(workspace.to_path_buf());
+                }
             }
         }
     }
-    paths.extend([
-        PathBuf::from("config/validator/consensus.private.key"),
-        PathBuf::from("config/validator/consensus_private.key"),
-        PathBuf::from("config/validator/private_key.txt"),
-        PathBuf::from("keys/private.key"),
-    ]);
-    paths
+    if let Ok(root) = env::var("SYNERGY_PROJECT_ROOT") {
+        let root = root.trim();
+        if !root.is_empty() {
+            push_root(PathBuf::from(root));
+        }
+    }
+    if let Ok(config_path) = env::var("SYNERGY_CONFIG_PATH") {
+        let config_path = config_path.trim();
+        if !config_path.is_empty() {
+            let path = PathBuf::from(config_path);
+            if let Some(config_dir) = path.parent() {
+                if let Some(root) = config_dir.parent() {
+                    push_root(root.to_path_buf());
+                }
+            }
+        }
+    }
+    roots
+}
+
+fn workspace_roots_from_config_args<I>(args: I) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut roots = Vec::new();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        let config_path = if arg == "--config" {
+            iter.next()
+        } else {
+            arg.strip_prefix("--config=").map(str::to_string)
+        };
+        if let Some(config_path) = config_path {
+            if let Some(root) = workspace_root_from_config_path(&PathBuf::from(config_path)) {
+                roots.push(root);
+            }
+        }
+    }
+    roots
+}
+
+fn workspace_root_from_config_path(config_path: &Path) -> Option<PathBuf> {
+    let config_dir = config_path.parent()?;
+    if config_dir.file_name().and_then(|name| name.to_str()) == Some("config") {
+        return config_dir.parent().map(Path::to_path_buf);
+    }
+    Some(config_dir.to_path_buf())
 }
 
 fn candidate_identity_paths() -> Vec<PathBuf> {
@@ -348,14 +687,29 @@ fn json_path_string(value: &Value, path: &[&str]) -> Option<String> {
     current.as_str().map(str::to_string)
 }
 
-fn split_algorithm_prefix(encoded: &str) -> (PQCAlgorithm, &str) {
-    let Some((prefix, material)) = encoded.split_once(':') else {
-        return (PQCAlgorithm::MLDSA, encoded);
-    };
-    match algorithm_from_label(prefix) {
-        Ok(algorithm) => (algorithm, material.trim()),
-        Err(_) => (PQCAlgorithm::MLDSA, encoded),
+fn split_algorithm_prefix<'a>(
+    encoded: &'a str,
+    declared_algorithm_label: Option<&str>,
+) -> Result<(PQCAlgorithm, &'a str), String> {
+    if let Some((prefix, material)) = encoded.split_once(':') {
+        let encoded_algorithm = algorithm_from_label(prefix)?;
+        if let Some(label) = declared_algorithm_label {
+            let declared_algorithm = algorithm_from_label(label)?;
+            if encoded_algorithm != declared_algorithm {
+                return Err(format!(
+                    "prefixed algorithm '{}' does not match declared algorithm '{}'",
+                    prefix.trim(),
+                    label.trim()
+                ));
+            }
+        }
+        return Ok((encoded_algorithm, material.trim()));
     }
+
+    let Some(label) = declared_algorithm_label else {
+        return Err("missing consensus key algorithm prefix; expected fn-dsa:<base64>, falcon:<base64>, or ml-dsa:<base64>".to_string());
+    };
+    Ok((algorithm_from_label(label)?, encoded))
 }
 
 fn block_signature_algorithm(label: &str) -> Result<PQCAlgorithm, String> {
@@ -364,12 +718,7 @@ fn block_signature_algorithm(label: &str) -> Result<PQCAlgorithm, String> {
 }
 
 fn algorithm_from_label(label: &str) -> Result<PQCAlgorithm, String> {
-    match label.trim().to_ascii_lowercase().as_str() {
-        "mldsa" | "ml-dsa" | "ml-dsa-65" | "ml-dsa-87" => Ok(PQCAlgorithm::MLDSA),
-        "fndsa" | "fn-dsa" | "fn-dsa-1024" => Ok(PQCAlgorithm::FNDSA),
-        "slhdsa" | "slh-dsa" => Ok(PQCAlgorithm::SLHDSA),
-        other => Err(other.to_string()),
-    }
+    normalize_consensus_key_algorithm(label)
 }
 
 fn decode_key_material(encoded: &str) -> Result<Vec<u8>, String> {
@@ -411,7 +760,12 @@ mod tests {
 
     #[test]
     fn candidate_private_key_paths_include_workspace_key_file() {
-        let paths = candidate_private_key_paths();
+        let paths = candidate_private_key_paths(&PQCPublicKey {
+            algorithm: PQCAlgorithm::FNDSA,
+            key_data: vec![1, 2, 3],
+            key_id: "test".to_string(),
+            created_at: 0,
+        });
 
         assert!(
             paths
@@ -419,5 +773,123 @@ mod tests {
                 .any(|path| path == Path::new("keys/private.key")),
             "validator startup must discover the control-panel workspace private key path"
         );
+        assert!(
+            paths
+                .iter()
+                .any(|path| path == Path::new("keys/fndsa-consensus/private.key")),
+            "post-fork FN-DSA signing must prefer explicit FN-DSA consensus key material"
+        );
+    }
+
+    #[test]
+    fn fork_private_key_paths_include_live_migration_directory() {
+        let paths = fork_consensus_private_key_paths(204_216);
+
+        assert!(paths
+            .iter()
+            .any(|path| path == "keys/fndsa-consensus-fork-204216/private.key"));
+    }
+
+    #[test]
+    fn workspace_roots_include_config_arg_workspace() {
+        let roots = workspace_roots_from_config_args([
+            "synergy-testnet-linux-amd64".to_string(),
+            "start".to_string(),
+            "--config".to_string(),
+            "/opt/synergy/testnet/validator/config/node.toml".to_string(),
+        ]);
+
+        assert!(roots
+            .iter()
+            .any(|path| path == Path::new("/opt/synergy/testnet/validator")));
+    }
+
+    #[test]
+    fn parses_explicit_fndsa_validator_public_key_prefix() {
+        let encoded = format!("falcon:{}", general_purpose::STANDARD.encode([1, 2, 3, 4]));
+        let key = parse_validator_public_key("synval1test", &encoded).unwrap();
+
+        assert_eq!(key.algorithm, PQCAlgorithm::FNDSA);
+        assert_eq!(key.key_data, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn rejects_unprefixed_validator_public_key_without_declared_algorithm() {
+        let encoded = general_purpose::STANDARD.encode([1, 2, 3, 4]);
+        let error = parse_validator_public_key("synval1test", &encoded).unwrap_err();
+
+        assert!(error.contains("missing consensus key algorithm prefix"));
+    }
+
+    #[test]
+    fn parses_unprefixed_genesis_public_key_only_with_declared_algorithm() {
+        let encoded = general_purpose::STANDARD.encode([1, 2, 3, 4]);
+        let key = parse_validator_public_key_with_declared_algorithm(
+            "synval1test",
+            &encoded,
+            "FN-DSA-1024",
+        )
+        .unwrap();
+
+        assert_eq!(key.algorithm, PQCAlgorithm::FNDSA);
+        assert_eq!(key.key_data, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn rejects_mismatched_prefixed_and_declared_validator_algorithms() {
+        let encoded = format!("ml-dsa:{}", general_purpose::STANDARD.encode([1, 2, 3, 4]));
+        let error =
+            parse_validator_public_key_with_declared_algorithm("synval1test", &encoded, "falcon")
+                .unwrap_err();
+
+        assert!(error.contains("does not match declared algorithm"));
+    }
+
+    #[test]
+    fn prefixes_declared_validator_public_key_for_registry_storage() {
+        let encoded = general_purpose::STANDARD.encode([1, 2, 3, 4]);
+        let prefixed =
+            validator_public_key_with_declared_algorithm("synval1test", &encoded, "falcon")
+                .unwrap();
+
+        assert_eq!(prefixed, format!("fn-dsa:{encoded}"));
+    }
+
+    #[test]
+    fn legacy_mldsa_startup_preflight_accepts_expected_key_lengths() {
+        let public_key = PQCPublicKey {
+            algorithm: PQCAlgorithm::MLDSA,
+            key_data: vec![7; ML_DSA_65_PUBLIC_KEY_BYTES],
+            key_id: "validator-consensus:synval1test".to_string(),
+            created_at: 0,
+        };
+        let private_key = PQCPrivateKey {
+            algorithm: PQCAlgorithm::MLDSA,
+            key_data: vec![9; ML_DSA_65_PRIVATE_KEY_BYTES],
+            public_key_id: public_key.key_id.clone(),
+            created_at: 0,
+        };
+
+        ensure_private_key_matches_public_key("synval1test", &public_key, &private_key).unwrap();
+    }
+
+    #[test]
+    fn legacy_mldsa_startup_preflight_rejects_wrong_key_lengths() {
+        let public_key = PQCPublicKey {
+            algorithm: PQCAlgorithm::MLDSA,
+            key_data: vec![7; ML_DSA_65_PUBLIC_KEY_BYTES - 1],
+            key_id: "validator-consensus:synval1test".to_string(),
+            created_at: 0,
+        };
+        let private_key = PQCPrivateKey {
+            algorithm: PQCAlgorithm::MLDSA,
+            key_data: vec![9; ML_DSA_65_PRIVATE_KEY_BYTES],
+            public_key_id: public_key.key_id.clone(),
+            created_at: 0,
+        };
+        let error = ensure_private_key_matches_public_key("synval1test", &public_key, &private_key)
+            .unwrap_err();
+
+        assert!(error.contains("expected 1952"));
     }
 }

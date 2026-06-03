@@ -27,9 +27,20 @@ SAM must also expose a Transaction Center that can:
 - Show Atlas visibility.
 - Inspect pending transactions and classify invalid or stale entries.
 
+SAM must expose checkpointed consensus-fork status from `synergy_getConsensusForkStatus`:
+
+- Show whether a fork migration object is configured.
+- Show `fork_height`, `fork_parent_height`, `fork_parent_hash`, and `state_root`.
+- Show `old_consensus_algorithm`, `new_consensus_algorithm`, and `parser_mode`.
+- Show each validator address, consensus key type, and consensus public key byte size.
+- Warn if any post-fork validator key resolves to ML-DSA, has missing or unknown metadata, or uses an ambiguous label such as `pqc` or `aegis`.
+- Warn if a post-fork snapshot manifest is missing `consensus_fork` metadata.
+- Frame the migration as a protocol upgrade preserving `chain_id=1264` and `network_id=synergy-testnet-v2`, not a block-0 reset.
+
 Minimum launch acceptance for SAM integration:
 
 - Snapshot metadata is read from `distribution-manifest.json`.
+- Consensus fork metadata is read from `synergy_getConsensusForkStatus`.
 - Wrong-class restore is rejected before download or extraction.
 - Failed chunk/hash/runtime verification is fail-closed.
 - Evidence is written for each Snapshot Center action.

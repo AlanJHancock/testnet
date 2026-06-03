@@ -99,6 +99,7 @@ Private material should be readable only by the node operator account. Public ma
 5. Compute the genesis hash locally and compare it to `network-identifiers.testnet.json`.
 6. Refuse to start if the hash, chain ID, network ID, or network magic bytes mismatch.
 7. Generate validator keys locally or import existing keys through a secure key manager.
+   After the checkpointed consensus-signature fork, validator consensus keys must be explicit FN-DSA keys with `consensus_key_type = "FN-DSA"` and a `fn-dsa:<base64>` public key. ML-DSA validator consensus keys, missing metadata, unknown labels, and ambiguous labels such as `pqc` or `aegis` must fail closed.
 8. Submit a validator admission transaction or governance proposal with public key material only.
 9. Bond at least `min_self_stake_nwei`.
 10. Enter `pending` or `eligible` state according to finalized protocol state.
@@ -148,4 +149,3 @@ Synergy Score may influence cluster selection, proposer selection, governance we
 | Pending validator not active | Sync as full node until epoch admission. |
 | Synced but not admitted | Do not propose or vote; submit admission and bond stake. |
 | Same chain ID, different genesis hash | Treat as fork and disconnect immediately. |
-

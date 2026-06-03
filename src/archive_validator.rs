@@ -1,3 +1,4 @@
+use crate::consensus::consensus_fork::{validate_snapshot_fork_metadata, ConsensusForkMigration};
 use crate::crypto::aegis_pqvm::{
     AegisPqvmSigner, AegisPqvmVerifier, SYNERGY_ARCHIVE_SNAPSHOT_CATALOG_V1,
     SYNERGY_ARCHIVE_SNAPSHOT_MANIFEST_V1,
@@ -100,6 +101,8 @@ pub struct SnapshotManifest {
     pub snapshot_block_hash: Hash,
     pub snapshot_parent_hash: Hash,
     pub snapshot_state_root: Hash,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consensus_fork: Option<ConsensusForkMigration>,
     pub snapshot_receipt_root: Hash,
     pub snapshot_qc_hash: Hash,
     pub snapshot_epoch: crate::synergy_types::Epoch,
@@ -246,6 +249,7 @@ pub fn verify_snapshot_manifest(
     if manifest.content_root == Hash::zero() {
         return Err("snapshot content_root missing".to_string());
     }
+    validate_snapshot_fork_metadata(manifest.snapshot_height.0, manifest.consensus_fork.as_ref())?;
     verifier
         .verify_domain_signature(
             SYNERGY_ARCHIVE_SNAPSHOT_MANIFEST_V1,
@@ -311,6 +315,7 @@ mod tests {
             snapshot_block_hash: Hash::from_domain_bytes("block", b"10000"),
             snapshot_parent_hash: Hash::zero(),
             snapshot_state_root: Hash::from_domain_bytes("state", b"10000"),
+            consensus_fork: None,
             snapshot_receipt_root: Hash::zero(),
             snapshot_qc_hash: Hash::from_domain_bytes("qc", b"10000"),
             snapshot_epoch: Epoch(0),
@@ -434,10 +439,9 @@ mod tests {
             );
         }
 
-        let m4_package_script = std::fs::read_to_string(
-            root.join("package-archive-validator-macos-m4.sh"),
-        )
-        .expect("m4 package script");
+        let m4_package_script =
+            std::fs::read_to_string(root.join("package-archive-validator-macos-m4.sh"))
+                .expect("m4 package script");
         for required in [
             "xattr -dr com.apple.quarantine",
             "codesign --force --sign -",
@@ -450,9 +454,8 @@ mod tests {
             );
         }
 
-        let m4_setup =
-            std::fs::read_to_string(root.join("macos-m4/setup-archive-validator-m4.sh"))
-                .expect("m4 setup script");
+        let m4_setup = std::fs::read_to_string(root.join("macos-m4/setup-archive-validator-m4.sh"))
+            .expect("m4 setup script");
         for required in [
             "STORAGE_VOLUME_REL=\"/Volumes/Synergy_Archive\"",
             "STORAGE_ROOT_REL=\"${STORAGE_VOLUME_REL}/archive-validator\"",

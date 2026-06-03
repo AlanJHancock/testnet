@@ -8,7 +8,7 @@ use super::dual_quorum::{
 use super::legacy_canonical_lock::{verify_legacy_canonical_lock, write_legacy_canonical_lock};
 use super::synergy_score::SynergyScoreCalculator;
 use super::timing_trace;
-use super::validator_keys::{consensus_algorithm_label, load_local_validator_keypair};
+use super::validator_keys::{consensus_algorithm_label, load_local_validator_keypair_for_height};
 use super::vrf::{VRFConsensus, VRFSeed};
 use crate::block::{Block, BlockChain};
 use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPublicKey};
@@ -556,7 +556,9 @@ impl ProofOfSynergy {
         let leader_timeout_secs = self.effective_leader_timeout_secs();
         let vote_timeout_secs = self.vote_timeout_secs.max(MIN_LAUNCH_VOTE_TIMEOUT_SECS);
 
-        thread::spawn(move || {
+        thread::Builder::new()
+            .name("posy-consensus".to_string())
+            .spawn(move || {
             let mut last_block_time = chain
                 .lock()
                 .unwrap()
@@ -574,6 +576,14 @@ impl ProofOfSynergy {
             if let Ok(mut consensus) = dual_quorum_consensus.lock() {
                 consensus.current_epoch = current_epoch;
             }
+            info!(
+                "consensus",
+                "Proof of Synergy consensus worker started",
+                "current_epoch" => current_epoch,
+                "epoch_length" => epoch_length,
+                "block_time_secs" => block_time_secs,
+                "leader_timeout_secs" => leader_timeout_secs
+            );
             let mut mesh_ready_since: Option<Instant> = None;
             let mut status_sync_grace_since: Option<Instant> = None;
             let mut genesis_status_gate_bypassed = false;
@@ -608,10 +618,35 @@ impl ProofOfSynergy {
 
                         let target_epoch =
                             Self::epoch_for_next_block(latest_block.block_index, epoch_length);
-                        while current_epoch < target_epoch {
+                        if current_epoch < target_epoch {
+                            let next_epoch = current_epoch.saturating_add(1);
+                            info!(
+                                "consensus",
+                                "Preparing pending epoch transition before block production",
+                                "current_epoch" => current_epoch,
+                                "next_epoch" => next_epoch,
+                                "target_epoch" => target_epoch,
+                                "latest_height" => latest_block.block_index
+                            );
+                            let previous_qc = Self::get_previous_quorum_certificate(
+                                &chain_guard,
+                                next_epoch,
+                                epoch_length,
+                            );
+                            info!(
+                                "consensus",
+                                "Applying pending epoch transition before block production",
+                                "current_epoch" => current_epoch,
+                                "next_epoch" => next_epoch,
+                                "target_epoch" => target_epoch,
+                                "latest_height" => latest_block.block_index,
+                                "previous_qc_block_hash" => previous_qc.block_hash.clone()
+                            );
+                            drop(chain_guard);
+                            drop(pool);
                             Self::handle_epoch_transition(
                                 &mut current_epoch,
-                                &chain_guard,
+                                previous_qc,
                                 &validator_manager,
                                 &synergy_calculator,
                                 &dual_quorum_consensus,
@@ -619,8 +654,9 @@ impl ProofOfSynergy {
                                 &validator_rotation,
                                 &dao_governance,
                                 &cartel_detection,
-                                epoch_length,
                             );
+                            thread::sleep(Duration::from_millis(100));
+                            continue;
                         }
 
                         // Get active validators, then reduce them to the shared consensus
@@ -1032,6 +1068,8 @@ impl ProofOfSynergy {
                             );
                             pending
                         };
+                        drop(pool);
+                        drop(chain_guard);
 
                         consensus_log!("Creating processed transactions vec...");
                         let mut processed_transactions = Vec::new();
@@ -1115,12 +1153,6 @@ impl ProofOfSynergy {
                         );
                         consensus_log!("Block proposal created!");
                         io::stdout().flush().unwrap();
-
-                        // The vote wait can run for multiple seconds on a public mesh.
-                        // Release local chain and pool locks before that wait so the P2P
-                        // path can apply parent blocks and answer vote requests in time.
-                        drop(chain_guard);
-                        drop(pool);
 
                         // Phase 3: Dual-quorum consensus
                         consensus_log!("Starting dual-quorum consensus...");
@@ -1670,7 +1702,8 @@ impl ProofOfSynergy {
 
                 thread::sleep(Duration::from_millis(100));
             }
-        });
+            })
+            .expect("failed to spawn Proof of Synergy consensus worker");
     }
 
     fn sync_validator_to_network_tip(
@@ -2012,10 +2045,13 @@ impl ProofOfSynergy {
         }
 
         let chain_path = get_chain_path();
-        thread::spawn(move || {
-            snapshot.save_to_file(&chain_path);
-            CONSENSUS_CHAIN_PERSIST_IN_FLIGHT.store(false, Ordering::SeqCst);
-        });
+        thread::Builder::new()
+            .name("chain-persist".to_string())
+            .spawn(move || {
+                snapshot.save_to_file(&chain_path);
+                CONSENSUS_CHAIN_PERSIST_IN_FLIGHT.store(false, Ordering::SeqCst);
+            })
+            .expect("failed to spawn chain persistence worker");
     }
 
     fn effective_leader_timeout_secs(&self) -> u64 {
@@ -2097,7 +2133,7 @@ impl ProofOfSynergy {
 
     fn handle_epoch_transition(
         current_epoch: &mut u64,
-        chain: &BlockChain,
+        previous_qc: QuorumCertificate,
         validator_manager: &Arc<ValidatorManager>,
         synergy_calculator: &Arc<SynergyScoreCalculator>,
         dual_quorum_consensus: &Arc<Mutex<DualQuorumConsensus>>,
@@ -2105,14 +2141,11 @@ impl ProofOfSynergy {
         validator_rotation: &Arc<ValidatorRotation>,
         dao_governance: &Arc<Mutex<DAOGovernance>>,
         cartel_detection: &Arc<Mutex<CartelDetectionEngine>>,
-        epoch_length: u64,
     ) {
         *current_epoch += 1;
         println!("🔄 Epoch Transition: Starting epoch {}", current_epoch);
 
         // 1. Generate new epoch randomness
-        let previous_qc =
-            Self::get_previous_quorum_certificate(chain, *current_epoch, epoch_length);
         let mut beacon = entropy_beacon.lock().unwrap();
         let _epoch_randomness = beacon.generate_epoch_randomness(&previous_qc);
         drop(beacon);
@@ -2164,6 +2197,7 @@ impl ProofOfSynergy {
         if let Some(block) = chain
             .chain
             .iter()
+            .rev()
             .find(|block| block.block_index == boundary_height)
             .or_else(|| chain.last())
         {
@@ -2478,7 +2512,7 @@ impl ProofOfSynergy {
             return block;
         }
 
-        // Create block and attach a real FN-DSA signature over the block hash.
+        // Create block and attach the consensus signature required for this height.
         let consensus_timestamp = Self::bounded_consensus_timestamp(
             previous_block.timestamp,
             block_time_secs,
@@ -2493,10 +2527,12 @@ impl ProofOfSynergy {
             consensus_timestamp,
         );
 
-        let (leader_public_key, leader_private_key) =
-            load_local_validator_keypair(&leader.address, &VALIDATOR_MANAGER).unwrap_or_else(
-                |error| panic!("Aegis PQC leader signing key unavailable: {error}"),
-            );
+        let (leader_public_key, leader_private_key) = load_local_validator_keypair_for_height(
+            block.block_index,
+            &leader.address,
+            &VALIDATOR_MANAGER,
+        )
+        .unwrap_or_else(|error| panic!("Aegis PQC leader signing key unavailable: {error}"));
 
         let mut pqc = pqc_manager.lock().unwrap();
         let signature = pqc
@@ -2908,6 +2944,8 @@ impl ProofOfSynergy {
             }
         }
 
+        Self::validate_transaction_nonce_for_mempool(tx)?;
+
         // 2. Verify sender balance via token manager to reflect on-chain state
         let token_manager = TOKEN_MANAGER.clone();
         let required = snrg_balance_required_for_transaction(tx);
@@ -2917,24 +2955,83 @@ impl ProofOfSynergy {
             ));
         }
 
-        // 3. Verify nonce using wallet manager metadata when available
-        if let Ok(wallet_manager) = WALLET_MANAGER.lock() {
-            if let Some(wallet) = wallet_manager.get_wallet(&tx.sender) {
-                let expected_nonce = wallet.nonce.saturating_sub(1);
-                if tx.nonce != expected_nonce {
-                    return Err(format!(
-                        "invalid nonce; expected {expected_nonce}, got {}",
-                        tx.nonce
-                    ));
-                }
-            }
-        }
-
-        // 4. Execute contract if applicable (simplified)
+        // 3. Execute contract if applicable (simplified)
         if tx.receiver.starts_with("contract_") {
             // Execute contract in sandboxed environment
             // Verify state changes
             // For now, assume valid
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn validate_transaction_nonce_for_mempool(
+        tx: &crate::transaction::Transaction,
+    ) -> Result<(), String> {
+        let committed_sender_nonces = {
+            let chain = SHARED_CHAIN.lock().unwrap();
+            chain
+                .chain
+                .iter()
+                .flat_map(|block| block.transactions.iter())
+                .filter(|committed| committed.sender.eq_ignore_ascii_case(&tx.sender))
+                .map(|committed| committed.nonce)
+                .collect::<Vec<_>>()
+        };
+        let pending_sender_nonces = {
+            let tx_hash = tx.hash();
+            let pool = TX_POOL.lock().unwrap();
+            pool.iter()
+                .filter(|pending| pending.sender.eq_ignore_ascii_case(&tx.sender))
+                .filter(|pending| pending.hash() != tx_hash)
+                .map(|pending| (pending.hash(), pending.nonce))
+                .collect::<Vec<_>>()
+        };
+
+        Self::validate_transaction_nonce_for_ordering(
+            tx.nonce,
+            &committed_sender_nonces,
+            &pending_sender_nonces,
+        )
+    }
+
+    pub(crate) fn validate_transaction_nonce_for_ordering(
+        tx_nonce: u64,
+        committed_sender_nonces: &[u64],
+        pending_sender_nonces: &[(String, u64)],
+    ) -> Result<(), String> {
+        let mut expected_nonce = committed_sender_nonces
+            .iter()
+            .copied()
+            .max()
+            .map(|nonce| nonce.saturating_add(1))
+            .unwrap_or(0);
+
+        let mut pending_lower_nonces = HashSet::new();
+        for (_, pending_nonce) in pending_sender_nonces {
+            if *pending_nonce == tx_nonce {
+                return Err(format!(
+                    "duplicate nonce; nonce {tx_nonce} is already pending"
+                ));
+            }
+            if *pending_nonce >= expected_nonce && *pending_nonce < tx_nonce {
+                pending_lower_nonces.insert(*pending_nonce);
+            }
+        }
+
+        while pending_lower_nonces.remove(&expected_nonce) {
+            expected_nonce = expected_nonce.saturating_add(1);
+        }
+
+        if tx_nonce < expected_nonce {
+            return Err(format!(
+                "stale nonce; expected {expected_nonce}, got {tx_nonce}"
+            ));
+        }
+        if tx_nonce > expected_nonce {
+            return Err(format!(
+                "future nonce gap; expected {expected_nonce}, got {tx_nonce}"
+            ));
         }
 
         Ok(())
@@ -4072,6 +4169,38 @@ mod tests {
 
         ProofOfSynergy::set_test_proposal_cache_dir(None);
         let _ = fs::remove_dir_all(cache_dir);
+    }
+
+    #[test]
+    fn transaction_nonce_ordering_accepts_next_committed_nonce() {
+        let pending = Vec::<(String, u64)>::new();
+        assert!(
+            ProofOfSynergy::validate_transaction_nonce_for_ordering(4, &[1, 3], &pending).is_ok()
+        );
+    }
+
+    #[test]
+    fn transaction_nonce_ordering_rejects_stale_duplicate_and_gap() {
+        let pending = vec![("pending-a".to_string(), 4)];
+
+        let stale = ProofOfSynergy::validate_transaction_nonce_for_ordering(3, &[1, 3], &[]);
+        assert!(stale.unwrap_err().contains("stale nonce"));
+
+        let duplicate =
+            ProofOfSynergy::validate_transaction_nonce_for_ordering(4, &[1, 3], &pending);
+        assert!(duplicate.unwrap_err().contains("duplicate nonce"));
+
+        let future_gap =
+            ProofOfSynergy::validate_transaction_nonce_for_ordering(6, &[1, 3], &pending);
+        assert!(future_gap.unwrap_err().contains("future nonce gap"));
+    }
+
+    #[test]
+    fn transaction_nonce_ordering_accepts_sequential_pending_nonce() {
+        let pending = vec![("pending-a".to_string(), 4)];
+        assert!(
+            ProofOfSynergy::validate_transaction_nonce_for_ordering(5, &[1, 3], &pending).is_ok()
+        );
     }
 
     #[test]

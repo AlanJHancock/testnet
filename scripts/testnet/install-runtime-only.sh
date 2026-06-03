@@ -11,6 +11,7 @@ binary_name="${SYNERGY_BINARY_NAME:-synergy-testnet-linux-amd64}"
 listener_wait_secs="${SYNERGY_LISTENER_WAIT_SECS:-240}"
 listener_poll_secs="${SYNERGY_LISTENER_POLL_SECS:-2}"
 rollback_on_health_fail="${SYNERGY_ROLLBACK_ON_HEALTH_FAIL:-false}"
+systemd_service="${SYNERGY_SYSTEMD_SERVICE:-}"
 
 node_env_value() {
   local key="$1"
@@ -34,7 +35,7 @@ workspace_processes() {
     cwd="$(readlink "$proc/cwd" 2>/dev/null || true)"
     cmd="$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)"
     [[ -n "$cmd" ]] || continue
-    if [[ "$exe" == "$workspace"/bin/* || "$cwd" == "$workspace" ]]; then
+    if [[ "$exe" == "$workspace"/bin/* || "$cwd" == "$workspace" || "$cmd" == *"$workspace"* ]]; then
       if [[ "$cmd" == *" start --config "* || "$exe" == "$binary" ]]; then
         printf '%s\t%s\t%s\t%s\n' "$pid" "$exe" "$cwd" "$cmd"
       fi
@@ -86,7 +87,9 @@ for log_file in "$workspace/data/logs/node.out" "$workspace/data/logs/node.err";
   fi
 done
 
-if [[ -x "$workspace/nodectl.sh" ]]; then
+if [[ -n "$systemd_service" ]] && command -v systemctl >/dev/null 2>&1; then
+  systemctl stop "$systemd_service" || true
+elif [[ -x "$workspace/nodectl.sh" ]]; then
   (cd "$workspace" && ./nodectl.sh stop) || true
 fi
 while IFS=$'\t' read -r pid _exe _cwd _cmd; do
@@ -108,7 +111,9 @@ if [[ "$installed_sha" != "$runtime_sha" ]]; then
 fi
 
 if [[ "$start_after" == "true" ]]; then
-  if [[ -x "$workspace/nodectl.sh" ]]; then
+  if [[ -n "$systemd_service" ]] && command -v systemctl >/dev/null 2>&1; then
+    systemctl start "$systemd_service"
+  elif [[ -x "$workspace/nodectl.sh" ]]; then
     (cd "$workspace" && ./nodectl.sh start)
   else
     mkdir -p "$workspace/logs"
@@ -143,12 +148,16 @@ done
 
 if [[ "$start_after" == "true" && "$health_ok" != "true" ]]; then
   if [[ "$rollback_on_health_fail" == "true" && -f "$backup/bin/synergy-testnet-linux-amd64" ]]; then
-    if [[ -x "$workspace/nodectl.sh" ]]; then
+    if [[ -n "$systemd_service" ]] && command -v systemctl >/dev/null 2>&1; then
+      systemctl stop "$systemd_service" || true
+    elif [[ -x "$workspace/nodectl.sh" ]]; then
       (cd "$workspace" && ./nodectl.sh stop) || true
     fi
     cp "$backup/bin/synergy-testnet-linux-amd64" "$binary"
     chmod 755 "$binary"
-    if [[ -x "$workspace/nodectl.sh" ]]; then
+    if [[ -n "$systemd_service" ]] && command -v systemctl >/dev/null 2>&1; then
+      systemctl start "$systemd_service" || true
+    elif [[ -x "$workspace/nodectl.sh" ]]; then
       (cd "$workspace" && ./nodectl.sh start) || true
     fi
     echo "runtime health check failed; restored backup runtime from $backup" >&2
@@ -158,4 +167,4 @@ if [[ "$start_after" == "true" && "$health_ok" != "true" ]]; then
   exit 5
 fi
 
-echo "spreadsheet_row_used=true row=$row node=$node workspace=$workspace binary=$binary_name backup=$backup installed_runtime_sha=$installed_sha start_after=$start_after health_ok=$health_ok p2p_port=$p2p_port qrpc_port=$qrpc_port ws_port=$ws_port metrics_port=$metrics_port"
+echo "spreadsheet_row_used=true row=$row node=$node workspace=$workspace binary=$binary_name backup=$backup installed_runtime_sha=$installed_sha start_after=$start_after health_ok=$health_ok p2p_port=$p2p_port qrpc_port=$qrpc_port ws_port=$ws_port metrics_port=$metrics_port systemd_service=$systemd_service"

@@ -5,12 +5,10 @@ use crate::consensus::legacy_canonical_lock::{
     latest_legacy_canonical_commit_record, legacy_canonical_commit_record,
 };
 use crate::consensus::validator_keys::{
-    sign_with_local_validator_key, verify_block_proposer_key_matches_validator,
-    verify_signer_key_matches_validator,
+    sign_with_local_validator_key_for_height, verify_block_proposer_key_matches_validator,
+    verify_signer_key_matches_validator_at_height,
 };
-use crate::crypto::pqc::{
-    PQCAlgorithm, PQCCiphertext, PQCManager, PQCPrivateKey, PQCPublicKey, PQCSignature,
-};
+use crate::crypto::pqc::{PQCCiphertext, PQCManager, PQCPrivateKey, PQCPublicKey, PQCSignature};
 use crate::validator::{
     consensus_membership_validators, Validator, ValidatorManager, ValidatorPerformanceUpdate,
     TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
@@ -47,6 +45,14 @@ const TWO_THIRDS_QUORUM_THRESHOLD: f64 = 2.0 / 3.0;
 pub const MIN_LAUNCH_VOTE_TIMEOUT_SECS: u64 = 4;
 const LOCAL_VOTE_LOCK_COMPACTION_MIN_LOCKS: usize = 1024;
 const LOCAL_VOTE_LOCK_FINALIZED_RETENTION_DEPTH: u64 = 16;
+
+#[derive(Debug, Clone)]
+struct SameHeightVoteParent {
+    height: u64,
+    block_hash: String,
+    source: &'static str,
+    checkpoint_fork_parent: bool,
+}
 
 #[cfg(test)]
 lazy_static::lazy_static! {
@@ -867,8 +873,12 @@ impl DualQuorumConsensus {
                 "round": round_number
             }),
         );
-        let sign_result =
-            sign_with_local_validator_key(validator_address, message.as_bytes(), validator_manager);
+        let sign_result = sign_with_local_validator_key_for_height(
+            proposed_block.block_index,
+            validator_address,
+            message.as_bytes(),
+            validator_manager,
+        );
         let sign_duration_ms = timing_trace::duration_ms(sign_started.elapsed());
         let (public_key, signature) = match sign_result {
             Ok(result) => {
@@ -1407,7 +1417,8 @@ impl DualQuorumConsensus {
             vote.epoch_number,
             vote.round_number,
         );
-        let public_key = verify_signer_key_matches_validator(
+        let public_key = verify_signer_key_matches_validator_at_height(
+            vote.block_index,
             &vote.validator_address,
             &vote.signer_public_key,
             validator_manager,
@@ -1940,10 +1951,11 @@ impl DualQuorumConsensus {
             ));
         }
 
-        let latest_lock = latest_legacy_canonical_commit_record()?.ok_or_else(|| {
-            "same-height vote supersede requires a durable finalized canonical parent lock"
-                .to_string()
-        })?;
+        let latest_lock =
+            Self::same_height_vote_parent_for_proposal(proposed_block)?.ok_or_else(|| {
+                "same-height vote supersede requires a durable finalized canonical parent lock"
+                    .to_string()
+            })?;
         if proposed_block.block_index != latest_lock.height + 1 {
             return Err(format!(
                 "same-height vote supersede target height {} must be the direct child of finalized canonical height {}",
@@ -1958,9 +1970,41 @@ impl DualQuorumConsensus {
         }
 
         Err(format!(
-            "same-height vote supersede for height {} requires an explicit view-change certificate; refusing conflicting transient vote for {} after round {}",
-            proposed_block.block_index, proposed_block.hash, latest_conflicting_round
+            "same-height vote supersede for height {} requires an explicit view-change certificate; refusing conflicting transient vote for {} after round {} using {} parent",
+            proposed_block.block_index, proposed_block.hash, latest_conflicting_round, latest_lock.source
         ))
+    }
+
+    fn same_height_vote_parent_for_proposal(
+        proposed_block: &Block,
+    ) -> Result<Option<SameHeightVoteParent>, String> {
+        if let Some(migration) =
+            crate::consensus::consensus_fork::active_consensus_fork_migration()?
+        {
+            if proposed_block.block_index == migration.fork_height {
+                if proposed_block.previous_hash != migration.parent_hash {
+                    return Err(format!(
+                        "checkpoint fork proposal at height {} does not extend configured fork parent {}",
+                        proposed_block.block_index, migration.parent_hash
+                    ));
+                }
+                return Ok(Some(SameHeightVoteParent {
+                    height: migration.parent_height,
+                    block_hash: migration.parent_hash,
+                    source: "checkpoint_consensus_fork",
+                    checkpoint_fork_parent: true,
+                }));
+            }
+        }
+
+        Ok(
+            latest_legacy_canonical_commit_record()?.map(|record| SameHeightVoteParent {
+                height: record.height,
+                block_hash: record.block_hash,
+                source: "legacy_canonical_lock",
+                checkpoint_fork_parent: false,
+            }),
+        )
     }
 
     fn latest_local_vote_lock_for_height_unlocked(
@@ -2018,7 +2062,8 @@ impl DualQuorumConsensus {
             return Ok(());
         }
 
-        let Some(canonical_parent) = latest_legacy_canonical_commit_record()? else {
+        let Some(canonical_parent) = Self::same_height_vote_parent_for_proposal(proposed_block)?
+        else {
             return Ok(());
         };
         if proposed_block.block_index != canonical_parent.height.saturating_add(1)
@@ -2028,12 +2073,17 @@ impl DualQuorumConsensus {
         }
 
         let now = Self::current_timestamp();
-        if now.saturating_sub(latest_lock.updated_at) < min_age_secs {
+        let effective_min_age_secs = if canonical_parent.checkpoint_fork_parent {
+            0
+        } else {
+            min_age_secs
+        };
+        if now.saturating_sub(latest_lock.updated_at) < effective_min_age_secs {
             return Ok(());
         }
 
         let recovery_reason = format!(
-            "{reason}: validator={validator_address} height={} requested_hash={} requested_proposer={} requested_round={} stale_locked_hash={} stale_locked_proposer={} stale_latest_round={} canonical_parent_height={} canonical_parent_hash={}",
+            "{reason}: validator={validator_address} height={} requested_hash={} requested_proposer={} requested_round={} stale_locked_hash={} stale_locked_proposer={} stale_latest_round={} canonical_parent_height={} canonical_parent_hash={} canonical_parent_source={}",
             proposed_block.block_index,
             proposed_block.hash,
             proposed_block.validator_id,
@@ -2042,11 +2092,12 @@ impl DualQuorumConsensus {
             latest_lock.proposer,
             latest_lock.latest_round_number,
             canonical_parent.height,
-            canonical_parent.block_hash
+            canonical_parent.block_hash,
+            canonical_parent.source
         );
         let report = Self::recover_transient_vote_locks_above_finalized_height(
             canonical_parent.height,
-            min_age_secs,
+            effective_min_age_secs,
             &recovery_reason,
         )?;
 
@@ -3161,6 +3212,113 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_fork_parent_recovers_transient_vote_lock_without_legacy_lock() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        let path = temp_vote_lock_path("checkpoint-fork-transient-recovery");
+        let root = path
+            .parent()
+            .and_then(|data| data.parent())
+            .expect("vote lock path has test root")
+            .to_path_buf();
+        let fork_path = root.join("config").join("consensus-fork-migration.json");
+        fs::create_dir_all(fork_path.parent().expect("fork config path has parent"))
+            .expect("fork config parent should be created");
+        fs::create_dir_all(path.parent().expect("vote lock path has parent"))
+            .expect("vote lock parent should be created");
+
+        let previous_root = std::env::var("SYNERGY_PROJECT_ROOT").ok();
+        let previous_fork =
+            std::env::var(crate::consensus::consensus_fork::CONSENSUS_FORK_MIGRATION_ENV).ok();
+        std::env::set_var("SYNERGY_PROJECT_ROOT", &root);
+        std::env::set_var(
+            crate::consensus::consensus_fork::CONSENSUS_FORK_MIGRATION_ENV,
+            &fork_path,
+        );
+        crate::consensus::legacy_canonical_lock::clear_legacy_canonical_locks_for_tests();
+        DualQuorumConsensus::set_test_local_vote_lock_path(Some(path.clone()));
+
+        let parent = signed_block(204_215, 1, "validator0");
+        let mut pqc_manager = PQCManager::new();
+        let (public_key, _) = pqc_manager
+            .generate_keypair(PQCAlgorithm::FNDSA)
+            .expect("FN-DSA key generation should succeed");
+        let fork = serde_json::json!({
+            "fork_height": 204_216,
+            "parent_height": 204_215,
+            "parent_hash": parent.hash,
+            "state_root": "checkpoint-v1:test",
+            "old_consensus_algorithm": "ML-DSA-65",
+            "new_consensus_algorithm": "FN-DSA",
+            "new_validator_registry": [{
+                "validator_address": "validator2",
+                "consensus_key_type": "FN-DSA",
+                "consensus_public_key": general_purpose::STANDARD.encode(&public_key.key_data),
+            }],
+            "migration_reason": "test checkpointed FN-DSA fork",
+            "parser_mode": "fail_closed"
+        });
+        fs::write(
+            &fork_path,
+            serde_json::to_vec_pretty(&fork).expect("fork config should encode"),
+        )
+        .expect("fork config should be written");
+
+        let mut first_block = signed_block(204_216, 1, "validator1");
+        first_block.previous_hash = fork["parent_hash"]
+            .as_str()
+            .expect("fork parent hash should be a string")
+            .to_string();
+        let mut recovery_block = signed_block(204_216, 2, "validator3");
+        recovery_block.previous_hash = first_block.previous_hash.clone();
+
+        DualQuorumConsensus::register_local_vote_intent("validator2", &first_block, 204, 1)
+            .expect("pre-fork transient vote intent should persist");
+
+        DualQuorumConsensus::recover_stale_conflicting_vote_lock_before_vote(
+            "validator2",
+            &recovery_block,
+            204,
+            2,
+            u64::MAX - 1,
+            "checkpoint fork transient lock recovery",
+        )
+        .expect("checkpoint fork parent should recover transient vote lock immediately");
+
+        DualQuorumConsensus::register_local_vote_intent("validator2", &recovery_block, 204, 2)
+            .expect("post-fork higher-round vote can proceed after evidence recovery");
+
+        let locks = DualQuorumConsensus::load_local_vote_locks_unlocked()
+            .expect("persisted vote locks should load");
+        assert!(locks
+            .values()
+            .any(|lock| lock.block_hash == recovery_block.hash
+                && lock.block_index == 204_216
+                && lock.latest_round_number == 2));
+        assert!(locks
+            .values()
+            .all(|lock| lock.block_hash != first_block.hash));
+
+        DualQuorumConsensus::set_test_local_vote_lock_path(None);
+        crate::consensus::legacy_canonical_lock::clear_legacy_canonical_locks_for_tests();
+        match previous_root {
+            Some(value) => std::env::set_var("SYNERGY_PROJECT_ROOT", value),
+            None => std::env::remove_var("SYNERGY_PROJECT_ROOT"),
+        }
+        match previous_fork {
+            Some(value) => std::env::set_var(
+                crate::consensus::consensus_fork::CONSENSUS_FORK_MIGRATION_ENV,
+                value,
+            ),
+            None => {
+                std::env::remove_var(crate::consensus::consensus_fork::CONSENSUS_FORK_MIGRATION_ENV)
+            }
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn fresh_conflicting_vote_lock_is_not_recovered_before_timeout() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
@@ -3799,21 +3957,11 @@ impl EntropyBeacon {
         self.previous_qc_hash = self.hash_qc(previous_qc);
         self.nonce += 1;
 
-        // Keep a per-epoch ML-KEM keypair for future cross-validation hooks, but
-        // derive the public epoch randomness deterministically from shared chain
-        // state so every validator computes the same leader rotation.
-        if !self.mlkem_keypairs.contains_key(&next_epoch) {
-            let mut pqc_manager = self.pqc_manager.lock().unwrap();
-
-            let (pub_key, priv_key) = pqc_manager
-                .generate_keypair(PQCAlgorithm::MLKEM1024)
-                .expect("Failed to generate ML-KEM keypair for epoch");
-
-            self.mlkem_keypairs.insert(next_epoch, (pub_key, priv_key));
-        }
-
         // Epoch randomness must be identical across validators at the same chain
-        // tip. Only use deterministic inputs derived from the previous QC.
+        // tip. Only use deterministic inputs derived from the previous QC. Do
+        // not generate KEM material in the live consensus epoch-transition path:
+        // validator consensus signing is FN-DSA, while ML-KEM is a separate
+        // encapsulation primitive and is not required to produce the next block.
         let mut input = Vec::new();
         input.extend(next_epoch.to_be_bytes());
         input.extend(self.previous_qc_hash.as_bytes());
