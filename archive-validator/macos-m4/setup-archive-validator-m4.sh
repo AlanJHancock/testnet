@@ -7,6 +7,8 @@ PUBLIC_HOST=""
 SNAPSHOT_API_BIND="0.0.0.0:48640"
 SKIP_LAUNCHD_LOAD="false"
 YES="false"
+STORAGE_VOLUME_REL="/Volumes/Synergy_Archive"
+STORAGE_ROOT_REL="${STORAGE_VOLUME_REL}/archive-validator"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -21,9 +23,7 @@ done
 
 [[ "$(uname -s)" == "Darwin" ]] || { echo "The M4 archive installer requires macOS." >&2; exit 1; }
 [[ "$(uname -m)" == "arm64" ]] || { echo "The M4 archive installer requires Apple Silicon arm64." >&2; exit 1; }
-if [[ -z "${TEST_ROOT}" ]]; then
-  [[ "$(id -u)" == "0" ]] || { echo "Run the production install with sudo." >&2; exit 1; }
-else
+if [[ -n "${TEST_ROOT}" ]]; then
   mkdir -p "${TEST_ROOT}"
   TEST_ROOT="$(cd "${TEST_ROOT}" && pwd)"
 fi
@@ -37,12 +37,27 @@ prefix_path() {
   fi
 }
 
+STORAGE_VOLUME="$(prefix_path "${STORAGE_VOLUME_REL}")"
+if [[ -n "${TEST_ROOT}" ]]; then
+  mkdir -p "${STORAGE_VOLUME}"
+else
+  [[ -d "${STORAGE_VOLUME}" ]] || {
+    echo "required archive storage volume is not mounted: ${STORAGE_VOLUME}" >&2
+    exit 1
+  }
+  /sbin/mount | grep -F " on ${STORAGE_VOLUME} " >/dev/null || {
+    echo "required archive storage volume is not mounted as a filesystem: ${STORAGE_VOLUME}" >&2
+    exit 1
+  }
+  [[ "$(id -u)" == "0" ]] || { echo "Run the production install with sudo." >&2; exit 1; }
+fi
+
 BIN_ROOT="$(prefix_path /usr/local/synergy/bin)"
 SHARE_ROOT="$(prefix_path /usr/local/synergy/share/archive-validator)"
-APP_ROOT="$(prefix_path '/Library/Application Support/Synergy/archive-validator')"
+APP_ROOT="$(prefix_path "${STORAGE_ROOT_REL}")"
 WORKSPACE="${APP_ROOT}/workspace"
-LOG_ROOT="$(prefix_path /Library/Logs/Synergy/archive-validator)"
-PUBLISH_ROOT="$(prefix_path /srv/synergy-snapshots)"
+LOG_ROOT="${APP_ROOT}/logs"
+PUBLISH_ROOT="${APP_ROOT}/snapshots"
 LAUNCHD_ROOT="$(prefix_path /Library/LaunchDaemons)"
 PROOF_MARKER="${APP_ROOT}/evidence/source-majority-branch-proven.json"
 
@@ -78,8 +93,21 @@ for binary in aegis-pqvm synergy-archive-validator-node; do
 done
 
 install -d -m 0755 "${BIN_ROOT}" "${SHARE_ROOT}" "${LAUNCHD_ROOT}"
-install -d -m 0750 "${APP_ROOT}/"{config,keys,logs,evidence,tmp} "${WORKSPACE}/"{config,data} "${PUBLISH_ROOT}"
-install -d -m 0755 "${LOG_ROOT}"
+install -d -m 0750 \
+  "${APP_ROOT}/config" \
+  "${APP_ROOT}/keys" \
+  "${APP_ROOT}/logs" \
+  "${APP_ROOT}/evidence" \
+  "${APP_ROOT}/tmp" \
+  "${APP_ROOT}/incoming/bootstrap" \
+  "${APP_ROOT}/backups" \
+  "${WORKSPACE}/config" \
+  "${WORKSPACE}/data" \
+  "${PUBLISH_ROOT}" \
+  "${PUBLISH_ROOT}/staging" \
+  "${PUBLISH_ROOT}/failed" \
+  "${PUBLISH_ROOT}/retired" \
+  "${PUBLISH_ROOT}/testnet-1264"
 install -m 0755 "${PACKAGE_ROOT}/bin/aegis-pqvm" "${BIN_ROOT}/aegis-pqvm"
 install -m 0755 "${PACKAGE_ROOT}/bin/synergy-archive-validator-node" "${BIN_ROOT}/synergy-archive-validator-node"
 install -m 0755 "${PACKAGE_ROOT}/bin/synergy-archive" "${BIN_ROOT}/synergy-archive"

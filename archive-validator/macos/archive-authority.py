@@ -30,8 +30,8 @@ CHUNK_SIZE = 512 * 1024 * 1024
 GRACE_SECS = 24 * 60 * 60
 CATALOG_DOMAIN = "SYNERGY_ARCHIVE_SNAPSHOT_CATALOG_V1"
 DISTRIBUTION_DOMAIN = "SYNERGY_ARCHIVE_SNAPSHOT_DISTRIBUTION_V1"
-DEFAULT_ROOT = Path("/Library/Application Support/Synergy/archive-validator")
-DEFAULT_PUBLISH_ROOT = Path("/srv/synergy-snapshots")
+DEFAULT_ROOT = Path("/Volumes/Synergy_Archive/archive-validator")
+DEFAULT_PUBLISH_ROOT = DEFAULT_ROOT / "snapshots"
 DEFAULT_RUNTIME = Path("/usr/local/synergy/bin/synergy-archive-validator-node")
 DEFAULT_AEGIS = Path("/usr/local/synergy/bin/aegis-pqvm")
 

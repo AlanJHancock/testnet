@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${ROOT_DIR}/.." && pwd)"
 BUILD_ROOT="${ROOT_DIR}/dist/macos-m4"
 PAYLOAD="${BUILD_ROOT}/synergy-archive-validator-testnet-v2-macos-m4"
-ARTIFACT="${ROOT_DIR}/dist/synergy-archive-validator-testnet-v2-macos-m4.zip"
+ARTIFACT="${ROOT_DIR}/dist/synergy-archive-validator-testnet-v2-macos-m4-storage-volume.zip"
 if [[ -d /Volumes/xcode && -w /Volumes/xcode ]]; then
   DEFAULT_CARGO_TARGET_DIR="/Volumes/xcode/synergy-archive-macos-m4-target"
 else
@@ -54,7 +54,7 @@ from datetime import datetime, timezone
 repo, output = sys.argv[1:3]
 def git(*args):
     return subprocess.check_output(["git", "-C", repo, *args], text=True).strip()
-dirty = git("status", "--short").splitlines()
+dirty = git("status", "--short", "--", ".", ":(exclude)archive-validator/dist").splitlines()
 payload = {
     "schema": "synergy-archive-macos-m4-source-provenance-v1",
     "built_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -75,8 +75,19 @@ forbidden="$(find "${PAYLOAD}" \( -name '*.key' -o -name '*.pem' -o -name '*.p12
   exit 1
 }
 
+forbidden_storage_paths="$(grep -R -F \
+  -e '/Library/Application Support/Synergy/archive-validator' \
+  -e '/srv/synergy-snapshots' \
+  "${PAYLOAD}" || true)"
+[[ -z "${forbidden_storage_paths}" ]] || {
+  echo "Refusing to package forbidden archive storage paths:" >&2
+  printf '%s\n' "${forbidden_storage_paths}" >&2
+  exit 1
+}
+
 rm -f "${ARTIFACT}"
 (cd "${BUILD_ROOT}" && zip -qr "${ARTIFACT}" "$(basename "${PAYLOAD}")")
 (cd "${ROOT_DIR}/dist" && shasum -a 256 "$(basename "${ARTIFACT}")" > "$(basename "${ARTIFACT}").sha256")
 echo "artifact=${ARTIFACT}"
 echo "checksum=${ARTIFACT}.sha256"
+echo "storage_root=/Volumes/Synergy_Archive/archive-validator"

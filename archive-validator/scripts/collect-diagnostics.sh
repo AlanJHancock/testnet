@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-out="/var/lib/synergy/archive-validator/logs/diagnostics-$(date +%Y%m%d%H%M%S).txt"
+ARCHIVE_DATA_DIR="${ARCHIVE_DATA_DIR:-/Volumes/Synergy_Archive/archive-validator}"
+out="${ARCHIVE_DATA_DIR}/logs/diagnostics-$(date +%Y%m%d%H%M%S).txt"
 {
   date -u
   synergy-archive status || true

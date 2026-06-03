@@ -6,12 +6,23 @@ command -v aegis-pqvm >/dev/null 2>&1 || {
   exit 1
 }
 
+STORAGE_VOLUME="/Volumes/Synergy_Archive"
+STORAGE_ROOT="${STORAGE_VOLUME}/archive-validator"
+[[ -d "${STORAGE_VOLUME}" ]] || {
+  echo "required archive storage volume is not mounted: ${STORAGE_VOLUME}" >&2
+  exit 1
+}
+/sbin/mount | grep -F " on ${STORAGE_VOLUME} " >/dev/null || {
+  echo "required archive storage volume is not mounted as a filesystem: ${STORAGE_VOLUME}" >&2
+  exit 1
+}
+
 install -d -m 0755 /usr/local/synergy/bin
-install -d -m 0755 "/Library/Application Support/Synergy/archive-validator/config"
-install -d -m 0750 "/Library/Application Support/Synergy/archive-validator/data"
-install -d -m 0750 "/Library/Application Support/Synergy/archive-validator/snapshots"
-install -d -m 0750 "/Library/Application Support/Synergy/archive-validator/tmp"
-install -d -m 0755 "/Library/Logs/Synergy/archive-validator"
+install -d -m 0755 "${STORAGE_ROOT}/config"
+install -d -m 0750 "${STORAGE_ROOT}/data"
+install -d -m 0750 "${STORAGE_ROOT}/snapshots"
+install -d -m 0750 "${STORAGE_ROOT}/tmp"
+install -d -m 0755 "${STORAGE_ROOT}/logs"
 
 for plist in \
   io.synergynetwork.archive-validator.plist \

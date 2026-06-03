@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=synergy
 Group=synergy
-Environment=SYNERGY_ARCHIVE_CONFIG=/var/lib/synergy/archive-validator/config/archive-validator.toml
+Environment=SYNERGY_ARCHIVE_CONFIG=/Volumes/Synergy_Archive/archive-validator/config/archive-validator.toml
 ExecStart=/usr/local/bin/synergy-archive serve
 Restart=on-failure
 RestartSec=5

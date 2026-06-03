@@ -4,10 +4,13 @@ set -euo pipefail
 PACKAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_ROOT="${1:-/Volumes/xcode/synergy-archive-mac-acceptance-$(date -u +%Y%m%dT%H%M%SZ)}"
 BIN_ROOT="${TEST_ROOT}/usr/local/synergy/bin"
-APP_ROOT="${TEST_ROOT}/Library/Application Support/Synergy/archive-validator"
-PUBLISH_ROOT="${TEST_ROOT}/srv/synergy-snapshots"
+STORAGE_VOLUME="${TEST_ROOT}/Volumes/Synergy_Archive"
+APP_ROOT="${STORAGE_VOLUME}/archive-validator"
+PUBLISH_ROOT="${APP_ROOT}/snapshots"
 WORKSPACE="${APP_ROOT}/workspace"
-EVIDENCE="${TEST_ROOT}/acceptance-evidence"
+EVIDENCE="${APP_ROOT}/evidence/isolated-acceptance"
+FORBIDDEN_APP_REL="/Library/Application Support/Synergy/archive""-validator"
+FORBIDDEN_PUBLISH_REL="/srv/synergy""-snapshots"
 mkdir -p "${EVIDENCE}"
 BACKGROUND_PIDS=()
 
@@ -28,6 +31,23 @@ trap cleanup EXIT
 "${PACKAGE_ROOT}/verify-archive-validator-m4.sh" \
   --test-root "${TEST_ROOT}" \
   --skip-launchd-check | tee "${EVIDENCE}/verify.txt"
+
+[[ -d "${APP_ROOT}" ]]
+[[ -d "${APP_ROOT}/tmp" ]]
+[[ -d "${APP_ROOT}/incoming/bootstrap" ]]
+[[ -d "${PUBLISH_ROOT}/staging" ]]
+[[ -d "${PUBLISH_ROOT}/failed" ]]
+[[ -d "${PUBLISH_ROOT}/retired" ]]
+[[ ! -e "${TEST_ROOT}${FORBIDDEN_APP_REL}" ]]
+[[ ! -e "${TEST_ROOT}${FORBIDDEN_PUBLISH_REL}" ]]
+if grep -R -F \
+  -e "${FORBIDDEN_APP_REL}" \
+  -e "${FORBIDDEN_PUBLISH_REL}" \
+  "${TEST_ROOT}/Library/LaunchDaemons" "${APP_ROOT}" >/dev/null 2>&1
+then
+  echo "isolated acceptance found forbidden archive storage path" >&2
+  exit 1
+fi
 
 python3 - "${WORKSPACE}/config/node.toml" <<'PY'
 from pathlib import Path

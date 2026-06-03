@@ -6,4 +6,4 @@ if command -v systemctl >/dev/null 2>&1; then
   rm -f /etc/systemd/system/synergy-archive-validator.service /etc/systemd/system/synergy-archive-snapshot-api.service /etc/systemd/system/synergy-archive-snapshot-worker.service
   systemctl daemon-reload
 fi
-echo "Archive validator services removed. Data under /var/lib/synergy/archive-validator was preserved."
+echo "Archive validator services removed. Data under /Volumes/Synergy_Archive/archive-validator was preserved."

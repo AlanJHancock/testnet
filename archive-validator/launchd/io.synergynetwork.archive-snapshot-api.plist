@@ -13,15 +13,15 @@
   <key>EnvironmentVariables</key>
   <dict>
     <key>SYNERGY_ARCHIVE_CONFIG</key>
-    <string>/Library/Application Support/Synergy/archive-validator/config/archive-validator.toml</string>
+    <string>/Volumes/Synergy_Archive/archive-validator/config/archive-validator.toml</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>/Library/Logs/Synergy/archive-validator/snapshot-api.out.log</string>
+  <string>/Volumes/Synergy_Archive/archive-validator/logs/snapshot-api.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/Library/Logs/Synergy/archive-validator/snapshot-api.err.log</string>
+  <string>/Volumes/Synergy_Archive/archive-validator/logs/snapshot-api.err.log</string>
 </dict>
 </plist>

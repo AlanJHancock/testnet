@@ -20,8 +20,7 @@ rm -f /Library/LaunchDaemons/io.synergynetwork.archive-snapshot-worker.plist
 rm -f /usr/local/synergy/bin/synergy-archive
 
 if [[ "${PURGE_DATA}" == "true" ]]; then
-  rm -rf "/Library/Application Support/Synergy/archive-validator"
-  rm -rf "/Library/Logs/Synergy/archive-validator"
+  rm -rf "/Volumes/Synergy_Archive/archive-validator"
 else
   echo "Archive validator services removed. Data and logs were preserved."
 fi

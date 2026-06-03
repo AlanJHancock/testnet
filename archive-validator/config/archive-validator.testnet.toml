@@ -4,8 +4,8 @@ network_id = "synergy-testnet-v2"
 role = "ARCHIVE_OBSERVER"
 
 [archive]
-data_dir = "/var/lib/synergy/archive-validator/data"
-snapshot_dir = "/var/lib/synergy/archive-validator/snapshots"
+data_dir = "/Volumes/Synergy_Archive/archive-validator/workspace/data"
+snapshot_dir = "/Volumes/Synergy_Archive/archive-validator/snapshots"
 retain_all_blocks = true
 retain_all_qcs = true
 retain_all_states = true
@@ -23,7 +23,7 @@ snapshot_classes = ["validator-pruned", "support-relayer", "support-rpc", "index
 publish_catalog = true
 sign_manifests = true
 sign_catalog = true
-build_tmp_dir = "/var/lib/synergy/archive-validator/tmp/snapshot-build"
+build_tmp_dir = "/Volumes/Synergy_Archive/archive-validator/tmp/snapshot-build"
 
 [aegis_pqvm]
 required = true

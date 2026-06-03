@@ -11,9 +11,10 @@ sudo /usr/local/synergy/bin/synergy-archive status
 Install locations:
 
 - Binary: `/usr/local/synergy/bin/synergy-archive`
-- Config: `/Library/Application Support/Synergy/archive-validator/config`
-- Data: `/Library/Application Support/Synergy/archive-validator`
-- Logs: `/Library/Logs/Synergy/archive-validator`
+- Storage root: `/Volumes/Synergy_Archive/archive-validator`
+- Config: `/Volumes/Synergy_Archive/archive-validator/config`
+- Data: `/Volumes/Synergy_Archive/archive-validator`
+- Logs: `/Volumes/Synergy_Archive/archive-validator/logs`
 - LaunchDaemons: `/Library/LaunchDaemons/io.synergynetwork.archive-*.plist`
 
 The installer fails closed if `aegis-pqvm` is unavailable or if the post-install health check fails. Uninstall without deleting data:

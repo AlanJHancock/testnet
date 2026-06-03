@@ -3,6 +3,8 @@ set -euo pipefail
 
 TEST_ROOT=""
 SKIP_LAUNCHD_CHECK="false"
+STORAGE_VOLUME_REL="/Volumes/Synergy_Archive"
+STORAGE_ROOT_REL="${STORAGE_VOLUME_REL}/archive-validator"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --test-root) TEST_ROOT="$2"; shift 2 ;;
@@ -19,15 +21,44 @@ prefix_path() {
   fi
 }
 
+STORAGE_VOLUME="$(prefix_path "${STORAGE_VOLUME_REL}")"
+if [[ -n "${TEST_ROOT}" ]]; then
+  [[ -d "${STORAGE_VOLUME}" ]] || {
+    echo "archive storage volume missing in test root: ${STORAGE_VOLUME}" >&2
+    exit 1
+  }
+else
+  [[ -d "${STORAGE_VOLUME}" ]] || {
+    echo "required archive storage volume is not mounted: ${STORAGE_VOLUME}" >&2
+    exit 1
+  }
+  /sbin/mount | grep -F " on ${STORAGE_VOLUME} " >/dev/null || {
+    echo "required archive storage volume is not mounted as a filesystem: ${STORAGE_VOLUME}" >&2
+    exit 1
+  }
+fi
+
 BIN_ROOT="$(prefix_path /usr/local/synergy/bin)"
 SHARE_ROOT="$(prefix_path /usr/local/synergy/share/archive-validator)"
-APP_ROOT="$(prefix_path '/Library/Application Support/Synergy/archive-validator')"
-PUBLISH_ROOT="$(prefix_path /srv/synergy-snapshots)"
+APP_ROOT="$(prefix_path "${STORAGE_ROOT_REL}")"
+PUBLISH_ROOT="${APP_ROOT}/snapshots"
 LAUNCHD_ROOT="$(prefix_path /Library/LaunchDaemons)"
 PATH="${BIN_ROOT}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 export PATH
+FORBIDDEN_APP_ROOT="$(prefix_path "/Library/Application Support/Synergy/archive""-validator")"
+FORBIDDEN_PUBLISH_ROOT="$(prefix_path "/srv/synergy""-snapshots")"
 
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]
+[[ -d "${APP_ROOT}" ]] || { echo "archive storage root missing: ${APP_ROOT}" >&2; exit 1; }
+[[ -d "${PUBLISH_ROOT}" ]] || { echo "archive snapshot root missing: ${PUBLISH_ROOT}" >&2; exit 1; }
+[[ ! -e "${FORBIDDEN_APP_ROOT}" ]] || {
+  echo "forbidden archive storage path exists: ${FORBIDDEN_APP_ROOT}" >&2
+  exit 1
+}
+[[ ! -e "${FORBIDDEN_PUBLISH_ROOT}" ]] || {
+  echo "forbidden archive snapshot path exists: ${FORBIDDEN_PUBLISH_ROOT}" >&2
+  exit 1
+}
 for binary in aegis-pqvm synergy-archive-validator-node synergy-archive; do
   [[ -x "${BIN_ROOT}/${binary}" ]]
 done

@@ -5,7 +5,7 @@ CHAIN_ID="1264"
 NETWORK_ID="synergy-testnet-v2"
 GENESIS_FILE=""
 EXPECTED_GENESIS_HASH=""
-ARCHIVE_DATA_DIR="/var/lib/synergy/archive-validator"
+ARCHIVE_DATA_DIR="/Volumes/Synergy_Archive/archive-validator"
 SNAPSHOT_API_BIND="0.0.0.0:48640"
 SNAPSHOT_PUBLIC_URL=""
 P2P_BIND="0.0.0.0:38639"
@@ -80,6 +80,7 @@ install -m 0640 ./config/archive-api.testnet.toml "${ARCHIVE_DATA_DIR}/config/ar
 chown -R "${INSTALL_USER}:${INSTALL_GROUP}" "${ARCHIVE_DATA_DIR}"
 
 ./scripts/verify-aegis-pqvm.sh
+export ARCHIVE_DATA_DIR
 ./scripts/init-aegis-archive-identity.sh
 
 if command -v systemctl >/dev/null 2>&1; then
