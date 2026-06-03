@@ -176,18 +176,12 @@ impl WalletManager {
         public_key: String,
         private_key: String,
     ) -> Result<String, String> {
-        let (kem_public, kem_private) = Self::generate_mlkem_keypair()?;
-
-        let mut wallet =
+        let wallet =
             Wallet::with_private_key(address.clone(), public_key.clone(), private_key.clone());
-        wallet.kem_public_key = Some(kem_public.clone());
-        wallet.kem_private_key = Some(kem_private.clone());
 
         self.wallets.insert(address.clone(), wallet);
         self.keypairs
             .insert(address.clone(), (public_key, private_key));
-        self.kem_keypairs
-            .insert(address.clone(), (kem_public, kem_private));
 
         Ok(address)
     }
@@ -987,6 +981,29 @@ mod tests {
             !wallet_manager.verify_signature(&tx),
             "unknown signature algorithm should be rejected"
         );
+    }
+
+    #[test]
+    fn imported_wallet_does_not_generate_kem_material() {
+        let mut wallet_manager = WalletManager::new();
+        let address = "synwimportedwallet0000000000000000000000".to_string();
+
+        wallet_manager
+            .import_wallet(
+                address.clone(),
+                hex::encode([1u8; 32]),
+                hex::encode([2u8; 32]),
+            )
+            .expect("imported signing wallet should not need generated KEM material");
+
+        assert!(wallet_manager.keypairs.contains_key(&address));
+        assert!(!wallet_manager.kem_keypairs.contains_key(&address));
+        let wallet = wallet_manager
+            .wallets
+            .get(&address)
+            .expect("imported wallet should be stored");
+        assert!(wallet.kem_public_key.is_none());
+        assert!(wallet.kem_private_key.is_none());
     }
 
     #[test]
