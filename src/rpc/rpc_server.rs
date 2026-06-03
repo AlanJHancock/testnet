@@ -2849,14 +2849,28 @@ fn handle_json_rpc(
             let sync_status = SYNC_MANAGER
                 .lock()
                 .ok()
-                .map(|manager| match manager.get_state() {
-                    SyncState::Synced | SyncState::Idle => "synced",
-                    SyncState::Discovering
-                    | SyncState::Downloading
-                    | SyncState::Validating
-                    | SyncState::Applying => "syncing",
+                .map(|manager| {
+                    let highest_block =
+                        manager.get_network_height().max(best_observed_sync_source_height());
+                    if last_block < highest_block {
+                        "syncing"
+                    } else {
+                        match manager.get_state() {
+                            SyncState::Synced | SyncState::Idle => "synced",
+                            SyncState::Discovering
+                            | SyncState::Downloading
+                            | SyncState::Validating
+                            | SyncState::Applying => "syncing",
+                        }
+                    }
                 })
                 .unwrap_or("unknown");
+            let highest_block = SYNC_MANAGER
+                .lock()
+                .ok()
+                .map(|manager| manager.get_network_height())
+                .unwrap_or(0)
+                .max(best_observed_sync_source_height());
             json!({
                 "node_type": null,
                 "status": "running",
@@ -2866,6 +2880,7 @@ fn handle_json_rpc(
                 "network": network_name,
                 "sync_status": sync_status,
                 "last_block": last_block,
+                "highest_block": highest_block,
                 "avg_block_time": avg_block_time,
                 "average_block_time": avg_block_time,
                 "peers_connected": peer_count,
@@ -4768,11 +4783,15 @@ fn sync_status_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
     let current_block = chain.lock().unwrap().last().map_or(0, |b| b.block_index);
     if let Ok(manager) = SYNC_MANAGER.lock() {
         let state = manager.get_state();
-        let syncing = !matches!(state, SyncState::Synced | SyncState::Idle);
+        let highest_block = manager
+            .get_network_height()
+            .max(best_observed_sync_source_height());
+        let syncing =
+            !matches!(state, SyncState::Synced | SyncState::Idle) || current_block < highest_block;
         json!({
             "syncing": syncing,
             "current_block": current_block,
-            "highest_block": manager.get_network_height(),
+            "highest_block": highest_block,
             "starting_block": manager.get_sync_start_height(),
             "sync_percentage": manager.get_progress_percentage(),
             "state": format!("{:?}", state),
@@ -4792,6 +4811,30 @@ fn peer_info_json() -> Value {
         "peers": peer_count,
         "chain": chain_identity_json(),
     })
+}
+
+fn best_observed_sync_source_height() -> u64 {
+    crate::p2p::get_p2p_network()
+        .map(|network| {
+            network
+                .collect_peer_snapshots()
+                .into_iter()
+                .filter(|peer| {
+                    peer.status_received_at.is_some()
+                        && !peer.quarantined
+                        && (!peer.consensus_duties_disabled
+                            || peer
+                                .validator_address
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                                .is_none())
+                })
+                .map(|peer| peer.block_height)
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
 }
 
 fn node_health_json(chain: &Arc<Mutex<BlockChain>>) -> Value {

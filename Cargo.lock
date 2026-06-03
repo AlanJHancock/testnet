@@ -22,21 +22,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aegis-pqsynq"
-version = "0.1.0"
-dependencies = [
- "getrandom 0.2.17",
- "hex",
- "pqrust-mldsa",
- "pqrust-traits",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
 name = "aegis-pqvm"
 version = "0.1.0"
 dependencies = [
@@ -1973,17 +1958,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pqrust-mldsa"
-version = "0.1.1"
-dependencies = [
- "cc",
- "glob",
- "libc",
- "pqrust-internals",
- "pqrust-traits",
-]
-
-[[package]]
 name = "pqrust-traits"
 version = "0.3.5"
 
@@ -2665,7 +2639,6 @@ dependencies = [
 name = "synergy-testnet"
 version = "1.2.0"
 dependencies = [
- "aegis-pqsynq",
  "aegis-pqvm",
  "aes-gcm",
  "base64 0.22.1",

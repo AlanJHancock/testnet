@@ -4,6 +4,13 @@ This zip is the internal Apple Silicon handoff for the non-consensus Synergy
 Testnet 1264 Archive Validator. It includes the archive runtime, Aegis CLI,
 snapshot authority controller, role policy, launchd persistence, and checksums.
 It does not include private keys, credentials, or a preloaded chain database.
+The default non-VPN topology uses Relayer1 and Relayer2 as persistent peers:
+
+- `195.26.241.95:5622`
+- `94.72.117.108:5622`
+
+The package does not use obsolete `*.synergyvps.xyz` bootnode or seed DNS
+defaults, and it does not configure direct private validator addresses.
 
 ## Install
 
@@ -37,6 +44,40 @@ Published snapshots and the signed catalog live under:
 ```text
 /srv/synergy-snapshots
 ```
+
+## Manual Bootstrap Restore
+
+If the archive node is at genesis and organic deep sync is unavailable, restore
+a verified bootstrap archive before recording majority proof or publishing
+snapshots. Put the bootstrap file on the Mac, then run:
+
+```bash
+cd synergy-archive-validator-testnet-v2-macos-m4
+sudo ./restore-archive-bootstrap-m4.sh \
+  --snapshot /path/to/archive-bootstrap-data.tar.zst \
+  --sha256 <expected-sha256> \
+  --yes
+```
+
+The restore helper stops the archive node and snapshot worker, verifies the
+archive checksum, rejects key/config material inside the bootstrap archive,
+backs up the existing workspace data, restores the bootstrap data into:
+
+```text
+/Library/Application Support/Synergy/archive-validator/workspace/data
+```
+
+Then it restarts the archive node and snapshot worker. After restore, prove
+local qRPC height/hash parity before enabling publication:
+
+```bash
+curl -s http://127.0.0.1:5640/ \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"synergy_getLatestBlock","params":[]}'
+```
+
+Do not run `record-majority-proof`, `create-snapshot`, or `publish-snapshot`
+while local archive qRPC is still at genesis or materially behind public RPC.
 
 ## Snapshot Publication Gate
 

@@ -53,6 +53,10 @@ jobs:
         shell: bash
         run: scripts/testnet/check-pqc-consensus-guard.sh
 
+      - name: Enforce release manifest portability
+        shell: bash
+        run: scripts/testnet/check-release-manifests.sh
+
       - name: Build release binaries
         shell: bash
         run: |

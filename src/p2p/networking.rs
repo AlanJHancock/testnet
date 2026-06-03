@@ -1,8 +1,6 @@
 use crate::block::{Block, BlockChain};
 use crate::config::NodeConfig;
-use crate::consensus::anti_divergence::{
-    current_self_quarantine_record, current_validator_quarantine_duty_block,
-};
+use crate::consensus::anti_divergence::current_validator_quarantine_duty_block;
 use crate::consensus::chain_durability::append_committed_block_body;
 use crate::consensus::consensus_algorithm::ProofOfSynergy;
 use crate::consensus::dual_quorum::{DualQuorumConsensus, QuorumCertificate};
@@ -1198,7 +1196,11 @@ fn handle_status_message(
         let chain = blockchain.lock().unwrap();
         chain.last().map(|block| block.block_index).unwrap_or(0)
     };
-    if quarantined || consensus_duties_disabled {
+    if !status_peer_is_eligible_block_sync_source(
+        peer_validator_address.as_deref(),
+        quarantined,
+        consensus_duties_disabled,
+    ) {
         debug!(
             "p2p",
             "Skipping block sync request to duty-disabled peer",
@@ -1640,12 +1642,34 @@ fn peer_is_active_validator_sync_source(peer: &PeerConnection) -> bool {
         && !peer.consensus_duties_disabled
 }
 
+fn peer_is_eligible_block_sync_source(peer: &PeerConnection) -> bool {
+    if peer.quarantined {
+        return false;
+    }
+
+    !peer.consensus_duties_disabled || !peer_has_validator_identity(peer)
+}
+
+fn status_peer_is_eligible_block_sync_source(
+    peer_validator_address: Option<&str>,
+    quarantined: bool,
+    consensus_duties_disabled: bool,
+) -> bool {
+    if quarantined {
+        return false;
+    }
+
+    !consensus_duties_disabled
+        || peer_validator_address
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+}
+
 fn select_block_sync_targets(peers: &PeerMap, max_targets: usize) -> Vec<String> {
     let mut candidates = peers
         .iter()
-        .filter(|(_, peer)| {
-            peer.stream.is_some() && !peer.quarantined && !peer.consensus_duties_disabled
-        })
+        .filter(|(_, peer)| peer.stream.is_some() && peer_is_eligible_block_sync_source(peer))
         .map(|(address, peer)| {
             let has_validator_identity = peer
                 .validator_address
@@ -5909,13 +5933,13 @@ mod tests {
         ensure_peer_status_allows_chain_data, handle_status_message, hydrate_peer_from_cache,
         local_node_runs_validator_consensus, local_peer_identity, merge_peer_state_from_existing,
         parse_bootnode_dial_address, peer_has_identifying_metadata, peer_identity_key,
-        pending_incoming_connections_from_host, preferred_connection_direction, receive_message,
-        resolve_bootstrap_dial_targets, resolve_duplicate_connection,
-        should_disconnect_for_status_genesis_mismatch, should_prune_stale_peer,
-        should_request_missing_blocks, status_ready_validator_addresses_with_local_duty_gate,
-        status_ready_validator_participants, status_sync_batch,
-        support_peer_sync_request_is_too_deep, validate_vote_request_extends_local_tip,
-        validator_status_genesis_grace_remaining_secs,
+        peer_is_eligible_block_sync_source, pending_incoming_connections_from_host,
+        preferred_connection_direction, receive_message, resolve_bootstrap_dial_targets,
+        resolve_duplicate_connection, should_disconnect_for_status_genesis_mismatch,
+        should_prune_stale_peer, should_request_missing_blocks,
+        status_ready_validator_addresses_with_local_duty_gate, status_ready_validator_participants,
+        status_sync_batch, support_peer_sync_request_is_too_deep,
+        validate_vote_request_extends_local_tip, validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_handshake_pq_signature,
         vote_request_parent_sync_range, ConnectionDirection, DialTargetsArc, DuplicateResolution,
         PeerConnection, PeerEntryGuard, BACKGROUND_SYNC_POLL_MILLIS,
@@ -6023,6 +6047,19 @@ mod tests {
             status_ready_validator_addresses_with_local_duty_gate(&config, &connected_peers, true);
         assert!(!local_disabled.contains(&"synv1local".to_string()));
         assert!(local_disabled.contains(&"synv1healthy".to_string()));
+    }
+
+    #[test]
+    fn block_sync_source_accepts_duty_disabled_support_peer_but_not_shadow_validator() {
+        let mut relayer_peer = test_peer_with_validator_address(None);
+        relayer_peer.consensus_duties_disabled = true;
+        relayer_peer.last_known_height = 195_000;
+        assert!(peer_is_eligible_block_sync_source(&relayer_peer));
+
+        let mut shadow_validator = test_peer_with_validator_address(Some("synv1shadow"));
+        shadow_validator.consensus_duties_disabled = true;
+        shadow_validator.last_known_height = 195_000;
+        assert!(!peer_is_eligible_block_sync_source(&shadow_validator));
     }
 
     lazy_static! {
@@ -7713,6 +7750,72 @@ mod tests {
                 assert_eq!(count, 9);
             }
             other => panic!("expected GetBlocks request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_handler_requests_blocks_from_duty_disabled_support_peer() {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to bind test listener: {error}"),
+        };
+        let addr = listener.local_addr().expect("listener address");
+        let client = match std::net::TcpStream::connect(addr) {
+            Ok(stream) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to connect test stream: {error}"),
+        };
+        let (mut server, _) = listener.accept().expect("accept peer stream");
+        server
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("set read timeout");
+
+        let blockchain = Arc::new(Mutex::new(BlockChain::new()));
+        let connected_peers = Arc::new(Mutex::new(HashMap::new()));
+        let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
+        let config = NodeConfig::default();
+
+        let mut support_peer = test_peer_with_validator_address(None);
+        support_peer.stream = Some(client);
+        support_peer.status_received_at = None;
+        support_peer.consensus_duties_disabled = true;
+        connected_peers
+            .lock()
+            .unwrap()
+            .insert("relayer-a".to_string(), support_peer);
+
+        let genesis_hash = canonical_genesis_hash();
+        handle_status_message(
+            &blockchain,
+            &connected_peers,
+            &peer_state_cache,
+            &config,
+            "relayer-a",
+            195_000,
+            "best-hash",
+            &genesis_hash,
+            false,
+            true,
+            Some("SUPPORT_RELAY"),
+        );
+
+        let local_height = blockchain
+            .lock()
+            .unwrap()
+            .last()
+            .map(|block| block.block_index)
+            .unwrap_or(0);
+        let (expected_from_height, expected_count) =
+            block_sync_request_range(local_height, 195_000, MAX_STATUS_SYNC_BATCH)
+                .expect("support peer should advertise blocks above the local tip");
+
+        match receive_message(&mut server).expect("status handling should request blocks") {
+            NetworkMessage::GetBlocks { from_height, count } => {
+                assert_eq!(from_height, expected_from_height);
+                assert_eq!(count, expected_count);
+            }
+            other => panic!("expected GetBlocks request from support peer, got {other:?}"),
         }
     }
 

@@ -16,11 +16,11 @@ p2p_port = 5622
 rpc_port = 5640
 ws_port = 5660
 max_peers = 100
-bootnodes = ["snr://bootstrap@bootnode1.synergyvps.xyz:5620", "snr://bootstrap@bootnode2.synergyvps.xyz:5620", "snr://bootstrap@bootnode3.synergyvps.xyz:5620"]
-seed_servers = ["http://seed1.synergyvps.xyz:5621", "http://seed2.synergyvps.xyz:5621", "http://seed3.synergyvps.xyz:5621"]
-bootstrap_dns_records = ["_dnsaddr.bootstrap.synergyvps.xyz"]
-additional_dial_targets = []
-persistent_peers = []
+bootnodes = []
+seed_servers = []
+bootstrap_dns_records = []
+additional_dial_targets = ["195.26.241.95:5622", "94.72.117.108:5622"]
+persistent_peers = ["195.26.241.95:5622", "94.72.117.108:5622"]
 
 [blockchain]
 block_time = 2

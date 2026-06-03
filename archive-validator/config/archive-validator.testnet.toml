@@ -40,8 +40,9 @@ rate_limit_enabled = true
 
 [p2p]
 enabled = true
-bind = "0.0.0.0:38639"
+bind = "0.0.0.0:5622"
 bootnodes = []
+persistent_peers = ["195.26.241.95:5622", "94.72.117.108:5622"]
 
 [metrics]
 enabled = true

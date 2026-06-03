@@ -54,7 +54,7 @@ pub fn sha3_digest(data: &[u8]) -> [u8; 32] {
 // ---------------------------------------------------------------------------
 //
 // Some NIST reference implementations include `rng.h` and call `randombytes()`
-// directly (instead of PQClean's macro indirection to pqrust_RUST_randombytes).
+// directly (instead of PQClean's macro indirection to PQRUST_RUST_randombytes).
 // We provide a single process-wide implementation here, backed by
 // pqrust-internals/getrandom.
 
@@ -66,8 +66,8 @@ pub fn sha3_digest(data: &[u8]) -> [u8; 32] {
 /// `buf` must be valid for writes of at least `len` bytes. The pointer may be
 /// null only when `len == 0`.
 pub unsafe extern "C" fn randombytes(buf: *mut u8, len: libc::c_ulonglong) -> libc::c_int {
-    // pqrust_internals::pqrust_RUST_randombytes uses `size_t`.
-    pqrust_internals::pqrust_RUST_randombytes(buf, len as libc::size_t)
+    // pqrust_internals::PQRUST_RUST_randombytes uses `size_t`.
+    pqrust_internals::PQRUST_RUST_randombytes(buf, len as libc::size_t)
 }
 
 #[no_mangle]
@@ -79,7 +79,7 @@ pub unsafe extern "C" fn randombytes(buf: *mut u8, len: libc::c_ulonglong) -> li
 /// null only when `len == 0`.
 #[allow(non_snake_case)]
 pub unsafe extern "C" fn PQRUST_RUST_randombytes(buf: *mut u8, len: libc::size_t) -> libc::c_int {
-    pqrust_internals::pqrust_RUST_randombytes(buf, len)
+    pqrust_internals::PQRUST_RUST_randombytes(buf, len)
 }
 
 #[no_mangle]

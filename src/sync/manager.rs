@@ -99,6 +99,7 @@ impl fmt::Display for SyncError {
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
     pub address: String,
+    pub validator_address: Option<String>,
     pub block_height: u64,
     pub best_block_hash: String,
     pub genesis_hash: String,
@@ -172,6 +173,7 @@ impl SyncManager {
             .into_iter()
             .map(|snap| PeerInfo {
                 address: snap.address,
+                validator_address: snap.validator_address,
                 block_height: snap.block_height,
                 best_block_hash: snap.best_block_hash,
                 genesis_hash: snap.genesis_hash,
@@ -183,7 +185,13 @@ impl SyncManager {
 
     fn peer_is_eligible_sync_source(&self, peer: &PeerInfo, local_genesis: &str) -> bool {
         !peer.quarantined
-            && !peer.consensus_duties_disabled
+            && (!peer.consensus_duties_disabled
+                || peer
+                    .validator_address
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none())
             && (local_genesis.is_empty() || peer.genesis_hash == local_genesis)
     }
 
@@ -439,9 +447,16 @@ fn sync_progress_overlap(batch_size: u64) -> u64 {
 mod tests {
     use super::*;
 
-    fn peer(address: &str, height: u64, quarantined: bool, duty_disabled: bool) -> PeerInfo {
+    fn peer(
+        address: &str,
+        validator_address: Option<&str>,
+        height: u64,
+        quarantined: bool,
+        duty_disabled: bool,
+    ) -> PeerInfo {
         PeerInfo {
             address: address.to_string(),
+            validator_address: validator_address.map(str::to_string),
             block_height: height,
             best_block_hash: format!("hash-{height}"),
             genesis_hash: String::new(),
@@ -459,16 +474,29 @@ mod tests {
     }
 
     #[test]
-    fn sync_peer_selection_rejects_quarantined_and_duty_disabled_sources() {
+    fn sync_peer_selection_rejects_quarantined_and_duty_disabled_validators() {
         let blockchain = Arc::new(Mutex::new(BlockChain::new()));
         let mut manager = SyncManager::new(blockchain);
         manager.peers = vec![
-            peer("quarantined", 200, true, true),
-            peer("duty-disabled", 180, false, true),
-            peer("active", 100, false, false),
+            peer("quarantined", Some("synv1quarantined"), 200, true, true),
+            peer("duty-disabled", Some("synv1shadow"), 180, false, true),
+            peer("active", Some("synv1active"), 100, false, false),
         ];
 
         assert_eq!(manager.select_sync_peer(), Some("active".to_string()));
         assert_eq!(manager.eligible_network_height(""), 100);
+    }
+
+    #[test]
+    fn sync_peer_selection_accepts_duty_disabled_support_peers() {
+        let blockchain = Arc::new(Mutex::new(BlockChain::new()));
+        let mut manager = SyncManager::new(blockchain);
+        manager.peers = vec![
+            peer("active-validator", Some("synv1active"), 100, false, false),
+            peer("relayer", None, 195_000, false, true),
+        ];
+
+        assert_eq!(manager.select_sync_peer(), Some("relayer".to_string()));
+        assert_eq!(manager.eligible_network_height(""), 195_000);
     }
 }

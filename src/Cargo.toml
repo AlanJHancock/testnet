@@ -31,9 +31,8 @@ tungstenite = "0.24"
 
 # Post-Quantum Cryptography
 aegis-pqvm = { path = "../aegis-pqvm" }
-pqsynq = { package = "aegis-pqsynq", path = "/Volumes/xcode/Synergy-Network-Projects/synq-language/aegis-pqsynq/pqsynq", default-features = false, features = ["std", "mldsa"] }
 pqcrypto-traits = { workspace = true }
-pqrust-traits = { path = "/Volumes/xcode/Synergy-Network-Projects/synq-language/pqrust/pqrust-traits" }
+pqrust-traits = { path = "../aegis-pqvm/vendor/pqcrypto-traits" }
 pqcrypto-falcon = "0.3"
 pqcrypto-hqc = "0.2.2"
 pqcrypto-mlkem = { workspace = true }
