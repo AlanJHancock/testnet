@@ -9,7 +9,10 @@ SKIP_LAUNCHD_LOAD="false"
 YES="false"
 SERVICE_TIMEOUT_SECS="${ARCHIVE_VALIDATOR_SERVICE_TIMEOUT_SECS:-120}"
 STORAGE_VOLUME_REL="/Volumes/Synergy_Archive"
-STORAGE_ROOT_REL="${STORAGE_VOLUME_REL}/archive-validator"
+LOCAL_ROOT_REL="/Users/Shared/Synergy/archive-validator"
+SMB_ROOT_REL="${STORAGE_VOLUME_REL}/archive-validator"
+PUBLISH_ROOT_REL="${SMB_ROOT_REL}/snapshots"
+INCOMING_BOOTSTRAP_REL="${SMB_ROOT_REL}/incoming/bootstrap"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -233,7 +236,10 @@ verify_runtime_listeners() {
 
 STORAGE_VOLUME="$(prefix_path "${STORAGE_VOLUME_REL}")"
 if [[ -n "${TEST_ROOT}" ]]; then
-  mkdir -p "${STORAGE_VOLUME}"
+  [[ -d "${STORAGE_VOLUME}" ]] || {
+    echo "archive storage volume missing in test root: ${STORAGE_VOLUME}" >&2
+    exit 1
+  }
 else
   [[ -d "${STORAGE_VOLUME}" ]] || {
     echo "required archive storage volume is not mounted: ${STORAGE_VOLUME}" >&2
@@ -248,13 +254,24 @@ fi
 
 BIN_ROOT="$(prefix_path /usr/local/synergy/bin)"
 SHARE_ROOT="$(prefix_path /usr/local/synergy/share/archive-validator)"
-APP_ROOT="$(prefix_path "${STORAGE_ROOT_REL}")"
+APP_ROOT="$(prefix_path "${LOCAL_ROOT_REL}")"
 WORKSPACE="${APP_ROOT}/workspace"
 LOG_ROOT="${APP_ROOT}/logs"
-PUBLISH_ROOT="${APP_ROOT}/snapshots"
+SMB_ROOT="$(prefix_path "${SMB_ROOT_REL}")"
+PUBLISH_ROOT="$(prefix_path "${PUBLISH_ROOT_REL}")"
+INCOMING_BOOTSTRAP="$(prefix_path "${INCOMING_BOOTSTRAP_REL}")"
 LAUNCHD_ROOT="$(prefix_path /Library/LaunchDaemons)"
 PROOF_MARKER="${APP_ROOT}/evidence/source-majority-branch-proven.json"
 PYTHON3_PATH="$(command -v python3 || true)"
+
+if [[ -z "${TEST_ROOT}" ]]; then
+  case "${APP_ROOT}" in
+    /Volumes/*)
+      echo "runtime root must be local storage, not an SMB/network volume: ${APP_ROOT}" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 for dependency in python3 tar shasum plutil codesign; do
   command -v "${dependency}" >/dev/null 2>&1 || {
@@ -301,10 +318,12 @@ install_dir 0750 \
   "${APP_ROOT}/logs" \
   "${APP_ROOT}/evidence" \
   "${APP_ROOT}/tmp" \
-  "${APP_ROOT}/incoming/bootstrap" \
   "${APP_ROOT}/backups" \
   "${WORKSPACE}/config" \
-  "${WORKSPACE}/data" \
+  "${WORKSPACE}/data"
+install_dir 0750 \
+  "${SMB_ROOT}" \
+  "${INCOMING_BOOTSTRAP}" \
   "${PUBLISH_ROOT}" \
   "${PUBLISH_ROOT}/staging" \
   "${PUBLISH_ROOT}/failed" \
@@ -325,6 +344,8 @@ if is_production_install; then
 fi
 install_file 0644 "${PACKAGE_ROOT}/SOURCE-PROVENANCE.json" "${SHARE_ROOT}/SOURCE-PROVENANCE.json"
 install_file 0644 "${PACKAGE_ROOT}/config/genesis.json" "${WORKSPACE}/config/genesis.json"
+install_file 0644 "${PACKAGE_ROOT}/config/consensus-fork-migration.json" "${WORKSPACE}/config/consensus-fork-migration.json"
+install_file 0644 "${PACKAGE_ROOT}/config/consensus-fork-migration.json" "${APP_ROOT}/config/consensus-fork-migration.json"
 install_file 0644 "${PACKAGE_ROOT}/config/snapshot-policy.toml" "${APP_ROOT}/config/snapshot-policy.toml"
 sed "s/replace-with-public-host/${PUBLIC_HOST}/g" \
   "${PACKAGE_ROOT}/config/node.toml.template" > "${WORKSPACE}/config/node.toml"
@@ -394,7 +415,9 @@ if [[ "${SKIP_LAUNCHD_LOAD}" != "true" ]]; then
 fi
 
 echo "archive_validator_install_ok=true"
+echo "runtime_root=${APP_ROOT}"
 echo "workspace=${WORKSPACE}"
 echo "publish_root=${PUBLISH_ROOT}"
+echo "incoming_bootstrap=${INCOMING_BOOTSTRAP}"
 echo "majority_proof_marker=${PROOF_MARKER}"
 echo "next_action=sync archive node, preserve parity evidence, then run synergy-archive record-majority-proof before worker publication"

@@ -9,6 +9,7 @@ runtime. It never packages keys, configs, genesis, or transient node secrets.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import http.server
 import json
@@ -30,10 +31,19 @@ CHUNK_SIZE = 512 * 1024 * 1024
 GRACE_SECS = 24 * 60 * 60
 CATALOG_DOMAIN = "SYNERGY_ARCHIVE_SNAPSHOT_CATALOG_V1"
 DISTRIBUTION_DOMAIN = "SYNERGY_ARCHIVE_SNAPSHOT_DISTRIBUTION_V1"
-DEFAULT_ROOT = Path("/Volumes/Synergy_Archive/archive-validator")
-DEFAULT_PUBLISH_ROOT = DEFAULT_ROOT / "snapshots"
+DEFAULT_ROOT = Path("/Users/Shared/Synergy/archive-validator")
+DEFAULT_PUBLISH_ROOT = Path("/Volumes/Synergy_Archive/archive-validator/snapshots")
 DEFAULT_RUNTIME = Path("/usr/local/synergy/bin/synergy-archive-validator-node")
 DEFAULT_AEGIS = Path("/usr/local/synergy/bin/aegis-pqvm")
+DEFAULT_FORK_METADATA = DEFAULT_ROOT / "config" / "consensus-fork-migration.json"
+FORK_PARENT_HEIGHT = 204_215
+FORK_HEIGHT = 204_216
+FORK_PARENT_HASH = "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816"
+OLD_CONSENSUS_ALGORITHM = "ML-DSA-65"
+POST_FORK_CONSENSUS_ALGORITHM = "FN-DSA"
+FORK_PARSER_MODE = "fail_closed"
+FNDSA_PUBLIC_KEY_BYTES = 1793
+FORK_VALIDATOR_COUNT = 5
 
 CLASS_POLICY = {
     "validator-pruned": {
@@ -104,6 +114,57 @@ def json_dump(path: Path, value: Any, mode: int = 0o644) -> None:
 
 def json_load(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def fork_metadata_path(root: Path) -> Path:
+    return root / "config" / "consensus-fork-migration.json"
+
+
+def validate_consensus_fork_metadata(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise RuntimeError("consensus fork metadata must be a JSON object")
+    checks = {
+        "fork_height": value.get("fork_height") == FORK_HEIGHT,
+        "parent_height": value.get("parent_height") == FORK_PARENT_HEIGHT,
+        "parent_hash": value.get("parent_hash") == FORK_PARENT_HASH,
+        "state_root": isinstance(value.get("state_root"), str) and bool(value.get("state_root", "").strip()),
+        "old_consensus_algorithm": value.get("old_consensus_algorithm") == OLD_CONSENSUS_ALGORITHM,
+        "new_consensus_algorithm": value.get("new_consensus_algorithm") == POST_FORK_CONSENSUS_ALGORITHM,
+        "parser_mode": value.get("parser_mode") == FORK_PARSER_MODE,
+    }
+    if value.get("fork_height") is not None and value.get("parent_height") is not None:
+        checks["fork_height_parent"] = int(value["fork_height"]) == int(value["parent_height"]) + 1
+    registry = value.get("new_validator_registry")
+    checks["validator_registry"] = isinstance(registry, list) and len(registry) == FORK_VALIDATOR_COUNT
+    seen_validators: set[str] = set()
+    if isinstance(registry, list):
+        for index, entry in enumerate(registry):
+            if not isinstance(entry, dict):
+                checks[f"validator_{index}_object"] = False
+                continue
+            validator = str(entry.get("validator_address", "")).strip()
+            checks[f"validator_{index}_address"] = bool(validator)
+            checks[f"validator_{index}_unique"] = bool(validator) and validator not in seen_validators
+            seen_validators.add(validator)
+            checks[f"validator_{index}_key_type"] = entry.get("consensus_key_type") == POST_FORK_CONSENSUS_ALGORITHM
+            try:
+                public_key = base64.b64decode(str(entry.get("consensus_public_key", "")), validate=True)
+            except Exception:
+                public_key = b""
+            checks[f"validator_{index}_public_key_bytes"] = len(public_key) == FNDSA_PUBLIC_KEY_BYTES
+    failed = [name for name, ok in checks.items() if not ok]
+    if failed:
+        raise RuntimeError(f"invalid consensus fork metadata: {', '.join(failed)}")
+    return value
+
+
+def read_consensus_fork_metadata(root: Path, *, required: bool = False) -> dict[str, Any] | None:
+    path = fork_metadata_path(root)
+    if not path.exists():
+        if required:
+            raise RuntimeError(f"consensus fork metadata missing: {path}")
+        return None
+    return validate_consensus_fork_metadata(json_load(path))
 
 
 def sha256_file(path: Path) -> str:
@@ -507,6 +568,18 @@ def read_catalog(publish_root: Path) -> dict[str, Any]:
 
 def write_signed_catalog(aegis: Path, root: Path, publish_root: Path, catalog: dict[str, Any]) -> None:
     catalog["updated_at"] = now()
+    consensus_fork = read_consensus_fork_metadata(root)
+    if consensus_fork is not None:
+        catalog["consensus_fork"] = consensus_fork
+    for entry in catalog.get("snapshots", []):
+        snapshot_height = int(entry.get("height", 0))
+        entry_fork = entry.get("consensus_fork")
+        if snapshot_height >= FORK_HEIGHT:
+            validate_consensus_fork_metadata(entry_fork)
+        elif entry_fork is not None:
+            validate_consensus_fork_metadata(entry_fork)
+        if consensus_fork is not None and entry_fork is not None and entry_fork != consensus_fork:
+            raise RuntimeError("snapshot catalog consensus fork metadata mismatch")
     catalog_path, sig_path = catalog_paths(publish_root)
     json_dump(catalog_path, catalog)
     sign_json(aegis, root, CATALOG_DOMAIN, catalog_path, sig_path)
@@ -549,6 +622,7 @@ def package_publish(args: argparse.Namespace, report: dict[str, Any]) -> dict[st
     uncompressed_size = directory_size(snapshot_root)
     enforce_free_space(args.publish_root, uncompressed_size, args.fixture_mode)
     snapshot_height = int(report["snapshot_height"])
+    consensus_fork = read_consensus_fork_metadata(args.root, required=snapshot_height >= FORK_HEIGHT)
     snapshot_id = f"snapshot-{snapshot_height:09d}"
     snapshot_dir = args.publish_root / "testnet-1264" / snapshot_class / snapshot_id
     if snapshot_dir.exists():
@@ -594,6 +668,7 @@ def package_publish(args: argparse.Namespace, report: dict[str, Any]) -> dict[st
         "source_manifest": source_manifest.name,
         "source_manifest_sha256": sha256_file(stage / "source-snapshot-manifest.json"),
         "safety": safety,
+        "consensus_fork": consensus_fork,
         "retention_class": "launch-stabilization",
         "status": "verified-local",
     }
@@ -676,6 +751,7 @@ def package_publish(args: argparse.Namespace, report: dict[str, Any]) -> dict[st
         "manifest_signature_status": "AEGIS_PQC_VERIFIED",
         "qc_vote_count": report["qc_vote_count"],
         "qc_signers": report["qc_signers"],
+        "consensus_fork": consensus_fork,
         "status": "published",
         "retention_class": "launch-stabilization",
         "retained_until": None,
@@ -743,11 +819,13 @@ def publish_existing_snapshot(args: argparse.Namespace) -> dict[str, Any]:
     return package_publish(args, report)
 
 
-def latest_local_canonical_height(workspace: Path) -> int:
+def latest_local_canonical_height(workspace: Path) -> int | None:
     path = workspace / "data" / "canonical_locks.json"
+    if not path.exists():
+        return None
     value = json_load(path)
     if not isinstance(value, dict) or not value:
-        raise RuntimeError("archive workspace has no canonical lock height")
+        return None
     return max(int(height) for height in value)
 
 
@@ -756,6 +834,8 @@ def worker(args: argparse.Namespace) -> None:
         try:
             proof_marker_ok(args.majority_proof_marker)
             local_height = latest_local_canonical_height(args.workspace)
+            if local_height is None:
+                raise RuntimeError("archive workspace has no canonical lock height")
             catalog = read_catalog(args.publish_root)
             for snapshot_class in args.snapshot_class:
                 latest = max(
@@ -796,11 +876,19 @@ def status(args: argparse.Namespace) -> dict[str, Any]:
         if not catalog_path.exists() or not sig_path.exists():
             raise RuntimeError("catalog JSON/signature pair is incomplete")
         catalog_signature = verify_json(aegis, CATALOG_DOMAIN, catalog_path, sig_path)
+    fork_metadata = read_consensus_fork_metadata(args.root)
     return {
         "ok": True,
         "chain_id": CHAIN_ID,
         "network_id": NETWORK_ID,
         "genesis_hash": GENESIS_HASH,
+        "runtime_root": str(args.root),
+        "publish_root": str(args.publish_root),
+        "current_height": latest_local_canonical_height(args.root / "workspace"),
+        "fork_height": fork_metadata.get("fork_height") if fork_metadata else None,
+        "current_consensus_algorithm": fork_metadata.get("new_consensus_algorithm") if fork_metadata else None,
+        "parser_mode": fork_metadata.get("parser_mode") if fork_metadata else None,
+        "consensus_fork": fork_metadata,
         "archive_role": "ARCHIVE_VALIDATOR_NON_CONSENSUS",
         "can_vote": False,
         "can_propose": False,
@@ -811,7 +899,6 @@ def status(args: argparse.Namespace) -> dict[str, Any]:
         "catalog_signature": catalog_signature,
         "catalog_entries": len(catalog["snapshots"]),
         "snapshot_classes": CLASS_POLICY,
-        "publish_root": str(args.publish_root),
         "free_bytes": free_bytes(args.publish_root),
     }
 
@@ -829,6 +916,15 @@ def verify_distribution(args: argparse.Namespace) -> dict[str, Any]:
         raise RuntimeError("snapshot distribution chain/network mismatch")
     if distribution.get("genesis_hash") != GENESIS_HASH:
         raise RuntimeError("snapshot distribution genesis mismatch")
+    snapshot_height = int(distribution.get("height", 0))
+    distribution_fork = distribution.get("consensus_fork")
+    if snapshot_height >= FORK_HEIGHT:
+        validate_consensus_fork_metadata(distribution_fork)
+    elif distribution_fork is not None:
+        validate_consensus_fork_metadata(distribution_fork)
+    local_fork = read_consensus_fork_metadata(args.root)
+    if local_fork is not None and distribution_fork is not None and distribution_fork != local_fork:
+        raise RuntimeError("snapshot distribution consensus fork metadata mismatch")
     signature = verify_json(
         args.aegis,
         DISTRIBUTION_DOMAIN,
@@ -864,6 +960,7 @@ def verify_distribution(args: argparse.Namespace) -> dict[str, Any]:
         "wrong_class_checked_before_extraction": True,
         "signature": signature,
         "runtime": runtime_report,
+        "consensus_fork": distribution_fork,
         "snapshot_root": str(roots[0]),
     }
 

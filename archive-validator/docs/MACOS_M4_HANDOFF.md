@@ -30,12 +30,20 @@ sudo ./verify-archive-validator-m4.sh
 ```
 
 The installer fails closed unless `/Volumes/Synergy_Archive` is mounted as a
-filesystem before setup starts. Binaries and launchd plists are installed in
-the normal system locations, but every mutable Archive Validator storage path is
-under:
+filesystem before setup starts. The mounted volume is used only for snapshot
+publication and bootstrap staging. Binaries and launchd plists are installed in
+the normal system locations, while live runtime/workspace/log/evidence/tmp/key
+storage stays on the local M4 system disk under:
 
 ```text
-/Volumes/Synergy_Archive/archive-validator
+/Users/Shared/Synergy/archive-validator
+```
+
+SMB-backed storage is limited to:
+
+```text
+/Volumes/Synergy_Archive/archive-validator/snapshots
+/Volumes/Synergy_Archive/archive-validator/incoming/bootstrap
 ```
 
 The installer verifies the packaged checksums and Apple Silicon executables,
@@ -62,10 +70,10 @@ Required listener proof at install/verify time:
 installed payload signatures/permissions, launchd running state, required
 listeners, and a live `synergy_getLatestBlock` qRPC response.
 
-The archive node syncs chain state into:
+The archive node syncs chain state into local storage:
 
 ```text
-/Volumes/Synergy_Archive/archive-validator/workspace/data
+/Users/Shared/Synergy/archive-validator/workspace/data
 ```
 
 Published snapshots and the signed catalog live under:
@@ -78,7 +86,8 @@ Published snapshots and the signed catalog live under:
 
 If the archive node is at genesis and organic deep sync is unavailable, restore
 a verified bootstrap archive before recording majority proof or publishing
-snapshots. Put the bootstrap file on the Mac under the storage root, then run:
+snapshots. Put the bootstrap file on the Mac under the SMB bootstrap staging
+path, then run:
 
 ```bash
 cd synergy-archive-validator-testnet-v2-macos-m4
@@ -96,7 +105,7 @@ archive checksum, rejects key/config material inside the bootstrap archive,
 backs up the existing workspace data, restores the bootstrap data into:
 
 ```text
-/Volumes/Synergy_Archive/archive-validator/workspace/data
+/Users/Shared/Synergy/archive-validator/workspace/data
 ```
 
 Then it restarts and kickstarts the archive node, snapshot API, and snapshot
@@ -124,7 +133,7 @@ sudo /usr/local/synergy/bin/synergy-archive record-majority-proof \
   --height <validator-common-height> \
   --hash <validator-common-hash> \
   --evidence-path <preserved-validator-monitor-evidence.json> \
-  --output "/Volumes/Synergy_Archive/archive-validator/evidence/source-majority-branch-proven.json"
+  --output "/Users/Shared/Synergy/archive-validator/evidence/source-majority-branch-proven.json"
 ```
 
 The worker then publishes verified classes at their configured cadence. For an
@@ -132,9 +141,9 @@ operator-triggered snapshot:
 
 ```bash
 sudo /usr/local/synergy/bin/synergy-archive create-snapshot \
-  --workspace "/Volumes/Synergy_Archive/archive-validator/workspace" \
+  --workspace "/Users/Shared/Synergy/archive-validator/workspace" \
   --snapshot-class validator-pruned \
-  --majority-proof-marker "/Volumes/Synergy_Archive/archive-validator/evidence/source-majority-branch-proven.json"
+  --majority-proof-marker "/Users/Shared/Synergy/archive-validator/evidence/source-majority-branch-proven.json"
 ```
 
 The publisher checks finalized QC proof, class compatibility, manifest

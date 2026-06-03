@@ -5,8 +5,10 @@ PACKAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_ROOT="${1:-/Volumes/xcode/synergy-archive-mac-acceptance-$(date -u +%Y%m%dT%H%M%SZ)}"
 BIN_ROOT="${TEST_ROOT}/usr/local/synergy/bin"
 STORAGE_VOLUME="${TEST_ROOT}/Volumes/Synergy_Archive"
-APP_ROOT="${STORAGE_VOLUME}/archive-validator"
-PUBLISH_ROOT="${APP_ROOT}/snapshots"
+SMB_ROOT="${STORAGE_VOLUME}/archive-validator"
+APP_ROOT="${TEST_ROOT}/Users/Shared/Synergy/archive-validator"
+PUBLISH_ROOT="${SMB_ROOT}/snapshots"
+INCOMING_BOOTSTRAP="${SMB_ROOT}/incoming/bootstrap"
 WORKSPACE="${APP_ROOT}/workspace"
 EVIDENCE="${APP_ROOT}/evidence/isolated-acceptance"
 FORBIDDEN_APP_REL="/Library/Application Support/Synergy/archive""-validator"
@@ -139,6 +141,7 @@ PY
   return 1
 }
 
+mkdir -p "${STORAGE_VOLUME}"
 "${PACKAGE_ROOT}/setup-archive-validator-m4.sh" \
   --test-root "${TEST_ROOT}" \
   --public-host 127.0.0.1 \
@@ -152,7 +155,13 @@ PY
 
 [[ -d "${APP_ROOT}" ]]
 [[ -d "${APP_ROOT}/tmp" ]]
-[[ -d "${APP_ROOT}/incoming/bootstrap" ]]
+[[ -d "${APP_ROOT}/workspace/data" ]]
+[[ -d "${APP_ROOT}/logs" ]]
+[[ -d "${APP_ROOT}/evidence" ]]
+[[ -f "${APP_ROOT}/config/consensus-fork-migration.json" ]]
+[[ -f "${WORKSPACE}/config/consensus-fork-migration.json" ]]
+[[ -d "${SMB_ROOT}" ]]
+[[ -d "${INCOMING_BOOTSTRAP}" ]]
 [[ -d "${PUBLISH_ROOT}/staging" ]]
 [[ -d "${PUBLISH_ROOT}/failed" ]]
 [[ -d "${PUBLISH_ROOT}/retired" ]]
@@ -164,6 +173,16 @@ if grep -R -F \
   "${TEST_ROOT}/Library/LaunchDaemons" "${APP_ROOT}" >/dev/null 2>&1
 then
   echo "isolated acceptance found forbidden archive storage path" >&2
+  exit 1
+fi
+if grep -R -F \
+  -e "${STORAGE_VOLUME}/archive-validator/workspace" \
+  -e "${STORAGE_VOLUME}/archive-validator/logs" \
+  -e "${STORAGE_VOLUME}/archive-validator/evidence" \
+  -e "${STORAGE_VOLUME}/archive-validator/tmp" \
+  "${TEST_ROOT}/Library/LaunchDaemons" "${APP_ROOT}" >/dev/null 2>&1
+then
+  echo "isolated acceptance found SMB-backed runtime storage path" >&2
   exit 1
 fi
 
@@ -251,6 +270,30 @@ SYNERGY_ARCHIVE_FIXTURE_MODE=1 "${BIN_ROOT}/aegis-pqvm" \
   --fixture-mode | tee "${EVIDENCE}/publish-snapshot.json"
 
 SNAPSHOT_DIR="${PUBLISH_ROOT}/testnet-1264/validator-pruned/snapshot-000000100"
+python3 - "${SNAPSHOT_DIR}/distribution-manifest.json" "${PUBLISH_ROOT}/catalog.json" <<'PY'
+import json
+import sys
+
+distribution_path, catalog_path = sys.argv[1:3]
+with open(distribution_path, encoding="utf-8") as handle:
+    distribution = json.load(handle)
+with open(catalog_path, encoding="utf-8") as handle:
+    catalog = json.load(handle)
+for label, value in {
+    "distribution": distribution.get("consensus_fork"),
+    "catalog": catalog.get("consensus_fork"),
+    "catalog_entry": (catalog.get("snapshots") or [{}])[0].get("consensus_fork"),
+}.items():
+    if not isinstance(value, dict):
+        raise SystemExit(f"{label} consensus_fork missing")
+    if value.get("fork_height") != 204216:
+        raise SystemExit(f"{label} fork_height mismatch: {value.get('fork_height')}")
+    if value.get("new_consensus_algorithm") != "FN-DSA":
+        raise SystemExit(f"{label} new_consensus_algorithm mismatch: {value.get('new_consensus_algorithm')}")
+    if value.get("parser_mode") != "fail_closed":
+        raise SystemExit(f"{label} parser_mode mismatch: {value.get('parser_mode')}")
+print("snapshot_consensus_fork_metadata_published_ok=true")
+PY
 "${BIN_ROOT}/synergy-archive" verify-distribution \
   --root "${APP_ROOT}" \
   --publish-root "${PUBLISH_ROOT}" \
@@ -261,6 +304,37 @@ SNAPSHOT_DIR="${PUBLISH_ROOT}/testnet-1264/validator-pruned/snapshot-000000100"
   --source-node archive-fixture \
   --target-role validator \
   --extract-root "${EVIDENCE}/receiver-valid" | tee "${EVIDENCE}/receiver-verify.json"
+MISSING_FORK_DIR="${EVIDENCE}/post-fork-missing-fork-distribution"
+mkdir -p "${MISSING_FORK_DIR}"
+python3 - "${SNAPSHOT_DIR}/distribution-manifest.json" "${MISSING_FORK_DIR}/distribution-manifest.json" <<'PY'
+import json
+import sys
+
+source, output = sys.argv[1:3]
+with open(source, encoding="utf-8") as handle:
+    value = json.load(handle)
+value["height"] = 204216
+value.pop("consensus_fork", None)
+with open(output, "w", encoding="utf-8") as handle:
+    json.dump(value, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+if "${BIN_ROOT}/synergy-archive" verify-distribution \
+  --root "${APP_ROOT}" \
+  --publish-root "${PUBLISH_ROOT}" \
+  --runtime "${BIN_ROOT}/synergy-archive-validator-node" \
+  --aegis "${BIN_ROOT}/aegis-pqvm" \
+  --input "${MISSING_FORK_DIR}" \
+  --workspace "${WORKSPACE}" \
+  --source-node archive-fixture \
+  --target-role validator \
+  --extract-root "${EVIDENCE}/receiver-missing-fork" \
+  > "${EVIDENCE}/receiver-missing-fork.out" 2> "${EVIDENCE}/receiver-missing-fork.err"
+then
+  echo "post-fork distribution missing consensus_fork was not rejected" >&2
+  exit 1
+fi
+[[ ! -e "${EVIDENCE}/receiver-missing-fork" ]]
 if "${BIN_ROOT}/synergy-archive" verify-distribution \
   --root "${APP_ROOT}" \
   --publish-root "${PUBLISH_ROOT}" \

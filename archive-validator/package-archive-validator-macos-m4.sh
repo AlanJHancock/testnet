@@ -58,6 +58,7 @@ install -m 0755 "${ROOT_DIR}/macos-m4/run-isolated-mac-acceptance.sh" "${PAYLOAD
 install -m 0644 "${ROOT_DIR}/macos-m4/launchd/"*.plist.in "${PAYLOAD}/launchd/"
 install -m 0644 "${REPO_ROOT}/templates/archive-validator.toml" "${PAYLOAD}/config/node.toml.template"
 install -m 0644 "${REPO_ROOT}/config/genesis.json" "${PAYLOAD}/config/genesis.json"
+install -m 0644 "${REPO_ROOT}/config/consensus-fork-migration.json" "${PAYLOAD}/config/consensus-fork-migration.json"
 install -m 0644 "${ROOT_DIR}/config/snapshot-policy.testnet.toml" "${PAYLOAD}/config/snapshot-policy.toml"
 install -m 0644 "${ROOT_DIR}/docs/MACOS_M4_HANDOFF.md" "${PAYLOAD}/docs/MACOS_M4_HANDOFF.md"
 
@@ -109,6 +110,10 @@ forbidden="$(find "${PAYLOAD}" \( -name '*.key' -o -name '*.pem' -o -name '*.p12
 forbidden_storage_paths="$(grep -R -F \
   -e '/Library/Application Support/Synergy/archive-validator' \
   -e '/srv/synergy-snapshots' \
+  -e '/Volumes/Synergy_Archive/archive-validator/workspace' \
+  -e '/Volumes/Synergy_Archive/archive-validator/logs' \
+  -e '/Volumes/Synergy_Archive/archive-validator/evidence' \
+  -e '/Volumes/Synergy_Archive/archive-validator/tmp' \
   "${PAYLOAD}" || true)"
 [[ -z "${forbidden_storage_paths}" ]] || {
   echo "Refusing to package forbidden archive storage paths:" >&2
@@ -123,4 +128,6 @@ clear_quarantine "${ARTIFACT}"
 (cd "${ROOT_DIR}/dist" && shasum -a 256 "$(basename "${ARTIFACT}")" > "$(basename "${ARTIFACT}").sha256")
 echo "artifact=${ARTIFACT}"
 echo "checksum=${ARTIFACT}.sha256"
-echo "storage_root=/Volumes/Synergy_Archive/archive-validator"
+echo "runtime_root=/Users/Shared/Synergy/archive-validator"
+echo "publish_root=/Volumes/Synergy_Archive/archive-validator/snapshots"
+echo "incoming_bootstrap=/Volumes/Synergy_Archive/archive-validator/incoming/bootstrap"

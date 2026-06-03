@@ -447,6 +447,8 @@ mod tests {
             "codesign --force --sign -",
             "codesign --verify",
             "synergy-archive-validator-testnet-v2-macos-m4-storage-volume.zip",
+            "config/consensus-fork-migration.json",
+            "runtime_root=/Users/Shared/Synergy/archive-validator",
         ] {
             assert!(
                 m4_package_script.contains(required),
@@ -454,17 +456,41 @@ mod tests {
             );
         }
 
+        let archive_authority =
+            std::fs::read_to_string(root.join("macos/archive-authority.py"))
+                .expect("archive authority script");
+        for required in [
+            "DEFAULT_ROOT = Path(\"/Users/Shared/Synergy/archive-validator\")",
+            "DEFAULT_PUBLISH_ROOT = Path(\"/Volumes/Synergy_Archive/archive-validator/snapshots\")",
+            "FORK_HEIGHT = 204_216",
+            "FORK_PARENT_HEIGHT = 204_215",
+            "POST_FORK_CONSENSUS_ALGORITHM = \"FN-DSA\"",
+            "latest_local_canonical_height(workspace: Path) -> int | None",
+            "\"consensus_fork\": consensus_fork",
+            "validate_consensus_fork_metadata(distribution_fork)",
+            "snapshot catalog consensus fork metadata mismatch",
+        ] {
+            assert!(
+                archive_authority.contains(required),
+                "archive authority must contain {required}"
+            );
+        }
+
         let m4_setup = std::fs::read_to_string(root.join("macos-m4/setup-archive-validator-m4.sh"))
             .expect("m4 setup script");
         for required in [
             "STORAGE_VOLUME_REL=\"/Volumes/Synergy_Archive\"",
-            "STORAGE_ROOT_REL=\"${STORAGE_VOLUME_REL}/archive-validator\"",
+            "LOCAL_ROOT_REL=\"/Users/Shared/Synergy/archive-validator\"",
+            "PUBLISH_ROOT_REL=\"${SMB_ROOT_REL}/snapshots\"",
+            "INCOMING_BOOTSTRAP_REL=\"${SMB_ROOT_REL}/incoming/bootstrap\"",
             "xattr -dr com.apple.quarantine",
             "codesign --force --sign -",
             "launchctl kickstart -k",
             "wait_for_tcp 127.0.0.1 5622 archive_p2p",
             "wait_for_qrpc_latest_block 5640",
             "required archive storage volume is not mounted",
+            "archive storage volume missing in test root",
+            "consensus-fork-migration.json",
         ] {
             assert!(
                 m4_setup.contains(required),
@@ -476,11 +502,15 @@ mod tests {
             std::fs::read_to_string(root.join("macos-m4/verify-archive-validator-m4.sh"))
                 .expect("m4 verify script");
         for required in [
+            "LOCAL_ROOT_REL=\"/Users/Shared/Synergy/archive-validator\"",
+            "PUBLISH_ROOT_REL=\"${SMB_ROOT_REL}/snapshots\"",
+            "INCOMING_BOOTSTRAP_REL=\"${SMB_ROOT_REL}/incoming/bootstrap\"",
             "assert_no_quarantine",
             "assert_codesign_valid",
             "assert_launchd_running",
             "wait_for_tcp 127.0.0.1",
             "wait_for_qrpc_latest_block",
+            "archive fork metadata missing",
             "archive_validator_verify_ok=true",
         ] {
             assert!(
@@ -493,6 +523,9 @@ mod tests {
             std::fs::read_to_string(root.join("macos-m4/restore-archive-bootstrap-m4.sh"))
                 .expect("m4 restore script");
         for required in [
+            "LOCAL_ROOT_REL=\"/Users/Shared/Synergy/archive-validator\"",
+            "INCOMING_BOOTSTRAP_REL=\"${SMB_ROOT_REL}/incoming/bootstrap\"",
+            "archive storage volume missing in test root",
             "launchctl kickstart -k",
             "wait_for_qrpc_latest_block",
             "io.synergynetwork.archive-snapshot-api",
@@ -508,11 +541,16 @@ mod tests {
             std::fs::read_to_string(root.join("macos-m4/run-isolated-mac-acceptance.sh"))
                 .expect("m4 acceptance script");
         for required in [
+            "APP_ROOT=\"${TEST_ROOT}/Users/Shared/Synergy/archive-validator\"",
+            "INCOMING_BOOTSTRAP=\"${SMB_ROOT}/incoming/bootstrap\"",
+            "mkdir -p \"${STORAGE_VOLUME}\"",
             "start_plist_service",
             "ProgramArguments",
             "wait_for_tcp 127.0.0.1 45622 archive_p2p",
             "wait_for_tcp 127.0.0.1 48641 snapshot_api",
             "wait_for_tcp 127.0.0.1 46030 archive_metrics",
+            "snapshot_consensus_fork_metadata_published_ok=true",
+            "post-fork distribution missing consensus_fork was not rejected",
             "snapshot_worker_pending_majority_proof_ok=true",
         ] {
             assert!(

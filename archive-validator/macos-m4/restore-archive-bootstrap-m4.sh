@@ -7,7 +7,9 @@ TEST_ROOT=""
 YES="false"
 SERVICE_TIMEOUT_SECS="${ARCHIVE_VALIDATOR_RESTORE_TIMEOUT_SECS:-180}"
 STORAGE_VOLUME_REL="/Volumes/Synergy_Archive"
-STORAGE_ROOT_REL="${STORAGE_VOLUME_REL}/archive-validator"
+LOCAL_ROOT_REL="/Users/Shared/Synergy/archive-validator"
+SMB_ROOT_REL="${STORAGE_VOLUME_REL}/archive-validator"
+INCOMING_BOOTSTRAP_REL="${SMB_ROOT_REL}/incoming/bootstrap"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -38,7 +40,10 @@ prefix_path() {
 
 STORAGE_VOLUME="$(prefix_path "${STORAGE_VOLUME_REL}")"
 if [[ -n "${TEST_ROOT}" ]]; then
-  mkdir -p "${STORAGE_VOLUME}"
+  [[ -d "${STORAGE_VOLUME}" ]] || {
+    echo "archive storage volume missing in test root: ${STORAGE_VOLUME}" >&2
+    exit 1
+  }
 else
   [[ -d "${STORAGE_VOLUME}" ]] || {
     echo "required archive storage volume is not mounted: ${STORAGE_VOLUME}" >&2
@@ -51,11 +56,13 @@ else
   [[ "$(id -u)" == "0" ]] || { echo "Run production restore with sudo." >&2; exit 1; }
 fi
 
-APP_ROOT="$(prefix_path "${STORAGE_ROOT_REL}")"
+APP_ROOT="$(prefix_path "${LOCAL_ROOT_REL}")"
 WORKSPACE="${APP_ROOT}/workspace"
 DATA_DIR="${WORKSPACE}/data"
 BACKUP_ROOT="${APP_ROOT}/backups"
 LOG_ROOT="${APP_ROOT}/logs"
+SMB_ROOT="$(prefix_path "${SMB_ROOT_REL}")"
+INCOMING_BOOTSTRAP="$(prefix_path "${INCOMING_BOOTSTRAP_REL}")"
 LAUNCHD_ROOT="$(prefix_path /Library/LaunchDaemons)"
 MANAGE_LAUNCHD="true"
 if [[ -n "${TEST_ROOT}" || "${SKIP_LAUNCHD_STOP:-false}" == "true" ]]; then
@@ -167,14 +174,24 @@ PY
   return 1
 }
 
-install_dir 0750 "${APP_ROOT}" "${APP_ROOT}/tmp" "${APP_ROOT}/incoming/bootstrap"
+if [[ -z "${TEST_ROOT}" ]]; then
+  case "${APP_ROOT}" in
+    /Volumes/*)
+      echo "runtime root must be local storage, not an SMB/network volume: ${APP_ROOT}" >&2
+      exit 1
+      ;;
+  esac
+fi
+
+install_dir 0750 "${APP_ROOT}" "${APP_ROOT}/tmp" "${SMB_ROOT}" "${INCOMING_BOOTSTRAP}"
 app_root_real="$(cd "${APP_ROOT}" && pwd -P)"
+bootstrap_root_real="$(cd "${INCOMING_BOOTSTRAP}" && pwd -P)"
 snapshot_dir="$(cd "$(dirname "${SNAPSHOT}")" && pwd -P)"
 snapshot_real="${snapshot_dir}/$(basename "${SNAPSHOT}")"
 case "${snapshot_real}" in
-  "${app_root_real}"/*) ;;
+  "${bootstrap_root_real}"/*) ;;
   *)
-    echo "--snapshot must be staged under ${APP_ROOT}, preferably ${APP_ROOT}/incoming/bootstrap" >&2
+    echo "--snapshot must be staged under ${INCOMING_BOOTSTRAP}" >&2
     exit 1
     ;;
 esac
@@ -254,6 +271,8 @@ fi
 
 echo "archive_bootstrap_restore_ok=true"
 echo "snapshot_sha256=${actual_sha}"
+echo "runtime_root=${APP_ROOT}"
+echo "incoming_bootstrap=${INCOMING_BOOTSTRAP}"
 echo "data_dir=${DATA_DIR}"
 echo "backup_root=${BACKUP_ROOT}"
 echo "next_action=wait for archive qRPC to catch up, then preserve height/hash parity evidence before majority proof or snapshot publication"

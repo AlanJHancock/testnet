@@ -11,7 +11,10 @@ WS_PORT="5660"
 METRICS_PORT="6030"
 SNAPSHOT_API_BIND="0.0.0.0:48640"
 STORAGE_VOLUME_REL="/Volumes/Synergy_Archive"
-STORAGE_ROOT_REL="${STORAGE_VOLUME_REL}/archive-validator"
+LOCAL_ROOT_REL="/Users/Shared/Synergy/archive-validator"
+SMB_ROOT_REL="${STORAGE_VOLUME_REL}/archive-validator"
+PUBLISH_ROOT_REL="${SMB_ROOT_REL}/snapshots"
+INCOMING_BOOTSTRAP_REL="${SMB_ROOT_REL}/incoming/bootstrap"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --test-root) TEST_ROOT="$2"; shift 2 ;;
@@ -190,8 +193,10 @@ fi
 
 BIN_ROOT="$(prefix_path /usr/local/synergy/bin)"
 SHARE_ROOT="$(prefix_path /usr/local/synergy/share/archive-validator)"
-APP_ROOT="$(prefix_path "${STORAGE_ROOT_REL}")"
-PUBLISH_ROOT="${APP_ROOT}/snapshots"
+APP_ROOT="$(prefix_path "${LOCAL_ROOT_REL}")"
+SMB_ROOT="$(prefix_path "${SMB_ROOT_REL}")"
+PUBLISH_ROOT="$(prefix_path "${PUBLISH_ROOT_REL}")"
+INCOMING_BOOTSTRAP="$(prefix_path "${INCOMING_BOOTSTRAP_REL}")"
 LAUNCHD_ROOT="$(prefix_path /Library/LaunchDaemons)"
 PATH="${BIN_ROOT}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 export PATH
@@ -199,8 +204,52 @@ FORBIDDEN_APP_ROOT="$(prefix_path "/Library/Application Support/Synergy/archive"
 FORBIDDEN_PUBLISH_ROOT="$(prefix_path "/srv/synergy""-snapshots")"
 
 [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]
-[[ -d "${APP_ROOT}" ]] || { echo "archive storage root missing: ${APP_ROOT}" >&2; exit 1; }
+if [[ -z "${TEST_ROOT}" ]]; then
+  case "${APP_ROOT}" in
+    /Volumes/*)
+      echo "runtime root must be local storage, not an SMB/network volume: ${APP_ROOT}" >&2
+      exit 1
+      ;;
+  esac
+fi
+[[ -d "${APP_ROOT}" ]] || { echo "archive runtime root missing: ${APP_ROOT}" >&2; exit 1; }
+[[ -d "${APP_ROOT}/workspace/data" ]] || { echo "archive workspace data root missing: ${APP_ROOT}/workspace/data" >&2; exit 1; }
+[[ -d "${APP_ROOT}/logs" ]] || { echo "archive log root missing: ${APP_ROOT}/logs" >&2; exit 1; }
+[[ -d "${APP_ROOT}/tmp" ]] || { echo "archive tmp root missing: ${APP_ROOT}/tmp" >&2; exit 1; }
+[[ -d "${APP_ROOT}/evidence" ]] || { echo "archive evidence root missing: ${APP_ROOT}/evidence" >&2; exit 1; }
+[[ -f "${APP_ROOT}/config/consensus-fork-migration.json" ]] || { echo "archive fork metadata missing: ${APP_ROOT}/config/consensus-fork-migration.json" >&2; exit 1; }
+[[ -f "${APP_ROOT}/workspace/config/consensus-fork-migration.json" ]] || { echo "runtime fork metadata missing: ${APP_ROOT}/workspace/config/consensus-fork-migration.json" >&2; exit 1; }
+python3 - "${APP_ROOT}/config/consensus-fork-migration.json" "${APP_ROOT}/workspace/config/consensus-fork-migration.json" <<'PY'
+import base64
+import json
+import sys
+
+expected_parent = "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816"
+for path in sys.argv[1:]:
+    with open(path, encoding="utf-8") as handle:
+        value = json.load(handle)
+    checks = {
+        "fork_height": value.get("fork_height") == 204216,
+        "parent_height": value.get("parent_height") == 204215,
+        "parent_hash": value.get("parent_hash") == expected_parent,
+        "new_consensus_algorithm": value.get("new_consensus_algorithm") == "FN-DSA",
+        "parser_mode": value.get("parser_mode") == "fail_closed",
+    }
+    registry = value.get("new_validator_registry") or []
+    checks["validator_count"] = len(registry) == 5
+    checks["all_validator_keys_fndsa"] = all(
+        item.get("consensus_key_type") == "FN-DSA"
+        and len(base64.b64decode(item.get("consensus_public_key", ""), validate=True)) == 1793
+        for item in registry
+    )
+    failed = [name for name, ok in checks.items() if not ok]
+    if failed:
+        raise SystemExit(f"invalid archive consensus fork metadata {path}: {failed}")
+print("archive_consensus_fork_metadata_ok=true")
+PY
+[[ -d "${SMB_ROOT}" ]] || { echo "archive SMB root missing: ${SMB_ROOT}" >&2; exit 1; }
 [[ -d "${PUBLISH_ROOT}" ]] || { echo "archive snapshot root missing: ${PUBLISH_ROOT}" >&2; exit 1; }
+[[ -d "${INCOMING_BOOTSTRAP}" ]] || { echo "archive bootstrap staging root missing: ${INCOMING_BOOTSTRAP}" >&2; exit 1; }
 [[ ! -e "${FORBIDDEN_APP_ROOT}" ]] || {
   echo "forbidden archive storage path exists: ${FORBIDDEN_APP_ROOT}" >&2
   exit 1
