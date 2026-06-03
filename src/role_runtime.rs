@@ -18,7 +18,6 @@ use crate::consensus::dual_quorum::{EntropyBeacon, ValidatorRotation};
 use crate::consensus::self_realign::EXPECTED_GENESIS_HASH;
 use crate::consensus::synergy_score::SynergyScoreCalculator;
 use crate::consensus::validator_keys::load_local_validator_keypair;
-use crate::crypto::aegis_pqvm::AegisPqvmSigner;
 use crate::crypto::pqc::PQCManager;
 use crate::genesis::canonical_genesis;
 use crate::logging::{init_logger, LogLevel};
@@ -735,9 +734,6 @@ fn ensure_consensus_pqc_runtime_ready(config: &NodeConfig) -> Result<(), String>
     if config.consensus.allow_genesis_status_bypass {
         return Err("validator consensus refuses genesis status bypass configuration".to_string());
     }
-    AegisPqvmSigner::initialize_required()
-        .map(|_| ())
-        .map_err(|error| format!("aegis-pqvm initialization failed: {error}"))?;
     ensure_local_validator_consensus_key_bound(config)
 }
 
