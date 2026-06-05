@@ -1,0 +1,16 @@
+{
+  "tag": "v13.0.68",
+  "commit": "4024a17eee461425409c6b9664904fb8afa68b3e",
+  "reason": "post-fork validator-pruned snapshot creation must use consensus-fork-migration FN-DSA registry instead of legacy untyped active registry",
+  "blocked_error_before_fix": "create-snapshot failed closed: validator synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re consensus key algorithm is invalid: missing consensus key algorithm prefix; expected fn-dsa:<base64>, falcon:<base64>, or ml-dsa:<base64>",
+  "tests": [
+    "cargo test post_fork_snapshot_active_set_uses_consensus_fork_registry -- --nocapture",
+    "cargo test consensus_fork -- --nocapture",
+    "cargo test snapshot -- --nocapture"
+  ],
+  "test_results": {
+    "post_fork_snapshot_active_set_uses_consensus_fork_registry": "pass",
+    "consensus_fork_filter": "pass",
+    "snapshot_filter": "pass: 49 snapshot/recovery tests"
+  }
+}

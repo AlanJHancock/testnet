@@ -1,0 +1,19 @@
+role=Val1
+synergy_getTransactionReceipt_begin
+{"error":{"code":-32700,"message":"Malformed JSON in body"},"id":null,"jsonrpc":"2.0"}
+synergy_getTransactionReceipt_end
+synergy_getTransactionByHash_begin
+{"error":{"code":-32700,"message":"Malformed JSON in body"},"id":null,"jsonrpc":"2.0"}
+synergy_getTransactionByHash_end
+synergy_getTransactionStatus_begin
+{"error":{"code":-32700,"message":"Malformed JSON in body"},"id":null,"jsonrpc":"2.0"}
+synergy_getTransactionStatus_end
+pending_begin
+{"id":1,"jsonrpc":"2.0","result":[]}
+pending_end
+fixed_block_begin
+{"error":{"code":-32700,"message":"Malformed JSON in body"},"id":null,"jsonrpc":"2.0"}
+fixed_block_end
+
+STDERR:
+Warning: Permanently added '62.146.182.207' (ED25519) to the list of known hosts.

@@ -1,0 +1,18 @@
+{
+  "http_status": 200,
+  "json": {
+    "error": {
+      "code": -32000,
+      "data": {
+        "error": "Transaction failed runtime validation: duplicate nonce; nonce 4 is already pending",
+        "mempool_status": "rejected",
+        "policy_warnings": [],
+        "pruned_count": 0,
+        "tx_hash": "syntxn-83b2afcf2f7df71519fc5224fa3e7d832ea117537af906794406aabf726042b0"
+      },
+      "message": "Transaction failed runtime validation: duplicate nonce; nonce 4 is already pending"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "http_status": 200,
+  "json": {
+    "error": {
+      "code": -32000,
+      "data": {
+        "error": "Transaction failed runtime validation: future nonce gap; expected 5, got 105",
+        "mempool_status": "rejected",
+        "policy_warnings": [],
+        "pruned_count": 0,
+        "tx_hash": "syntxn-e9c904d9cecf40e1b904073cbbefe644c41969e35447ecfd58f668c76d592816"
+      },
+      "message": "Transaction failed runtime validation: future nonce gap; expected 5, got 105"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}

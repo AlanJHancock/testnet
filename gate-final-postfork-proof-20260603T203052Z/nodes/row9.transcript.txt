@@ -1,0 +1,207 @@
+role=row9-Gateway
+hostname=ubuntu
+workspace=/opt/synergy/Node-RPC
+service=genesisrpc.service
+active
+MainPID=2644124
+ActiveState=active
+SubState=running
+FragmentPath=/etc/systemd/system/genesisrpc.service
+binary_path=/opt/synergy/Node-RPC/bin/synergy-rpc-gateway-node-linux-amd64
+658febcbd4a0883718173ba5bff65d5cd006598e4604f0ee70a9b35c673898d3  /opt/synergy/Node-RPC/bin/synergy-rpc-gateway-node-linux-amd64
+processes_begin
+pid=2644124 owner=root deleted_inode=false exe=/opt/synergy/Node-RPC/bin/synergy-rpc-gateway-node-linux-amd64 cmd=/opt/synergy/Node-RPC/bin/synergy-rpc-gateway-node-linux-amd64start--config/opt/synergy/Node-RPC/config/node.toml
+processes_end
+listeners_begin
+LISTEN 0      128        127.0.0.1:6031      0.0.0.0:*    users:(("synergy-rpc-gat",pid=2644124,fd=11))                                                                                                                                                                                                             
+LISTEN 0      128          0.0.0.0:5623      0.0.0.0:*    users:(("synergy-rpc-gat",pid=2644124,fd=3))                                                                                                                                                                                                              
+LISTEN 0      128          0.0.0.0:5661      0.0.0.0:*    users:(("synergy-rpc-gat",pid=2644124,fd=9))                                                                                                                                                                                                              
+LISTEN 0      128          0.0.0.0:5641      0.0.0.0:*    users:(("synergy-rpc-gat",pid=2644124,fd=7))                                                                                                                                                                                                              
+listeners_end
+connections_begin
+close_wait=0
+established_service=0
+connections_end
+rpc_synergy_getLatestBlock_begin
+{"id":1,"jsonrpc":"2.0","result":{"block_index":205950,"hash":"7112a9d8bc41ae87abc2cf8afe5ce2b52c574c11a94fb720a20daa9e0038cdb8","nonce":205950,"parent_hash":"fbf4bb11363c550710ef8d0901fc011cadda6c72b4f85c955a4d01455487b50c","previous_hash":"fbf4bb11363c550710ef8d0901fc011cadda6c72b4f85c955a4d01455487b50c","timestamp":1780519654,"transactions":[],"tx_count":0,"validator":"synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re","validator_id":"synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re"}}
+rpc_synergy_getLatestBlock_end
+rpc_synergy_getConsensusForkStatus_begin
+{"id":1,"jsonrpc":"2.0","result":{"fork_configured":true,"fork_height":204216,"fork_parent_hash":"e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816","fork_parent_height":204215,"new_consensus_algorithm":"FN-DSA","old_consensus_algorithm":"ML-DSA-65","parser_mode":"fail_closed","state_root":"checkpoint-v1:chain_json_sha256=04a660f0ea4bff004412326d8ce1185dbb1e6870fb0e02cb359b776a1b1e989d;committed_blocks_jsonl_sha256=a214da21afc2191fcc087569fe73500cb97c384119e749e2bf8093ecddb9f381;canonical_locks_json_sha256=577a3347522b8e81527f27b34212ce441d04d7c5d89f3b8c943df09b3085b49a;committed_qcs_jsonl_sha256=86e113856705cd987140fdf5783169c20ab28f5efc103b92810493857bcb593d;verified_on=Val2,Val4","validator_count":5,"validators":[{"consensus_key_type":"FN-DSA","consensus_public_key_bytes":1793,"validator_address":"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"},{"consensus_key_type":"FN-DSA","consensus_public_key_bytes":1793,"validator_address":"synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt"},{"consensus_key_type":"FN-DSA","consensus_public_key_bytes":1793,"validator_address":"synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re"},{"consensus_key_type":"FN-DSA","consensus_public_key_bytes":1793,"validator_address":"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"},{"consensus_key_type":"FN-DSA","consensus_public_key_bytes":1793,"validator_address":"synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f"}]}}
+rpc_synergy_getConsensusForkStatus_end
+rpc_synergy_getPendingTransactions_begin
+{"id":1,"jsonrpc":"2.0","result":[]}
+rpc_synergy_getPendingTransactions_end
+rpc_block_204215_begin
+{"id":1,"jsonrpc":"2.0","result":{"block_index":204215,"hash":"e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816","nonce":204215,"parent_hash":"d104b4a20a1ca529b6508a574e5c4af4387e10b7aaa0922c0736a61991f09f5c","previous_hash":"d104b4a20a1ca529b6508a574e5c4af4387e10b7aaa0922c0736a61991f09f5c","timestamp":1780481254,"transactions":[],"tx_count":0,"validator":"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs","validator_id":"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"}}
+rpc_block_204215_end
+rpc_block_204216_begin
+{"id":1,"jsonrpc":"2.0","result":{"block_index":204216,"hash":"a9388eb033ec11633a3bb68fd0d04c9b708e580959a9ab15b0387e03849c1e04","nonce":204216,"parent_hash":"e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816","previous_hash":"e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816","timestamp":1780506049,"transactions":[],"tx_count":0,"validator":"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5","validator_id":"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"}}
+rpc_block_204216_end
+rpc_block_205752_begin
+{"id":1,"jsonrpc":"2.0","result":{"block_index":205752,"hash":"a87b7b53e6b3b45ebda48da31a3dafd9f99fe4febf23ceee43bb0130e20441ba","nonce":205752,"parent_hash":"f1d6f370d5ae171a37f4565dee61e6ed08fcffa8e3ee9a70ef826d6d03f64001","previous_hash":"f1d6f370d5ae171a37f4565dee61e6ed08fcffa8e3ee9a70ef826d6d03f64001","timestamp":1780518703,"transactions":[],"tx_count":0,"validator":"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5","validator_id":"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"}}
+rpc_block_205752_end
+role=row9-Explorer
+hostname=ubuntu
+workspace=/opt/synergy/Node-EXP
+service=synergy-node-exp.service
+active
+MainPID=2668513
+ActiveState=active
+SubState=running
+FragmentPath=/etc/systemd/system/synergy-node-exp.service
+binary_path=/opt/synergy/Node-EXP/bin/synergy-testnet-linux-amd64
+0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3  /opt/synergy/Node-EXP/bin/synergy-testnet-linux-amd64
+processes_begin
+pid=2668513 owner=root deleted_inode=false exe=/opt/synergy/Node-EXP/bin/synergy-testnet-linux-amd64 cmd=/opt/synergy/Node-EXP/bin/synergy-testnet-linux-amd64start--config/opt/synergy/Node-EXP/config/node.toml
+processes_end
+listeners_begin
+LISTEN 0      128        127.0.0.1:6030      0.0.0.0:*    users:(("synergy-testnet",pid=2668513,fd=16))                                                                                                                                                                                                             
+LISTEN 0      128          0.0.0.0:5622      0.0.0.0:*    users:(("synergy-testnet",pid=2668513,fd=4))                                                                                                                                                                                                              
+LISTEN 0      128          0.0.0.0:5660      0.0.0.0:*    users:(("synergy-testnet",pid=2668513,fd=7))                                                                                                                                                                                                              
+LISTEN 0      128          0.0.0.0:5640      0.0.0.0:*    users:(("synergy-testnet",pid=2668513,fd=5))                                                                                                                                                                                                              
+listeners_end
+connections_begin
+close_wait=0
+established_service=2
+connections_end
+rpc_synergy_getLatestBlock_begin
+{"id":1,"jsonrpc":"2.0","result":{"block_index":205954,"hash":"78a74913b8e6644fe0c22ceaf1957aa217d67bcc15c32d23c6fa9eb179a2b2cb","nonce":205954,"parent_hash":"4281d120e9f4a2544d615bfe96329fabea1bb64090434522b84fb8ef63fb8908","previous_hash":"4281d120e9f4a2544d615bfe96329fabea1bb64090434522b84fb8ef63fb8908","timestamp":1780519671,"transactions":[],"tx_count":0,"validator":"synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re","validator_id":"synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re"}}
+rpc_synergy_getLatestBlock_end
+rpc_synergy_getConsensusForkStatus_begin
+{"id":1,"jsonrpc":"2.0","result":{"fork_configured":true,"fork_height":204216,"fork_parent_hash":"e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816","fork_parent_height":204215,"new_consensus_algorithm":"FN-DSA","old_consensus_algorithm":"ML-DSA-65","parser_mode":"fail_closed","state_root":"checkpoint-v1:chain_json_sha256=04a660f0ea4bff004412326d8ce1185dbb1e6870fb0e02cb359b776a1b1e989d;committed_blocks_jsonl_sha256=a214da21afc2191fcc087569fe73500cb97c384119e749e2bf8093ecddb9f381;canonical_locks_json_sha256=577a3347522b8e81527f27b34212ce441d04d7c5d89f3b8c943df09b3085b49a;committed_qcs_jsonl_sha256=86e113856705cd987140fdf5783169c20ab28f5efc103b92810493857bcb593d;verified_on=Val2,Val4","validator_count":5,"validators":[{"consensus_key_type":"FN-DSA","consensus_public_key_bytes":1793,"validator_address":"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"},{"consensus_key_type":"FN-DSA","consensus_public_key_bytes":1793,"validator_address":"synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt"},{"consensus_key_type":"FN-DSA","consensus_public_key_bytes":1793,"validator_address":"synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re"},{"consensus_key_type":"FN-DSA","consensus_public_key_bytes":1793,"validator_address":"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"},{"consensus_key_type":"FN-DSA","consensus_public_key_bytes":1793,"validator_address":"synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f"}]}}
+rpc_synergy_getConsensusForkStatus_end
+rpc_synergy_getPendingTransactions_begin
+{"id":1,"jsonrpc":"2.0","result":[]}
+rpc_synergy_getPendingTransactions_end
+rpc_block_204215_begin
+{"id":1,"jsonrpc":"2.0","result":{"block_index":204215,"hash":"e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816","nonce":204215,"parent_hash":"d104b4a20a1ca529b6508a574e5c4af4387e10b7aaa0922c0736a61991f09f5c","previous_hash":"d104b4a20a1ca529b6508a574e5c4af4387e10b7aaa0922c0736a61991f09f5c","timestamp":1780481254,"transactions":[],"tx_count":0,"validator":"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs","validator_id":"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"}}
+rpc_block_204215_end
+rpc_block_204216_begin
+{"id":1,"jsonrpc":"2.0","result":{"block_index":204216,"hash":"a9388eb033ec11633a3bb68fd0d04c9b708e580959a9ab15b0387e03849c1e04","nonce":204216,"parent_hash":"e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816","previous_hash":"e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816","timestamp":1780506049,"transactions":[],"tx_count":0,"validator":"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5","validator_id":"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"}}
+rpc_block_204216_end
+rpc_block_205752_begin
+{"id":1,"jsonrpc":"2.0","result":{"block_index":205752,"hash":"a87b7b53e6b3b45ebda48da31a3dafd9f99fe4febf23ceee43bb0130e20441ba","nonce":205752,"parent_hash":"f1d6f370d5ae171a37f4565dee61e6ed08fcffa8e3ee9a70ef826d6d03f64001","previous_hash":"f1d6f370d5ae171a37f4565dee61e6ed08fcffa8e3ee9a70ef826d6d03f64001","timestamp":1780518703,"transactions":[],"tx_count":0,"validator":"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5","validator_id":"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"}}
+rpc_block_205752_end
+service_active_begin
+active
+active
+active
+active
+service_active_end
+
+STDERR:
+Warning: Permanently added '74.208.227.23' (ED25519) to the list of known hosts.
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input
+bash: line 22: warning: command substitution: ignored null byte in input

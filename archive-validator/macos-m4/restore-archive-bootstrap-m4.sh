@@ -3,8 +3,10 @@ set -euo pipefail
 
 SNAPSHOT=""
 EXPECTED_SHA256=""
+BOOTSTRAP_MANIFEST=""
 TEST_ROOT=""
 YES="false"
+ALLOW_VALIDATOR_PRUNED_BOOTSTRAP="false"
 SERVICE_TIMEOUT_SECS="${ARCHIVE_VALIDATOR_RESTORE_TIMEOUT_SECS:-180}"
 STORAGE_VOLUME_REL="/Volumes/Synergy_Archive"
 LOCAL_ROOT_REL="/Users/Shared/Synergy/archive-validator"
@@ -15,8 +17,10 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --snapshot) SNAPSHOT="$2"; shift 2 ;;
     --sha256) EXPECTED_SHA256="$2"; shift 2 ;;
+    --manifest) BOOTSTRAP_MANIFEST="$2"; shift 2 ;;
     --test-root) TEST_ROOT="$2"; shift 2 ;;
     --service-timeout) SERVICE_TIMEOUT_SECS="$2"; shift 2 ;;
+    --allow-validator-pruned-bootstrap) ALLOW_VALIDATOR_PRUNED_BOOTSTRAP="true"; shift ;;
     --yes) YES="true"; shift ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -174,6 +178,182 @@ PY
   return 1
 }
 
+validate_bootstrap_payload() {
+  local extract_root="$1"
+  local restore_source="$2"
+  local report="$3"
+  install_dir 0750 "${APP_ROOT}/evidence"
+  python3 - \
+    "${extract_root}" \
+    "${restore_source}" \
+    "${BOOTSTRAP_MANIFEST}" \
+    "${ALLOW_VALIDATOR_PRUNED_BOOTSTRAP}" \
+    "${report}" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+extract_root = Path(sys.argv[1])
+restore_source = Path(sys.argv[2])
+explicit_manifest = sys.argv[3].strip()
+allow_validator_pruned = sys.argv[4] == "true"
+report_path = Path(sys.argv[5])
+
+EXPECTED = {
+    "chain_id": 1264,
+    "network_id": "synergy-testnet-v2",
+    "fork_height": 204216,
+    "fork_parent_height": 204215,
+    "fork_parent_hash": "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816",
+    "consensus_algorithm": "FN-DSA",
+    "parser_mode": "fail_closed",
+}
+REQUIRED_DATA = {
+    "chain.json",
+    "canonical_locks.json",
+    "committed_qcs.json",
+    "committed_qcs.jsonl",
+    "dag_state.json",
+    "validator_registry.json",
+    "token_state.json",
+}
+OPTIONAL_DATA = {
+    "account_state.json",
+    "state_checkpoint.json",
+    "committed_blocks.jsonl",
+    "canonical_locks.jsonl",
+}
+
+
+def fail(message, **extra):
+    payload = {"ok": False, "error": message, **extra}
+    report_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    raise SystemExit(message)
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def normalize_class(value):
+    value = (value or "").strip().lower().replace("_", "-")
+    if value == "archive-validator-bootstrap":
+        return "archive-bootstrap"
+    return value
+
+
+def load_json(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        fail(f"unable to parse bootstrap manifest {path}: {exc}")
+
+
+manifest_candidates = []
+if explicit_manifest:
+    manifest_candidates.append(Path(explicit_manifest))
+manifest_candidates.extend([
+    extract_root / "metadata" / "archive-bootstrap-manifest.json",
+    extract_root / "archive-bootstrap-manifest.json",
+])
+manifest_candidates.extend(sorted(extract_root.glob("**/snapshot-*-manifest.json")))
+manifest_path = next((path for path in manifest_candidates if path.is_file()), None)
+if manifest_path is None:
+    fail("bootstrap artifact has no archive bootstrap or signed snapshot manifest")
+
+raw = load_json(manifest_path)
+signed_manifest = raw.get("manifest") if isinstance(raw, dict) else None
+manifest = signed_manifest if isinstance(signed_manifest, dict) else raw
+artifact_class = normalize_class(
+    manifest.get("artifact_class") or manifest.get("snapshot_class") or raw.get("artifact_class")
+)
+
+if artifact_class == "validator-pruned" and not allow_validator_pruned:
+    fail("validator-pruned bootstrap is rejected for Archive Validator restore")
+if artifact_class not in {"archive-full", "archive-bootstrap"}:
+    fail(f"unsupported Archive Validator bootstrap class: {artifact_class}")
+
+chain_id = manifest.get("chain_id")
+network_id = manifest.get("network_id")
+if chain_id != EXPECTED["chain_id"]:
+    fail(f"bootstrap chain_id mismatch: {chain_id}")
+if network_id != EXPECTED["network_id"]:
+    fail(f"bootstrap network_id mismatch: {network_id}")
+
+fork = manifest.get("consensus_fork") if isinstance(manifest.get("consensus_fork"), dict) else manifest
+fork_height = fork.get("fork_height")
+parent_height = fork.get("parent_height") or fork.get("fork_parent_height")
+parent_hash = fork.get("parent_hash") or fork.get("fork_parent_hash")
+new_algorithm = fork.get("new_consensus_algorithm") or manifest.get("consensus_algorithm")
+parser_mode = fork.get("parser_mode") or manifest.get("parser_mode")
+if fork_height != EXPECTED["fork_height"]:
+    fail(f"bootstrap fork_height mismatch: {fork_height}")
+if parent_height != EXPECTED["fork_parent_height"]:
+    fail(f"bootstrap fork parent height mismatch: {parent_height}")
+if parent_hash != EXPECTED["fork_parent_hash"]:
+    fail(f"bootstrap fork parent hash mismatch: {parent_hash}")
+if new_algorithm != EXPECTED["consensus_algorithm"]:
+    fail(f"bootstrap consensus algorithm mismatch: {new_algorithm}")
+if parser_mode != EXPECTED["parser_mode"]:
+    fail(f"bootstrap parser mode mismatch: {parser_mode}")
+
+if artifact_class == "archive-bootstrap":
+    if manifest.get("historical_archive_complete_from_genesis") is not False:
+        fail("archive-bootstrap must declare historical_archive_complete_from_genesis=false")
+
+for name in REQUIRED_DATA:
+    if not (restore_source / name).is_file():
+        fail(f"bootstrap missing required state file: {name}")
+
+file_entries = manifest.get("files") if isinstance(manifest.get("files"), list) else []
+verified_files = []
+for entry in file_entries:
+    rel = entry.get("relative_path") or entry.get("path")
+    expected = entry.get("sha256")
+    if not rel or not expected:
+        continue
+    rel_path = Path(rel)
+    if rel_path.is_absolute() or ".." in rel_path.parts:
+        fail(f"bootstrap manifest has unsafe file path: {rel}")
+    candidates = [extract_root / rel_path, restore_source / rel_path.name]
+    path = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if path is None:
+        fail(f"bootstrap manifest file is missing: {rel}")
+    actual = sha256(path)
+    if actual != expected:
+        fail(f"bootstrap manifest checksum mismatch for {rel}", actual=actual, expected=expected)
+    verified_files.append(rel)
+
+payload = {
+    "ok": True,
+    "artifact_class": artifact_class,
+    "target_role": "archive_validator",
+    "manifest_path": str(manifest_path),
+    "chain_id": chain_id,
+    "network_id": network_id,
+    "height": manifest.get("height") or manifest.get("snapshot_height"),
+    "hash": manifest.get("hash") or manifest.get("snapshot_block_hash"),
+    "fork_height": fork_height,
+    "fork_parent_height": parent_height,
+    "fork_parent_hash": parent_hash,
+    "consensus_algorithm": new_algorithm,
+    "parser_mode": parser_mode,
+    "historical_archive_complete_from_genesis": bool(
+        manifest.get("historical_archive_complete_from_genesis")
+    ),
+    "required_data_files": sorted(REQUIRED_DATA),
+    "optional_data_files_present": sorted(name for name in OPTIONAL_DATA if (restore_source / name).is_file()),
+    "verified_manifest_files": verified_files,
+}
+report_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
 if [[ -z "${TEST_ROOT}" ]]; then
   case "${APP_ROOT}" in
     /Volumes/*)
@@ -235,6 +415,9 @@ else
   RESTORE_SOURCE="${extract_root}"
 fi
 
+bootstrap_validation_report="${APP_ROOT}/evidence/archive-bootstrap-restore-validation.json"
+validate_bootstrap_payload "${extract_root}" "${RESTORE_SOURCE}" "${bootstrap_validation_report}"
+
 for forbidden in keys key.pem private.pem node.env .env genesis.json config.toml node.toml; do
   if find "${RESTORE_SOURCE}" -iname "${forbidden}" -type f | grep -q .; then
     echo "bootstrap snapshot contains forbidden key/config material: ${forbidden}" >&2
@@ -264,6 +447,10 @@ if [[ -z "${TEST_ROOT}" ]]; then
   chmod -R u+rwX,go-rwx "${DATA_DIR}"
 fi
 
+if grep -q '"artifact_class": "archive-bootstrap"' "${bootstrap_validation_report}"; then
+  cp "${bootstrap_validation_report}" "${APP_ROOT}/evidence/archive-bootstrap-limitation.json"
+fi
+
 if [[ "${MANAGE_LAUNCHD}" == "true" ]]; then
   restart_launchd_services
   wait_for_qrpc_latest_block
@@ -271,6 +458,7 @@ fi
 
 echo "archive_bootstrap_restore_ok=true"
 echo "snapshot_sha256=${actual_sha}"
+echo "bootstrap_validation_report=${bootstrap_validation_report}"
 echo "runtime_root=${APP_ROOT}"
 echo "incoming_bootstrap=${INCOMING_BOOTSTRAP}"
 echo "data_dir=${DATA_DIR}"

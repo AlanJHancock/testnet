@@ -1,0 +1,85 @@
+{
+  "chain": {
+    "chain_id": 1264,
+    "chain_id_hex": "0x4f0",
+    "genesis_hash": "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789",
+    "network_id": "synergy-testnet-v2"
+  },
+  "computed_state": "SHADOW_OBSERVING",
+  "current_epoch_end": 208999,
+  "current_epoch_start": 208000,
+  "duty_gate": {
+    "can_aggregate_qc": false,
+    "can_count_toward_quorum": false,
+    "can_enter_proposer_schedule": false,
+    "can_propose": false,
+    "can_serve_as_canonical_source": false,
+    "can_vote": false,
+    "shadow_signs_real_votes": false,
+    "state": "QUARANTINED"
+  },
+  "earliest_activation_height": 209000,
+  "epoch_bounds": {
+    "current_epoch_end": 208999,
+    "current_epoch_start": 208000,
+    "earliest_activation_height": 209000,
+    "epoch_size": 1000,
+    "partial_epoch_end": 207999,
+    "partial_epoch_start": 207000,
+    "required_full_shadow_epoch_end": 208999,
+    "required_full_shadow_epoch_start": 208000,
+    "shadow_start_epoch": 207,
+    "shadow_start_height": 207828
+  },
+  "epoch_size": 1000,
+  "fail_closed": false,
+  "full_epoch_shadow_completed": false,
+  "last_observed_hash": "bfafa90ad9432605539d2df2baf3cb125e741ddac5fc61a7458d44393bac2c5c",
+  "last_observed_height": 208308,
+  "latest_hash": "bfafa90ad9432605539d2df2baf3cb125e741ddac5fc61a7458d44393bac2c5c",
+  "latest_height": 208308,
+  "mismatch_count": 0,
+  "missed_observation_count": 20,
+  "observed_blocks": 480,
+  "observed_shadow_blocks": 480,
+  "partial_epoch_end": 207999,
+  "partial_epoch_start": 207000,
+  "process_proof_completed": false,
+  "process_target_height": 208328,
+  "quarantine": {
+    "chain": {
+      "chain_id": 1264,
+      "chain_id_hex": "0x4f0",
+      "genesis_hash": "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789",
+      "network_id": "synergy-testnet-v2"
+    },
+    "duty_gate": {
+      "can_aggregate_qc": false,
+      "can_count_toward_quorum": false,
+      "can_enter_proposer_schedule": false,
+      "can_propose": false,
+      "can_serve_as_canonical_source": false,
+      "can_vote": false,
+      "shadow_signs_real_votes": false,
+      "state": "QUARANTINED"
+    },
+    "marker_paths": [
+      "/home/justin/.synergy/testnet/nodes/validator-workspace/data/validator_quarantine.json"
+    ],
+    "quarantined": true,
+    "recovery_state": "QUARANTINED",
+    "rejoin_eligibility": false,
+    "status": "quarantined"
+  },
+  "rejoin_eligible": false,
+  "required_blocks": 500,
+  "required_full_shadow_epoch_end": 208999,
+  "required_full_shadow_epoch_start": 208000,
+  "shadow_observation_path": "/home/justin/.synergy/testnet/nodes/validator-workspace/data/shadow_observation.json",
+  "shadow_signs_real_votes": false,
+  "shadow_start_epoch": 207,
+  "shadow_start_height": 207828,
+  "start_height": 207828,
+  "status": "SHADOW_OBSERVING",
+  "target_height": 208328
+}

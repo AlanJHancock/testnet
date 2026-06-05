@@ -1,0 +1,79 @@
+{
+  "generated_at_utc": "2026-06-03T22:53:00Z",
+  "v13.0.66_commit": "8f86af208358506c6caea6e604a522f9d72a001e",
+  "v13.0.68_commit": "4024a17eee461425409c6b9664904fb8afa68b3e",
+  "latest_linux_amd64_sha256": "74f7b02e0ffef84c42865b8c9d0e9bc907cc512054695aab43ec10fb59b3918d",
+  "all_v13_0_68_sidecars_verified": true,
+  "comparison": [
+    {
+      "artifact": "synergy-testnet-linux-amd64",
+      "v13.0.66": {
+        "present": true,
+        "sha256": "7939c0bda667c8abd42fa9b3d1a32e86b1b2ed7db132a558c9969bf397be63f4",
+        "bytes": 13579320
+      },
+      "v13.0.68": {
+        "present": true,
+        "sha256": "ec8daac7bd4fd0b5628b1f787e9ce5d5aa87bba59cb5b310a082f751be27ab69",
+        "bytes": 13596384
+      },
+      "byte_identical": false
+    },
+    {
+      "artifact": "synergy-node-linux-amd64",
+      "v13.0.66": {
+        "present": true,
+        "sha256": "1f6b106bb1d29907e4d0dbc46d64a03c4bca7d40c15dcfd85938ab45318ef67b",
+        "bytes": 8973544
+      },
+      "v13.0.68": {
+        "present": true,
+        "sha256": "4e2088ca4d278e981e30a5d45bc32fa697a11026fe617bf49fc3ca96fe12e106",
+        "bytes": 9005592
+      },
+      "byte_identical": false
+    },
+    {
+      "artifact": "synergy-rpc-gateway-node-linux-amd64",
+      "v13.0.66": {
+        "present": true,
+        "sha256": "21d76bb1d3cf87f5b7806166c7c8e475fed9b0b3e69d2be32f49b95ef2117430",
+        "bytes": 13579512
+      },
+      "v13.0.68": {
+        "present": true,
+        "sha256": "8f2859bd5c56ed9acc49c004c55484c8b8001b09a74a0edf73990e66429ca614",
+        "bytes": 13596648
+      },
+      "byte_identical": false
+    },
+    {
+      "artifact": "synergy-indexer-and-explorer-node-linux-amd64",
+      "v13.0.66": {
+        "present": true,
+        "sha256": "463a2b5a70c40cc839522dae4fdcc0904c3c5fe51e98a8fe8d74ddb047a15ebc",
+        "bytes": 13579528
+      },
+      "v13.0.68": {
+        "present": true,
+        "sha256": "a0a38031e81e4b21b568e8b89c896cfda16550a78dfa364de505ccd93aa6230d",
+        "bytes": 13596664
+      },
+      "byte_identical": false
+    },
+    {
+      "artifact": "wallet-pqc-cli-linux-amd64",
+      "v13.0.66": {
+        "present": true,
+        "sha256": "2ebb7343c8b04f1fe9003858b15eeb401cf362c5ad6952f694a90c3ed5f13432",
+        "bytes": 2041320
+      },
+      "v13.0.68": {
+        "present": true,
+        "sha256": "3bc15afd4e59f167783e64d18c85b77c9945dcdff21b23513877bd31886b50b2",
+        "bytes": 2042576
+      },
+      "byte_identical": false
+    }
+  ]
+}

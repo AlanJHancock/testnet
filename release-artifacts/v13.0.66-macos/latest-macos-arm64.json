@@ -1,0 +1,39 @@
+{
+  "version": "v13.0.66",
+  "binaries": {
+    "macos-arm64": {
+      "synergy-testnet": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-testnet-macos-arm64",
+        "sha256": "5e054cde3607948c8bff540a68bf317a41a57d35aa5ccc3e57520f2d9d670c0d"
+      },
+      "generate-node-keys": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/generate-node-keys-macos-arm64",
+        "sha256": "373ee9e79bee1be1a794aa75a12f320aec2aee3c4b2e98c84a1a6adb7b318c9f"
+      },
+      "synergy-address-engine": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-address-engine-macos-arm64",
+        "sha256": "0c14c37a38928cb9e113b1b45d6badd015f840680452828885ca2cea7589e3bd"
+      },
+      "wallet-pqc-cli": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/wallet-pqc-cli-macos-arm64",
+        "sha256": "d5ec4ead7866cb14a0406765662c30ccb218c876a33250d97dabb1e55c38c828"
+      },
+      "synergy-rpc-gateway-node": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-rpc-gateway-node-macos-arm64",
+        "sha256": "850d808dac6da0853bbf0655af6479c25c985ed087701599daa1bbe8dadd594b"
+      },
+      "synergy-archive": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-archive-macos-arm64",
+        "sha256": "583290af6c17687ec84e62cf0a4e5c478dd0c5b507284e152e4be28fad676a93"
+      },
+      "synergy-node": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-node-macos-arm64",
+        "sha256": "03201fa82c508e58134e7643a8b0d57035bcf4eeae6751009686ecbdd3ea6467"
+      },
+      "synergy-indexer-and-explorer-node": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-indexer-and-explorer-node-macos-arm64",
+        "sha256": "ec923f2e17a193d57a2768d0df2452458b01efd612cec8445a04246c44376377"
+      }
+    }
+  }
+}

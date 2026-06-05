@@ -40,6 +40,12 @@ scrape_configs:
       - targets: ["10.69.0.202:6030"]
         labels: { role: relayer, host: relayer-2, instance_label: "Relayer-2" }
 
+  - job_name: "synergy-archive-validators"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["73.79.66.255:6030"]
+        labels: { role: archive_validator, host: archive-validator, instance_label: "Archive Validator" }
+
   - job_name: "synergy-rpc-gateways"
     scheme: https
     metrics_path: /metrics/node-rpc
@@ -70,6 +76,8 @@ scrape_configs:
         labels: { role: relayer, host: relayer-1, instance_label: "Relayer-1" }
       - targets: ["10.69.0.202:9100"]
         labels: { role: relayer, host: relayer-2, instance_label: "Relayer-2" }
+      - targets: ["73.79.66.255:9100"]
+        labels: { role: archive_validator, host: archive-validator, instance_label: "Archive Validator" }
       - targets: ["127.0.0.1:9100"]
         labels: { role: observer, host: observer, instance_label: "Observer" }
 
@@ -97,6 +105,35 @@ scrape_configs:
         labels: { role: seed, host: seed-2, instance_label: "Seed-2", probe_label: "seed_tcp" }
       - targets: ["157.245.226.240:5621"]
         labels: { role: seed, host: seed-3, instance_label: "Seed-3", probe_label: "seed_tcp" }
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - target_label: __address__
+        replacement: 127.0.0.1:9115
+      - source_labels: [__param_target]
+        target_label: target
+
+  - job_name: "private-qrpc-probes"
+    metrics_path: /probe
+    params:
+      module: ["tcp_connect"]
+    static_configs:
+      - targets: ["10.69.0.1:5640"]
+        labels: { role: validator, host: val1, instance_label: "Val1", probe_label: "qrpc_tcp" }
+      - targets: ["10.69.0.2:5640"]
+        labels: { role: validator, host: val2, instance_label: "Val2", probe_label: "qrpc_tcp" }
+      - targets: ["10.69.0.3:5640"]
+        labels: { role: validator, host: val3, instance_label: "Val3", probe_label: "qrpc_tcp" }
+      - targets: ["10.69.0.4:5640"]
+        labels: { role: validator, host: val4, instance_label: "Val4", probe_label: "qrpc_tcp" }
+      - targets: ["10.69.0.5:5640"]
+        labels: { role: validator, host: val5, instance_label: "Val5", probe_label: "qrpc_tcp" }
+      - targets: ["10.69.0.201:5640"]
+        labels: { role: relayer, host: relayer-1, instance_label: "Relayer-1", probe_label: "qrpc_tcp" }
+      - targets: ["10.69.0.202:5640"]
+        labels: { role: relayer, host: relayer-2, instance_label: "Relayer-2", probe_label: "qrpc_tcp" }
+      - targets: ["73.79.66.255:5640"]
+        labels: { role: archive_validator, host: archive-validator, instance_label: "Archive Validator", probe_label: "qrpc_tcp" }
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target

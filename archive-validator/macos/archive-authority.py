@@ -68,6 +68,11 @@ CLASS_POLICY = {
         "cadence": 50_000,
         "retain": 1,
     },
+    "archive-bootstrap": {
+        "roles": ["archive", "archive_validator", "snapshot_authority"],
+        "cadence": 50_000,
+        "retain": 1,
+    },
 }
 
 ALLOWED_STATE_FILES = {

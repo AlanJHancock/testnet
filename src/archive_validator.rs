@@ -456,9 +456,8 @@ mod tests {
             );
         }
 
-        let archive_authority =
-            std::fs::read_to_string(root.join("macos/archive-authority.py"))
-                .expect("archive authority script");
+        let archive_authority = std::fs::read_to_string(root.join("macos/archive-authority.py"))
+            .expect("archive authority script");
         for required in [
             "DEFAULT_ROOT = Path(\"/Users/Shared/Synergy/archive-validator\")",
             "DEFAULT_PUBLISH_ROOT = Path(\"/Volumes/Synergy_Archive/archive-validator/snapshots\")",
@@ -526,6 +525,11 @@ mod tests {
             "LOCAL_ROOT_REL=\"/Users/Shared/Synergy/archive-validator\"",
             "INCOMING_BOOTSTRAP_REL=\"${SMB_ROOT_REL}/incoming/bootstrap\"",
             "archive storage volume missing in test root",
+            "archive-bootstrap",
+            "archive-validator-bootstrap",
+            "validator-pruned bootstrap is rejected for Archive Validator restore",
+            "historical_archive_complete_from_genesis",
+            "archive-bootstrap-limitation.json",
             "launchctl kickstart -k",
             "wait_for_qrpc_latest_block",
             "io.synergynetwork.archive-snapshot-api",

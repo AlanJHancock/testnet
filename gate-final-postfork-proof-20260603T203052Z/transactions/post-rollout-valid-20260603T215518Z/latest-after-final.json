@@ -1,0 +1,19 @@
+{
+  "http_status": 200,
+  "json": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "block_index": 206755,
+      "hash": "a16c524ff7813407cc69581c1addc2761aad937f6be7d2abf112d29684372774",
+      "nonce": 206755,
+      "parent_hash": "a62e190e24742607a835c1accc98dad0d3cde177a34fa2dc3224201c09c9d6cc",
+      "previous_hash": "a62e190e24742607a835c1accc98dad0d3cde177a34fa2dc3224201c09c9d6cc",
+      "timestamp": 1780523817,
+      "transactions": [],
+      "tx_count": 0,
+      "validator": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
+      "validator_id": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"
+    }
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "all_ok": true,
+  "reports": [
+    {
+      "actual": "373ee9e79bee1be1a794aa75a12f320aec2aee3c4b2e98c84a1a6adb7b318c9f",
+      "checksum_file": "generate-node-keys-macos-arm64.sha256",
+      "expected": "373ee9e79bee1be1a794aa75a12f320aec2aee3c4b2e98c84a1a6adb7b318c9f",
+      "ok": true,
+      "target": "generate-node-keys-macos-arm64"
+    },
+    {
+      "actual": "0c14c37a38928cb9e113b1b45d6badd015f840680452828885ca2cea7589e3bd",
+      "checksum_file": "synergy-address-engine-macos-arm64.sha256",
+      "expected": "0c14c37a38928cb9e113b1b45d6badd015f840680452828885ca2cea7589e3bd",
+      "ok": true,
+      "target": "synergy-address-engine-macos-arm64"
+    },
+    {
+      "actual": "583290af6c17687ec84e62cf0a4e5c478dd0c5b507284e152e4be28fad676a93",
+      "checksum_file": "synergy-archive-macos-arm64.sha256",
+      "expected": "583290af6c17687ec84e62cf0a4e5c478dd0c5b507284e152e4be28fad676a93",
+      "ok": true,
+      "target": "synergy-archive-macos-arm64"
+    },
+    {
+      "actual": "f916cd119a60a2a2e307b786f03487ceb398f055461859bffa0629889f1c7267",
+      "checksum_file": "synergy-archive-validator-testnet-v2-macos-m4-storage-volume.zip.sha256",
+      "expected": "f916cd119a60a2a2e307b786f03487ceb398f055461859bffa0629889f1c7267",
+      "ok": true,
+      "target": "synergy-archive-validator-testnet-v2-macos-m4-storage-volume.zip"
+    },
+    {
+      "actual": "ec923f2e17a193d57a2768d0df2452458b01efd612cec8445a04246c44376377",
+      "checksum_file": "synergy-indexer-and-explorer-node-macos-arm64.sha256",
+      "expected": "ec923f2e17a193d57a2768d0df2452458b01efd612cec8445a04246c44376377",
+      "ok": true,
+      "target": "synergy-indexer-and-explorer-node-macos-arm64"
+    },
+    {
+      "actual": "03201fa82c508e58134e7643a8b0d57035bcf4eeae6751009686ecbdd3ea6467",
+      "checksum_file": "synergy-node-macos-arm64.sha256",
+      "expected": "03201fa82c508e58134e7643a8b0d57035bcf4eeae6751009686ecbdd3ea6467",
+      "ok": true,
+      "target": "synergy-node-macos-arm64"
+    },
+    {
+      "actual": "850d808dac6da0853bbf0655af6479c25c985ed087701599daa1bbe8dadd594b",
+      "checksum_file": "synergy-rpc-gateway-node-macos-arm64.sha256",
+      "expected": "850d808dac6da0853bbf0655af6479c25c985ed087701599daa1bbe8dadd594b",
+      "ok": true,
+      "target": "synergy-rpc-gateway-node-macos-arm64"
+    },
+    {
+      "actual": "5e054cde3607948c8bff540a68bf317a41a57d35aa5ccc3e57520f2d9d670c0d",
+      "checksum_file": "synergy-testnet-macos-arm64.sha256",
+      "expected": "5e054cde3607948c8bff540a68bf317a41a57d35aa5ccc3e57520f2d9d670c0d",
+      "ok": true,
+      "target": "synergy-testnet-macos-arm64"
+    },
+    {
+      "actual": "d5ec4ead7866cb14a0406765662c30ccb218c876a33250d97dabb1e55c38c828",
+      "checksum_file": "wallet-pqc-cli-macos-arm64.sha256",
+      "expected": "d5ec4ead7866cb14a0406765662c30ccb218c876a33250d97dabb1e55c38c828",
+      "ok": true,
+      "target": "wallet-pqc-cli-macos-arm64"
+    }
+  ]
+}

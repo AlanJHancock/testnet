@@ -1,7 +1,7 @@
 # Synergy Testnet Observability Dashboard Guide
 
 This guide explains the observer-backed Grafana dashboards in `ops/observability/grafana`.
-Prometheus scrapes the observer, validators, relayers, public edge probes, and node_exporter host metrics from the observer node. The validator and relayer Synergy app metrics come from `/metrics` on port `6030`; generic host metrics come from node_exporter on port `9100`.
+Prometheus scrapes the observer, validators, relayers, Archive Validator, public edge probes, and node_exporter host metrics from the observer node. Validator, relayer, and archive Synergy app metrics come from `/metrics` on port `6030`; generic host metrics come from node_exporter on port `9100`.
 
 ## Percentiles: p50, p95, and p99
 
@@ -27,8 +27,9 @@ Panels:
 - `Private Host Scrapes Up`: count of private WireGuard node_exporter targets reachable on port `9100`.
 - `Public HTTPS Probes Up`: public HTTPS health checks that returned success through blackbox_exporter.
 - `Public TCP Probes Up`: public bootnode and seed TCP checks that returned success.
-- `Block Height by Node`: local block height reported by each scraped Synergy node. Validators should stay close together.
+- `Block Height by Node`: local block height reported by each scraped Synergy node. Validators should stay close together. Archive Validator height is displayed as archive state, not voting consensus state.
 - `Block Production Rate`: per-validator block-height change rate converted to blocks per minute. A flat zero line means no new blocks from that node over the selected window.
+- `Average Block Time`: average seconds per block over the selected window. Lower is faster. This answers: "How quickly are blocks being created?" The primary query is `300 / clamp_min(max(delta(synergy_block_height{job="synergy-validators"}[5m])), 1)`, which uses the fastest validator height delta instead of summing validators and double-counting the same block.
 - `Latest Block Age`: seconds since each node's latest local block. Rising age means that node has not seen a new block.
 - `Sync Gap Blocks`: highest block observed by the sync manager minus the node's local height.
 - `Mempool Pending Transactions`: local pending transaction count per node.
@@ -44,15 +45,15 @@ Purpose: shows Synergy-specific chain, consensus, validator, P2P, mempool, and g
 
 Panels:
 
-- `Max Validator Height`: highest `synergy_chain_height` across validators.
-- `Min Validator Height`: lowest `synergy_chain_height` across validators.
-- `Height Spread`: max height minus min height. This should normally be 0 or very small.
+- `Highest Validator Height`: highest `synergy_block_height` across voting validators.
+- `Lowest Validator Height`: lowest `synergy_block_height` across voting validators.
+- `Validator Height Difference`: highest voting-validator height minus lowest voting-validator height. This should normally be 0 or very small.
 - `Validators Syncing`: number of validators reporting active sync.
 - `Active Validators in Registry`: active validator count from the local validator registry.
 - `Pending Validator Registrations`: validator registrations waiting for activation.
-- `Block Interval / Finalization Proxy`: p50, p95, and p99 of latest block interval over the selected window, plus configured target block time. This is a block-cadence/finality proxy from local timestamps, not a cryptographic finality proof.
-- `Blocks Per Minute by Validator`: `rate(synergy_chain_height[5m]) * 60`, useful for spotting stuck validators.
-- `P2P Peer Count`: connected peers seen by each validator process.
+- `Average Block Time`: average seconds per block over the selected window. It replaces the old p95 block interval panel and avoids double-counting validators.
+- `Block Production Rate by Validator`: `rate(synergy_block_height[5m]) * 60`, useful for spotting stuck validators.
+- `Peer Count by Node`: connected peers seen by each Synergy process.
 - `Status-Ready Validator Peers`: connected validator peers that have exchanged enough status data for consensus membership checks.
 - `Best Validator Peer Height vs Local Height`: compares local chain height to the best connected validator-peer height.
 - `Peer Reported Heights`: per-peer last known heights. Divergence here is a direct split/sync warning.
@@ -67,7 +68,7 @@ Panels:
 - `Validator Missed Blocks / Vote Windows`: missed block count plus missed-vote windows.
 - `Validator Synergy Score`: registry-reported Synergy score by validator.
 - `Validator Uptime Percent`: registry-reported validator uptime.
-- `Validator Avg Block Time`: registry-reported average block time by validator.
+- `Validator Average Block Time`: registry-reported average block time by validator.
 - `Current Sync State by Node`: current sync state label, such as `idle`, `synced`, `downloading`, or `validating`.
 - `Current Peer Labels`: peer identity, direction, node id, and validator address labels.
 
@@ -80,7 +81,7 @@ Purpose: shows generic Linux host health for validators, relayers, observer, and
 Panels:
 
 - `Node Exporter Targets Up`: count of node_exporter targets reachable by Prometheus.
-- `Prometheus Samples Scraped / sec`: scrape ingestion rate.
+- `Prometheus Samples Scraped per Second`: scrape ingestion rate.
 - `Scrape Failures`: number of targets currently down.
 - `Prometheus TSDB Head Series`: active in-memory Prometheus time series.
 - `Host CPUs Visible`: CPU label count seen by node_exporter.
@@ -112,6 +113,12 @@ Key readings:
 - Shared public host metrics panels show whether edge app metrics and public host node_exporter proxy endpoints are reachable.
 - Probe duration panels show public endpoint latency from the observer's perspective.
 
+## Fleet Roster
+
+The Fleet Overview and Network Overview dashboards include a `Node Metrics Roster` table with these columns: Node Name, Role, Target, Up, Block Height, Peer Count, Syncing, Last Seen, and Notes/Status. Missing values are displayed as `N/A` when a metric is not emitted by that role.
+
+The roster includes Val1 through Val5, relayers, rpc-gateway, explorer, observer, bootnodes, seeds, and `Archive Validator`. Archive Validator is labeled with role `archive_validator` or `archive`; it is not treated as an active voting validator in consensus or PoSy panels.
+
 ## New Synergy Metrics Added
 
 The runtime `/metrics` exporter now emits additional Synergy-specific metrics:
@@ -125,9 +132,9 @@ The runtime `/metrics` exporter now emits additional Synergy-specific metrics:
 
 ## What To Look For During Incidents
 
-- Chain stalled: `Latest Block Age` rises on all validators, `Blocks Per Minute` goes to zero, and `Block Interval / Finalization Proxy` p95/p99 climb.
+- Chain stalled: `Latest Block Age` rises on all validators, `Blocks Per Minute` goes to zero, and `Average Block Time` climbs.
 - Height split: `Height Spread` is above 0 and `Peer Reported Heights` shows different peer heights.
 - Sync issue: `Sync Gap Blocks` remains above 0 or `Current Sync State` stays in `downloading`, `validating`, or `applying`.
 - Network partition: P2P peer counts drop, peer last-seen age rises, or scrape targets stay up while peer status becomes stale.
-- Host pressure: CPU, memory, swap, disk IO, or disk fill panels spike before block interval p95/p99 rises.
+- Host pressure: CPU, memory, swap, disk IO, or disk fill panels spike before average block time rises.
 - Public edge issue: internal validators keep producing blocks but public HTTP/TCP probes fail or probe latency rises sharply.

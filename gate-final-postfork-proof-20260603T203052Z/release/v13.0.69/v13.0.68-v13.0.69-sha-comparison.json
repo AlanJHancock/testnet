@@ -1,0 +1,41 @@
+{
+  "comparison": "v13.0.68 vs v13.0.69 linux artifacts",
+  "rows": [
+    {
+      "artifact": "synergy-testnet-linux-amd64",
+      "v13.0.68": "ec8daac7bd4fd0b5628b1f787e9ce5d5aa87bba59cb5b310a082f751be27ab69",
+      "v13.0.69": "2db89bf78691e4989a93b902e3765eec861cbeba876c208879b291e0deef3061",
+      "identical": false
+    },
+    {
+      "artifact": "synergy-node-linux-amd64",
+      "v13.0.68": "4e2088ca4d278e981e30a5d45bc32fa697a11026fe617bf49fc3ca96fe12e106",
+      "v13.0.69": "4253b810142ba02350c1a93b944f48d698cec33d87a1c7dbc2d2d34feb9554af",
+      "identical": false
+    },
+    {
+      "artifact": "synergy-rpc-gateway-node-linux-amd64",
+      "v13.0.68": "8f2859bd5c56ed9acc49c004c55484c8b8001b09a74a0edf73990e66429ca614",
+      "v13.0.69": "c436f7c930163074d8067221cce3e0c3dd925cb8cd969195644348cec05db3eb",
+      "identical": false
+    },
+    {
+      "artifact": "synergy-indexer-and-explorer-node-linux-amd64",
+      "v13.0.68": "a0a38031e81e4b21b568e8b89c896cfda16550a78dfa364de505ccd93aa6230d",
+      "v13.0.69": "71d45dde8d985e8e0291004dc838be78c13381c1662b4a9dce440c96eddacd4d",
+      "identical": false
+    },
+    {
+      "artifact": "wallet-pqc-cli-linux-amd64",
+      "v13.0.68": "3bc15afd4e59f167783e64d18c85b77c9945dcdff21b23513877bd31886b50b2",
+      "v13.0.69": "b4b3b1bce84ad4f97cee15c1e0412c4df80988fdf4e7474f44fcf54c1b95d0f6",
+      "identical": false
+    },
+    {
+      "artifact": "synergy-archive-linux-amd64",
+      "v13.0.68": "ab0facbe72d5bb3650955a7fa7ed0f04c0b8c6883d15610bee3b88816675ff20",
+      "v13.0.69": "fc0696a832a0910e28f4fc67ae1bbceeff0643fe9b392987dc9d6b2b59516bd4",
+      "identical": false
+    }
+  ]
+}

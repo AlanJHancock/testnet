@@ -1,0 +1,35 @@
+{
+  "receipt": {
+    "http_status": 200,
+    "json": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "result": null
+    }
+  },
+  "status": {
+    "http_status": 200,
+    "json": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "result": {
+        "chain": {
+          "chain_id": 1264,
+          "chain_id_hex": "0x4f0",
+          "genesis_hash": "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789",
+          "name": "synergy-testnet",
+          "network_id": "synergy-testnet-v2"
+        },
+        "dag": {
+          "found": false,
+          "reason": "transaction is not present in the committed DAG state",
+          "tx_id_or_hash": "syntxn-effbe0fde85ce5ba75a18b4ca39e3a4a6d87b35b8e385a501b1ab24cbed4ff0c"
+        },
+        "found": false,
+        "status": "not_found",
+        "tx_hash": "syntxn-effbe0fde85ce5ba75a18b4ca39e3a4a6d87b35b8e385a501b1ab24cbed4ff0c"
+      }
+    }
+  },
+  "tx_hash": "syntxn-effbe0fde85ce5ba75a18b4ca39e3a4a6d87b35b8e385a501b1ab24cbed4ff0c"
+}

@@ -1,0 +1,45 @@
+role=Relayer1
+hostname=vmi3231914
+workspace=/opt/synergy/testnet/relayer
+service=synergy-testnet-relayer.service
+active
+MainPID=3654503
+ActiveState=active
+SubState=running
+FragmentPath=/etc/systemd/system/synergy-testnet-relayer.service
+binary_path=/opt/synergy/testnet/relayer/bin/synergy-testnet-linux-amd64
+0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3  /opt/synergy/testnet/relayer/bin/synergy-testnet-linux-amd64
+processes_begin
+pid=3654503 owner=root deleted_inode=false exe=/opt/synergy/testnet/relayer/bin/synergy-testnet-linux-amd64 cmd=./bin/synergy-testnet-linux-amd64 start --config config/node.toml
+processes_end
+listeners_begin
+LISTEN 0      128          0.0.0.0:5622      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=3))           
+LISTEN 0      128          0.0.0.0:5640      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=4))           
+LISTEN 0      128          0.0.0.0:5660      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=7))           
+LISTEN 0      128          0.0.0.0:6030      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=23))          
+listeners_end
+connections_begin
+close_wait=92
+established_service=6
+connections_end
+rpc_synergy_getLatestBlock_begin
+{"id":1,"jsonrpc":"2.0","result":{"block_index":206080,"hash":"214228f6bb2fce1af6a10d58c12600221d0d930ba62811bb5e033cf12874f64e","nonce":206080,"parent_hash":"26cdc4f9b0974b8e7918d279cbf7ce6d6f1b577e82c33a1c5906b5cb30c7a06e","previous_hash":"26cdc4f9b0974b8e7918d279cbf7ce6d6f1b577e82c33a1c5906b5cb30c7a06e","timestamp":1780520247,"transactions":[],"tx_count":0,"validator":"synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re","validator_id":"synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re"}}
+rpc_synergy_getLatestBlock_end
+rpc_synergy_getConsensusForkStatus_begin
+{"id":1,"jsonrpc":"2.0","result":{"fork_configured":true,"fork_height":204216,"fork_parent_hash":"e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816","fork_parent_height":204215,"new_consensus_algorithm":"FN-DSA","old_consensus_algorithm":"ML-DSA-65","parser_mode":"fail_closed","state_root":"checkpoint-v1:chain_json_sha256=04a660f0ea4bff004412326d8ce1185dbb1e6870fb0e02cb359b776a1b1e989d;committed_blocks_jsonl_sha256=a214da21afc2191fcc087569fe73500cb97c384119e749e2bf8093ecddb9f381;canonical_locks_json_sha256=577a3347522b8e81527f27b34212ce441d04d7c5d89f3b8c943df09b3085b49a;committed_qcs_jsonl_sha256=86e113856705cd987140fdf5783169c20ab28f5efc103b92810493857bcb593d;verified_on=Val2,Val4","validator_count":5,"validators":[{"consensus_key_type":"FN-DSA","consensus_public_key_bytes":1793,"validator_address":"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"},{"consensus_key_type":"FN-DSA","consensus_public_key_bytes":1793,"validator_address":"synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt"},{"consensus_key_type":"FN-DSA","consensus_public_key_bytes":1793,"validator_address":"synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re"},{"consensus_key_type":"FN-DSA","consensus_public_key_bytes":1793,"validator_address":"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"},{"consensus_key_type":"FN-DSA","consensus_public_key_bytes":1793,"validator_address":"synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f"}]}}
+rpc_synergy_getConsensusForkStatus_end
+rpc_synergy_getPendingTransactions_begin
+{"id":1,"jsonrpc":"2.0","result":[]}
+rpc_synergy_getPendingTransactions_end
+rpc_block_204215_begin
+{"id":1,"jsonrpc":"2.0","result":{"block_index":204215,"hash":"e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816","nonce":204215,"parent_hash":"d104b4a20a1ca529b6508a574e5c4af4387e10b7aaa0922c0736a61991f09f5c","previous_hash":"d104b4a20a1ca529b6508a574e5c4af4387e10b7aaa0922c0736a61991f09f5c","timestamp":1780481254,"transactions":[],"tx_count":0,"validator":"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs","validator_id":"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"}}
+rpc_block_204215_end
+rpc_block_204216_begin
+{"id":1,"jsonrpc":"2.0","result":{"block_index":204216,"hash":"a9388eb033ec11633a3bb68fd0d04c9b708e580959a9ab15b0387e03849c1e04","nonce":204216,"parent_hash":"e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816","previous_hash":"e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816","timestamp":1780506049,"transactions":[],"tx_count":0,"validator":"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5","validator_id":"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"}}
+rpc_block_204216_end
+rpc_block_205905_begin
+{"id":1,"jsonrpc":"2.0","result":{"block_index":205905,"hash":"e64f31282497eb2093130ab2c7e2a6433c40d6b8efc36f35a140471fcc32ed4f","nonce":205905,"parent_hash":"03129c203c136e9737754e6f1149e22a245cbacb6facddc44df76401f4cccfc4","previous_hash":"03129c203c136e9737754e6f1149e22a245cbacb6facddc44df76401f4cccfc4","timestamp":1780519426,"transactions":[],"tx_count":0,"validator":"synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt","validator_id":"synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt"}}
+rpc_block_205905_end
+
+STDERR:
+Warning: Permanently added '195.26.241.95' (ED25519) to the list of known hosts.

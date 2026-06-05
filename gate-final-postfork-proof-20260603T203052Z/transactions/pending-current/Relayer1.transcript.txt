@@ -1,0 +1,7 @@
+role=Relayer1
+pending_begin
+{"id":1,"jsonrpc":"2.0","result":[]}
+pending_end
+
+STDERR:
+Warning: Permanently added '195.26.241.95' (ED25519) to the list of known hosts.

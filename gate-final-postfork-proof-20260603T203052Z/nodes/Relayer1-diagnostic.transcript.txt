@@ -1,0 +1,167 @@
+Warning: Permanently added '195.26.241.95' (ED25519) to the list of known hosts.
+vmi3231914
+Wed Jun  3 22:51:22 CEST 2026
+--- services ---
+  UNIT                            LOAD   ACTIVE   SUB  DESCRIPTION
+  synergy-testnet-relayer.service loaded inactive dead Synergy Testnet Relayer sentry1
+
+Legend: LOAD   → Reflects whether the unit definition was properly loaded.
+        ACTIVE → The high-level unit activation state, i.e. generalization of SUB.
+        SUB    → The low-level unit activation state, values depend on unit type.
+
+1 loaded units listed.
+To show all installed unit files use 'systemctl list-unit-files'.
+--- likely-status ---
+service=synergy-testnet-relayer.service
+○ synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1
+     Loaded: loaded (/etc/systemd/system/synergy-testnet-relayer.service; enabled; preset: enabled)
+     Active: inactive (dead) since Wed 2026-06-03 19:07:35 CEST; 3h 43min ago
+   Duration: 1h 28min 3.583s
+    Process: 3514150 ExecStart=/usr/bin/bash -lc mkdir -p data/logs data/chain && exec ./bin/synergy-testnet-linux-amd64 start --config config/node.toml (code=killed, signal=TERM)
+   Main PID: 3514150 (code=killed, signal=TERM)
+        CPU: 9min 44.150s
+
+Jun 03 17:39:26 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'oom-kill'.
+Jun 03 17:39:26 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 31min 5.355s CPU time, 4.9G memory peak, 0B memory swap peak.
+Jun 03 17:39:31 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 1.
+Jun 03 17:39:31 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 19:07:35 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+Jun 03 19:07:35 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 9min 44.150s CPU time.
+service=synergy-relayer.service
+Unit synergy-relayer.service could not be found.
+service=synergy-node-relayer.service
+Unit synergy-node-relayer.service could not be found.
+service=testnet-relayer.service
+Unit testnet-relayer.service could not be found.
+service=relayer.service
+Unit relayer.service could not be found.
+--- journal recent ---
+May 28 20:20:26 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 28 20:20:26 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 28 20:20:26 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 28 20:20:26 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 4h 54min 27.794s CPU time, 10.9G memory peak, 0B memory swap peak.
+May 28 20:20:26 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 28 21:06:14 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 28 21:06:14 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 11min 38.475s CPU time, 3.7G memory peak, 0B memory swap peak.
+May 28 21:25:59 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 28 22:20:29 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 28 22:20:29 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 13min 31.794s CPU time, 2.7G memory peak, 0B memory swap peak.
+May 31 00:22:05 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 04:25:08 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 31 04:25:08 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 31 04:25:08 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 04:25:08 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 1h 2min 1.776s CPU time.
+May 31 04:27:43 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 06:22:37 vmi3231914 systemd[1]: synergy-testnet-relayer.service: A process of this unit has been killed by the OOM killer.
+May 31 06:22:37 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+May 31 06:22:37 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'oom-kill'.
+May 31 06:22:37 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 1h 24min 30.484s CPU time.
+May 31 06:22:42 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 1.
+May 31 06:22:42 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 08:43:19 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 31 08:43:20 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 31 08:43:20 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 08:43:20 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 44min 51.943s CPU time.
+May 31 08:43:40 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 09:53:07 vmi3231914 systemd[1]: synergy-testnet-relayer.service: A process of this unit has been killed by the OOM killer.
+May 31 09:53:08 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+May 31 09:53:08 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'oom-kill'.
+May 31 09:53:08 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 11min 16.098s CPU time, 9.4G memory peak, 0B memory swap peak.
+May 31 09:53:13 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 1.
+May 31 09:53:13 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 10:03:50 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 31 10:03:50 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 31 10:03:50 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 10:03:50 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 2min 44.830s CPU time, 11.2G memory peak, 0B memory swap peak.
+May 31 10:03:50 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 12:07:54 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 31 12:07:55 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 31 12:07:55 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 12:07:55 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 15min 53.528s CPU time, 11.1G memory peak, 0B memory swap peak.
+May 31 12:07:55 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 13:19:00 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 31 13:19:01 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 31 13:19:01 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 13:19:01 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 12min 33.179s CPU time, 11.1G memory peak, 0B memory swap peak.
+May 31 13:19:01 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 14:02:58 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 31 14:02:58 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 31 14:02:58 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 14:02:58 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 7min 1.046s CPU time, 11.1G memory peak, 0B memory swap peak.
+May 31 14:02:58 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 14:39:22 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 31 14:39:23 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 31 14:39:23 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 14:39:23 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 8min 36.724s CPU time, 11.0G memory peak, 0B memory swap peak.
+May 31 14:39:23 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 16:12:44 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 31 16:12:45 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 31 16:12:45 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 16:12:45 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 12min 56.084s CPU time, 11.0G memory peak, 0B memory swap peak.
+May 31 16:21:10 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 16:29:31 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 31 16:29:31 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 31 16:29:31 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 16:29:31 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 2min 32.586s CPU time, 5.6G memory peak, 0B memory swap peak.
+May 31 22:47:04 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 22:49:09 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 31 22:49:09 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 31 22:49:09 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 22:49:09 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 46.407s CPU time, 3.5G memory peak, 0B memory swap peak.
+Jun 02 10:51:00 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 02 23:24:52 vmi3231914 systemd[1]: synergy-testnet-relayer.service: A process of this unit has been killed by the OOM killer.
+Jun 02 23:24:53 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+Jun 02 23:24:53 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'oom-kill'.
+Jun 02 23:24:53 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 5h 34min 48.147s CPU time.
+Jun 02 23:24:58 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 1.
+Jun 02 23:24:58 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 02:14:07 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+Jun 03 02:14:07 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'signal'.
+Jun 03 02:14:07 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 1h 17min 37.679s CPU time.
+Jun 03 02:14:12 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 2.
+Jun 03 02:14:12 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 04:28:18 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+Jun 03 04:28:18 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'signal'.
+Jun 03 04:28:18 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 1h 5min 11.254s CPU time.
+Jun 03 04:28:23 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 3.
+Jun 03 04:28:23 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 06:25:59 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+Jun 03 06:25:59 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'signal'.
+Jun 03 06:25:59 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 56min 22.822s CPU time.
+Jun 03 06:26:04 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 4.
+Jun 03 06:26:04 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 08:19:35 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+Jun 03 08:19:35 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'signal'.
+Jun 03 08:19:35 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 49min 4.730s CPU time.
+Jun 03 08:19:40 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 5.
+Jun 03 08:19:40 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 09:34:40 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+Jun 03 09:34:40 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'signal'.
+Jun 03 09:34:40 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 36min 13.896s CPU time.
+Jun 03 09:34:45 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 6.
+Jun 03 09:34:45 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 11:05:01 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+Jun 03 11:05:01 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'signal'.
+Jun 03 11:05:01 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 43min 23.452s CPU time.
+Jun 03 11:05:06 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 7.
+Jun 03 11:05:06 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 12:20:57 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+Jun 03 12:20:57 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 28min 28.949s CPU time.
+Jun 03 12:49:44 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 17:39:25 vmi3231914 systemd[1]: synergy-testnet-relayer.service: A process of this unit has been killed by the OOM killer.
+Jun 03 17:39:26 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+Jun 03 17:39:26 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'oom-kill'.
+Jun 03 17:39:26 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 31min 5.355s CPU time, 4.9G memory peak, 0B memory swap peak.
+Jun 03 17:39:31 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 1.
+Jun 03 17:39:31 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 19:07:35 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+Jun 03 19:07:35 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 9min 44.150s CPU time.
+--- process ---
+--- ports ---
+--- disk-mem ---
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1       193G  112G   81G  59% /
+/dev/sda1       193G  112G   81G  59% /
+               total        used        free      shared  buff/cache   available
+Mem:            11Gi       508Mi        11Gi       1.0Mi       220Mi        11Gi
+Swap:             0B          0B          0B

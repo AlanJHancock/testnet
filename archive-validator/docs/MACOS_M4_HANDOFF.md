@@ -85,9 +85,11 @@ Published snapshots and the signed catalog live under:
 ## Manual Bootstrap Restore
 
 If the archive node is at genesis and organic deep sync is unavailable, restore
-a verified bootstrap archive before recording majority proof or publishing
-snapshots. Put the bootstrap file on the Mac under the SMB bootstrap staging
-path, then run:
+a verified `archive-full` or explicitly limited `archive-bootstrap` artifact
+before recording majority proof or publishing snapshots. `archive-bootstrap` is
+a launch seed for getting the Archive Validator near head; it is not proof that
+the node has complete historical archive coverage from genesis. Put the
+bootstrap file on the Mac under the SMB bootstrap staging path, then run:
 
 ```bash
 cd synergy-archive-validator-testnet-v2-macos-m4
@@ -95,23 +97,28 @@ sudo mkdir -p /Volumes/Synergy_Archive/archive-validator/incoming/bootstrap
 sudo cp /path/to/archive-bootstrap-data.tar.zst \
   /Volumes/Synergy_Archive/archive-validator/incoming/bootstrap/
 sudo ./restore-archive-bootstrap-m4.sh \
-  --snapshot /Volumes/Synergy_Archive/archive-validator/incoming/bootstrap/archive-bootstrap-data.tar.zst \
+  --snapshot /Volumes/Synergy_Archive/archive-validator/incoming/bootstrap/synergy-archive-bootstrap-postfork-h<height>-v13.0.69.tar.zst \
   --sha256 <expected-sha256> \
   --yes
 ```
 
 The restore helper stops the archive node and snapshot worker, verifies the
-archive checksum, rejects key/config material inside the bootstrap archive,
-backs up the existing workspace data, restores the bootstrap data into:
+archive checksum, validates the bootstrap manifest class and post-fork metadata,
+rejects `validator-pruned` unless a dangerous explicit override is passed,
+rejects key/config material inside the restored data payload, backs up the
+existing workspace data, restores the bootstrap data into:
 
 ```text
 /Users/Shared/Synergy/archive-validator/workspace/data
 ```
 
 Then it restarts and kickstarts the archive node, snapshot API, and snapshot
-worker. `archive_bootstrap_restore_ok=true` is printed only after the restored
-archive qRPC returns `synergy_getLatestBlock`. After restore, preserve local qRPC
-height/hash parity before enabling publication:
+worker. For `archive-bootstrap`, the helper writes
+`/Users/Shared/Synergy/archive-validator/evidence/archive-bootstrap-limitation.json`
+with `historical_archive_complete_from_genesis=false`. `archive_bootstrap_restore_ok=true`
+is printed only after the restored archive qRPC returns
+`synergy_getLatestBlock`. After restore, preserve local qRPC height/hash parity
+before enabling publication:
 
 ```bash
 curl -s http://127.0.0.1:5640/ \

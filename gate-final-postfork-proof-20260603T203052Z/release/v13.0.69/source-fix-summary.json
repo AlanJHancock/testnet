@@ -1,0 +1,22 @@
+{
+  "release": "v13.0.69",
+  "commit": "624d9d22e859b5ccf551923c9782eaa1663376eb",
+  "fix": "Post-fork committed-QC verification now uses consensus-fork-migration.json as authoritative FN-DSA validator key material at and after fork_height instead of parsing legacy untyped validator_registry.json keys.",
+  "why": "Val1 post-fork validator-pruned snapshot creation failed closed because the recovery/QC verifier still parsed legacy untyped active-registry keys before the fork-aware snapshot active set was used.",
+  "chain_continuity": {
+    "chain_id": 1264,
+    "network_id": "synergy-testnet-v2",
+    "fork_height": 204216,
+    "parent_height": 204215,
+    "parent_hash": "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816",
+    "new_consensus_algorithm": "FN-DSA",
+    "parser_mode": "fail_closed"
+  },
+  "tests_passed": [
+    "cargo test post_fork_qc_verification_uses_fork_registry_for_untyped_legacy_registry -- --nocapture",
+    "cargo test consensus_fork -- --nocapture",
+    "cargo test snapshot -- --nocapture",
+    "cargo test verify_latest_committed_qc -- --nocapture"
+  ],
+  "release_workflow": "https://github.com/synergy-network-hq/testnet/actions/runs/26918545470"
+}

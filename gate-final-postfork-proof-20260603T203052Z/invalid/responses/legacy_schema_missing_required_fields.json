@@ -1,0 +1,14 @@
+{
+  "http_status": 200,
+  "json": {
+    "error": {
+      "code": -32000,
+      "data": {
+        "error": "Transaction chainId 0 does not match local chain 1264"
+      },
+      "message": "Transaction chainId 0 does not match local chain 1264"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}

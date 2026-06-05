@@ -1,0 +1,118 @@
+{
+  "artifact_shas": {
+    "synergy-archive-linux-amd64": "04dfd7cbc3504e19def2136f08d442dcf3b57f83b956c67ae164f7ce4fa23fa9",
+    "synergy-indexer-and-explorer-node-linux-amd64": "463a2b5a70c40cc839522dae4fdcc0904c3c5fe51e98a8fe8d74ddb047a15ebc",
+    "synergy-rpc-gateway-node-linux-amd64": "21d76bb1d3cf87f5b7806166c7c8e475fed9b0b3e69d2be32f49b95ef2117430",
+    "synergy-testnet-linux-amd64": "7939c0bda667c8abd42fa9b3d1a32e86b1b2ed7db132a558c9969bf397be63f4",
+    "wallet-pqc-cli-linux-amd64": "2ebb7343c8b04f1fe9003858b15eeb401cf362c5ad6952f694a90c3ed5f13432"
+  },
+  "artifact_version": "v13.0.66",
+  "live_sample": "gate-final-postfork-proof-20260603T203052Z/release/live-runtime-health-20260603T212740Z.jsonl",
+  "rows": [
+    {
+      "deleted_inode_count": 0,
+      "hash": "c271a2097149bc45196aaa37698ddbb55bc51bc02b0b67f5a5c3eadbfc2c88d6",
+      "height": 206474,
+      "listeners_all": true,
+      "live_sha": "0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3",
+      "matches": false,
+      "pending_count": 0,
+      "process_count": 1,
+      "role": "Val1",
+      "trusted_asset": "synergy-testnet-linux-amd64",
+      "trusted_sha": "7939c0bda667c8abd42fa9b3d1a32e86b1b2ed7db132a558c9969bf397be63f4"
+    },
+    {
+      "deleted_inode_count": 0,
+      "hash": "c271a2097149bc45196aaa37698ddbb55bc51bc02b0b67f5a5c3eadbfc2c88d6",
+      "height": 206474,
+      "listeners_all": true,
+      "live_sha": "0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3",
+      "matches": false,
+      "pending_count": 0,
+      "process_count": 1,
+      "role": "Val2",
+      "trusted_asset": "synergy-testnet-linux-amd64",
+      "trusted_sha": "7939c0bda667c8abd42fa9b3d1a32e86b1b2ed7db132a558c9969bf397be63f4"
+    },
+    {
+      "deleted_inode_count": 0,
+      "hash": "1cf775e8b08f3755f85b71eef452ff9098d51024cf142f306d79d7082539acd7",
+      "height": 206475,
+      "listeners_all": true,
+      "live_sha": "0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3",
+      "matches": false,
+      "pending_count": 0,
+      "process_count": 1,
+      "role": "Val3",
+      "trusted_asset": "synergy-testnet-linux-amd64",
+      "trusted_sha": "7939c0bda667c8abd42fa9b3d1a32e86b1b2ed7db132a558c9969bf397be63f4"
+    },
+    {
+      "deleted_inode_count": 0,
+      "hash": "1cf775e8b08f3755f85b71eef452ff9098d51024cf142f306d79d7082539acd7",
+      "height": 206475,
+      "listeners_all": true,
+      "live_sha": "0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3",
+      "matches": false,
+      "pending_count": 0,
+      "process_count": 1,
+      "role": "Val4",
+      "trusted_asset": "synergy-testnet-linux-amd64",
+      "trusted_sha": "7939c0bda667c8abd42fa9b3d1a32e86b1b2ed7db132a558c9969bf397be63f4"
+    },
+    {
+      "deleted_inode_count": 0,
+      "hash": "8fe645fb906884ecac03f7eec60c50ffe8c6eb7e8327ce12c9beac301aafd9aa",
+      "height": 206476,
+      "listeners_all": true,
+      "live_sha": "0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3",
+      "matches": false,
+      "pending_count": 0,
+      "process_count": 1,
+      "role": "Relayer1",
+      "trusted_asset": "synergy-testnet-linux-amd64",
+      "trusted_sha": "7939c0bda667c8abd42fa9b3d1a32e86b1b2ed7db132a558c9969bf397be63f4"
+    },
+    {
+      "deleted_inode_count": 0,
+      "hash": "8fe645fb906884ecac03f7eec60c50ffe8c6eb7e8327ce12c9beac301aafd9aa",
+      "height": 206476,
+      "listeners_all": true,
+      "live_sha": "0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3",
+      "matches": false,
+      "pending_count": 0,
+      "process_count": 1,
+      "role": "Relayer2",
+      "trusted_asset": "synergy-testnet-linux-amd64",
+      "trusted_sha": "7939c0bda667c8abd42fa9b3d1a32e86b1b2ed7db132a558c9969bf397be63f4"
+    },
+    {
+      "deleted_inode_count": 0,
+      "hash": "8fe645fb906884ecac03f7eec60c50ffe8c6eb7e8327ce12c9beac301aafd9aa",
+      "height": 206476,
+      "listeners_all": true,
+      "live_sha": "658febcbd4a0883718173ba5bff65d5cd006598e4604f0ee70a9b35c673898d3",
+      "matches": false,
+      "pending_count": 0,
+      "process_count": 1,
+      "role": "row9-Gateway",
+      "trusted_asset": "synergy-rpc-gateway-node-linux-amd64",
+      "trusted_sha": "21d76bb1d3cf87f5b7806166c7c8e475fed9b0b3e69d2be32f49b95ef2117430"
+    },
+    {
+      "deleted_inode_count": 0,
+      "hash": "1cf775e8b08f3755f85b71eef452ff9098d51024cf142f306d79d7082539acd7",
+      "height": 206475,
+      "listeners_all": true,
+      "live_sha": "0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3",
+      "matches": false,
+      "pending_count": 0,
+      "process_count": 1,
+      "role": "row9-Explorer",
+      "trusted_asset": "synergy-testnet-linux-amd64",
+      "trusted_sha": "7939c0bda667c8abd42fa9b3d1a32e86b1b2ed7db132a558c9969bf397be63f4"
+    }
+  ],
+  "source_commit": "8f86af208358506c6caea6e604a522f9d72a001e"
+}

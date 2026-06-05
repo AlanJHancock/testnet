@@ -6,7 +6,7 @@ usage() {
 manual-snapshot-publisher.sh \
   --snapshot-root <dir> \
   --snapshot-manifest <manifest.json> \
-  --snapshot-class <validator-pruned|support-relayer|support-rpc|indexer-full|indexer-replay|archive-full> \
+  --snapshot-class <validator-pruned|support-relayer|support-rpc|indexer-full|indexer-replay|archive-full|archive-bootstrap> \
   --allowed-role <role> [--allowed-role <role> ...] \
   --out <dir> \
   --source-node <node-id> \
@@ -49,7 +49,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$snapshot_class" in
-  validator-pruned|support-relayer|support-rpc|indexer-full|indexer-replay|archive-full) ;;
+  validator-pruned|support-relayer|support-rpc|indexer-full|indexer-replay|archive-full|archive-bootstrap|archive-validator-bootstrap) ;;
   *) echo "invalid or missing --snapshot-class" >&2; exit 2 ;;
 esac
 

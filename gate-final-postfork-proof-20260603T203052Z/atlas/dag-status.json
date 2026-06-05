@@ -1,0 +1,25 @@
+{
+  "dataSource": "atlas_indexed_committed_dag",
+  "enabled": true,
+  "frontierCount": "2",
+  "latestVertex": {
+    "availabilityCert": "5a2bc398f1f9c6d5642ff6b8c9485141cb5146a79b672a103164b1310a73b782",
+    "blockHash": "2c3bb8fdd088aaede2e29efd0b7270ba115de79d776304dec21f0165cbdfaae1",
+    "blockNumber": "205822",
+    "createdAt": "2026-06-03T20:37:39.000Z",
+    "hash": "6107bd83e8d1cb0c63fecd786f3c06c5429f0498d69f0b986316ade8be9b0fb2",
+    "heightHint": "205822",
+    "parentHashes": [
+      "7725a941a709b2161b1217ec2cf8d673a42c78c9914e6969a16ef5ab9760b574"
+    ],
+    "proposerAddress": "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re",
+    "status": "committed",
+    "transactionHashes": [
+      "syntxn-6075c3a9f449ca66d65e07e61e428af9b368d839c8c552ea3a7d4bd019ac55ae"
+    ],
+    "txCount": 1
+  },
+  "root": "synergy-dag-root",
+  "transactionCount": "42",
+  "vertexCount": "34"
+}

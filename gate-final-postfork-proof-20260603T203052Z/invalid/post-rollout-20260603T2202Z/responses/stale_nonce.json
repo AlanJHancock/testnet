@@ -1,0 +1,18 @@
+{
+  "http_status": 200,
+  "json": {
+    "error": {
+      "code": -32000,
+      "data": {
+        "error": "Transaction failed runtime validation: stale nonce; expected 6, got 5",
+        "mempool_status": "rejected",
+        "policy_warnings": [],
+        "pruned_count": 0,
+        "tx_hash": "syntxn-5a979cf8811d480ada86dbd3889a3a0f920df3eea9e09d9d519bf8a4277e754f"
+      },
+      "message": "Transaction failed runtime validation: stale nonce; expected 6, got 5"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}

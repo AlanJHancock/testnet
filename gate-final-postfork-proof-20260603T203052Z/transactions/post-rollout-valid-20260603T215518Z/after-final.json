@@ -1,0 +1,97 @@
+{
+  "captured_at": "2026-06-03T22:01:44Z",
+  "fork_status": {
+    "fork_configured": true,
+    "fork_height": 204216,
+    "fork_parent_hash": "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816",
+    "fork_parent_height": 204215,
+    "new_consensus_algorithm": "FN-DSA",
+    "old_consensus_algorithm": "ML-DSA-65",
+    "parser_mode": "fail_closed",
+    "state_root": "checkpoint-v1:chain_json_sha256=04a660f0ea4bff004412326d8ce1185dbb1e6870fb0e02cb359b776a1b1e989d;committed_blocks_jsonl_sha256=a214da21afc2191fcc087569fe73500cb97c384119e749e2bf8093ecddb9f381;canonical_locks_json_sha256=577a3347522b8e81527f27b34212ce441d04d7c5d89f3b8c943df09b3085b49a;committed_qcs_jsonl_sha256=86e113856705cd987140fdf5783169c20ab28f5efc103b92810493857bcb593d;verified_on=Val2,Val4",
+    "validator_count": 5,
+    "validators": [
+      {
+        "consensus_key_type": "FN-DSA",
+        "consensus_public_key_bytes": 1793,
+        "validator_address": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"
+      },
+      {
+        "consensus_key_type": "FN-DSA",
+        "consensus_public_key_bytes": 1793,
+        "validator_address": "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt"
+      },
+      {
+        "consensus_key_type": "FN-DSA",
+        "consensus_public_key_bytes": 1793,
+        "validator_address": "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re"
+      },
+      {
+        "consensus_key_type": "FN-DSA",
+        "consensus_public_key_bytes": 1793,
+        "validator_address": "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
+      },
+      {
+        "consensus_key_type": "FN-DSA",
+        "consensus_public_key_bytes": 1793,
+        "validator_address": "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f"
+      }
+    ]
+  },
+  "latest": {
+    "block_index": 206755,
+    "hash": "a16c524ff7813407cc69581c1addc2761aad937f6be7d2abf112d29684372774",
+    "nonce": 206755,
+    "parent_hash": "a62e190e24742607a835c1accc98dad0d3cde177a34fa2dc3224201c09c9d6cc",
+    "previous_hash": "a62e190e24742607a835c1accc98dad0d3cde177a34fa2dc3224201c09c9d6cc",
+    "timestamp": 1780523817,
+    "transactions": [],
+    "tx_count": 0,
+    "validator": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
+    "validator_id": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"
+  },
+  "public_pending": [],
+  "receiver_account": {
+    "address": "synw17nh265ug2fgc8guv2ad7tt8kv0wlhesxndl8",
+    "balance_nwei": 2225998999572940004,
+    "balance_response": {
+      "http_status": 200,
+      "json": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": 2225998999572940004
+      }
+    },
+    "nonce": 1,
+    "nonce_response": {
+      "http_status": 200,
+      "json": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": 1
+      }
+    }
+  },
+  "rpc_url": "https://testnet-core-rpc.synergy-network.io",
+  "sender_account": {
+    "address": "synw1zp7cxme7xm838663yrd43lxtxlw0ck90z4am",
+    "balance_nwei": 999381683996,
+    "balance_response": {
+      "http_status": 200,
+      "json": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": 999381683996
+      }
+    },
+    "nonce": 6,
+    "nonce_response": {
+      "http_status": 200,
+      "json": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": 6
+      }
+    }
+  }
+}

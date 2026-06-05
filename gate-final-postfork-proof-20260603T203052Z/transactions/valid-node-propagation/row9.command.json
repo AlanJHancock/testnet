@@ -1,0 +1,19 @@
+{
+  "captured_at": "2026-06-03T20:39:36.476374+00:00",
+  "command_redacted": [
+    "ssh",
+    "-o",
+    "BatchMode=no",
+    "-o",
+    "NumberOfPasswordPrompts=1",
+    "-o",
+    "StrictHostKeyChecking=no",
+    "-o",
+    "UserKnownHostsFile=/dev/null",
+    "synergyvps",
+    "\ntx='syntxn-6075c3a9f449ca66d65e07e61e428af9b368d839c8c552ea3a7d4bd019ac55ae'; fixed=205752\nfor spec in 'row9-Gateway 5641' 'row9-Explorer 5640'; do\n set -- $spec; role=$1; qrpc=$2\n echo \"role=$role\"\n for method in synergy_getTransactionReceipt synergy_getTransactionByHash synergy_getTransactionStatus; do echo \"${method}_begin\"; curl -fsS --max-time 8 -H 'Content-Type: application/json' --data \"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$method\",\"params\":[\"$tx\"]}\" \"http://127.0.0.1:$qrpc\" || true; echo; echo \"${method}_end\"; done\n echo \"pending_begin\"; curl -fsS --max-time 8 -H 'Content-Type: application/json' --data '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"synergy_getPendingTransactions\",\"params\":[]}' \"http://127.0.0.1:$qrpc\" || true; echo; echo \"pending_end\"\n echo \"fixed_block_begin\"; curl -fsS --max-time 8 -H 'Content-Type: application/json' --data \"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"synergy_getBlockByNumber\",\"params\":[$fixed]}\" \"http://127.0.0.1:$qrpc\" || true; echo; echo \"fixed_block_end\"\ndone\n"
+  ],
+  "returncode": 0,
+  "stderr": "Warning: Permanently added '74.208.227.23' (ED25519) to the list of known hosts.\n",
+  "stdout": "role=row9-Gateway\nsynergy_getTransactionReceipt_begin\n{\"error\":{\"code\":-32700,\"message\":\"Malformed JSON in body\"},\"id\":null,\"jsonrpc\":\"2.0\"}\nsynergy_getTransactionReceipt_end\nsynergy_getTransactionByHash_begin\n{\"error\":{\"code\":-32700,\"message\":\"Malformed JSON in body\"},\"id\":null,\"jsonrpc\":\"2.0\"}\nsynergy_getTransactionByHash_end\nsynergy_getTransactionStatus_begin\n{\"error\":{\"code\":-32700,\"message\":\"Malformed JSON in body\"},\"id\":null,\"jsonrpc\":\"2.0\"}\nsynergy_getTransactionStatus_end\npending_begin\n{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":[]}\npending_end\nfixed_block_begin\n{\"error\":{\"code\":-32700,\"message\":\"Malformed JSON in body\"},\"id\":null,\"jsonrpc\":\"2.0\"}\nfixed_block_end\nrole=row9-Explorer\nsynergy_getTransactionReceipt_begin\n{\"error\":{\"code\":-32700,\"message\":\"Malformed JSON in body\"},\"id\":null,\"jsonrpc\":\"2.0\"}\nsynergy_getTransactionReceipt_end\nsynergy_getTransactionByHash_begin\n{\"error\":{\"code\":-32700,\"message\":\"Malformed JSON in body\"},\"id\":null,\"jsonrpc\":\"2.0\"}\nsynergy_getTransactionByHash_end\nsynergy_getTransactionStatus_begin\n{\"error\":{\"code\":-32700,\"message\":\"Malformed JSON in body\"},\"id\":null,\"jsonrpc\":\"2.0\"}\nsynergy_getTransactionStatus_end\npending_begin\n{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":[]}\npending_end\nfixed_block_begin\n{\"error\":{\"code\":-32700,\"message\":\"Malformed JSON in body\"},\"id\":null,\"jsonrpc\":\"2.0\"}\nfixed_block_end\n"
+}

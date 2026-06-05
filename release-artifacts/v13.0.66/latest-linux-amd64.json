@@ -1,0 +1,39 @@
+{
+  "version": "v13.0.66",
+  "binaries": {
+    "linux-amd64": {
+      "synergy-testnet": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-testnet-linux-amd64",
+        "sha256": "7939c0bda667c8abd42fa9b3d1a32e86b1b2ed7db132a558c9969bf397be63f4"
+      },
+      "generate-node-keys": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/generate-node-keys-linux-amd64",
+        "sha256": "b60ce67a81bc69fdf749115a824eda1f8bcbc3d88c97268518f7cc887ce383e6"
+      },
+      "synergy-address-engine": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-address-engine-linux-amd64",
+        "sha256": "d388a60e63c4ab24ad889c62dbd9198ea29b1fa79c120bba0708dee231124cf7"
+      },
+      "wallet-pqc-cli": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/wallet-pqc-cli-linux-amd64",
+        "sha256": "2ebb7343c8b04f1fe9003858b15eeb401cf362c5ad6952f694a90c3ed5f13432"
+      },
+      "synergy-rpc-gateway-node": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-rpc-gateway-node-linux-amd64",
+        "sha256": "21d76bb1d3cf87f5b7806166c7c8e475fed9b0b3e69d2be32f49b95ef2117430"
+      },
+      "synergy-archive": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-archive-linux-amd64",
+        "sha256": "04dfd7cbc3504e19def2136f08d442dcf3b57f83b956c67ae164f7ce4fa23fa9"
+      },
+      "synergy-node": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-node-linux-amd64",
+        "sha256": "1f6b106bb1d29907e4d0dbc46d64a03c4bca7d40c15dcfd85938ab45318ef67b"
+      },
+      "synergy-indexer-and-explorer-node": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-indexer-and-explorer-node-linux-amd64",
+        "sha256": "463a2b5a70c40cc839522dae4fdcc0904c3c5fe51e98a8fe8d74ddb047a15ebc"
+      }
+    }
+  }
+}

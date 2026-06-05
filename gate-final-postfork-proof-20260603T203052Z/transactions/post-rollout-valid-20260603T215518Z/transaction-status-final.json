@@ -1,0 +1,16 @@
+{
+  "http_status": 200,
+  "json": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "block_hash": "aa759e7aa00cb914df15ad2aa31188d6f02fc78d097961462c907a2eab14cd97",
+      "block_number": 206736,
+      "found": true,
+      "status": "committed",
+      "tx_hash": "syntxn-87b6ef0c2bfadbc30f38afb00345455bc601278cfd1ef68e23341ccb42453f7f",
+      "tx_id_or_hash": "syntxn-87b6ef0c2bfadbc30f38afb00345455bc601278cfd1ef68e23341ccb42453f7f",
+      "vertex_hash": "f9f9fa75d1ddb934854a09a3dbfb06da07e5c6fff0c252440586a696c5b80f65"
+    }
+  }
+}

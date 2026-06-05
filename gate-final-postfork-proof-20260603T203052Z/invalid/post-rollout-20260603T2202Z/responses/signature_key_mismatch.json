@@ -1,0 +1,14 @@
+{
+  "http_status": 200,
+  "json": {
+    "error": {
+      "code": -32000,
+      "data": {
+        "error": "Transaction signer public key does not derive sender address"
+      },
+      "message": "Transaction signer public key does not derive sender address"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}

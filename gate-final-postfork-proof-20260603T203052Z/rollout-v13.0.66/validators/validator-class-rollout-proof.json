@@ -1,0 +1,21 @@
+{
+  "all_deleted_inode_zero": true,
+  "all_listeners_present": true,
+  "all_pending_zero": true,
+  "all_process_count_one": true,
+  "all_runtime_sha_match": true,
+  "class": "validators",
+  "fork_status_ok": true,
+  "notes": [
+    "Val3 initial getLatestBlock timed out once while fork/pending RPCs succeeded; immediate resample returned latest block."
+  ],
+  "probe_file": "gate-final-postfork-proof-20260603T203052Z/rollout-v13.0.66/validators/post-validator-class-probe-20260603T213945Z.jsonl",
+  "trusted_sha": "7939c0bda667c8abd42fa9b3d1a32e86b1b2ed7db132a558c9969bf397be63f4",
+  "val3_resample": {
+    "attempt": 1,
+    "hash": "b98ae7fd1d202471a29130dbe7904a4894d0f923ecdf50819480558f27654895",
+    "height": 206506,
+    "ok": true,
+    "pending_count": 0
+  }
+}

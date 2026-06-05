@@ -1,0 +1,49 @@
+{
+  "captured_at": "2026-06-03T21:01:44.569926+00:00",
+  "summary": {
+    "Relayer1": {
+      "pending_count": 0,
+      "pending_hashes": [],
+      "returncode": 0
+    },
+    "Relayer2": {
+      "pending_count": 0,
+      "pending_hashes": [],
+      "returncode": 0
+    },
+    "Val1": {
+      "pending_count": 0,
+      "pending_hashes": [],
+      "returncode": 0
+    },
+    "Val2": {
+      "pending_count": 0,
+      "pending_hashes": [],
+      "returncode": 0
+    },
+    "Val3": {
+      "pending_count": 0,
+      "pending_hashes": [],
+      "returncode": 0
+    },
+    "Val4": {
+      "pending_count": 0,
+      "pending_hashes": [],
+      "returncode": 0
+    },
+    "public-RPC": {
+      "pending_count": 0,
+      "pending_hashes": []
+    },
+    "row9-Explorer": {
+      "pending_count": 0,
+      "pending_hashes": [],
+      "returncode": 0
+    },
+    "row9-Gateway": {
+      "pending_count": 0,
+      "pending_hashes": [],
+      "returncode": 0
+    }
+  }
+}

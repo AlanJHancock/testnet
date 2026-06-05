@@ -1,0 +1,13 @@
+{
+  "id": 1,
+  "jsonrpc": "2.0",
+  "method": "synergy_sendTransaction",
+  "params": [
+    {
+      "amount": 1,
+      "receiver": "synw17nh265ug2fgc8guv2ad7tt8kv0wlhesxndl8",
+      "sender": "synw1zp7cxme7xm838663yrd43lxtxlw0ck90z4am",
+      "signature": "legacy-signature"
+    }
+  ]
+}

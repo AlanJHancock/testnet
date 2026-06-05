@@ -1,0 +1,40 @@
+{
+  "captured_at": "2026-06-03T20:37:51Z",
+  "latest": {
+    "block_index": 205823,
+    "hash": "f1e010ab21fdd44f06182d774a57dcc19c8a9f859a815c30967452fbde090e5a",
+    "nonce": 205823,
+    "parent_hash": "2c3bb8fdd088aaede2e29efd0b7270ba115de79d776304dec21f0165cbdfaae1",
+    "previous_hash": "2c3bb8fdd088aaede2e29efd0b7270ba115de79d776304dec21f0165cbdfaae1",
+    "timestamp": 1780519063,
+    "transactions": [],
+    "tx_count": 0,
+    "validator": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
+    "validator_id": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"
+  },
+  "public_pending": [],
+  "receiver_account": {
+    "address": "synw17nh265ug2fgc8guv2ad7tt8kv0wlhesxndl8",
+    "balance_nwei": 2225998999572940003,
+    "chain": {
+      "chain_id": 1264,
+      "chain_id_hex": "0x4f0",
+      "genesis_hash": "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789",
+      "name": "synergy-testnet",
+      "network_id": "synergy-testnet-v2"
+    },
+    "nonce": 1
+  },
+  "sender_account": {
+    "address": "synw1zp7cxme7xm838663yrd43lxtxlw0ck90z4am",
+    "balance_nwei": 999445819997,
+    "chain": {
+      "chain_id": 1264,
+      "chain_id_hex": "0x4f0",
+      "genesis_hash": "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789",
+      "name": "synergy-testnet",
+      "network_id": "synergy-testnet-v2"
+    },
+    "nonce": 5
+  }
+}

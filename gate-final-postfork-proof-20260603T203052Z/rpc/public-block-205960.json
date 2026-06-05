@@ -1,0 +1,12 @@
+{
+  "block_index": 205960,
+  "hash": "d415a734b0e5c5ecf6bced86bb1471eae4f5295ae5832fdd0bcec440d36da1bc",
+  "nonce": 205960,
+  "parent_hash": "49491cdd8d94ab17a4324bbea46fbe3a8871c94369ca796712ae38909f9950e2",
+  "previous_hash": "49491cdd8d94ab17a4324bbea46fbe3a8871c94369ca796712ae38909f9950e2",
+  "timestamp": 1780519698,
+  "transactions": [],
+  "tx_count": 0,
+  "validator": "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5",
+  "validator_id": "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
+}

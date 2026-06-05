@@ -1,0 +1,105 @@
+{
+  "canonical_locks_mutated": true,
+  "chain": {
+    "chain_id": 1264,
+    "chain_id_hex": "0x4f0",
+    "genesis_hash": "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789",
+    "network_id": "synergy-testnet-v2"
+  },
+  "chain_state_mutated": true,
+  "committed_qcs_mutated": true,
+  "evidence_path": "/home/justin/.synergy/testnet/nodes/validator-workspace/data/self-heal-evidence/1780529802-snapshot-restore",
+  "genesis_mutated": false,
+  "keys_or_configs_copied": false,
+  "next_required_action": "restart_or_continue_quarantined_node_speed_sync_then_start_shadow_observe",
+  "preserved_stale_shadow_observation_path": "/home/justin/.synergy/testnet/nodes/validator-workspace/data/self-heal-evidence/1780529802-snapshot-restore/stale-shadow-observation-before-restore.json",
+  "quorum_mutated": false,
+  "restore_plan": {
+    "files_to_restore": [
+      "chain.json",
+      "canonical_locks.json",
+      "committed_qcs.json",
+      "committed_qcs.jsonl",
+      "dag_state.json",
+      "validator_registry.json",
+      "token_state.json"
+    ],
+    "genesis_mutated": false,
+    "keys_or_configs_copied": false,
+    "quorum_mutated": false,
+    "snapshot_height": 207828,
+    "snapshot_manifest_hash": "86e382bf4292cf0164187acb36fdd92af6107f6fa8c0a07d829d3138eca588b6",
+    "source_snapshot": "/home/justin/synergy-testnet-evidence/received-snapshots/validator-pruned-207828-v13.0.69/snapshot-207828-1780528664",
+    "target_data_dir": "/home/justin/.synergy/testnet/nodes/validator-workspace/data",
+    "validator_id": "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f"
+  },
+  "restored_files": [
+    "/home/justin/.synergy/testnet/nodes/validator-workspace/data/chain.json",
+    "/home/justin/.synergy/testnet/nodes/validator-workspace/data/canonical_locks.json",
+    "/home/justin/.synergy/testnet/nodes/validator-workspace/data/committed_qcs.json",
+    "/home/justin/.synergy/testnet/nodes/validator-workspace/data/committed_qcs.jsonl",
+    "/home/justin/.synergy/testnet/nodes/validator-workspace/data/dag_state.json",
+    "/home/justin/.synergy/testnet/nodes/validator-workspace/data/validator_registry.json",
+    "/home/justin/.synergy/testnet/nodes/validator-workspace/data/token_state.json"
+  ],
+  "stale_shadow_observation_invalidated": true,
+  "success": true,
+  "typed_status": "SNAPSHOT_RESTORED",
+  "verification": {
+    "active_validator_set_is_genesis_5": true,
+    "allowed_restore_roles": [
+      "validator"
+    ],
+    "committed_qc_hash": "e8335be7c028385062e3ab84662271632e13b61dc9c893e5176d84ef4a29aa05",
+    "committed_qc_height": 207828,
+    "committed_qc_signers": [
+      "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re",
+      "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5",
+      "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
+      "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt"
+    ],
+    "committed_qc_vote_count": 4,
+    "duplicate_signer_check_passed": true,
+    "errors": [],
+    "fail_closed": false,
+    "file_checksums_verified": true,
+    "manifest_hash": "86e382bf4292cf0164187acb36fdd92af6107f6fa8c0a07d829d3138eca588b6",
+    "manifest_signature_verified": true,
+    "relayers_rpc_support_counted_toward_quorum": false,
+    "snapshot_class": "validator-pruned",
+    "snapshot_height": 207828,
+    "source_qc_aegis_pqc_verified": true,
+    "success": true
+  },
+  "wipe_result": {
+    "canonical_locks_mutated": true,
+    "chain_state_mutated": true,
+    "committed_qcs_mutated": true,
+    "dag_state_mutated": true,
+    "evidence_path": "/home/justin/.synergy/testnet/nodes/validator-workspace/data/self-heal-evidence/1780529802-snapshot-restore",
+    "files_preserved": [
+      "/home/justin/.synergy/testnet/nodes/validator-workspace/data/self-heal-evidence/1780529802-snapshot-restore/chain.json",
+      "/home/justin/.synergy/testnet/nodes/validator-workspace/data/self-heal-evidence/1780529802-snapshot-restore/canonical_locks.json",
+      "/home/justin/.synergy/testnet/nodes/validator-workspace/data/self-heal-evidence/1780529802-snapshot-restore/committed_qcs.json",
+      "/home/justin/.synergy/testnet/nodes/validator-workspace/data/self-heal-evidence/1780529802-snapshot-restore/committed_qcs.jsonl",
+      "/home/justin/.synergy/testnet/nodes/validator-workspace/data/self-heal-evidence/1780529802-snapshot-restore/dag_state.json",
+      "/home/justin/.synergy/testnet/nodes/validator-workspace/data/self-heal-evidence/1780529802-snapshot-restore/validator_registry.json",
+      "/home/justin/.synergy/testnet/nodes/validator-workspace/data/self-heal-evidence/1780529802-snapshot-restore/token_state.json"
+    ],
+    "files_wiped": [
+      "/home/justin/.synergy/testnet/nodes/validator-workspace/data/chain.json",
+      "/home/justin/.synergy/testnet/nodes/validator-workspace/data/canonical_locks.json",
+      "/home/justin/.synergy/testnet/nodes/validator-workspace/data/committed_qcs.json",
+      "/home/justin/.synergy/testnet/nodes/validator-workspace/data/committed_qcs.jsonl",
+      "/home/justin/.synergy/testnet/nodes/validator-workspace/data/dag_state.json",
+      "/home/justin/.synergy/testnet/nodes/validator-workspace/data/validator_registry.json",
+      "/home/justin/.synergy/testnet/nodes/validator-workspace/data/token_state.json"
+    ],
+    "genesis_mutated": false,
+    "keys_or_configs_copied": false,
+    "quorum_mutated": false,
+    "registry_state_mutated": true,
+    "success": true,
+    "token_state_mutated": true
+  }
+}

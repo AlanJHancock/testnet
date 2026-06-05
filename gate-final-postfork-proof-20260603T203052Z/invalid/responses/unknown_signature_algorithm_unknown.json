@@ -1,0 +1,16 @@
+{
+  "http_status": 200,
+  "json": {
+    "error": {
+      "code": -32000,
+      "data": {
+        "code": -32602,
+        "data": null,
+        "error": "Unsupported signature algorithm 'unknown'"
+      },
+      "message": "Unsupported signature algorithm 'unknown'"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}

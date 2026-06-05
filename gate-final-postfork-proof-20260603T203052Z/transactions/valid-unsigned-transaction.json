@@ -1,0 +1,14 @@
+{
+  "amount": 1,
+  "chain_id": 1264,
+  "data": "gate4-valid-fndsa:2026-06-03T20:37:34Z:1780519054466405000",
+  "gas_limit": 21000,
+  "gas_price": 1000,
+  "network_id": "synergy-testnet-v2",
+  "nonce": 4,
+  "receiver": "synw17nh265ug2fgc8guv2ad7tt8kv0wlhesxndl8",
+  "sender": "synw1zp7cxme7xm838663yrd43lxtxlw0ck90z4am",
+  "signature": [],
+  "signature_algorithm": "fndsa",
+  "timestamp": 1780519054
+}

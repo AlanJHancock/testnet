@@ -1,0 +1,27 @@
+{
+  "pending": [],
+  "receiver_account": {
+    "address": "synw17nh265ug2fgc8guv2ad7tt8kv0wlhesxndl8",
+    "balance_nwei": 2225998999572940003,
+    "chain": {
+      "chain_id": 1264,
+      "chain_id_hex": "0x4f0",
+      "genesis_hash": "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789",
+      "name": "synergy-testnet",
+      "network_id": "synergy-testnet-v2"
+    },
+    "nonce": 1
+  },
+  "sender_account": {
+    "address": "synw1zp7cxme7xm838663yrd43lxtxlw0ck90z4am",
+    "balance_nwei": 999445819997,
+    "chain": {
+      "chain_id": 1264,
+      "chain_id_hex": "0x4f0",
+      "genesis_hash": "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789",
+      "name": "synergy-testnet",
+      "network_id": "synergy-testnet-v2"
+    },
+    "nonce": 5
+  }
+}

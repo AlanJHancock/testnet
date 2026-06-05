@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpListener};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -415,8 +415,7 @@ pub fn start_rpc_server(
                             cors_enabled_for_conn,
                             &cors_origins_for_conn,
                         );
-                        let _ = stream.write(response_str.as_bytes());
-                        let _ = stream.flush();
+                        write_http_response_and_close(&mut stream, &response_str);
                         return;
                     }
 
@@ -501,8 +500,7 @@ pub fn start_rpc_server(
                                         cors_enabled_for_conn,
                                         &cors_origins_for_conn,
                                     );
-                                    let _ = stream.write(response_str.as_bytes());
-                                    let _ = stream.flush();
+                                    write_http_response_and_close(&mut stream, &response_str);
                                 }
                                 Ok(None) => {
                                     let response_str = format_http_response(
@@ -512,8 +510,7 @@ pub fn start_rpc_server(
                                         cors_enabled_for_conn,
                                         &cors_origins_for_conn,
                                     );
-                                    let _ = stream.write(response_str.as_bytes());
-                                    let _ = stream.flush();
+                                    write_http_response_and_close(&mut stream, &response_str);
                                 }
                                 Err(error) => send_json_rpc_error(
                                     &mut stream,
@@ -4684,7 +4681,14 @@ fn send_json_rpc_error(
 ) {
     let response = json_rpc_error_response(id, error);
     let response = format_response(&response.to_string(), cors_enabled, cors_origins);
-    let _ = stream.write(response.as_bytes());
+    write_http_response_and_close(stream, &response);
+}
+
+fn write_http_response_and_close(stream: &mut std::net::TcpStream, response: &str) {
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+    let _ = stream.shutdown(Shutdown::Both);
 }
 
 fn translate_legacy_rpc_result(value: Value) -> Result<Value, RpcError> {
@@ -6213,7 +6217,7 @@ fn format_http_response(
     if cors_enabled {
         let origin = select_cors_origin(cors_origins);
         return format!(
-            "HTTP/1.1 {}\r\nContent-Type: {}\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: {}\r\n\r\n{}",
+            "HTTP/1.1 {}\r\nContent-Type: {}\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             status,
             content_type,
             origin,
@@ -6223,7 +6227,7 @@ fn format_http_response(
     }
 
     format!(
-        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n{}",
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         status,
         content_type,
         body.len(),
@@ -6233,12 +6237,13 @@ fn format_http_response(
 
 fn format_cors_preflight_response(cors_enabled: bool, cors_origins: &[String]) -> String {
     if !cors_enabled {
-        return "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n".to_string();
+        return "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_string();
     }
 
     let origin = select_cors_origin(cors_origins);
     format!(
-        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: 0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: {}\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         origin
     )
 }
@@ -6497,6 +6502,15 @@ mod tests {
         let header_end = find_http_header_end(request).expect("header delimiter should be found");
         assert_eq!(&request[header_end..header_end + 4], b"\r\n\r\n");
         assert_eq!(&request[header_end + 4..], b"{\"jsonrpc\":\"2");
+    }
+
+    #[test]
+    fn http_responses_close_connections_explicitly() {
+        let response = format_http_response("200 OK", "application/json", "{}", false, &[]);
+        assert!(response.contains("\r\nConnection: close\r\n"));
+
+        let preflight = format_cors_preflight_response(true, &["https://example.com".to_string()]);
+        assert!(preflight.contains("\r\nConnection: close\r\n"));
     }
 
     #[test]

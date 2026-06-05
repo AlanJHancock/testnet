@@ -1,0 +1,251 @@
+{
+  "Relayer1": {
+    "binary_path": "/opt/synergy/testnet/relayer/bin/synergy-testnet-linux-amd64",
+    "close_wait": "92",
+    "deleted_inode_any": false,
+    "established_service": "6",
+    "fixed_hash": "e64f31282497eb2093130ab2c7e2a6433c40d6b8efc36f35a140471fcc32ed4f",
+    "fixed_height": 205905,
+    "fork_height": 204216,
+    "latest_hash": "214228f6bb2fce1af6a10d58c12600221d0d930ba62811bb5e033cf12874f64e",
+    "latest_height": 206080,
+    "listener_ports_present": [
+      5622,
+      5640,
+      5660,
+      6030
+    ],
+    "new_consensus_algorithm": "FN-DSA",
+    "parser_mode": "fail_closed",
+    "pending_count": 0,
+    "pending_hashes": [],
+    "process_count": 1,
+    "runtime_sha256": "0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3",
+    "validator_count": 5,
+    "validator_key_bytes": [
+      1793
+    ],
+    "validator_key_types": [
+      "FN-DSA"
+    ]
+  },
+  "Relayer2": {
+    "binary_path": "/opt/synergy/testnet/relayer/bin/synergy-testnet-linux-amd64",
+    "close_wait": "18",
+    "deleted_inode_any": false,
+    "established_service": "9",
+    "fixed_hash": "e64f31282497eb2093130ab2c7e2a6433c40d6b8efc36f35a140471fcc32ed4f",
+    "fixed_height": 205905,
+    "fork_height": 204216,
+    "latest_hash": "214228f6bb2fce1af6a10d58c12600221d0d930ba62811bb5e033cf12874f64e",
+    "latest_height": 206080,
+    "listener_ports_present": [
+      5622,
+      5640,
+      5660,
+      6030
+    ],
+    "new_consensus_algorithm": "FN-DSA",
+    "parser_mode": "fail_closed",
+    "pending_count": 0,
+    "pending_hashes": [],
+    "process_count": 1,
+    "runtime_sha256": "0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3",
+    "validator_count": 5,
+    "validator_key_bytes": [
+      1793
+    ],
+    "validator_key_types": [
+      "FN-DSA"
+    ]
+  },
+  "Val1": {
+    "binary_path": "/home/justin/.synergy/testnet/nodes/validator-workspace/bin/synergy-testnet-linux-amd64",
+    "close_wait": "1",
+    "deleted_inode_any": false,
+    "established_service": "3",
+    "fixed_hash": "e64f31282497eb2093130ab2c7e2a6433c40d6b8efc36f35a140471fcc32ed4f",
+    "fixed_height": 205905,
+    "fork_height": 204216,
+    "latest_hash": "520e82439a1880291c1f8209976abfa4901e4c47266625654b0fce57934458ca",
+    "latest_height": 206047,
+    "listener_ports_present": [
+      5622,
+      5640,
+      5660,
+      6030
+    ],
+    "new_consensus_algorithm": "FN-DSA",
+    "parser_mode": "fail_closed",
+    "pending_count": 0,
+    "pending_hashes": [],
+    "process_count": 1,
+    "runtime_sha256": "0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3",
+    "validator_count": 5,
+    "validator_key_bytes": [
+      1793
+    ],
+    "validator_key_types": [
+      "FN-DSA"
+    ]
+  },
+  "Val2": {
+    "binary_path": "/home/rob/.synergy/testnet/nodes/validator-workspace/bin/synergy-testnet-linux-amd64",
+    "close_wait": "1",
+    "deleted_inode_any": false,
+    "established_service": "4",
+    "fixed_hash": "e64f31282497eb2093130ab2c7e2a6433c40d6b8efc36f35a140471fcc32ed4f",
+    "fixed_height": 205905,
+    "fork_height": 204216,
+    "latest_hash": "25b415d375df11d55c7155f20a1d12d808b2a9ca572cff96b81bf2eb562e2184",
+    "latest_height": 206046,
+    "listener_ports_present": [
+      5622,
+      5640,
+      5660,
+      6030
+    ],
+    "new_consensus_algorithm": "FN-DSA",
+    "parser_mode": "fail_closed",
+    "pending_count": 1,
+    "pending_hashes": [
+      "syntxn-3ecc821e5a2acbdf3e13b9d63e19e083a2bbc964189988bc6cdbafb60819e5ec"
+    ],
+    "process_count": 1,
+    "runtime_sha256": "0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3",
+    "validator_count": 5,
+    "validator_key_bytes": [
+      1793
+    ],
+    "validator_key_types": [
+      "FN-DSA"
+    ]
+  },
+  "Val3": {
+    "binary_path": "/home/rob/.synergy/testnet/nodes/validator-workspace/bin/synergy-testnet-linux-amd64",
+    "close_wait": "0",
+    "deleted_inode_any": false,
+    "established_service": "3",
+    "fixed_hash": "e64f31282497eb2093130ab2c7e2a6433c40d6b8efc36f35a140471fcc32ed4f",
+    "fixed_height": 205905,
+    "fork_height": 204216,
+    "latest_hash": "520e82439a1880291c1f8209976abfa4901e4c47266625654b0fce57934458ca",
+    "latest_height": 206047,
+    "listener_ports_present": [
+      5622,
+      5640,
+      5660,
+      6030
+    ],
+    "new_consensus_algorithm": "FN-DSA",
+    "parser_mode": "fail_closed",
+    "pending_count": 0,
+    "pending_hashes": [],
+    "process_count": 1,
+    "runtime_sha256": "0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3",
+    "validator_count": 5,
+    "validator_key_bytes": [
+      1793
+    ],
+    "validator_key_types": [
+      "FN-DSA"
+    ]
+  },
+  "Val4": {
+    "binary_path": "/home/node/.synergy/testnet/nodes/validator-workspace/bin/synergy-testnet-linux-amd64",
+    "close_wait": "1",
+    "deleted_inode_any": false,
+    "established_service": "3",
+    "fixed_hash": "e64f31282497eb2093130ab2c7e2a6433c40d6b8efc36f35a140471fcc32ed4f",
+    "fixed_height": 205905,
+    "fork_height": 204216,
+    "latest_hash": "25b415d375df11d55c7155f20a1d12d808b2a9ca572cff96b81bf2eb562e2184",
+    "latest_height": 206046,
+    "listener_ports_present": [
+      5622,
+      5640,
+      5660,
+      6030
+    ],
+    "new_consensus_algorithm": "FN-DSA",
+    "parser_mode": "fail_closed",
+    "pending_count": 1,
+    "pending_hashes": [
+      "syntxn-3ecc821e5a2acbdf3e13b9d63e19e083a2bbc964189988bc6cdbafb60819e5ec"
+    ],
+    "process_count": 1,
+    "runtime_sha256": "0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3",
+    "validator_count": 5,
+    "validator_key_bytes": [
+      1793
+    ],
+    "validator_key_types": [
+      "FN-DSA"
+    ]
+  },
+  "row9-Explorer": {
+    "binary_path": "/opt/synergy/Node-EXP/bin/synergy-testnet-linux-amd64",
+    "close_wait": "0",
+    "deleted_inode_any": false,
+    "established_service": "3",
+    "fixed_hash": "e64f31282497eb2093130ab2c7e2a6433c40d6b8efc36f35a140471fcc32ed4f",
+    "fixed_height": 205905,
+    "fork_height": 204216,
+    "latest_hash": "701fc9bfcf4609e36d40dfa8095cb80f101eb9dc25d245764bfcd0c159d97cf5",
+    "latest_height": 206028,
+    "listener_ports_present": [
+      5622,
+      5640,
+      5660,
+      6030
+    ],
+    "new_consensus_algorithm": "FN-DSA",
+    "parser_mode": "fail_closed",
+    "pending_count": 2,
+    "pending_hashes": [
+      "syntxn-3ecc821e5a2acbdf3e13b9d63e19e083a2bbc964189988bc6cdbafb60819e5ec",
+      "syntxn-ca5550eeaf974d6f9d3395a08af2f5192665cb5f8784d936623fab4585e41ee0"
+    ],
+    "process_count": 1,
+    "runtime_sha256": "0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3",
+    "validator_count": 5,
+    "validator_key_bytes": [
+      1793
+    ],
+    "validator_key_types": [
+      "FN-DSA"
+    ]
+  },
+  "row9-Gateway": {
+    "binary_path": "/opt/synergy/Node-RPC/bin/synergy-rpc-gateway-node-linux-amd64",
+    "close_wait": "0",
+    "deleted_inode_any": false,
+    "established_service": "0",
+    "fixed_hash": "e64f31282497eb2093130ab2c7e2a6433c40d6b8efc36f35a140471fcc32ed4f",
+    "fixed_height": 205905,
+    "fork_height": 204216,
+    "latest_hash": "016fdc72dea906879b811ee5988eea0f8d62ac565838da5af3c8330c2eca0897",
+    "latest_height": 206045,
+    "listener_ports_present": [
+      5623,
+      5641,
+      5661,
+      6031
+    ],
+    "new_consensus_algorithm": "FN-DSA",
+    "parser_mode": "fail_closed",
+    "pending_count": 1,
+    "pending_hashes": [
+      "syntxn-3ecc821e5a2acbdf3e13b9d63e19e083a2bbc964189988bc6cdbafb60819e5ec"
+    ],
+    "process_count": 1,
+    "runtime_sha256": "658febcbd4a0883718173ba5bff65d5cd006598e4604f0ee70a9b35c673898d3",
+    "validator_count": 5,
+    "validator_key_bytes": [
+      1793
+    ],
+    "validator_key_types": [
+      "FN-DSA"
+    ]
+  }
+}

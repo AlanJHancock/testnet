@@ -1,5 +1,7 @@
-use crate::block::BlockChain;
-use crate::consensus::chain_durability::validate_chain_body_covers_canonical_lock;
+use crate::block::{Block, BlockChain};
+use crate::consensus::chain_durability::{
+    committed_block_log_path, validate_chain_body_covers_canonical_lock, CommittedBlockLogEntry,
+};
 use crate::consensus::consensus_algorithm::ProofOfSynergy;
 use crate::consensus::consensus_fork;
 use crate::consensus::dual_quorum::DualQuorumConsensus;
@@ -114,6 +116,18 @@ struct BlockSummary {
     parent_hash: String,
     validator_id: String,
     transactions_root: String,
+}
+
+impl From<&Block> for BlockSummary {
+    fn from(block: &Block) -> Self {
+        Self {
+            height: block.block_index,
+            hash: block.hash.clone(),
+            parent_hash: block.previous_hash.clone(),
+            validator_id: block.validator_id.clone(),
+            transactions_root: block.transactions_root.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -523,6 +537,12 @@ fn find_block_at_height(value: &Value, height: u64) -> Option<BlockSummary> {
 }
 
 fn read_block_at_height(height: u64) -> Result<BlockSummary, String> {
+    let mut committed_log_blocks = BTreeMap::<u64, BlockSummary>::new();
+    fill_blocks_from_committed_log(height, height, &mut committed_log_blocks)?;
+    if let Some(block) = committed_log_blocks.remove(&height) {
+        return Ok(block);
+    }
+
     let path = crate::utils::resolve_data_path("data/chain.json");
     let mut found = None;
     stream_chain_blocks(&path, |value| {
@@ -546,6 +566,11 @@ fn read_blocks_in_height_range(
     let path = crate::utils::resolve_data_path("data/chain.json");
     let expected = end_height.saturating_sub(start_height).saturating_add(1) as usize;
     let mut blocks = BTreeMap::<u64, BlockSummary>::new();
+    fill_blocks_from_committed_log(start_height, end_height, &mut blocks)?;
+    if blocks.len() == expected {
+        return Ok(blocks.into_values().collect());
+    }
+
     stream_chain_blocks(&path, |value| {
         let Some(height) = u64_field(value, &["height", "number", "block_number", "block_index"])
         else {
@@ -584,6 +609,56 @@ fn read_blocks_in_height_range(
         ));
     }
     Ok(blocks.into_values().collect())
+}
+
+fn fill_blocks_from_committed_log(
+    start_height: u64,
+    end_height: u64,
+    blocks: &mut BTreeMap<u64, BlockSummary>,
+) -> Result<(), String> {
+    let path = committed_block_log_path();
+    if !path.exists() {
+        return Ok(());
+    }
+    let file = fs::File::open(&path)
+        .map_err(|error| format!("open committed block log {}: {error}", path.display()))?;
+    let expected = end_height.saturating_sub(start_height).saturating_add(1) as usize;
+    for (line_number, line) in BufReader::new(file).lines().enumerate() {
+        let line = line.map_err(|error| {
+            format!(
+                "read committed block log {} line {}: {error}",
+                path.display(),
+                line_number + 1
+            )
+        })?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let entry = serde_json::from_str::<CommittedBlockLogEntry>(trimmed).map_err(|error| {
+            format!(
+                "parse committed block log {} line {}: {error}",
+                path.display(),
+                line_number + 1
+            )
+        })?;
+        if entry.height < start_height || entry.height > end_height {
+            continue;
+        }
+        if entry.height != entry.block.block_index || entry.hash != entry.block.hash {
+            return Err(format!(
+                "committed block log entry at line {} has inconsistent height/hash",
+                line_number + 1
+            ));
+        }
+        blocks
+            .entry(entry.height)
+            .or_insert_with(|| BlockSummary::from(&entry.block));
+        if blocks.len() >= expected {
+            break;
+        }
+    }
+    Ok(())
 }
 
 fn evaluate_shadow_block_range(
@@ -3132,8 +3207,8 @@ mod tests {
         read_latest_block_summary, rejoin_eligibility, request_rejoin_with_options,
         self_heal_from_snapshot, shadow_status, snapshot_metadata_consistency_report,
         start_shadow_observe_with_options, sync_from_canonical_peer_with_options, BlockSummary,
-        CreateSnapshotOptions, OperatorQuarantineOptions, RejoinRequestOptions,
-        SnapshotCanonicalLockMaterialization, StartShadowObserveOptions,
+        CommittedBlockLogEntry, CreateSnapshotOptions, OperatorQuarantineOptions,
+        RejoinRequestOptions, SnapshotCanonicalLockMaterialization, StartShadowObserveOptions,
         SyncFromCanonicalPeerOptions, DIAGNOSTIC_STALE_TRANSIENT_VOTE_LOCK_SECS, EXPECTED_CHAIN_ID,
         EXPECTED_NETWORK_ID,
     };
@@ -4657,6 +4732,74 @@ mod tests {
                 .and_then(Value::as_u64),
             Some(91000)
         );
+    }
+
+    #[test]
+    fn shadow_status_uses_committed_block_log_when_chain_snapshot_lags() {
+        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
+            .lock()
+            .expect("diagnostics env lock should succeed");
+        let root = test_runtime_root("shadow-committed-log-fallback");
+        install_test_genesis(&root);
+        install_test_config(&root, 1264, "synergy-testnet-v2");
+        write_quarantine_marker(&root);
+        write_empty_vote_locks(&root);
+        write_shadow_observation(&root, 89957, 500);
+        write_chain_range(&root, 89958, 90456);
+        write_canonical_lock_at_height(&root, 90457);
+        write_legacy_qc_fixture_at_height(&root, 90457);
+        let block = Block {
+            block_index: 90457,
+            timestamp: 1,
+            transactions: Vec::new(),
+            previous_hash: test_hash(90456),
+            validator_id: "validator-1".to_string(),
+            nonce: 90457,
+            hash: test_hash(90457),
+            transactions_root: String::new(),
+            proposer_public_key: Vec::new(),
+            block_signature: Vec::new(),
+            block_signature_algorithm: "fn-dsa".to_string(),
+        };
+        let entry = CommittedBlockLogEntry {
+            height: block.block_index,
+            hash: block.hash.clone(),
+            previous_hash: block.previous_hash.clone(),
+            block,
+        };
+        let committed_log_path = root.join("data/committed_blocks.jsonl");
+        fs::write(
+            &committed_log_path,
+            serde_json::to_string(&entry).expect("committed block log entry should serialize")
+                + "\n",
+        )
+        .expect("committed block log should be written");
+
+        let previous_committed_log = std::env::var("SYNERGY_COMMITTED_BLOCK_LOG_FILE").ok();
+        std::env::set_var("SYNERGY_COMMITTED_BLOCK_LOG_FILE", &committed_log_path);
+        let report = with_runtime_root(&root, shadow_status);
+        match previous_committed_log {
+            Some(value) => std::env::set_var("SYNERGY_COMMITTED_BLOCK_LOG_FILE", value),
+            None => std::env::remove_var("SYNERGY_COMMITTED_BLOCK_LOG_FILE"),
+        }
+
+        assert_eq!(
+            report.get("status").and_then(Value::as_str),
+            Some("PROCESS_PROOF_PASS")
+        );
+        assert_eq!(
+            report.get("observed_blocks").and_then(Value::as_u64),
+            Some(500)
+        );
+        assert_eq!(
+            report.get("mismatch_count").and_then(Value::as_u64),
+            Some(0)
+        );
+        assert!(report
+            .get("failures")
+            .and_then(Value::as_array)
+            .map(|failures| failures.is_empty())
+            .unwrap_or(false));
     }
 
     #[test]

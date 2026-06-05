@@ -6,7 +6,7 @@ Protocol role: `ARCHIVE_OBSERVER`
 
 The archive node verifies finalized chain data, stores full archival data, creates role-specific signed snapshots, chunks zstd archives at 512 MiB, retains verified snapshots by class, and serves verified snapshots to new validators, self-healing validators, relayers, RPC nodes, and indexers. It never votes, never proposes, never aggregates QCs, and never counts toward quorum.
 
-Required snapshot classes: `validator-pruned`, `support-relayer`, `support-rpc`, `indexer-replay`, `indexer-full`, and `archive-full`.
+Required snapshot classes: `validator-pruned`, `support-relayer`, `support-rpc`, `indexer-replay`, `indexer-full`, `archive-full`, and `archive-bootstrap`.
 
 Linux install:
 

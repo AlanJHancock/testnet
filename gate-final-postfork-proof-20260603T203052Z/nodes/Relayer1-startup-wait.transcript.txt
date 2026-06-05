@@ -1,0 +1,165 @@
+Warning: Permanently added '195.26.241.95' (ED25519) to the list of known hosts.
+sample=1 date=2026-06-03T22:52:03+02:00
+active
+curl: (7) Failed to connect to 127.0.0.1 port 5640 after 0 ms: Couldn't connect to server
+sample=2 date=2026-06-03T22:52:08+02:00
+active
+curl: (7) Failed to connect to 127.0.0.1 port 5640 after 0 ms: Couldn't connect to server
+sample=3 date=2026-06-03T22:52:14+02:00
+active
+curl: (7) Failed to connect to 127.0.0.1 port 5640 after 0 ms: Couldn't connect to server
+sample=4 date=2026-06-03T22:52:19+02:00
+active
+curl: (7) Failed to connect to 127.0.0.1 port 5640 after 0 ms: Couldn't connect to server
+sample=5 date=2026-06-03T22:52:24+02:00
+active
+curl: (7) Failed to connect to 127.0.0.1 port 5640 after 0 ms: Couldn't connect to server
+sample=6 date=2026-06-03T22:52:29+02:00
+active
+curl: (7) Failed to connect to 127.0.0.1 port 5640 after 0 ms: Couldn't connect to server
+sample=7 date=2026-06-03T22:52:34+02:00
+active
+curl: (7) Failed to connect to 127.0.0.1 port 5640 after 0 ms: Couldn't connect to server
+sample=8 date=2026-06-03T22:52:39+02:00
+active
+curl: (7) Failed to connect to 127.0.0.1 port 5640 after 0 ms: Couldn't connect to server
+sample=9 date=2026-06-03T22:52:44+02:00
+active
+curl: (7) Failed to connect to 127.0.0.1 port 5640 after 0 ms: Couldn't connect to server
+sample=10 date=2026-06-03T22:52:49+02:00
+active
+curl: (7) Failed to connect to 127.0.0.1 port 5640 after 0 ms: Couldn't connect to server
+sample=11 date=2026-06-03T22:52:54+02:00
+active
+LISTEN 0      128          0.0.0.0:5622      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=3))           
+LISTEN 0      128          0.0.0.0:5640      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=4))           
+LISTEN 0      128          0.0.0.0:5660      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=7))           
+LISTEN 0      128          0.0.0.0:6030      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=23))          
+curl: (28) Operation timed out after 3002 milliseconds with 0 bytes received
+sample=12 date=2026-06-03T22:53:02+02:00
+active
+LISTEN 0      128          0.0.0.0:5622      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=3))           
+LISTEN 0      128          0.0.0.0:5640      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=4))           
+LISTEN 0      128          0.0.0.0:5660      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=7))           
+LISTEN 0      128          0.0.0.0:6030      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=23))          
+curl: (28) Operation timed out after 3002 milliseconds with 0 bytes received
+sample=13 date=2026-06-03T22:53:10+02:00
+active
+LISTEN 0      128          0.0.0.0:5622      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=3))           
+LISTEN 0      128          0.0.0.0:5640      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=4))           
+LISTEN 0      128          0.0.0.0:5660      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=7))           
+LISTEN 0      128          0.0.0.0:6030      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=23))          
+curl: (28) Operation timed out after 3002 milliseconds with 0 bytes received
+sample=14 date=2026-06-03T22:53:18+02:00
+active
+LISTEN 0      128          0.0.0.0:5622      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=3))           
+LISTEN 0      128          0.0.0.0:5640      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=4))           
+LISTEN 0      128          0.0.0.0:5660      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=7))           
+LISTEN 0      128          0.0.0.0:6030      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=23))          
+curl: (28) Operation timed out after 3002 milliseconds with 0 bytes received
+sample=15 date=2026-06-03T22:53:26+02:00
+active
+LISTEN 0      128          0.0.0.0:5622      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=3))           
+LISTEN 0      128          0.0.0.0:5640      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=4))           
+LISTEN 0      128          0.0.0.0:5660      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=7))           
+LISTEN 0      128          0.0.0.0:6030      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=23))          
+curl: (28) Operation timed out after 3002 milliseconds with 0 bytes received
+sample=16 date=2026-06-03T22:53:34+02:00
+active
+LISTEN 0      128          0.0.0.0:5622      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=3))           
+LISTEN 0      128          0.0.0.0:5640      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=4))           
+LISTEN 0      128          0.0.0.0:5660      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=7))           
+LISTEN 0      128          0.0.0.0:6030      0.0.0.0:*    users:(("synergy-testnet",pid=3654503,fd=23))          
+{"id":1,"jsonrpc":"2.0","result":{"block_index":205915,"hash":"9ace0e1fe7a125fae0826cea4f43033320bc548c313da4be9acc1bbbd81b07a7","nonce":205915,"parent_hash":"eff18c41ac142d3fd182c65624044e2f3d9918b658e8cf4dfa08d98c515c6f91","previous_hash":"eff18c41ac142d3fd182c65624044e2f3d9918b658e8cf4dfa08d98c515c6f91","timestamp":1780519475,"transactions":[],"tx_count":0,"validator":"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs","validator_id":"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"}}--- status ---
+● synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1
+     Loaded: loaded (/etc/systemd/system/synergy-testnet-relayer.service; enabled; preset: enabled)
+     Active: active (running) since Wed 2026-06-03 22:51:41 CEST; 1min 53s ago
+   Main PID: 3654503 (synergy-testnet)
+      Tasks: 21 (limit: 14306)
+     Memory: 9.6G (peak: 11.0G)
+        CPU: 1min 30.903s
+     CGroup: /system.slice/synergy-testnet-relayer.service
+             └─3654503 ./bin/synergy-testnet-linux-amd64 start --config config/node.toml
+
+Jun 03 22:51:41 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+--- journal ---
+May 31 12:07:55 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 15min 53.528s CPU time, 11.1G memory peak, 0B memory swap peak.
+May 31 12:07:55 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 13:19:00 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 31 13:19:01 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 31 13:19:01 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 13:19:01 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 12min 33.179s CPU time, 11.1G memory peak, 0B memory swap peak.
+May 31 13:19:01 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 14:02:58 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 31 14:02:58 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 31 14:02:58 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 14:02:58 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 7min 1.046s CPU time, 11.1G memory peak, 0B memory swap peak.
+May 31 14:02:58 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 14:39:22 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 31 14:39:23 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 31 14:39:23 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 14:39:23 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 8min 36.724s CPU time, 11.0G memory peak, 0B memory swap peak.
+May 31 14:39:23 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 16:12:44 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 31 16:12:45 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 31 16:12:45 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 16:12:45 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 12min 56.084s CPU time, 11.0G memory peak, 0B memory swap peak.
+May 31 16:21:10 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 16:29:31 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 31 16:29:31 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 31 16:29:31 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 16:29:31 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 2min 32.586s CPU time, 5.6G memory peak, 0B memory swap peak.
+May 31 22:47:04 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 22:49:09 vmi3231914 systemd[1]: Stopping synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1...
+May 31 22:49:09 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+May 31 22:49:09 vmi3231914 systemd[1]: Stopped synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+May 31 22:49:09 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 46.407s CPU time, 3.5G memory peak, 0B memory swap peak.
+Jun 02 10:51:00 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 02 23:24:52 vmi3231914 systemd[1]: synergy-testnet-relayer.service: A process of this unit has been killed by the OOM killer.
+Jun 02 23:24:53 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+Jun 02 23:24:53 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'oom-kill'.
+Jun 02 23:24:53 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 5h 34min 48.147s CPU time.
+Jun 02 23:24:58 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 1.
+Jun 02 23:24:58 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 02:14:07 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+Jun 03 02:14:07 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'signal'.
+Jun 03 02:14:07 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 1h 17min 37.679s CPU time.
+Jun 03 02:14:12 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 2.
+Jun 03 02:14:12 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 04:28:18 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+Jun 03 04:28:18 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'signal'.
+Jun 03 04:28:18 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 1h 5min 11.254s CPU time.
+Jun 03 04:28:23 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 3.
+Jun 03 04:28:23 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 06:25:59 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+Jun 03 06:25:59 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'signal'.
+Jun 03 06:25:59 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 56min 22.822s CPU time.
+Jun 03 06:26:04 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 4.
+Jun 03 06:26:04 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 08:19:35 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+Jun 03 08:19:35 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'signal'.
+Jun 03 08:19:35 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 49min 4.730s CPU time.
+Jun 03 08:19:40 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 5.
+Jun 03 08:19:40 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 09:34:40 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+Jun 03 09:34:40 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'signal'.
+Jun 03 09:34:40 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 36min 13.896s CPU time.
+Jun 03 09:34:45 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 6.
+Jun 03 09:34:45 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 11:05:01 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+Jun 03 11:05:01 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'signal'.
+Jun 03 11:05:01 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 43min 23.452s CPU time.
+Jun 03 11:05:06 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 7.
+Jun 03 11:05:06 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 12:20:57 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+Jun 03 12:20:57 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 28min 28.949s CPU time.
+Jun 03 12:49:44 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 17:39:25 vmi3231914 systemd[1]: synergy-testnet-relayer.service: A process of this unit has been killed by the OOM killer.
+Jun 03 17:39:26 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Main process exited, code=killed, status=9/KILL
+Jun 03 17:39:26 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Failed with result 'oom-kill'.
+Jun 03 17:39:26 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 31min 5.355s CPU time, 4.9G memory peak, 0B memory swap peak.
+Jun 03 17:39:31 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Scheduled restart job, restart counter is at 1.
+Jun 03 17:39:31 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+Jun 03 19:07:35 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Deactivated successfully.
+Jun 03 19:07:35 vmi3231914 systemd[1]: synergy-testnet-relayer.service: Consumed 9min 44.150s CPU time.
+Jun 03 22:51:41 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.

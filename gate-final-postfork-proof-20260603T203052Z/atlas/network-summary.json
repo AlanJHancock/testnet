@@ -1,0 +1,14 @@
+{
+  "activeValidators": "5",
+  "averageSynergyScore": 100,
+  "avgBlockTimeSeconds": 4.708333333333333,
+  "chainId": "1264",
+  "env": "testnet",
+  "fallbackRpc": "http://94.72.117.108:5640",
+  "indexedAt": "2026-06-03T20:54:43.060Z",
+  "latestBlock": "206045",
+  "peerCount": "1",
+  "sourceRpc": "http://195.26.241.95:5640",
+  "totalTransactions": "26",
+  "totalValidators": "5"
+}

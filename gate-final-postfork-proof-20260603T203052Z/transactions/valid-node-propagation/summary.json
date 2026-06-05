@@ -1,0 +1,16 @@
+{
+  "captured_at": "2026-06-03T20:39:36.478155+00:00",
+  "fixed_height": 205752,
+  "note": "Raw per-role qRPC receipt/lookup/status/pending/fixed-height transcripts saved beside this summary.",
+  "roles": [
+    "Val1",
+    "Val2",
+    "Val3",
+    "Val4",
+    "Relayer1",
+    "Relayer2",
+    "row9-Gateway",
+    "row9-Explorer"
+  ],
+  "tx": "syntxn-6075c3a9f449ca66d65e07e61e428af9b368d839c8c552ea3a7d4bd019ac55ae"
+}

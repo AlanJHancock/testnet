@@ -1,0 +1,58 @@
+{
+  "captured_at": "2026-06-03T22:04:01Z",
+  "latest": {
+    "block_index": 206770,
+    "hash": "781d8fbfc90a660b71af2523ddeec9c161f3afcfe58e110a5ae56bd36b1d7cd8",
+    "nonce": 206770,
+    "parent_hash": "63a68bea6c184ed6fab36d8a0e974ca598cf52d7bf96332405c1a1a853266b1a",
+    "previous_hash": "63a68bea6c184ed6fab36d8a0e974ca598cf52d7bf96332405c1a1a853266b1a",
+    "timestamp": 1780523882,
+    "transactions": [],
+    "tx_count": 0,
+    "validator": "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5",
+    "validator_id": "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
+  },
+  "pending": [],
+  "receiver_account": {
+    "address": "synw17nh265ug2fgc8guv2ad7tt8kv0wlhesxndl8",
+    "balance_nwei": 2225998999572940004,
+    "balance_response": {
+      "http_status": 200,
+      "json": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": 2225998999572940004
+      }
+    },
+    "nonce": 1,
+    "nonce_response": {
+      "http_status": 200,
+      "json": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": 1
+      }
+    }
+  },
+  "sender_account": {
+    "address": "synw1zp7cxme7xm838663yrd43lxtxlw0ck90z4am",
+    "balance_nwei": 999381683996,
+    "balance_response": {
+      "http_status": 200,
+      "json": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": 999381683996
+      }
+    },
+    "nonce": 6,
+    "nonce_response": {
+      "http_status": 200,
+      "json": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": 6
+      }
+    }
+  }
+}

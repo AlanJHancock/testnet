@@ -5,7 +5,7 @@ compression = "zstd"
 compression_level = 3
 compression_long_window = 27
 chunk_size_bytes = 536870912
-snapshot_classes = ["validator-pruned", "support-relayer", "support-rpc", "indexer-replay", "indexer-full", "archive-full"]
+snapshot_classes = ["validator-pruned", "support-relayer", "support-rpc", "indexer-replay", "indexer-full", "archive-full", "archive-bootstrap"]
 sign_manifests = true
 sign_catalog = true
 staging_then_atomic_publish = true
@@ -46,3 +46,10 @@ allowed_roles = ["archive", "archive_validator", "snapshot_authority"]
 interval_finalized_blocks = 50000
 interval_seconds = 86400
 retain_launch = 1
+
+[snapshots.classes.archive-bootstrap]
+allowed_roles = ["archive", "archive_validator", "snapshot_authority"]
+interval_finalized_blocks = 50000
+retain_launch = 1
+historical_archive_complete_from_genesis = false
+bootstrap_seed_only = true

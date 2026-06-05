@@ -1,0 +1,14 @@
+{
+  "http_status": 200,
+  "json": {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "mempool_status": "queued",
+      "message": "Transaction submitted",
+      "policy_warnings": [],
+      "success": true,
+      "tx_hash": "syntxn-6075c3a9f449ca66d65e07e61e428af9b368d839c8c552ea3a7d4bd019ac55ae"
+    }
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "captured_at": "2026-06-03T20:37:32Z",
+  "fork_status": {
+    "fork_configured": true,
+    "fork_height": 204216,
+    "fork_parent_hash": "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816",
+    "fork_parent_height": 204215,
+    "new_consensus_algorithm": "FN-DSA",
+    "old_consensus_algorithm": "ML-DSA-65",
+    "parser_mode": "fail_closed",
+    "state_root": "checkpoint-v1:chain_json_sha256=04a660f0ea4bff004412326d8ce1185dbb1e6870fb0e02cb359b776a1b1e989d;committed_blocks_jsonl_sha256=a214da21afc2191fcc087569fe73500cb97c384119e749e2bf8093ecddb9f381;canonical_locks_json_sha256=577a3347522b8e81527f27b34212ce441d04d7c5d89f3b8c943df09b3085b49a;committed_qcs_jsonl_sha256=86e113856705cd987140fdf5783169c20ab28f5efc103b92810493857bcb593d;verified_on=Val2,Val4",
+    "validator_count": 5,
+    "validators": [
+      {
+        "consensus_key_type": "FN-DSA",
+        "consensus_public_key_bytes": 1793,
+        "validator_address": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"
+      },
+      {
+        "consensus_key_type": "FN-DSA",
+        "consensus_public_key_bytes": 1793,
+        "validator_address": "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt"
+      },
+      {
+        "consensus_key_type": "FN-DSA",
+        "consensus_public_key_bytes": 1793,
+        "validator_address": "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re"
+      },
+      {
+        "consensus_key_type": "FN-DSA",
+        "consensus_public_key_bytes": 1793,
+        "validator_address": "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
+      },
+      {
+        "consensus_key_type": "FN-DSA",
+        "consensus_public_key_bytes": 1793,
+        "validator_address": "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f"
+      }
+    ]
+  },
+  "latest": {
+    "block_index": 205818,
+    "hash": "9043753cb4855db085f38b998cdd66537752a21f0a11e6ed72f5f3f60bae5140",
+    "nonce": 205818,
+    "parent_hash": "a89a9793cd7abecf04db523d73fefc650bbba185229afbe5a783086512e4a856",
+    "previous_hash": "a89a9793cd7abecf04db523d73fefc650bbba185229afbe5a783086512e4a856",
+    "timestamp": 1780519042,
+    "transactions": [],
+    "tx_count": 0,
+    "validator": "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re",
+    "validator_id": "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re"
+  },
+  "public_pending": [],
+  "receiver_account": {
+    "address": "synw17nh265ug2fgc8guv2ad7tt8kv0wlhesxndl8",
+    "balance_nwei": 2225998999572940002,
+    "chain": {
+      "chain_id": 1264,
+      "chain_id_hex": "0x4f0",
+      "genesis_hash": "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789",
+      "name": "synergy-testnet",
+      "network_id": "synergy-testnet-v2"
+    },
+    "nonce": 1
+  },
+  "sender_account": {
+    "address": "synw1zp7cxme7xm838663yrd43lxtxlw0ck90z4am",
+    "balance_nwei": 999509747998,
+    "chain": {
+      "chain_id": 1264,
+      "chain_id_hex": "0x4f0",
+      "genesis_hash": "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789",
+      "name": "synergy-testnet",
+      "network_id": "synergy-testnet-v2"
+    },
+    "nonce": 4
+  }
+}

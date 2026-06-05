@@ -907,7 +907,7 @@ fn print_usage(binary_name: &str, expected_profile: Option<&RoleProfile>) {
     eprintln!("    --source-workspace <PATH>  Source workspace for offline create/list/verify");
     eprintln!("    --source-node-majority-branch-proven");
     eprintln!("    --source-role GENESIS_VALIDATOR");
-    eprintln!("    --snapshot-class validator-pruned|support-relayer|support-rpc|indexer-replay|indexer-full|archive-full");
+    eprintln!("    --snapshot-class validator-pruned|support-relayer|support-rpc|indexer-replay|indexer-full|archive-full|archive-bootstrap");
     eprintln!("    --allowed-role <role> [--allowed-role <role> ...]");
     eprintln!("    --target-role <role>");
     eprintln!("    --manifest <PATH> [--snapshot-root <DIR>]");

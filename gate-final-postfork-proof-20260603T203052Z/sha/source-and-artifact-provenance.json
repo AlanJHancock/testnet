@@ -1,0 +1,8 @@
+{
+  "captured_at": "2026-06-03T20:35:09.240763+00:00",
+  "fixed_hash": "a87b7b53e6b3b45ebda48da31a3dafd9f99fe4febf23ceee43bb0130e20441ba",
+  "fixed_height": 205752,
+  "git_head": "aaa26a511e09a95602eb6d19af5c2a8b694aba02",
+  "git_status_short": " M docs/SAM-Snapshot-Center-Task.md\n M docs/synergy-testnet-validator-onboarding.md\n M ops/observability/grafana/consensus-and-chain.json\n M ops/observability/grafana/network-overview.json\n M ops/observability/prometheus.observer.yml\n M scripts/testnet/install-runtime-only.sh\n M src/archive_validator.rs\n M src/bin/wallet_pqc_cli.rs\n M src/block.rs\n M src/consensus/consensus_algorithm.rs\n M src/consensus/dual_quorum.rs\n M src/consensus/mod.rs\n M src/consensus/self_realign.rs\n M src/consensus/validator_keys.rs\n M src/genesis.rs\n M src/recovery.rs\n M src/role_runtime.rs\n M src/rpc/rpc_server.rs\n?? config/consensus-fork-migration.example.json\n?? config/consensus-fork-migration.json\n?? gate-final-postfork-proof-20260603T203052Z/\n?? src/consensus/consensus_fork.rs\n",
+  "local_runtime_sha": "0a222176125375674a939b8c57755980ea2c6f290e15ee470e129add8d70d6f3  target/x86_64-unknown-linux-gnu/release/synergy-testnet\n658febcbd4a0883718173ba5bff65d5cd006598e4604f0ee70a9b35c673898d3  target/x86_64-unknown-linux-gnu/release/synergy-rpc-gateway-node\n"
+}

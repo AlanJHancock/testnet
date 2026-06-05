@@ -58,11 +58,11 @@ No compatibility aliases are part of the frozen Testnet keep set.
 
 These records remain the approved bootstrap discovery surface:
 
-- `bootnode1.synergynode.xyz` -> `74.208.227.23`
-- `bootnode2.synergynode.xyz` -> `73.79.66.255`
+- `bootnode1.synergynode.xyz` -> `170.64.187.206`
+- `bootnode2.synergynode.xyz` -> `146.190.210.121`
 - `bootnode3.synergynode.xyz` -> `157.245.226.240`
-- `seed1.synergynode.xyz` -> `74.208.227.23`
-- `seed2.synergynode.xyz` -> `73.79.66.255`
+- `seed1.synergynode.xyz` -> `170.64.187.206`
+- `seed2.synergynode.xyz` -> `146.190.210.121`
 - `seed3.synergynode.xyz` -> `157.245.226.240`
 - `_dnsaddr.bootstrap.synergynode.xyz` TXT records pointing at `tcp/5620`
 - `_synergy-seed._tcp.synergynode.xyz` SRV records pointing at `5621`
@@ -72,6 +72,7 @@ These records remain the approved bootstrap discovery surface:
 DNS work is now limited to:
 
 - verifying every keep-set record resolves exactly as frozen
+- correcting `seed1.synergynode.xyz` and `seed2.synergynode.xyz` if they still resolve to legacy RPC/validator hosts instead of the seed-service hosts above
 - keeping retired and removed names out of certificates, docs, configs, and launch procedures
 - verifying the services behind these names are actually deployed and healthy
 

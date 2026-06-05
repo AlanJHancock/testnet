@@ -1,0 +1,16 @@
+{
+  "http_status": 200,
+  "json": {
+    "error": {
+      "code": -32000,
+      "data": {
+        "code": -32602,
+        "data": null,
+        "error": "signerPublicKey must be a valid hex string or byte array"
+      },
+      "message": "signerPublicKey must be a valid hex string or byte array"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}

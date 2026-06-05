@@ -247,7 +247,7 @@ fn run() -> Result<(), String> {
             println!("  synergy-node recover-transient-vote-locks --chain-id 1264 --network-id synergy-testnet-v2 [--finalized-height <height>] [--min-age-secs <seconds>]");
             println!("  synergy-node self-heal --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node sync-from-canonical-peer --chain-id 1264 --network-id synergy-testnet-v2 --canonical-height <height> --canonical-hash <hash> --source-qc-aegis-pqc-verified --parent-continuity-verified --state-root-matches --source-peer-not-quarantined [--source-peer <id>]");
-            println!("  synergy-node create-snapshot --chain-id 1264 --network-id synergy-testnet-v2 --source-node-majority-branch-proven [--source-role GENESIS_VALIDATOR] [--snapshot-class validator-pruned|support-relayer|support-rpc|indexer-replay|indexer-full|archive-full] [--allowed-role <role> ...] [--conflict-height-hash <hash>]");
+            println!("  synergy-node create-snapshot --chain-id 1264 --network-id synergy-testnet-v2 --source-node-majority-branch-proven [--source-role GENESIS_VALIDATOR] [--snapshot-class validator-pruned|support-relayer|support-rpc|indexer-replay|indexer-full|archive-full|archive-bootstrap] [--allowed-role <role> ...] [--conflict-height-hash <hash>]");
             println!(
                 "  synergy-node list-snapshots --chain-id 1264 --network-id synergy-testnet-v2"
             );

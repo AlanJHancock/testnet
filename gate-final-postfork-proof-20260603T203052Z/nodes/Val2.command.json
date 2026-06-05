@@ -1,0 +1,12 @@
+{
+  "command_redacted": [
+    "ssh",
+    "rob@62.146.182.208",
+    "bash -s"
+  ],
+  "fixed_height": 205905,
+  "returncode": 0,
+  "started_at": "2026-06-03T20:54:34.087782+00:00",
+  "ended_at": "2026-06-03T20:54:38.336808+00:00",
+  "stderr": "Warning: Permanently added '62.146.182.208' (ED25519) to the list of known hosts.\n"
+}

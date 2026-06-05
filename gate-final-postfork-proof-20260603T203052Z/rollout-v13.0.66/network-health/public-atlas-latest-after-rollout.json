@@ -1,0 +1,44 @@
+{
+  "atlas_dag_latest": {
+    "availabilityCert": "e217cce7d3703c8ce62cf6cd05378da1ba06c703c306d776ccd920836dddb37c",
+    "blockHash": "520e82439a1880291c1f8209976abfa4901e4c47266625654b0fce57934458ca",
+    "blockNumber": "206047",
+    "createdAt": "2026-06-03T20:54:34.000Z",
+    "hash": "47fa2ea6c8a5b4fa416998f9975873dd6b20a1c71b25111b005416d0250f6d6d",
+    "heightHint": "206047",
+    "parentHashes": [
+      "62657872fba7c2d81644eb4a7f36681ce0c5f6c4a5cf934cab54b4b72e4fafe5"
+    ],
+    "proposerAddress": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
+    "status": "committed",
+    "transactionHashes": [
+      "syntxn-3ecc821e5a2acbdf3e13b9d63e19e083a2bbc964189988bc6cdbafb60819e5ec"
+    ],
+    "txCount": 1
+  },
+  "atlas_lag_blocks": -6,
+  "atlas_summary": {
+    "activeValidators": "5",
+    "averageSynergyScore": 100,
+    "avgBlockTimeSeconds": 3.9583333333333335,
+    "chainId": "1264",
+    "env": "testnet",
+    "fallbackRpc": "http://94.72.117.108:5640",
+    "indexedAt": "2026-06-03T21:48:57.061Z",
+    "latestBlock": "206637",
+    "peerCount": "7",
+    "sourceRpc": "http://195.26.241.95:5640",
+    "totalTransactions": "27",
+    "totalValidators": "5"
+  },
+  "atlas_summary_latest": 206637,
+  "captured_at": 1780523338,
+  "max_sampled_role_latest": 206631,
+  "public_lag_blocks": 31,
+  "public_latest": {
+    "hash": "84648abc7ccf55f979089de8f86a1d64f116f0f684c9933161ea951e3456fd4e",
+    "height": 206600,
+    "tx_count": null
+  },
+  "public_pending_count": 0
+}

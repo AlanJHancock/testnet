@@ -1,0 +1,14 @@
+{
+  "command_redacted": [
+    "ssh",
+    "-p",
+    "5619",
+    "node@73.79.66.255",
+    "bash -s"
+  ],
+  "fixed_height": 205905,
+  "returncode": 0,
+  "started_at": "2026-06-03T20:54:34.182963+00:00",
+  "ended_at": "2026-06-03T20:54:36.246350+00:00",
+  "stderr": "Warning: Permanently added '[73.79.66.255]:5619' (ED25519) to the list of known hosts.\n"
+}

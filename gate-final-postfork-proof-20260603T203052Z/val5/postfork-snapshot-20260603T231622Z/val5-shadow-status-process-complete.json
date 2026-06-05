@@ -1,0 +1,141 @@
+{
+  "accepted_conflicting_block": false,
+  "canonical_match_count": 0,
+  "chain": {
+    "chain_id": 1264,
+    "chain_id_hex": "0x4f0",
+    "genesis_hash": "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789",
+    "network_id": "synergy-testnet-v2"
+  },
+  "computed_state": "QUARANTINED",
+  "current_epoch_end": 208999,
+  "current_epoch_start": 208000,
+  "duty_gate": {
+    "can_aggregate_qc": false,
+    "can_count_toward_quorum": false,
+    "can_enter_proposer_schedule": false,
+    "can_propose": false,
+    "can_serve_as_canonical_source": false,
+    "can_vote": false,
+    "shadow_signs_real_votes": false,
+    "state": "QUARANTINED"
+  },
+  "earliest_activation_height": 209000,
+  "epoch_bounds": {
+    "current_epoch_end": 208999,
+    "current_epoch_start": 208000,
+    "earliest_activation_height": 209000,
+    "epoch_size": 1000,
+    "partial_epoch_end": 207999,
+    "partial_epoch_start": 207000,
+    "required_full_shadow_epoch_end": 208999,
+    "required_full_shadow_epoch_start": 208000,
+    "shadow_start_epoch": 207,
+    "shadow_start_height": 207828
+  },
+  "epoch_rejoin_window_open": false,
+  "epoch_size": 1000,
+  "evaluation_end_height": 208328,
+  "evaluation_start_height": 207829,
+  "fail_closed": true,
+  "failures": [
+    "chain state missing shadow observation block height 208251 in range 207829-208328",
+    "shadow observation has 0 block(s), 500 required"
+  ],
+  "full_epoch_shadow_completed": false,
+  "last_eligible_boundary": null,
+  "last_missed_boundary": null,
+  "last_observed_hash": "fcbadc2390728d0198c82118c3808bf563862aead2fe93b479240c8d83785aeb",
+  "last_observed_height": 208345,
+  "latest_hash": "fcbadc2390728d0198c82118c3808bf563862aead2fe93b479240c8d83785aeb",
+  "latest_height": 208345,
+  "mismatch_count": 1,
+  "missed_boundary": false,
+  "missed_boundary_reason": null,
+  "missed_observation_count": 500,
+  "next_eligible_boundary": 209000,
+  "observed_blocks": 0,
+  "observed_shadow_blocks": 0,
+  "partial_epoch_end": 207999,
+  "partial_epoch_start": 207000,
+  "process_proof_completed": true,
+  "process_target_height": 208328,
+  "quarantine": {
+    "chain": {
+      "chain_id": 1264,
+      "chain_id_hex": "0x4f0",
+      "genesis_hash": "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789",
+      "network_id": "synergy-testnet-v2"
+    },
+    "duty_gate": {
+      "can_aggregate_qc": false,
+      "can_count_toward_quorum": false,
+      "can_enter_proposer_schedule": false,
+      "can_propose": false,
+      "can_serve_as_canonical_source": false,
+      "can_vote": false,
+      "shadow_signs_real_votes": false,
+      "state": "QUARANTINED"
+    },
+    "marker_paths": [
+      "/home/justin/.synergy/testnet/nodes/validator-workspace/data/validator_quarantine.json"
+    ],
+    "quarantined": true,
+    "recovery_state": "QUARANTINED",
+    "rejoin_eligibility": false,
+    "status": "quarantined"
+  },
+  "records": [],
+  "rejected_valid_majority_block": false,
+  "rejoin_eligible": false,
+  "required_blocks": 500,
+  "required_full_shadow_epoch_end": 208999,
+  "required_full_shadow_epoch_start": 208000,
+  "runtime_boundary_assessment": {
+    "blocked_reasons": [
+      "shadow or safety verification has failures",
+      "continuous full shadow epoch is incomplete",
+      "current height 208345 is before earliest activation height 209000"
+    ],
+    "current_height": 208345,
+    "earliest_activation_height": 209000,
+    "epoch_rejoin_window_open": false,
+    "epoch_size": 1000,
+    "last_eligible_boundary": null,
+    "last_missed_boundary": null,
+    "missed_boundary": false,
+    "missed_boundary_reason": null,
+    "next_eligible_boundary": 209000
+  },
+  "shadow_observation_path": "/home/justin/.synergy/testnet/nodes/validator-workspace/data/shadow_observation.json",
+  "shadow_signs_real_votes": false,
+  "shadow_start_epoch": 207,
+  "shadow_start_height": 207828,
+  "start_height": 207828,
+  "state_root_matches": false,
+  "status": "QUARANTINED",
+  "target_height": 208328,
+  "vote_locks": {
+    "chain": {
+      "chain_id": 1264,
+      "chain_id_hex": "0x4f0",
+      "genesis_hash": "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789",
+      "network_id": "synergy-testnet-v2"
+    },
+    "conflicting_heights_above_finalized": [],
+    "finalized_height": 208345,
+    "fresh_locks": [],
+    "fresh_locks_above_finalized": 0,
+    "locks": [],
+    "locks_above_finalized": 0,
+    "parse_error": null,
+    "stale_conflicting_heights_above_finalized": [],
+    "stale_locks": [],
+    "stale_locks_above_finalized": 0,
+    "stale_threshold_seconds": 30,
+    "total_vote_locks": 50892,
+    "vote_lock_path": "/home/justin/.synergy/testnet/nodes/validator-workspace/data/consensus_vote_locks.json"
+  },
+  "would_have_proposed_conflicts": 0,
+  "would_have_voted_conflicts": 0
+}

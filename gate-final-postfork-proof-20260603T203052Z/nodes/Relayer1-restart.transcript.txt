@@ -1,0 +1,15 @@
+Warning: Permanently added '195.26.241.95' (ED25519) to the list of known hosts.
+● synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1
+     Loaded: loaded (/etc/systemd/system/synergy-testnet-relayer.service; enabled; preset: enabled)
+     Active: active (running) since Wed 2026-06-03 22:51:41 CEST; 8s ago
+   Main PID: 3654503 (synergy-testnet)
+      Tasks: 1 (limit: 14306)
+     Memory: 6.1G (peak: 6.1G)
+        CPU: 4.105s
+     CGroup: /system.slice/synergy-testnet-relayer.service
+             └─3654503 ./bin/synergy-testnet-linux-amd64 start --config config/node.toml
+
+Jun 03 22:51:41 vmi3231914 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry1.
+--- ports ---
+--- latest ---
+curl: (7) Failed to connect to 127.0.0.1 port 5640 after 0 ms: Couldn't connect to server

@@ -33,6 +33,7 @@ pub const SNAPSHOT_CLASS_SUPPORT_RPC: &str = "support-rpc";
 pub const SNAPSHOT_CLASS_INDEXER_FULL: &str = "indexer-full";
 pub const SNAPSHOT_CLASS_INDEXER_REPLAY: &str = "indexer-replay";
 pub const SNAPSHOT_CLASS_ARCHIVE_FULL: &str = "archive-full";
+pub const SNAPSHOT_CLASS_ARCHIVE_BOOTSTRAP: &str = "archive-bootstrap";
 
 const SNAPSHOT_MANIFEST_VERSION: u32 = 1;
 const SNAPSHOT_STATE_ROOT_DOMAIN: &[u8] = b"SYNERGY_SNAPSHOT_STATE_ROOT_V1";
@@ -60,6 +61,9 @@ pub fn normalize_snapshot_class(value: &str) -> Option<&'static str> {
         SNAPSHOT_CLASS_INDEXER_FULL => Some(SNAPSHOT_CLASS_INDEXER_FULL),
         SNAPSHOT_CLASS_INDEXER_REPLAY => Some(SNAPSHOT_CLASS_INDEXER_REPLAY),
         SNAPSHOT_CLASS_ARCHIVE_FULL => Some(SNAPSHOT_CLASS_ARCHIVE_FULL),
+        SNAPSHOT_CLASS_ARCHIVE_BOOTSTRAP | "archive-validator-bootstrap" => {
+            Some(SNAPSHOT_CLASS_ARCHIVE_BOOTSTRAP)
+        }
         _ => None,
     }
 }
@@ -83,6 +87,9 @@ pub fn default_allowed_restore_roles_for_class(snapshot_class: &str) -> Option<V
             vec!["indexer", "explorer", "atlas_indexer", "explorer_indexer"]
         }
         SNAPSHOT_CLASS_ARCHIVE_FULL => vec!["archive", "archive_validator", "snapshot_authority"],
+        SNAPSHOT_CLASS_ARCHIVE_BOOTSTRAP => {
+            vec!["archive", "archive_validator", "snapshot_authority"]
+        }
         _ => return None,
     };
     Some(roles.into_iter().map(str::to_string).collect())
@@ -1729,6 +1736,62 @@ mod tests {
         assert!(report.file_checksums_verified);
         assert_eq!(report.snapshot_class, SNAPSHOT_CLASS_VALIDATOR_PRUNED);
         assert_eq!(report.allowed_restore_roles, vec!["validator".to_string()]);
+    }
+
+    #[test]
+    fn archive_bootstrap_class_accepts_archive_roles_and_alias() {
+        assert_eq!(
+            normalize_snapshot_class("archive-validator-bootstrap"),
+            Some(SNAPSHOT_CLASS_ARCHIVE_BOOTSTRAP)
+        );
+        assert!(snapshot_class_allows_role(
+            SNAPSHOT_CLASS_ARCHIVE_BOOTSTRAP,
+            "archive_validator"
+        ));
+        assert!(!snapshot_class_allows_role(
+            SNAPSHOT_CLASS_ARCHIVE_BOOTSTRAP,
+            "validator"
+        ));
+
+        let (mut signer, key_id, public) = signer();
+        let manifest = create_snapshot_manifest(SnapshotBuildInput {
+            state_dir: state_dir(),
+            snapshot_class: "archive-validator-bootstrap".to_string(),
+            allowed_restore_roles: vec!["archive_validator".to_string()],
+            snapshot_height: 100,
+            snapshot_block_hash: "block-hash".to_string(),
+            parent_hash: "parent-hash".to_string(),
+            state_root: None,
+            canonical_lock_height: 100,
+            canonical_lock_hash: "block-hash".to_string(),
+            qc_evidence: qc_evidence(),
+            active_validator_set: validators(),
+            source_node_id: "validator-2".to_string(),
+            source_role: "GENESIS_VALIDATOR".to_string(),
+            runtime_checksum: "runtime-sha256".to_string(),
+            source_node_quarantined: false,
+            source_node_majority_branch: true,
+            conflict_height_hash: Some("block-hash".to_string()),
+            manifest_signer_uma_id: "archive-1".to_string(),
+            manifest_signing_key_id: key_id,
+            manifest_signer_public_key: public,
+            manifest_signature_epoch: 0,
+            created_at: 1,
+        })
+        .unwrap();
+        assert_eq!(manifest.snapshot_class, SNAPSHOT_CLASS_ARCHIVE_BOOTSTRAP);
+        let signed = sign_snapshot_manifest(&mut signer, manifest).unwrap();
+        let report = verify_signed_snapshot_manifest(
+            &signed,
+            &SnapshotVerificationPolicy {
+                expected_snapshot_class: Some(SNAPSHOT_CLASS_ARCHIVE_BOOTSTRAP.to_string()),
+                target_role: Some("archive_validator".to_string()),
+                ..SnapshotVerificationPolicy::default()
+            },
+            None,
+        );
+        assert!(report.success, "{:?}", report.errors);
+        assert_eq!(report.snapshot_class, SNAPSHOT_CLASS_ARCHIVE_BOOTSTRAP);
     }
 
     #[test]

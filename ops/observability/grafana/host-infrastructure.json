@@ -26,7 +26,7 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "Node Exporter Targets Up",
+      "title": "Host Exporters Online",
       "gridPos": {
         "x": 0,
         "y": 0,
@@ -41,7 +41,7 @@
         {
           "refId": "A",
           "expr": "count(up{job=~\"node_exporter_private|node_exporter_public_roles\"} == 1)",
-          "legendFormat": "",
+          "legendFormat": "{{instance_label}}",
           "instant": true
         }
       ],
@@ -77,12 +77,13 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Host Exporters Online for Synergy Testnet operations. Check units and legend for interpretation."
     },
     {
       "id": 2,
       "type": "stat",
-      "title": "Prometheus Samples Scraped / sec",
+      "title": "Prometheus Samples Scraped per Second",
       "gridPos": {
         "x": 4,
         "y": 0,
@@ -97,7 +98,7 @@
         {
           "refId": "A",
           "expr": "sum(rate(scrape_samples_scraped[5m]))",
-          "legendFormat": "",
+          "legendFormat": "{{instance_label}}",
           "instant": true
         }
       ],
@@ -133,12 +134,13 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Samples per second collected by Prometheus across all scrape targets."
     },
     {
       "id": 3,
       "type": "stat",
-      "title": "Scrape Failures",
+      "title": "Prometheus Scrape Targets Offline",
       "gridPos": {
         "x": 8,
         "y": 0,
@@ -153,7 +155,7 @@
         {
           "refId": "A",
           "expr": "count(up == 0)",
-          "legendFormat": "",
+          "legendFormat": "offline",
           "instant": true
         }
       ],
@@ -193,7 +195,8 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Count of Prometheus scrape targets that are currently down. Lower is better; zero is healthy."
     },
     {
       "id": 4,
@@ -213,7 +216,7 @@
         {
           "refId": "A",
           "expr": "prometheus_tsdb_head_series",
-          "legendFormat": "",
+          "legendFormat": "{{instance_label}}",
           "instant": true
         }
       ],
@@ -249,12 +252,13 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Prometheus TSDB Head Series for Synergy Testnet operations. Check units and legend for interpretation."
     },
     {
       "id": 5,
       "type": "stat",
-      "title": "Host CPUs Visible",
+      "title": "Host CPU Cores Visible",
       "gridPos": {
         "x": 16,
         "y": 0,
@@ -269,7 +273,7 @@
         {
           "refId": "A",
           "expr": "count(count by (instance_label,cpu) (node_cpu_seconds_total{job=~\"node_exporter_private|node_exporter_public_roles\",mode=\"idle\"}))",
-          "legendFormat": "",
+          "legendFormat": "{{instance_label}}",
           "instant": true
         }
       ],
@@ -305,7 +309,8 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Host CPU Cores Visible for Synergy Testnet operations. Check units and legend for interpretation."
     },
     {
       "id": 6,
@@ -325,7 +330,7 @@
         {
           "refId": "A",
           "expr": "count(node_filesystem_size_bytes{job=~\"node_exporter_private|node_exporter_public_roles\",fstype!~\"tmpfs|overlay|squashfs\"})",
-          "legendFormat": "",
+          "legendFormat": "{{instance_label}}",
           "instant": true
         }
       ],
@@ -361,12 +366,13 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Filesystem Mounts Visible for Synergy Testnet operations. Check units and legend for interpretation."
     },
     {
       "id": 7,
       "type": "timeseries",
-      "title": "CPU Busy Percent",
+      "title": "Host CPU Usage",
       "gridPos": {
         "x": 0,
         "y": 4,
@@ -408,7 +414,8 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "CPU utilization by host as a percentage. Lower is healthier."
     },
     {
       "id": 8,
@@ -465,12 +472,13 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Load Average for Synergy Testnet operations. Check units and legend for interpretation."
     },
     {
       "id": 9,
       "type": "timeseries",
-      "title": "Memory Used Percent",
+      "title": "Host Memory Usage",
       "gridPos": {
         "x": 0,
         "y": 12,
@@ -512,7 +520,8 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Memory utilization by host as a percentage. Lower is healthier."
     },
     {
       "id": 10,
@@ -559,12 +568,13 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Swap Used Percent for Synergy Testnet operations. Check units and legend for interpretation."
     },
     {
       "id": 11,
       "type": "timeseries",
-      "title": "Disk Used Percent",
+      "title": "Host Disk Usage",
       "gridPos": {
         "x": 0,
         "y": 20,
@@ -606,12 +616,13 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Filesystem utilization by host as a percentage. Lower is healthier; high archive-validator usage may indicate storage pressure."
     },
     {
       "id": 12,
       "type": "timeseries",
-      "title": "Disk IO Bytes / sec",
+      "title": "Disk IO Throughput",
       "gridPos": {
         "x": 12,
         "y": 20,
@@ -658,12 +669,13 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Disk IO Throughput for Synergy Testnet operations. Check units and legend for interpretation."
     },
     {
       "id": 13,
       "type": "timeseries",
-      "title": "Network Traffic Bytes / sec",
+      "title": "Network Traffic",
       "gridPos": {
         "x": 0,
         "y": 28,
@@ -710,12 +722,13 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Network Traffic for Synergy Testnet operations. Check units and legend for interpretation."
     },
     {
       "id": 14,
       "type": "timeseries",
-      "title": "Network Errors / sec",
+      "title": "Network Errors",
       "gridPos": {
         "x": 12,
         "y": 28,
@@ -762,12 +775,13 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Network Errors for Synergy Testnet operations. Check units and legend for interpretation."
     },
     {
       "id": 15,
       "type": "timeseries",
-      "title": "Open File Descriptors Percent",
+      "title": "Open File Descriptor Usage",
       "gridPos": {
         "x": 0,
         "y": 36,
@@ -809,12 +823,13 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Open File Descriptor Usage for Synergy Testnet operations. Check units and legend for interpretation."
     },
     {
       "id": 16,
       "type": "timeseries",
-      "title": "Systemd Unit State",
+      "title": "Systemd Units Active",
       "gridPos": {
         "x": 8,
         "y": 36,
@@ -856,12 +871,13 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Systemd Units Active for Synergy Testnet operations. Check units and legend for interpretation."
     },
     {
       "id": 17,
       "type": "timeseries",
-      "title": "Scrape Duration",
+      "title": "Prometheus Scrape Duration",
       "gridPos": {
         "x": 16,
         "y": 36,
@@ -903,12 +919,13 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Prometheus Scrape Duration for Synergy Testnet operations. Check units and legend for interpretation."
     },
     {
       "id": 18,
       "type": "table",
-      "title": "Host Kernel and OS Info",
+      "title": "Host Kernel and OS Information",
       "gridPos": {
         "x": 0,
         "y": 43,
@@ -939,7 +956,8 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Host Kernel and OS Information for Synergy Testnet operations. Check units and legend for interpretation."
     },
     {
       "id": 19,
@@ -975,7 +993,65 @@
           }
         },
         "overrides": []
-      }
+      },
+      "description": "Down or Failing Targets for Synergy Testnet operations. Check units and legend for interpretation."
+    },
+    {
+      "id": 20,
+      "type": "stat",
+      "title": "Archive Validator Host Online",
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(up{job=\"node_exporter_private\",host=\"archive-validator\"}) or vector(0)",
+          "legendFormat": "archive host",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bool",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "description": "Whether the Archive Validator host node_exporter target is reachable. 1 means online; 0 means not yet configured or down."
     }
   ],
   "refresh": "10s",
@@ -987,7 +1063,104 @@
     "observer"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "name": "network",
+        "label": "Network",
+        "type": "custom",
+        "query": "testnet",
+        "current": {
+          "selected": true,
+          "text": "testnet",
+          "value": "testnet"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "testnet",
+            "value": "testnet"
+          }
+        ],
+        "hide": 0,
+        "skipUrlSync": false
+      },
+      {
+        "name": "role",
+        "label": "Role",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, role)",
+        "query": "label_values(up, role)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "node",
+        "label": "Node",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, host)",
+        "query": "label_values(up, host)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, instance)",
+        "query": "label_values(up, instance)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "job",
+        "label": "Job",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(up, job)",
+        "query": "label_values(up, job)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
   },
   "time": {
     "from": "now-1h",

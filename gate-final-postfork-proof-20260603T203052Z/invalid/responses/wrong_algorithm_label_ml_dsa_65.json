@@ -1,0 +1,14 @@
+{
+  "http_status": 200,
+  "json": {
+    "error": {
+      "code": -32000,
+      "data": {
+        "error": "Aegis PQC transaction signature verification failed"
+      },
+      "message": "Aegis PQC transaction signature verification failed"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}

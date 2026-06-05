@@ -1,0 +1,39 @@
+Warning: Permanently added '94.72.117.108' (ED25519) to the list of known hosts.
+sample=1 date=2026-06-03T22:58:47+02:00
+active
+    PID     ELAPSED   RSS %CPU COMMAND
+1524769       02:00 2871588 93.1 ./bin/synergy-testnet-linux-amd64 start --config config/node.toml
+LISTEN 0      128          0.0.0.0:5660      0.0.0.0:*    users:(("synergy-testnet",pid=1524769,fd=4))           
+LISTEN 0      128          0.0.0.0:5640      0.0.0.0:*    users:(("synergy-testnet",pid=1524769,fd=7))           
+LISTEN 0      128          0.0.0.0:6030      0.0.0.0:*    users:(("synergy-testnet",pid=1524769,fd=22))          
+LISTEN 0      128          0.0.0.0:5622      0.0.0.0:*    users:(("synergy-testnet",pid=1524769,fd=3))           
+curl: (28) Operation timed out after 4002 milliseconds with 0 bytes received
+sample=2 date=2026-06-03T22:58:56+02:00
+active
+    PID     ELAPSED   RSS %CPU COMMAND
+1524769       02:09 3114720 92.3 ./bin/synergy-testnet-linux-amd64 start --config config/node.toml
+LISTEN 0      128          0.0.0.0:5660      0.0.0.0:*    users:(("synergy-testnet",pid=1524769,fd=4))           
+LISTEN 0      128          0.0.0.0:5640      0.0.0.0:*    users:(("synergy-testnet",pid=1524769,fd=7))           
+LISTEN 0      128          0.0.0.0:6030      0.0.0.0:*    users:(("synergy-testnet",pid=1524769,fd=22))          
+LISTEN 0      128          0.0.0.0:5622      0.0.0.0:*    users:(("synergy-testnet",pid=1524769,fd=3))           
+curl: (28) Operation timed out after 4003 milliseconds with 0 bytes received
+sample=3 date=2026-06-03T22:59:06+02:00
+active
+    PID     ELAPSED   RSS %CPU COMMAND
+1524769       02:18 3489692 92.3 ./bin/synergy-testnet-linux-amd64 start --config config/node.toml
+LISTEN 0      128          0.0.0.0:5660      0.0.0.0:*    users:(("synergy-testnet",pid=1524769,fd=4))           
+LISTEN 0      128          0.0.0.0:5640      0.0.0.0:*    users:(("synergy-testnet",pid=1524769,fd=7))           
+LISTEN 0      128          0.0.0.0:6030      0.0.0.0:*    users:(("synergy-testnet",pid=1524769,fd=22))          
+LISTEN 0      128          0.0.0.0:5622      0.0.0.0:*    users:(("synergy-testnet",pid=1524769,fd=3))           
+{"id":1,"jsonrpc":"2.0","result":{"block_index":206051,"hash":"ea131647d85746a0661813451747d459ef816cfd2693dc6c0f9a5ce97856a137","nonce":206051,"parent_hash":"4f9d6cdcf3e68539112bb6f193b1919b4624bf6169a6ae7684225b42cd754044","previous_hash":"4f9d6cdcf3e68539112bb6f193b1919b4624bf6169a6ae7684225b42cd754044","timestamp":1780520095,"transactions":[],"tx_count":0,"validator":"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs","validator_id":"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"}}--- status ---
+● synergy-testnet-relayer.service - Synergy Testnet Relayer sentry2
+     Loaded: loaded (/etc/systemd/system/synergy-testnet-relayer.service; enabled; preset: enabled)
+     Active: active (running) since Wed 2026-06-03 22:56:47 CEST; 2min 22s ago
+   Main PID: 1524769 (synergy-testnet)
+      Tasks: 22 (limit: 14306)
+     Memory: 10.2G (peak: 11.1G)
+        CPU: 2min 15.179s
+     CGroup: /system.slice/synergy-testnet-relayer.service
+             └─1524769 ./bin/synergy-testnet-linux-amd64 start --config config/node.toml
+
+Jun 03 22:56:47 vmi3231913 systemd[1]: Started synergy-testnet-relayer.service - Synergy Testnet Relayer sentry2.

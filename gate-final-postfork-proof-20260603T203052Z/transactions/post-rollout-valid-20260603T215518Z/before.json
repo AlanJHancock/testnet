@@ -1,0 +1,171 @@
+{
+  "captured_at": "2026-06-03T21:55:19Z",
+  "fork_status": {
+    "fork_configured": true,
+    "fork_height": 204216,
+    "fork_parent_hash": "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816",
+    "fork_parent_height": 204215,
+    "new_consensus_algorithm": "FN-DSA",
+    "old_consensus_algorithm": "ML-DSA-65",
+    "parser_mode": "fail_closed",
+    "state_root": "checkpoint-v1:chain_json_sha256=04a660f0ea4bff004412326d8ce1185dbb1e6870fb0e02cb359b776a1b1e989d;committed_blocks_jsonl_sha256=a214da21afc2191fcc087569fe73500cb97c384119e749e2bf8093ecddb9f381;canonical_locks_json_sha256=577a3347522b8e81527f27b34212ce441d04d7c5d89f3b8c943df09b3085b49a;committed_qcs_jsonl_sha256=86e113856705cd987140fdf5783169c20ab28f5efc103b92810493857bcb593d;verified_on=Val2,Val4",
+    "validator_count": 5,
+    "validators": [
+      {
+        "consensus_key_type": "FN-DSA",
+        "consensus_public_key_bytes": 1793,
+        "validator_address": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"
+      },
+      {
+        "consensus_key_type": "FN-DSA",
+        "consensus_public_key_bytes": 1793,
+        "validator_address": "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt"
+      },
+      {
+        "consensus_key_type": "FN-DSA",
+        "consensus_public_key_bytes": 1793,
+        "validator_address": "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re"
+      },
+      {
+        "consensus_key_type": "FN-DSA",
+        "consensus_public_key_bytes": 1793,
+        "validator_address": "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
+      },
+      {
+        "consensus_key_type": "FN-DSA",
+        "consensus_public_key_bytes": 1793,
+        "validator_address": "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f"
+      }
+    ]
+  },
+  "latest": {
+    "block_index": 206695,
+    "hash": "fcaa2fdd2ca6f6e78e9bb6dc676b0288473e472f62228d0d8790f811fda5055c",
+    "nonce": 206695,
+    "parent_hash": "11a0d9fedf26d812c350b3f10bf1432cf471baa2d610cce4f55b1b100693d9f5",
+    "previous_hash": "11a0d9fedf26d812c350b3f10bf1432cf471baa2d610cce4f55b1b100693d9f5",
+    "timestamp": 1780523563,
+    "transactions": [],
+    "tx_count": 0,
+    "validator": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
+    "validator_id": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"
+  },
+  "public_pending": [],
+  "raw": {
+    "fork_status": {
+      "http_status": 200,
+      "json": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {
+          "fork_configured": true,
+          "fork_height": 204216,
+          "fork_parent_hash": "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816",
+          "fork_parent_height": 204215,
+          "new_consensus_algorithm": "FN-DSA",
+          "old_consensus_algorithm": "ML-DSA-65",
+          "parser_mode": "fail_closed",
+          "state_root": "checkpoint-v1:chain_json_sha256=04a660f0ea4bff004412326d8ce1185dbb1e6870fb0e02cb359b776a1b1e989d;committed_blocks_jsonl_sha256=a214da21afc2191fcc087569fe73500cb97c384119e749e2bf8093ecddb9f381;canonical_locks_json_sha256=577a3347522b8e81527f27b34212ce441d04d7c5d89f3b8c943df09b3085b49a;committed_qcs_jsonl_sha256=86e113856705cd987140fdf5783169c20ab28f5efc103b92810493857bcb593d;verified_on=Val2,Val4",
+          "validator_count": 5,
+          "validators": [
+            {
+              "consensus_key_type": "FN-DSA",
+              "consensus_public_key_bytes": 1793,
+              "validator_address": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"
+            },
+            {
+              "consensus_key_type": "FN-DSA",
+              "consensus_public_key_bytes": 1793,
+              "validator_address": "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt"
+            },
+            {
+              "consensus_key_type": "FN-DSA",
+              "consensus_public_key_bytes": 1793,
+              "validator_address": "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re"
+            },
+            {
+              "consensus_key_type": "FN-DSA",
+              "consensus_public_key_bytes": 1793,
+              "validator_address": "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
+            },
+            {
+              "consensus_key_type": "FN-DSA",
+              "consensus_public_key_bytes": 1793,
+              "validator_address": "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f"
+            }
+          ]
+        }
+      }
+    },
+    "latest": {
+      "http_status": 200,
+      "json": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {
+          "block_index": 206695,
+          "hash": "fcaa2fdd2ca6f6e78e9bb6dc676b0288473e472f62228d0d8790f811fda5055c",
+          "nonce": 206695,
+          "parent_hash": "11a0d9fedf26d812c350b3f10bf1432cf471baa2d610cce4f55b1b100693d9f5",
+          "previous_hash": "11a0d9fedf26d812c350b3f10bf1432cf471baa2d610cce4f55b1b100693d9f5",
+          "timestamp": 1780523563,
+          "transactions": [],
+          "tx_count": 0,
+          "validator": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
+          "validator_id": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"
+        }
+      }
+    },
+    "pending": {
+      "http_status": 200,
+      "json": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": []
+      }
+    }
+  },
+  "receiver_account": {
+    "address": "synw17nh265ug2fgc8guv2ad7tt8kv0wlhesxndl8",
+    "balance_nwei": 2225998999572940003,
+    "balance_response": {
+      "http_status": 200,
+      "json": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": 2225998999572940003
+      }
+    },
+    "nonce": 1,
+    "nonce_response": {
+      "http_status": 200,
+      "json": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": 1
+      }
+    }
+  },
+  "rpc_url": "https://testnet-core-rpc.synergy-network.io",
+  "sender_account": {
+    "address": "synw1zp7cxme7xm838663yrd43lxtxlw0ck90z4am",
+    "balance_nwei": 999445819997,
+    "balance_response": {
+      "http_status": 200,
+      "json": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": 999445819997
+      }
+    },
+    "nonce": 5,
+    "nonce_response": {
+      "http_status": 200,
+      "json": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": 5
+      }
+    }
+  }
+}

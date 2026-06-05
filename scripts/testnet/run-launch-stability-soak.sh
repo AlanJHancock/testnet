@@ -11,8 +11,13 @@ atlas_api_url="${ATLAS_API_URL:-https://testnet-atlas.synergy-network.io/api/v1}
 max_rpc_lag_blocks="${MAX_RPC_LAG_BLOCKS:-5}"
 max_atlas_lag_blocks="${MAX_ATLAS_LAG_BLOCKS:-25}"
 expected_validator_sha="${EXPECTED_VALIDATOR_SHA:-50f95442de06b15193e8d77bff6c8ed3676986cfc4e234ee7b5845f936df0d90}"
+expected_val5_sha="${EXPECTED_VAL5_SHA:-$expected_validator_sha}"
 expected_rpc_sha="${EXPECTED_RPC_SHA:-115233b08a3d25f340c3c6bd2edef4b17ba972e6d4ba440b65c9d6ff964471ed}"
 max_support_lag_blocks="${MAX_SUPPORT_LAG_BLOCKS:-5}"
+spreadsheet_workbook="${SPREADSHEET_WORKBOOK:-/Users/devpup/Desktop/node machine credentials.xlsx}"
+if [[ ! -f "$spreadsheet_workbook" && -f "/Users/devpup/Desktop/node-machine-credentials.xlsx" ]]; then
+  spreadsheet_workbook="/Users/devpup/Desktop/node-machine-credentials.xlsx"
+fi
 
 case "$soak_scope" in
   consensus|full) ;;
@@ -26,7 +31,7 @@ timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 out_dir="$out_root/$timestamp"
 mkdir -p "$out_dir/raw"
 
-host_access=("$python_bin" scripts/testnet/spreadsheet_host_access.py)
+host_access=("$python_bin" scripts/testnet/spreadsheet_host_access.py --workbook "$spreadsheet_workbook")
 
 # Format: node|primary auth args|fallback auth args|extra remote env
 # Auth args and fallback auth must stay empty: the host helper invokes only the
@@ -52,13 +57,14 @@ echo "soak_dir=$out_dir"
   echo "soak_scope=$soak_scope"
   echo "duration_seconds=$duration_seconds"
   echo "interval_seconds=$interval_seconds"
-  echo "spreadsheet=/Users/devpup/Desktop/node machine credentials.xlsx"
+  echo "spreadsheet=$spreadsheet_workbook"
   echo "public_rpc_url=$public_rpc_url"
   echo "atlas_api_url=$atlas_api_url"
   echo "max_rpc_lag_blocks=$max_rpc_lag_blocks"
   echo "max_support_lag_blocks=$max_support_lag_blocks"
   echo "max_atlas_lag_blocks=$max_atlas_lag_blocks"
   echo "expected_validator_sha=$expected_validator_sha"
+  echo "expected_val5_sha=$expected_val5_sha"
   echo "expected_rpc_sha=$expected_rpc_sha"
 } > "$out_dir/manifest.txt"
 
@@ -269,7 +275,7 @@ PY
 
 summarize_sample() {
   local sample="$1"
-  "$python_bin" - "$out_dir" "$sample" "$soak_scope" "$max_rpc_lag_blocks" "$max_support_lag_blocks" "$max_atlas_lag_blocks" "$expected_validator_sha" "$expected_rpc_sha" <<'PY'
+  "$python_bin" - "$out_dir" "$sample" "$soak_scope" "$max_rpc_lag_blocks" "$max_support_lag_blocks" "$max_atlas_lag_blocks" "$expected_validator_sha" "$expected_rpc_sha" "$expected_val5_sha" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -282,8 +288,11 @@ max_support_lag = int(sys.argv[5])
 max_atlas_lag = int(sys.argv[6])
 expected_validator_sha = sys.argv[7]
 expected_rpc_sha = sys.argv[8]
+expected_val5_sha = sys.argv[9]
 validators = {"Val1", "Val2", "Val3", "Val4", "Val5"}
 relayers = {"Relayer-1", "Relayer-2"}
+expected_validator_shas = {node: expected_validator_sha for node in validators}
+expected_validator_shas["Val5"] = expected_val5_sha
 failures = []
 warnings = []
 entries = []
@@ -333,8 +342,9 @@ for node in validators:
         failures.append(f"{node}: deleted-inode runtime process")
     if value.get("process_count") != 1:
         failures.append(f"{node}: process count {value.get('process_count')} != 1")
-    if value.get("runtime_sha256") != expected_validator_sha:
-        failures.append(f"{node}: runtime checksum drift {value.get('runtime_sha256')}")
+    expected_sha = expected_validator_shas.get(node, expected_validator_sha)
+    if value.get("runtime_sha256") != expected_sha:
+        failures.append(f"{node}: runtime checksum drift {value.get('runtime_sha256')} expected {expected_sha}")
     locks_above = value.get("vote_locks_above_canonical")
     if isinstance(locks_above, int) and locks_above > 0:
         failures.append(f"{node}: vote locks above canonical={locks_above}")

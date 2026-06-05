@@ -1,0 +1,20 @@
+{
+  "all_deleted_inode_zero": true,
+  "all_listeners": true,
+  "all_pending_zero": true,
+  "all_process_one": true,
+  "all_service_active": true,
+  "all_sha_v13066": true,
+  "close_wait": {
+    "Relayer1": 0,
+    "Relayer2": 3
+  },
+  "hashes": {
+    "Relayer1": "4acbf2329834987be93d10bf0354041c104e320279b2986830ff897efff3f55e",
+    "Relayer2": "6e817c2882cf49f644bfd04e14567eda5008f2cff4b92b189bec2e735da76e81"
+  },
+  "heights": {
+    "Relayer1": 206579,
+    "Relayer2": 206534
+  }
+}

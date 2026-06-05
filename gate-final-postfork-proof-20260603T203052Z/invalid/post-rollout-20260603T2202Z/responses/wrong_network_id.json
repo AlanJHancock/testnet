@@ -1,0 +1,14 @@
+{
+  "http_status": 200,
+  "json": {
+    "error": {
+      "code": -32000,
+      "data": {
+        "error": "Transaction network_id synergy-testnet-v3 does not match synergy-testnet-v2"
+      },
+      "message": "Transaction network_id synergy-testnet-v3 does not match synergy-testnet-v2"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  }
+}

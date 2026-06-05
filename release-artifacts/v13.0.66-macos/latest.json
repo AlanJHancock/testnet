@@ -1,0 +1,108 @@
+{
+  "version": "v13.0.66",
+  "build_date": "2026-06-03T21:28:15Z",
+  "binaries": {
+    "linux-amd64": {
+      "synergy-testnet": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-testnet-linux-amd64",
+        "sha256": "7939c0bda667c8abd42fa9b3d1a32e86b1b2ed7db132a558c9969bf397be63f4"
+      },
+      "generate-node-keys": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/generate-node-keys-linux-amd64",
+        "sha256": "b60ce67a81bc69fdf749115a824eda1f8bcbc3d88c97268518f7cc887ce383e6"
+      },
+      "synergy-address-engine": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-address-engine-linux-amd64",
+        "sha256": "d388a60e63c4ab24ad889c62dbd9198ea29b1fa79c120bba0708dee231124cf7"
+      },
+      "wallet-pqc-cli": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/wallet-pqc-cli-linux-amd64",
+        "sha256": "2ebb7343c8b04f1fe9003858b15eeb401cf362c5ad6952f694a90c3ed5f13432"
+      },
+      "synergy-rpc-gateway-node": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-rpc-gateway-node-linux-amd64",
+        "sha256": "21d76bb1d3cf87f5b7806166c7c8e475fed9b0b3e69d2be32f49b95ef2117430"
+      },
+      "synergy-archive": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-archive-linux-amd64",
+        "sha256": "04dfd7cbc3504e19def2136f08d442dcf3b57f83b956c67ae164f7ce4fa23fa9"
+      },
+      "synergy-node": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-node-linux-amd64",
+        "sha256": "1f6b106bb1d29907e4d0dbc46d64a03c4bca7d40c15dcfd85938ab45318ef67b"
+      },
+      "synergy-indexer-and-explorer-node": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-indexer-and-explorer-node-linux-amd64",
+        "sha256": "463a2b5a70c40cc839522dae4fdcc0904c3c5fe51e98a8fe8d74ddb047a15ebc"
+      }
+    },
+    "macos-arm64": {
+      "synergy-testnet": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-testnet-macos-arm64",
+        "sha256": "5e054cde3607948c8bff540a68bf317a41a57d35aa5ccc3e57520f2d9d670c0d"
+      },
+      "generate-node-keys": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/generate-node-keys-macos-arm64",
+        "sha256": "373ee9e79bee1be1a794aa75a12f320aec2aee3c4b2e98c84a1a6adb7b318c9f"
+      },
+      "synergy-address-engine": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-address-engine-macos-arm64",
+        "sha256": "0c14c37a38928cb9e113b1b45d6badd015f840680452828885ca2cea7589e3bd"
+      },
+      "wallet-pqc-cli": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/wallet-pqc-cli-macos-arm64",
+        "sha256": "d5ec4ead7866cb14a0406765662c30ccb218c876a33250d97dabb1e55c38c828"
+      },
+      "synergy-rpc-gateway-node": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-rpc-gateway-node-macos-arm64",
+        "sha256": "850d808dac6da0853bbf0655af6479c25c985ed087701599daa1bbe8dadd594b"
+      },
+      "synergy-archive": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-archive-macos-arm64",
+        "sha256": "583290af6c17687ec84e62cf0a4e5c478dd0c5b507284e152e4be28fad676a93"
+      },
+      "synergy-node": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-node-macos-arm64",
+        "sha256": "03201fa82c508e58134e7643a8b0d57035bcf4eeae6751009686ecbdd3ea6467"
+      },
+      "synergy-indexer-and-explorer-node": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-indexer-and-explorer-node-macos-arm64",
+        "sha256": "ec923f2e17a193d57a2768d0df2452458b01efd612cec8445a04246c44376377"
+      }
+    },
+    "windows-amd64": {
+      "synergy-testnet": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-testnet-windows-amd64.exe",
+        "sha256": "3b9033cd5981e005baf2e0b42e304e6f83ac8f94cd96e443560d224160ebc765"
+      },
+      "generate-node-keys": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/generate-node-keys-windows-amd64.exe",
+        "sha256": "a19265c5a2a0f88fa10fe6d9dc1a8576764de559785658bb773e3b973f99fb67"
+      },
+      "synergy-address-engine": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-address-engine-windows-amd64.exe",
+        "sha256": "ae7a7d24805ea44f8b1d3547e54416ae9c75f8c63fa34fd090dc4c4af0750886"
+      },
+      "wallet-pqc-cli": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/wallet-pqc-cli-windows-amd64.exe",
+        "sha256": "8a7dbd2e5caee9ea80817c7ec9748aacafbbade5f2714e8e89bf5b8e3e8c4253"
+      },
+      "synergy-rpc-gateway-node": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-rpc-gateway-node-windows-amd64.exe",
+        "sha256": "0bf9747d25a008de6c8ac223a45f9fb2a89cc0bfadeefd59b258d34454e5b627"
+      },
+      "synergy-archive": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-archive-windows-amd64.exe",
+        "sha256": "8d5245b6748a682848ee72167362d35d3f55fc0123b21b13f65ec03e0aeeb67d"
+      },
+      "synergy-node": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-node-windows-amd64.exe",
+        "sha256": "ea23bd3bf6679a3b8928cb608f5a3fe69f98a5d49f8dc1a0da4e080e7b2482c1"
+      },
+      "synergy-indexer-and-explorer-node": {
+        "url": "https://github.com/synergy-network-hq/testnet/releases/download/v13.0.66/synergy-indexer-and-explorer-node-windows-amd64.exe",
+        "sha256": "da37daa90f53e3e4d43806a1cb87caeb481d19f030e50e176162268a6581a741"
+      }
+    }
+  }
+}
