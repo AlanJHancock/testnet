@@ -3,7 +3,7 @@
   "listen_host": "0.0.0.0",
   "port": 5621,
   "admin_token_env": "SEED_ADMIN_TOKEN",
-  "allow_dynamic_registration": false,
+  "allow_dynamic_registration": true,
   "state_file": "/var/lib/synergy-seed/seed3-peers.json",
   "bootnodes": [
     {

@@ -4,7 +4,6 @@ use crate::token::TokenManager;
 use crate::transaction::Transaction;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
-use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -926,32 +925,6 @@ fn configured_consensus_order(active_validators: &[Validator]) -> (Option<Vec<St
                 .filter(|address| active_addresses.contains(*address))
                 .cloned()
                 .collect::<Vec<_>>();
-
-            let mut activated = active_validators
-                .iter()
-                .filter(|validator| !ordered.contains(&validator.address))
-                .filter(|validator| {
-                    validator
-                        .activation_tx_hash
-                        .as_deref()
-                        .map(|hash| hash == "genesis" || hash.starts_with("syntxn-"))
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            activated.sort_by(|left, right| {
-                right
-                    .stake_amount
-                    .cmp(&left.stake_amount)
-                    .then_with(|| {
-                        right
-                            .synergy_score
-                            .partial_cmp(&left.synergy_score)
-                            .unwrap_or(Ordering::Equal)
-                    })
-                    .then_with(|| left.address.cmp(&right.address))
-            });
-            ordered.extend(activated.into_iter().map(|validator| validator.address));
             ordered.truncate(max_validators);
             return (Some(ordered), max_validators);
         }
@@ -965,31 +938,6 @@ fn configured_consensus_order(active_validators: &[Validator]) -> (Option<Vec<St
             .filter(|address| active_addresses.contains(address))
             .collect::<Vec<_>>();
         if !ordered.is_empty() {
-            let mut activated = active_validators
-                .iter()
-                .filter(|validator| !ordered.contains(&validator.address))
-                .filter(|validator| {
-                    validator
-                        .activation_tx_hash
-                        .as_deref()
-                        .map(|hash| hash == "genesis" || hash.starts_with("syntxn-"))
-                        .unwrap_or(false)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            activated.sort_by(|left, right| {
-                right
-                    .stake_amount
-                    .cmp(&left.stake_amount)
-                    .then_with(|| {
-                        right
-                            .synergy_score
-                            .partial_cmp(&left.synergy_score)
-                            .unwrap_or(Ordering::Equal)
-                    })
-                    .then_with(|| left.address.cmp(&right.address))
-            });
-            ordered.extend(activated.into_iter().map(|validator| validator.address));
             ordered.truncate(max_validators);
             return (Some(ordered), max_validators);
         }
@@ -1250,6 +1198,44 @@ mod tests {
         assert!(!validator.is_eligible(1_000));
         validator.status = ValidatorStatus::Active;
         assert!(!validator.is_eligible(1_001));
+    }
+
+    #[test]
+    fn activated_non_genesis_validator_does_not_expand_consensus_membership() {
+        let genesis = crate::genesis::canonical_genesis().expect("canonical genesis should load");
+        let mut active_validators = genesis
+            .validators()
+            .iter()
+            .map(|entry| {
+                let mut validator = Validator::new(
+                    entry.operator_address.clone(),
+                    entry.consensus_public_key.clone(),
+                    entry.moniker.clone(),
+                    entry.stake_nwei,
+                );
+                validator.status = ValidatorStatus::Active;
+                validator.activation_tx_hash = Some("genesis".to_string());
+                validator
+            })
+            .collect::<Vec<_>>();
+        let mut activated = Validator::new(
+            "synv11wsfus6ghzgjvm4glpatuy8tnyacrwealyjv".to_string(),
+            "fndsa:test-public-key".to_string(),
+            "Local Validator v14 onboarding test".to_string(),
+            TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+        );
+        activated.status = ValidatorStatus::Active;
+        activated.activation_tx_hash = Some("syntxn-onboarding-test".to_string());
+        active_validators.push(activated);
+
+        let membership = consensus_membership_validators(active_validators);
+        let membership_addresses = membership
+            .iter()
+            .map(|validator| validator.address.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(membership.len(), genesis.validators().len());
+        assert!(!membership_addresses.contains(&"synv11wsfus6ghzgjvm4glpatuy8tnyacrwealyjv"));
     }
 
     #[test]

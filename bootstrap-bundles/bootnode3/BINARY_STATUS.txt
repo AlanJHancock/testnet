@@ -9,7 +9,7 @@ SHA-256: 612f696b7e476930bf1616b241a8b7b6043665dc72ef782cae02fc23d29450fc
 Darwin Binary
 -------------
 Path: ./bin/synergy-testnet-darwin-arm64
-SHA-256: 75535f5bdda512426657cce62a95f95051bff24e5cd6b930884cd47043be6c4d
+SHA-256: 6984bda33c250c2a04e83e8fc5b62ecfeef5fd57eaeea7cd62fc8c59d98dfb38
 
 Windows Binary
 --------------
