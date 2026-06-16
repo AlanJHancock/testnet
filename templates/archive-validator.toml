@@ -16,11 +16,11 @@ p2p_port = 5622
 rpc_port = 5640
 ws_port = 5660
 max_peers = 100
-bootnodes = []
-seed_servers = []
-bootstrap_dns_records = []
-additional_dial_targets = ["195.26.241.95:5622", "94.72.117.108:5622"]
-persistent_peers = ["195.26.241.95:5622", "94.72.117.108:5622"]
+bootnodes = ["snr://bootstrap@bootnode1.synergyvps.xyz:5620", "snr://bootstrap@bootnode2.synergyvps.xyz:5620", "snr://bootstrap@bootnode3.synergyvps.xyz:5620"]
+seed_servers = ["http://seed1.synergyvps.xyz:5621", "http://seed2.synergyvps.xyz:5621", "http://seed3.synergyvps.xyz:5621"]
+bootstrap_dns_records = ["_dnsaddr.bootstrap.synergyvps.xyz"]
+additional_dial_targets = []
+persistent_peers = []
 
 [blockchain]
 block_time = 2
@@ -32,7 +32,7 @@ algorithm = "Proof of Synergy"
 block_time_secs = 2
 epoch_length = 1000
 min_validators = 3
-validator_cluster_size = 5
+validator_cluster_size = 7
 validator_vote_threshold = 4
 max_validators = 100
 status_ready_gate_enabled = true
@@ -94,7 +94,7 @@ pruning_interval = 86400
 bootstrap_only = false
 auto_register_validator = false
 validator_address = ""
-strict_validator_allowlist = true
+strict_validator_allowlist = false
 allowed_validator_addresses = ["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs", "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt", "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re", "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5", "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f"]
 
 [telemetry]

@@ -115,12 +115,14 @@ impl Transaction {
         let message_bytes =
             hex::decode(&message).map_err(|e| format!("Failed to decode hash: {}", e))?;
 
-        // Sign using the appropriate PQC algorithm
         let signature = match private_key.algorithm {
-            PQCAlgorithm::MLDSA => pqc_manager.sign(private_key, &message_bytes)?,
             PQCAlgorithm::FNDSA => pqc_manager.sign(private_key, &message_bytes)?,
-            PQCAlgorithm::SLHDSA => pqc_manager.sign(private_key, &message_bytes)?,
-            _ => return Err("Unsupported signature algorithm".to_string()),
+            _ => {
+                return Err(
+                    "Unsupported signature algorithm; Synergy transactions use FN-DSA only"
+                        .to_string(),
+                )
+            }
         };
 
         self.signature = signature.signature_data;
@@ -247,7 +249,7 @@ impl Transaction {
             };
         }
 
-        if self.amount == 0 {
+        if self.amount == 0 && !self.is_zero_value_protocol_transaction() {
             return TransactionValidationResult {
                 is_valid: false,
                 error_message: Some("Transaction amount must be greater than 0".to_string()),
@@ -275,9 +277,8 @@ impl Transaction {
             };
         }
 
-        // Check if signature algorithm is supported
         match self.signature_algorithm.as_str() {
-            "mldsa" | "fndsa" | "slhdsa" => {}
+            "fndsa" => {}
             _ => {
                 return TransactionValidationResult {
                     is_valid: false,
@@ -311,6 +312,13 @@ impl Transaction {
     pub fn serialize(&self) -> Result<Vec<u8>, String> {
         encode_to_vec(self, standard())
             .map_err(|e| format!("Failed to serialize transaction: {}", e))
+    }
+
+    fn is_zero_value_protocol_transaction(&self) -> bool {
+        self.data
+            .as_deref()
+            .map(|data| data.starts_with("validator_activation:"))
+            .unwrap_or(false)
     }
 
     pub fn deserialize(data: &[u8]) -> Result<Self, String> {
@@ -524,7 +532,6 @@ impl Transaction {
 fn algorithm_name(algorithm: &PQCAlgorithm) -> &'static str {
     match algorithm {
         PQCAlgorithm::MLKEM1024 => "mlkem1024",
-        PQCAlgorithm::MLDSA => "mldsa",
         PQCAlgorithm::FNDSA => "fndsa",
         PQCAlgorithm::SLHDSA => "slhdsa",
         PQCAlgorithm::HQCKEM => "hqckem",
@@ -534,12 +541,13 @@ fn algorithm_name(algorithm: &PQCAlgorithm) -> &'static str {
 // Helper function to parse algorithm name
 pub fn parse_algorithm_name(name: &str) -> Result<PQCAlgorithm, String> {
     match name.to_lowercase().as_str() {
-        "mlkem" | "mlkem1024" => Ok(PQCAlgorithm::MLKEM1024),
-        "mldsa" => Ok(PQCAlgorithm::MLDSA),
-        "fndsa" => Ok(PQCAlgorithm::FNDSA),
-        "slhdsa" => Ok(PQCAlgorithm::SLHDSA),
-        "hqckem" => Ok(PQCAlgorithm::HQCKEM),
-        _ => Err(format!("Unknown algorithm: {}", name)),
+        "fndsa" | "fn-dsa" | "fn-dsa-512" | "fn-dsa-1024" | "falcon" | "falcon-1024" => {
+            Ok(PQCAlgorithm::FNDSA)
+        }
+        _ => Err(format!(
+            "Unsupported transaction signature algorithm: {}; use fndsa",
+            name
+        )),
     }
 }
 
@@ -558,7 +566,7 @@ mod tests {
             100,
             21000,
             None,
-            "mldsa".to_string(),
+            "fndsa".to_string(),
         );
 
         assert_eq!(tx.sender, "sender123");
@@ -568,7 +576,7 @@ mod tests {
         assert_eq!(tx.signature, vec![0x01, 0x02, 0x03]);
         assert_eq!(tx.gas_price, 100);
         assert_eq!(tx.gas_limit, 21000);
-        assert_eq!(tx.signature_algorithm, "mldsa");
+        assert_eq!(tx.signature_algorithm, "fndsa");
     }
 
     #[test]
@@ -582,7 +590,7 @@ mod tests {
             100,
             21000,
             None,
-            "mldsa".to_string(),
+            "fndsa".to_string(),
         );
 
         let tx2 = Transaction::new(
@@ -594,7 +602,7 @@ mod tests {
             100,
             21000,
             None,
-            "mldsa".to_string(),
+            "fndsa".to_string(),
         );
 
         // Same transaction should have same hash
@@ -609,7 +617,7 @@ mod tests {
             100,
             21000,
             None,
-            "mldsa".to_string(),
+            "fndsa".to_string(),
         );
 
         // Different transaction should have different hash
@@ -627,7 +635,7 @@ mod tests {
             100,
             21000,
             None,
-            "mldsa".to_string(),
+            "fndsa".to_string(),
         );
 
         let result = valid_tx.validate();
@@ -643,7 +651,7 @@ mod tests {
             100,
             21000,
             None,
-            "mldsa".to_string(),
+            "fndsa".to_string(),
         );
 
         let result = invalid_tx.validate();
@@ -697,6 +705,63 @@ mod tests {
     }
 
     #[test]
+    fn admission_allows_signed_zero_value_validator_activation() {
+        let mut manager = PQCManager::new();
+        let (public_key, private_key) = manager
+            .generate_keypair(PQCAlgorithm::FNDSA)
+            .expect("test keypair should generate");
+        let sender = crate::address::generate_class_based_address(&public_key.key_data, 1);
+        let mut tx = Transaction::new(
+            sender.clone(),
+            sender.clone(),
+            0,
+            1,
+            Vec::new(),
+            100,
+            21000,
+            Some(format!(
+                "validator_activation:{{\"validator\":\"{}\",\"public_key\":\"{}\",\"name\":\"Test Validator\",\"stake_amount_nwei\":50000000000000}}",
+                sender,
+                hex::encode(&public_key.key_data)
+            )),
+            "fndsa".to_string(),
+        );
+        tx.sign_with_public_key(&public_key, &private_key, &mut manager)
+            .expect("test transaction should sign");
+
+        let validation = tx.validate_for_admission();
+
+        assert!(
+            validation.is_valid,
+            "validator activation admission failed: {:?}",
+            validation.error_message
+        );
+    }
+
+    #[test]
+    fn admission_still_rejects_unsigned_zero_value_transfer() {
+        let tx = Transaction::new(
+            "sender123".to_string(),
+            "receiver456".to_string(),
+            0,
+            1,
+            vec![0x01, 0x02, 0x03],
+            100,
+            21000,
+            None,
+            "fndsa".to_string(),
+        );
+
+        let validation = tx.validate_for_admission();
+
+        assert!(!validation.is_valid);
+        assert_eq!(
+            validation.error_message.as_deref(),
+            Some("Transaction amount must be greater than 0")
+        );
+    }
+
+    #[test]
     fn aegis_carrier_transaction_validates_for_p2p_admission() {
         let report = crate::aegis_tx_tool::sign_with_new_aegis_transaction_key(
             crate::aegis_tx_tool::AegisTxBuildOptions::default(),
@@ -726,7 +791,7 @@ mod tests {
             100,
             21000,
             None,
-            "mldsa".to_string(),
+            "fndsa".to_string(),
         );
 
         let serialized = tx.serialize().unwrap();
@@ -751,7 +816,7 @@ mod tests {
             100,
             21000,
             None,
-            "mldsa".to_string(),
+            "fndsa".to_string(),
         );
 
         let json = tx.to_json().unwrap();
@@ -776,7 +841,7 @@ mod tests {
             100,
             21000,
             None,
-            "mldsa".to_string(),
+            "fndsa".to_string(),
         );
 
         assert_eq!(tx.get_fee(), 100 * 38500);
@@ -785,25 +850,12 @@ mod tests {
 
     #[test]
     fn test_algorithm_parsing() {
-        assert_eq!(parse_algorithm_name("mldsa").unwrap(), PQCAlgorithm::MLDSA);
         assert_eq!(parse_algorithm_name("fndsa").unwrap(), PQCAlgorithm::FNDSA);
-        assert_eq!(
-            parse_algorithm_name("slhdsa").unwrap(),
-            PQCAlgorithm::SLHDSA
-        );
-        assert_eq!(
-            parse_algorithm_name("mlkem").unwrap(),
-            PQCAlgorithm::MLKEM1024
-        );
-        assert_eq!(
-            parse_algorithm_name("mlkem1024").unwrap(),
-            PQCAlgorithm::MLKEM1024
-        );
-        assert_eq!(
-            parse_algorithm_name("hqckem").unwrap(),
-            PQCAlgorithm::HQCKEM
-        );
-
+        assert_eq!(parse_algorithm_name("fn-dsa").unwrap(), PQCAlgorithm::FNDSA);
+        assert!(parse_algorithm_name("unsupported-signature").is_err());
+        assert!(parse_algorithm_name("slhdsa").is_err());
+        assert!(parse_algorithm_name("mlkem").is_err());
+        assert!(parse_algorithm_name("hqckem").is_err());
         assert!(parse_algorithm_name("unknown").is_err());
     }
 }

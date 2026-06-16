@@ -9,5 +9,7 @@ pub mod security;
 pub mod traits;
 pub mod utils;
 
+#[cfg(feature = "mlkem")]
 pub use pqc::kem::mlkem;
-pub use pqc::signatures::{fndsa, mldsa};
+#[cfg(feature = "fndsa")]
+pub use pqc::signatures::fndsa;

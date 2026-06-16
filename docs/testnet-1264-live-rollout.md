@@ -160,4 +160,4 @@ Do not describe a future rollout as complete until the final report proves:
 - block cadence is near 2 seconds over latest 50/120/300 blocks
 - release package and live runtime checksums match
 - no direct public-node-to-validator peers exist
-- no active deployable `Testnet`, `testnet`, `testnet`, chain 1262, or chain 1263 identity material remains
+- no active deployable material for deprecated environments or chain 1262/1263 identity remains

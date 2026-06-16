@@ -17,6 +17,7 @@ use crate::{debug, warn};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_512};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
@@ -42,9 +43,11 @@ lazy_static::lazy_static! {
 static COMMITTED_QC_STORE_INIT: Once = Once::new();
 
 const TWO_THIRDS_QUORUM_THRESHOLD: f64 = 2.0 / 3.0;
-pub const MIN_LAUNCH_VOTE_TIMEOUT_SECS: u64 = 4;
+pub const MIN_LAUNCH_VOTE_TIMEOUT_SECS: u64 = 1;
 const LOCAL_VOTE_LOCK_COMPACTION_MIN_LOCKS: usize = 1024;
 const LOCAL_VOTE_LOCK_FINALIZED_RETENTION_DEPTH: u64 = 16;
+const COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV: &str = "SYNERGY_COMMITTED_QC_HOT_RETENTION_BLOCKS";
+const COMMITTED_QC_RETENTION_PRUNE_INTERVAL: usize = 1024;
 
 #[derive(Debug, Clone)]
 struct SameHeightVoteParent {
@@ -119,6 +122,8 @@ pub struct LocalLockedVote {
     pub first_round_number: u64,
     pub latest_round_number: u64,
     pub proposer: String,
+    pub created_at: u64,
+    pub updated_at: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,6 +203,8 @@ pub struct DualQuorumConsensus {
 }
 
 impl DualQuorumConsensus {
+    const MIN_CONFIGURED_LAUNCH_QC_VOTES: usize = 4;
+
     pub fn new(
         validator_manager: Arc<ValidatorManager>,
         pqc_manager: Arc<Mutex<PQCManager>>,
@@ -695,6 +702,7 @@ impl DualQuorumConsensus {
 
         Self::append_committed_qc_to_log(&qc)?;
         store.insert(qc.block_hash.clone(), qc);
+        Self::prune_committed_qc_store_for_retention(&mut store);
         Ok(())
     }
 
@@ -756,6 +764,9 @@ impl DualQuorumConsensus {
     fn load_committed_qc_store_from_disk() -> Result<HashMap<String, QuorumCertificate>, String> {
         let path = Self::committed_qc_store_path();
         let mut loaded = HashMap::new();
+        let retention_blocks = Self::configured_committed_qc_hot_retention_blocks();
+        let mut latest_height = 0_u64;
+        let mut seen_log_entries = 0_usize;
 
         if path.exists() {
             let data = fs::read(&path)
@@ -765,7 +776,20 @@ impl DualQuorumConsensus {
                     .map_err(|err| {
                     format!("failed to parse committed QC store {:?}: {err}", path)
                 })?;
-                loaded.extend(legacy);
+                for (block_hash, qc) in legacy {
+                    Self::insert_committed_qc_with_retention(
+                        &mut loaded,
+                        block_hash,
+                        qc,
+                        retention_blocks,
+                        &mut latest_height,
+                    );
+                }
+                Self::prune_committed_qc_store_for_retention_with_latest(
+                    &mut loaded,
+                    retention_blocks,
+                    latest_height,
+                );
             }
         }
 
@@ -793,11 +817,131 @@ impl DualQuorumConsensus {
                             line_number + 1
                         )
                     })?;
-                loaded.insert(entry.block_hash, entry.qc);
+                Self::insert_committed_qc_with_retention(
+                    &mut loaded,
+                    entry.block_hash,
+                    entry.qc,
+                    retention_blocks,
+                    &mut latest_height,
+                );
+                seen_log_entries = seen_log_entries.saturating_add(1);
+                if retention_blocks.is_some()
+                    && seen_log_entries % COMMITTED_QC_RETENTION_PRUNE_INTERVAL == 0
+                {
+                    Self::prune_committed_qc_store_for_retention_with_latest(
+                        &mut loaded,
+                        retention_blocks,
+                        latest_height,
+                    );
+                }
             }
         }
 
+        Self::prune_committed_qc_store_for_retention_with_latest(
+            &mut loaded,
+            retention_blocks,
+            latest_height,
+        );
+        Self::trim_allocator_after_hot_retention();
         Ok(loaded)
+    }
+
+    fn insert_committed_qc_with_retention(
+        store: &mut HashMap<String, QuorumCertificate>,
+        block_hash: String,
+        qc: QuorumCertificate,
+        retention_blocks: Option<u64>,
+        latest_height: &mut u64,
+    ) {
+        let qc_height = Self::committed_qc_height(&qc);
+        if let Some(height) = qc_height {
+            *latest_height = (*latest_height).max(height);
+        }
+
+        if Self::committed_qc_is_within_retention(qc_height, retention_blocks, *latest_height) {
+            store.insert(block_hash, qc);
+        }
+    }
+
+    fn committed_qc_height(qc: &QuorumCertificate) -> Option<u64> {
+        qc.votes
+            .iter()
+            .map(|vote| vote.block_index)
+            .filter(|height| *height > 0)
+            .max()
+    }
+
+    fn configured_committed_qc_hot_retention_blocks() -> Option<u64> {
+        env::var(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV)
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+    }
+
+    fn committed_qc_is_within_retention(
+        qc_height: Option<u64>,
+        retention_blocks: Option<u64>,
+        latest_height: u64,
+    ) -> bool {
+        let Some(retention_blocks) = retention_blocks else {
+            return true;
+        };
+        let Some(qc_height) = qc_height else {
+            return true;
+        };
+        if latest_height < retention_blocks {
+            return true;
+        }
+        qc_height
+            >= latest_height
+                .saturating_sub(retention_blocks)
+                .saturating_add(1)
+    }
+
+    fn prune_committed_qc_store_for_retention(
+        store: &mut HashMap<String, QuorumCertificate>,
+    ) -> usize {
+        let retention_blocks = Self::configured_committed_qc_hot_retention_blocks();
+        let latest_height = store
+            .values()
+            .filter_map(Self::committed_qc_height)
+            .max()
+            .unwrap_or(0);
+        Self::prune_committed_qc_store_for_retention_with_latest(
+            store,
+            retention_blocks,
+            latest_height,
+        )
+    }
+
+    fn prune_committed_qc_store_for_retention_with_latest(
+        store: &mut HashMap<String, QuorumCertificate>,
+        retention_blocks: Option<u64>,
+        latest_height: u64,
+    ) -> usize {
+        if retention_blocks.is_none() || latest_height == 0 {
+            return 0;
+        }
+        let before = store.len();
+        store.retain(|_, qc| {
+            Self::committed_qc_is_within_retention(
+                Self::committed_qc_height(qc),
+                retention_blocks,
+                latest_height,
+            )
+        });
+        let removed = before.saturating_sub(store.len());
+        if removed > 0 {
+            Self::trim_allocator_after_hot_retention();
+        }
+        removed
+    }
+
+    fn trim_allocator_after_hot_retention() {
+        #[cfg(target_os = "linux")]
+        unsafe {
+            libc::malloc_trim(0);
+        }
     }
 
     fn append_committed_qc_to_log(qc: &QuorumCertificate) -> Result<(), String> {
@@ -1091,6 +1235,14 @@ impl DualQuorumConsensus {
             ));
         }
 
+        if self.configured_launch_quorum_mode(total_validators) {
+            let qc =
+                self.create_quorum_certificate(block_hash, epoch_number, round_number, votes)?;
+            self.quorum_certificates
+                .insert(block_hash.to_string(), qc.clone());
+            return Ok(qc);
+        }
+
         // Check validation quorum against the total live validator weight for the round.
         let total_live_weight = self.total_validator_weight(&active_validators);
         let validation_ratio = if total_live_weight > 0.0 {
@@ -1147,8 +1299,12 @@ impl DualQuorumConsensus {
     }
 
     fn required_validator_votes(&self, total_validators: usize) -> usize {
+        Self::required_votes_from_config(total_validators, Some(self.validator_vote_threshold)).0
+    }
+
+    fn configured_launch_quorum_mode(&self, total_validators: usize) -> bool {
         let bft_required = ((total_validators * 2) / 3) + 1;
-        self.validator_vote_threshold.max(1).max(bft_required)
+        self.required_validator_votes(total_validators) < bft_required
     }
 
     fn has_commit_quorum(&self, live_validators: &[Validator], votes: &[Vote]) -> bool {
@@ -1159,6 +1315,10 @@ impl DualQuorumConsensus {
         let required_validator_votes = self.required_validator_votes(live_validators.len());
         if votes.len() < required_validator_votes {
             return false;
+        }
+
+        if self.configured_launch_quorum_mode(live_validators.len()) {
+            return true;
         }
 
         let total_live_weight = self.total_validator_weight(live_validators);
@@ -1501,27 +1661,71 @@ impl DualQuorumConsensus {
             signed_weight += (validator.synergy_score / 100.0).max(0.0);
         }
 
-        let required_votes = ((active_validators.len() * 2) / 3) + 1;
+        let (required_votes, configured_launch_quorum) =
+            Self::required_qc_validator_votes(active_validators.len());
         if seen.len() < required_votes {
+            let quorum_label = if configured_launch_quorum {
+                "configured launch quorum"
+            } else {
+                "BFT quorum"
+            };
             return Err(format!(
-                "QC has {} signer(s), {} required for BFT quorum",
+                "QC has {} signer(s), {} required for {quorum_label}",
                 seen.len(),
-                required_votes
+                required_votes,
             ));
         }
 
-        let total_weight = active_validators
-            .iter()
-            .map(|validator| (validator.synergy_score / 100.0).max(0.0))
-            .sum::<f64>();
-        if total_weight <= 0.0 {
-            return Err("active validator set has zero voting weight".to_string());
-        }
-        if (signed_weight / total_weight) <= TWO_THIRDS_QUORUM_THRESHOLD {
-            return Err("QC signed weight is not strictly greater than two thirds".to_string());
+        if configured_launch_quorum {
+            if signed_weight <= 0.0 {
+                return Err("QC signed weight is zero".to_string());
+            }
+        } else {
+            let total_weight = active_validators
+                .iter()
+                .map(|validator| (validator.synergy_score / 100.0).max(0.0))
+                .sum::<f64>();
+            if total_weight <= 0.0 {
+                return Err("active validator set has zero voting weight".to_string());
+            }
+            if (signed_weight / total_weight) <= TWO_THIRDS_QUORUM_THRESHOLD {
+                return Err("QC signed weight is not strictly greater than two thirds".to_string());
+            }
         }
 
         Ok(())
+    }
+
+    fn required_qc_validator_votes(total_validators: usize) -> (usize, bool) {
+        let configured = env::var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .or_else(|| {
+                crate::config::load_node_config(None)
+                    .ok()
+                    .map(|config| config.consensus.validator_vote_threshold)
+            });
+
+        Self::required_votes_from_config(total_validators, configured)
+    }
+
+    fn required_votes_from_config(
+        total_validators: usize,
+        configured: Option<usize>,
+    ) -> (usize, bool) {
+        let bft_required = ((total_validators * 2) / 3) + 1;
+        let Some(configured) = configured else {
+            return (bft_required.max(1), false);
+        };
+
+        let configured = configured.max(1);
+        let required =
+            if configured >= bft_required || configured >= Self::MIN_CONFIGURED_LAUNCH_QC_VOTES {
+                configured
+            } else {
+                bft_required.max(1)
+            };
+        (required, required != bft_required)
     }
 
     fn vote_signature_cache_contains(&self, cache_key: &str) -> bool {
@@ -1799,6 +2003,8 @@ impl DualQuorumConsensus {
             first_round_number: lock.first_round_number,
             latest_round_number: lock.latest_round_number,
             proposer: lock.proposer.clone(),
+            created_at: lock.created_at,
+            updated_at: lock.updated_at,
         }))
     }
 
@@ -1969,10 +2175,20 @@ impl DualQuorumConsensus {
             ));
         }
 
-        Err(format!(
-            "same-height vote supersede for height {} requires an explicit view-change certificate; refusing conflicting transient vote for {} after round {} using {} parent",
-            proposed_block.block_index, proposed_block.hash, latest_conflicting_round, latest_lock.source
-        ))
+        warn!(
+            "consensus",
+            "Accepting higher-round same-height vote supersede after deterministic view change",
+            "height" => proposed_block.block_index,
+            "new_hash" => proposed_block.hash.clone(),
+            "new_proposer" => proposed_block.validator_id.clone(),
+            "requested_round" => round_number,
+            "latest_conflicting_round" => latest_conflicting_round,
+            "canonical_parent_height" => latest_lock.height,
+            "canonical_parent_hash" => latest_lock.block_hash,
+            "canonical_parent_source" => latest_lock.source
+        );
+
+        Ok(())
     }
 
     fn same_height_vote_parent_for_proposal(
@@ -2498,7 +2714,7 @@ impl DualQuorumConsensus {
     pub(crate) fn test_vote_tracking_guard() -> std::sync::MutexGuard<'static, ()> {
         TEST_VOTE_TRACKING_MUTEX
             .lock()
-            .expect("test vote tracking mutex is poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[cfg(test)]
@@ -2612,6 +2828,63 @@ mod tests {
         }
     }
 
+    fn test_qc_at_height(block_hash: &str, height: u64) -> QuorumCertificate {
+        let mut qc = test_qc(block_hash);
+        qc.votes = vec![Vote {
+            validator_address: "validator1".to_string(),
+            block_hash: block_hash.to_string(),
+            block_index: height,
+            epoch_number: 0,
+            round_number: 1,
+            signature: PQCSignature {
+                algorithm: PQCAlgorithm::FNDSA,
+                signature_data: Vec::new(),
+                message_hash: Vec::new(),
+                public_key_id: String::new(),
+                created_at: 0,
+            },
+            signer_public_key: Vec::new(),
+            timestamp: height,
+        }];
+        qc
+    }
+
+    #[test]
+    fn qc_verification_does_not_allow_configured_threshold_below_bft() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        let previous = env::var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD").ok();
+        env::set_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD", "3");
+
+        let (required, configured_launch_quorum) =
+            DualQuorumConsensus::required_qc_validator_votes(5);
+
+        assert_eq!(required, 4);
+        assert!(!configured_launch_quorum);
+
+        match previous {
+            Some(value) => env::set_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD", value),
+            None => env::remove_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD"),
+        }
+    }
+
+    #[test]
+    fn qc_verification_uses_configured_launch_quorum_for_expanded_validator_set() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        let previous = env::var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD").ok();
+        env::set_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD", "4");
+
+        let (required, configured_launch_quorum) =
+            DualQuorumConsensus::required_qc_validator_votes(6);
+
+        assert_eq!(required, 4);
+        assert!(configured_launch_quorum);
+
+        match previous {
+            Some(value) => env::set_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD", value),
+            None => env::remove_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD"),
+        }
+    }
+
     #[test]
     fn committed_qc_store_is_persisted_incrementally() {
         let _guard = DualQuorumConsensus::test_vote_tracking_guard();
@@ -2651,6 +2924,35 @@ mod tests {
         let raw =
             fs::read_to_string(DualQuorumConsensus::committed_qc_log_path()).unwrap_or_default();
         assert_eq!(raw.lines().count(), 1);
+    }
+
+    #[test]
+    fn committed_qc_store_load_honors_hot_retention_env() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let previous = env::var(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV).ok();
+        env::set_var(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV, "3");
+
+        for height in 1..=8 {
+            DualQuorumConsensus::append_committed_qc_to_log(&test_qc_at_height(
+                &format!("block-{height}"),
+                height,
+            ))
+            .unwrap();
+        }
+
+        let loaded = DualQuorumConsensus::load_committed_qc_store_from_disk()
+            .expect("committed QC log should load");
+
+        assert!(!loaded.contains_key("block-5"));
+        assert!(loaded.contains_key("block-6"));
+        assert!(loaded.contains_key("block-7"));
+        assert!(loaded.contains_key("block-8"));
+
+        match previous {
+            Some(value) => env::set_var(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV, value),
+            None => env::remove_var(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV),
+        }
     }
 
     fn signed_block(block_index: u64, nonce: u64, validator_id: &str) -> Block {
@@ -2737,7 +3039,7 @@ mod tests {
             true,
             2,
             2,
-            2,
+            0,
             6,
         );
 
@@ -2921,7 +3223,7 @@ mod tests {
     }
 
     #[test]
-    fn same_height_higher_round_without_view_change_certificate_rejected() {
+    fn same_height_higher_round_extending_canonical_parent_supersedes_transient_lock() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
         crate::consensus::legacy_canonical_lock::clear_legacy_canonical_locks_for_tests();
@@ -2955,24 +3257,16 @@ mod tests {
             "unexpected same-round error: {same_round_error}"
         );
 
-        let higher_round_error = DualQuorumConsensus::register_local_vote_intent(
-            "validator2",
-            &conflicting_block,
-            40,
-            2,
-        )
-        .expect_err("higher-round conflicting vote requires explicit view-change certificate");
-        assert!(
-            higher_round_error.contains("requires an explicit view-change certificate"),
-            "unexpected higher-round error: {higher_round_error}"
-        );
+        DualQuorumConsensus::register_local_vote_intent("validator2", &conflicting_block, 40, 2)
+            .expect("higher-round canonical-parent vote supersede should be accepted");
 
         let locked = DualQuorumConsensus::local_locked_vote_for_height("validator2", 40, 13)
             .expect("local vote lock lookup should succeed")
-            .expect("original local vote lock should remain");
-        assert_eq!(locked.block_hash, block.hash);
-        assert_eq!(locked.first_round_number, 1);
-        assert_eq!(locked.latest_round_number, 1);
+            .expect("latest local vote lock should advance");
+        assert_eq!(locked.block_hash, conflicting_block.hash);
+        assert_eq!(locked.first_round_number, 2);
+        assert_eq!(locked.latest_round_number, 2);
+        assert_eq!(locked.proposer, "validator3");
 
         let locks = DualQuorumConsensus::load_local_vote_locks_unlocked()
             .expect("persisted vote locks should load");
@@ -2983,8 +3277,15 @@ mod tests {
         assert!(
             locks
                 .values()
-                .all(|lock| lock.block_hash != conflicting_block.hash),
-            "conflicting higher-round vote lock must not be persisted without a certificate"
+                .any(|lock| lock.block_hash == conflicting_block.hash
+                    && lock.block_index == 13
+                    && lock.latest_round_number == 2
+                    && lock.superseded.iter().any(|superseded| {
+                        superseded.block_hash == block.hash
+                            && superseded.first_round_number == 1
+                            && superseded.latest_round_number == 1
+                    })),
+            "higher-round superseding vote lock should be persisted"
         );
 
         DualQuorumConsensus::set_test_local_vote_lock_path(None);
@@ -3249,7 +3550,7 @@ mod tests {
             "parent_height": 204_215,
             "parent_hash": parent.hash,
             "state_root": "checkpoint-v1:test",
-            "old_consensus_algorithm": "ML-DSA-65",
+            "old_consensus_algorithm": "FN-DSA",
             "new_consensus_algorithm": "FN-DSA",
             "new_validator_registry": [{
                 "validator_address": "validator2",
@@ -3319,7 +3620,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_conflicting_vote_lock_is_not_recovered_before_timeout() {
+    fn fresh_conflicting_vote_lock_can_supersede_at_higher_round_without_recovery() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
         crate::consensus::legacy_canonical_lock::clear_legacy_canonical_locks_for_tests();
@@ -3352,18 +3653,24 @@ mod tests {
         )
         .expect("fresh lock check should fail closed without mutation");
 
-        let err =
-            DualQuorumConsensus::register_local_vote_intent("validator2", &recovery_block, 40, 2)
-                .expect_err("fresh conflicting vote remains unsafe without stale recovery");
-        assert!(
-            err.contains("requires an explicit view-change certificate"),
-            "unexpected fresh-lock error: {err}"
-        );
+        DualQuorumConsensus::register_local_vote_intent("validator2", &recovery_block, 40, 2)
+            .expect(
+                "higher-round canonical-parent vote supersede should not wait for stale recovery",
+            );
 
         let locked = DualQuorumConsensus::local_locked_vote_for_height("validator2", 40, 13)
             .expect("local vote lock lookup should succeed")
-            .expect("original lock should remain");
-        assert_eq!(locked.block_hash, first_block.hash);
+            .expect("higher-round lock should become latest");
+        assert_eq!(locked.block_hash, recovery_block.hash);
+        assert_eq!(locked.latest_round_number, 2);
+        let locks = DualQuorumConsensus::load_local_vote_locks_unlocked()
+            .expect("persisted vote locks should load");
+        assert!(locks.values().any(|lock| {
+            lock.block_hash == recovery_block.hash
+                && lock.superseded.iter().any(|superseded| {
+                    superseded.block_hash == first_block.hash && superseded.latest_round_number == 1
+                })
+        }));
 
         DualQuorumConsensus::set_test_local_vote_lock_path(None);
         crate::consensus::legacy_canonical_lock::clear_legacy_canonical_locks_for_tests();
@@ -3630,7 +3937,7 @@ mod tests {
     }
 
     #[test]
-    fn four_of_six_equal_weight_votes_do_not_satisfy_strict_bft_quorum() {
+    fn four_of_six_equal_weight_votes_satisfy_configured_launch_quorum() {
         let validator_manager = approved_validator_manager(&[
             "validator1",
             "validator2",
@@ -3671,9 +3978,14 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
+        assert_eq!(
+            consensus.required_validator_votes(active_validators.len()),
+            4
+        );
+        assert!(consensus.configured_launch_quorum_mode(active_validators.len()));
         assert!(
-            !consensus.has_commit_quorum(&active_validators, &votes),
-            "4 of 6 equal-weight votes is exactly two thirds, not strictly greater"
+            consensus.has_commit_quorum(&active_validators, &votes),
+            "configured Testnet launch quorum accepts 4 collected votes across six active validators"
         );
 
         let five_votes = [
@@ -3750,6 +4062,57 @@ mod tests {
         assert!(
             !consensus.has_commit_quorum(&active_validators, &votes),
             "configured 4-of-5 quorum must not silently become 3-of-3 when peers disappear"
+        );
+    }
+
+    #[test]
+    fn configured_launch_quorum_does_not_override_bft_for_five_validators() {
+        let validator_manager = approved_validator_manager(&[
+            "validator1",
+            "validator2",
+            "validator3",
+            "validator4",
+            "validator5",
+        ]);
+        let pqc_manager = Arc::new(Mutex::new(PQCManager::new()));
+        let consensus = DualQuorumConsensus::new(
+            Arc::clone(&validator_manager),
+            Arc::clone(&pqc_manager),
+            false,
+            1,
+            3,
+            2,
+            6,
+        );
+        let active_validators =
+            consensus_membership_validators(validator_manager.get_active_validators());
+        let votes = ["validator1", "validator2", "validator3"]
+            .into_iter()
+            .map(|validator_address| Vote {
+                validator_address: validator_address.to_string(),
+                block_hash: "block-hash".to_string(),
+                block_index: 42,
+                epoch_number: 1,
+                round_number: 1,
+                signature: PQCSignature {
+                    algorithm: PQCAlgorithm::FNDSA,
+                    signature_data: Vec::new(),
+                    message_hash: Vec::new(),
+                    public_key_id: String::new(),
+                    created_at: 0,
+                },
+                signer_public_key: Vec::new(),
+                timestamp: 0,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            consensus.required_validator_votes(active_validators.len()),
+            4
+        );
+        assert!(
+            !consensus.has_commit_quorum(&active_validators, &votes),
+            "configured launch quorum must not allow 3 collected votes across five active validators"
         );
     }
 

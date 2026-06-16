@@ -14,6 +14,7 @@ pub const TESTNET_VALIDATOR_CLUSTER_SIZE: usize = 7;
 pub const TESTNET_FIRST_CLUSTER_SPLIT_THRESHOLD: usize = 6;
 pub const MISSED_VOTE_JAIL_THRESHOLD: u64 = 3;
 pub const MISSED_VOTE_SLASH_THRESHOLD: u64 = 6;
+pub const VALIDATOR_SHADOW_PHASE_BLOCKS: u64 = 1_000;
 const MISSED_VOTE_WINDOW_DECAY: u64 = 1;
 const MISSED_VOTE_UPTIME_PENALTY: f64 = 2.5;
 const MISSED_VOTE_ACCURACY_PENALTY: f64 = 2.0;
@@ -110,6 +111,12 @@ pub struct Validator {
     pub version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_tx_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow_started_at_height: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_recorded_height: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_effective_height: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +132,7 @@ pub enum ValidatorStatus {
     Jailed,
     Slashed,
     Pending,
+    Shadow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,6 +212,9 @@ impl Validator {
             status: ValidatorStatus::Pending,
             version: "1.0.0".to_string(),
             activation_tx_hash: None,
+            shadow_started_at_height: None,
+            activation_recorded_height: None,
+            activation_effective_height: None,
         }
     }
 
@@ -373,6 +384,68 @@ impl ValidatorRegistry {
         } else {
             Err("No pending registration found".to_string())
         }
+    }
+
+    pub fn start_shadow_activation(
+        &mut self,
+        address: &str,
+        activation_block_height: u64,
+    ) -> Result<(), String> {
+        if let Some(registration) = self.pending_registrations.remove(address) {
+            let activation_recorded_height =
+                activation_block_height.saturating_add(VALIDATOR_SHADOW_PHASE_BLOCKS);
+            let mut validator = Validator::new(
+                registration.address.clone(),
+                registration.public_key,
+                registration.name,
+                registration.stake_amount,
+            );
+
+            validator.status = ValidatorStatus::Shadow;
+            validator.stake_amount = registration.stake_amount;
+            validator.min_stake_required = registration.stake_amount;
+            validator.activation_tx_hash = Some(registration.registration_tx_hash);
+            validator.shadow_started_at_height = Some(activation_block_height);
+            validator.activation_recorded_height = Some(activation_recorded_height);
+            validator.activation_effective_height =
+                Some(activation_recorded_height.saturating_add(1));
+
+            self.validators.insert(address.to_string(), validator);
+            Ok(())
+        } else {
+            Err("No pending registration found".to_string())
+        }
+    }
+
+    pub fn apply_pending_shadow_activations(&mut self, finalized_height: u64) -> Vec<String> {
+        let mut activated = Vec::new();
+        for validator in self.validators.values_mut() {
+            if validator.status != ValidatorStatus::Shadow {
+                continue;
+            }
+            let effective_height = validator
+                .activation_effective_height
+                .or_else(|| {
+                    validator
+                        .activation_recorded_height
+                        .map(|height| height.saturating_add(1))
+                })
+                .unwrap_or(u64::MAX);
+            if finalized_height < effective_height {
+                continue;
+            };
+
+            validator.status = ValidatorStatus::Active;
+            validator.synergy_score = INITIAL_VALIDATOR_SYNERGY_SCORE;
+            validator.uptime_percentage = 100.0;
+            activated.push(validator.address.clone());
+        }
+
+        if !activated.is_empty() {
+            self.reorganize_clusters();
+        }
+
+        activated
     }
 
     pub fn update_validator_performance(
@@ -721,6 +794,26 @@ impl ValidatorManager {
         }
     }
 
+    pub fn start_shadow_activation(
+        &self,
+        address: &str,
+        activation_block_height: u64,
+    ) -> Result<(), String> {
+        if let Ok(mut registry) = self.registry.lock() {
+            registry.start_shadow_activation(address, activation_block_height)
+        } else {
+            Err("Failed to acquire registry lock".to_string())
+        }
+    }
+
+    pub fn apply_pending_shadow_activations(&self, finalized_height: u64) -> Vec<String> {
+        if let Ok(mut registry) = self.registry.lock() {
+            registry.apply_pending_shadow_activations(finalized_height)
+        } else {
+            Vec::new()
+        }
+    }
+
     pub fn update_performance(&self, update: ValidatorPerformanceUpdate) {
         if let Ok(mut registry) = self.registry.lock() {
             registry.update_validator_performance(&update.validator_address.clone(), update);
@@ -931,12 +1024,24 @@ fn configured_consensus_order(active_validators: &[Validator]) -> (Option<Vec<St
     }
 
     if let Ok(genesis) = canonical_genesis() {
+        let genesis_addresses = genesis
+            .validators()
+            .iter()
+            .map(|entry| entry.operator_address.clone())
+            .collect::<HashSet<_>>();
         let mut ordered = genesis
             .validators()
             .iter()
             .map(|entry| entry.operator_address.clone())
             .filter(|address| active_addresses.contains(address))
             .collect::<Vec<_>>();
+        let mut added_validators = active_validators
+            .iter()
+            .map(|validator| validator.address.clone())
+            .filter(|address| !genesis_addresses.contains(address))
+            .collect::<Vec<_>>();
+        added_validators.sort();
+        ordered.extend(added_validators);
         if !ordered.is_empty() {
             ordered.truncate(max_validators);
             return (Some(ordered), max_validators);
@@ -1001,6 +1106,7 @@ pub fn apply_validator_activation_transaction(
     tx: &Transaction,
     token_manager: &TokenManager,
     validator_manager: &Arc<ValidatorManager>,
+    block_height: u64,
 ) -> Result<String, String> {
     let (validator, public_key, name, _stake_amount) = parse_validator_activation(tx)?;
     let minimum_stake = validator_manager
@@ -1013,8 +1119,13 @@ pub fn apply_validator_activation_transaction(
         ));
     }
 
-    if validator_manager.get_validator(&validator).is_some() {
+    if let Some(existing) = validator_manager.get_validator(&validator) {
         validator_manager.update_validator_stake(&validator, bonded_stake);
+        if existing.status == ValidatorStatus::Shadow {
+            return Ok(format!(
+                "Validator {validator} already shadowing; stake refreshed."
+            ));
+        }
         return Ok(format!(
             "Validator {validator} already active; stake refreshed."
         ));
@@ -1034,16 +1145,16 @@ pub fn apply_validator_activation_transaction(
 
     match validator_manager.register_validator(registration) {
         Ok(_) => {
-            validator_manager.approve_validator(&validator)?;
+            validator_manager.start_shadow_activation(&validator, block_height)?;
             Ok(format!(
-                "Validator {validator} activated from chain transaction."
+                "Validator {validator} entered 1000-block shadow activation window."
             ))
         }
         Err(error) if error == "Registration already pending" => {
-            validator_manager.approve_validator(&validator)?;
+            validator_manager.start_shadow_activation(&validator, block_height)?;
             validator_manager.update_validator_stake(&validator, bonded_stake);
             Ok(format!(
-                "Validator {validator} pending activation approved."
+                "Validator {validator} pending activation entered shadow window."
             ))
         }
         Err(error) => Err(error),
@@ -1064,11 +1175,17 @@ pub fn replay_validator_activation_transactions(
                 continue;
             }
 
-            match apply_validator_activation_transaction(tx, token_manager, validator_manager) {
+            match apply_validator_activation_transaction(
+                tx,
+                token_manager,
+                validator_manager,
+                block.block_index,
+            ) {
                 Ok(_) => applied += 1,
                 Err(_) => failed += 1,
             }
         }
+        let _ = validator_manager.apply_pending_shadow_activations(block.block_index);
     }
 
     (applied, failed)
@@ -1154,6 +1271,39 @@ mod tests {
             .unwrap_or_else(|| "synu1nd0fvzfhhj4s0te3ks06csfsnpg2hed8vsmh".to_string())
     }
 
+    fn funded_activation_fixture(
+        public_key: &str,
+        tx_bytes: Vec<u8>,
+    ) -> (crate::token::TokenManager, String, Transaction) {
+        let validator_address = crate::address::generate_validator_address(public_key, 1);
+        let bonded_stake = TESTNET_MIN_VALIDATOR_STAKE_NWEI;
+        let funding_source = funded_test_address(bonded_stake);
+        let token_manager = crate::token::TokenManager::new();
+        token_manager
+            .transfer_tokens(&funding_source, &validator_address, "SNRG", bonded_stake, 0)
+            .expect("test stake balance should fund from genesis allocation");
+        token_manager
+            .stake_tokens(&validator_address, &validator_address, "SNRG", bonded_stake)
+            .expect("test validator should bond stake");
+
+        let tx = Transaction::new(
+            validator_address.clone(),
+            validator_address.clone(),
+            0,
+            0,
+            tx_bytes,
+            1,
+            21_000,
+            Some(format!(
+                "validator_activation:{{\"validator\":\"{}\",\"public_key\":\"{}\",\"name\":\"Outside Validator\",\"stake_amount_nwei\":{}}}",
+                validator_address, public_key, bonded_stake
+            )),
+            "fndsa".to_string(),
+        );
+
+        (token_manager, validator_address, tx)
+    }
+
     #[test]
     fn approved_validators_start_at_full_synergy_score() {
         let mut registry = ValidatorRegistry::new();
@@ -1201,7 +1351,10 @@ mod tests {
     }
 
     #[test]
-    fn activated_non_genesis_validator_does_not_expand_consensus_membership() {
+    fn activated_non_genesis_validator_expands_consensus_membership_when_allowlist_disabled() {
+        let previous_strict = std::env::var("SYNERGY_STRICT_VALIDATOR_ALLOWLIST").ok();
+        std::env::set_var("SYNERGY_STRICT_VALIDATOR_ALLOWLIST", "0");
+
         let genesis = crate::genesis::canonical_genesis().expect("canonical genesis should load");
         let mut active_validators = genesis
             .validators()
@@ -1234,8 +1387,16 @@ mod tests {
             .map(|validator| validator.address.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(membership.len(), genesis.validators().len());
-        assert!(!membership_addresses.contains(&"synv11wsfus6ghzgjvm4glpatuy8tnyacrwealyjv"));
+        match previous_strict {
+            Some(value) => std::env::set_var("SYNERGY_STRICT_VALIDATOR_ALLOWLIST", value),
+            None => std::env::remove_var("SYNERGY_STRICT_VALIDATOR_ALLOWLIST"),
+        }
+
+        assert_eq!(membership.len(), genesis.validators().len() + 1);
+        assert_eq!(
+            membership_addresses.last().copied(),
+            Some("synv11wsfus6ghzgjvm4glpatuy8tnyacrwealyjv")
+        );
     }
 
     #[test]
@@ -1297,18 +1458,46 @@ mod tests {
         );
 
         let tx_hash = tx.hash();
-        apply_validator_activation_transaction(&tx, &token_manager, &validator_manager)
+        apply_validator_activation_transaction(&tx, &token_manager, &validator_manager, 10)
             .expect("bonded validator activation should apply");
 
         let activated = validator_manager
             .get_validator(&validator_address)
-            .expect("validator should be active after activation transaction");
-        assert_eq!(activated.status, ValidatorStatus::Active);
+            .expect("validator should be registered after activation transaction");
+        assert_eq!(activated.status, ValidatorStatus::Shadow);
         assert_eq!(activated.stake_amount, bonded_stake);
         assert_eq!(
             activated.activation_tx_hash.as_deref(),
             Some(tx_hash.as_str())
         );
+        assert_eq!(activated.shadow_started_at_height, Some(10));
+        assert_eq!(
+            activated.activation_recorded_height,
+            Some(10 + VALIDATOR_SHADOW_PHASE_BLOCKS)
+        );
+        assert_eq!(
+            activated.activation_effective_height,
+            Some(10 + VALIDATOR_SHADOW_PHASE_BLOCKS + 1)
+        );
+
+        assert!(validator_manager
+            .apply_pending_shadow_activations(10 + VALIDATOR_SHADOW_PHASE_BLOCKS - 1)
+            .is_empty());
+        assert!(validator_manager
+            .apply_pending_shadow_activations(10 + VALIDATOR_SHADOW_PHASE_BLOCKS)
+            .is_empty());
+        let recorded = validator_manager
+            .get_validator(&validator_address)
+            .expect("validator should remain registered at activation record boundary");
+        assert_eq!(recorded.status, ValidatorStatus::Shadow);
+
+        let promoted = validator_manager
+            .apply_pending_shadow_activations(10 + VALIDATOR_SHADOW_PHASE_BLOCKS + 1);
+        assert_eq!(promoted, vec![validator_address.clone()]);
+        let active = validator_manager
+            .get_validator(&validator_address)
+            .expect("validator should be active after activation boundary");
+        assert_eq!(active.status, ValidatorStatus::Active);
     }
 
     #[test]
@@ -1349,6 +1538,22 @@ mod tests {
             0,
             1,
         ));
+        chain.add_block(Block::new_with_timestamp(
+            1 + VALIDATOR_SHADOW_PHASE_BLOCKS,
+            Vec::new(),
+            "activation-record-block".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            2,
+        ));
+        chain.add_block(Block::new_with_timestamp(
+            1 + VALIDATOR_SHADOW_PHASE_BLOCKS + 1,
+            Vec::new(),
+            "activation-effective-block".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            3,
+        ));
 
         let validator_manager = Arc::new(ValidatorManager::new());
         let (applied, failed) =
@@ -1365,6 +1570,267 @@ mod tests {
             activated.activation_tx_hash.as_deref(),
             Some(activation_hash.as_str())
         );
+        assert_eq!(activated.shadow_started_at_height, Some(1));
+    }
+
+    #[test]
+    fn replay_validator_activation_keeps_shadow_through_recorded_boundary() {
+        let public_key = "replay-shadow-public-key";
+        let validator_address = crate::address::generate_validator_address(public_key, 1);
+        let bonded_stake = TESTNET_MIN_VALIDATOR_STAKE_NWEI;
+        let funding_source = funded_test_address(bonded_stake);
+        let token_manager = crate::token::TokenManager::new();
+        token_manager
+            .transfer_tokens(&funding_source, &validator_address, "SNRG", bonded_stake, 0)
+            .expect("test stake balance should fund from genesis allocation");
+        token_manager
+            .stake_tokens(&validator_address, &validator_address, "SNRG", bonded_stake)
+            .expect("test validator should bond stake");
+
+        let activation_tx = Transaction::new(
+            validator_address.clone(),
+            validator_address.clone(),
+            0,
+            0,
+            vec![7, 8, 9],
+            1,
+            21_000,
+            Some(format!(
+                "validator_activation:{{\"validator\":\"{}\",\"public_key\":\"{}\",\"name\":\"Recorded Boundary Validator\",\"stake_amount_nwei\":{}}}",
+                validator_address, public_key, bonded_stake
+            )),
+            "fndsa".to_string(),
+        );
+        let mut chain = BlockChain::new();
+        chain.add_block(Block::new_with_timestamp(
+            1,
+            vec![activation_tx],
+            "genesis".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            1,
+        ));
+        chain.add_block(Block::new_with_timestamp(
+            1 + VALIDATOR_SHADOW_PHASE_BLOCKS,
+            Vec::new(),
+            "activation-record-block".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            2,
+        ));
+
+        let validator_manager = Arc::new(ValidatorManager::new());
+        let (applied, failed) =
+            replay_validator_activation_transactions(&chain, &token_manager, &validator_manager);
+
+        assert_eq!(applied, 1);
+        assert_eq!(failed, 0);
+        let shadow = validator_manager
+            .get_validator(&validator_address)
+            .expect("validator should be restored from replayed activation");
+        assert_eq!(shadow.status, ValidatorStatus::Shadow);
+        assert_eq!(
+            shadow.activation_recorded_height,
+            Some(1 + VALIDATOR_SHADOW_PHASE_BLOCKS)
+        );
+        assert_eq!(
+            shadow.activation_effective_height,
+            Some(1 + VALIDATOR_SHADOW_PHASE_BLOCKS + 1)
+        );
+    }
+
+    #[test]
+    fn repeated_activation_application_is_idempotent_and_restart_safe() {
+        let (token_manager, validator_address, activation_tx) =
+            funded_activation_fixture("idempotent-activation-public-key", vec![10, 11, 12]);
+        let activation_hash = activation_tx.hash();
+        let activation_height = 25;
+        let recorded_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS;
+        let effective_height = recorded_height + 1;
+        let validator_manager = Arc::new(ValidatorManager::new());
+
+        apply_validator_activation_transaction(
+            &activation_tx,
+            &token_manager,
+            &validator_manager,
+            activation_height,
+        )
+        .expect("first activation should enter shadow");
+        apply_validator_activation_transaction(
+            &activation_tx,
+            &token_manager,
+            &validator_manager,
+            activation_height,
+        )
+        .expect("duplicate activation should be idempotent while shadowing");
+
+        let shadow = validator_manager
+            .get_validator(&validator_address)
+            .expect("validator should remain registered after duplicate activation");
+        assert_eq!(shadow.status, ValidatorStatus::Shadow);
+        assert_eq!(
+            shadow.activation_tx_hash.as_deref(),
+            Some(activation_hash.as_str())
+        );
+        assert_eq!(shadow.shadow_started_at_height, Some(activation_height));
+        assert_eq!(shadow.activation_recorded_height, Some(recorded_height));
+        assert_eq!(shadow.activation_effective_height, Some(effective_height));
+
+        assert!(validator_manager
+            .apply_pending_shadow_activations(recorded_height)
+            .is_empty());
+        assert_eq!(
+            validator_manager.apply_pending_shadow_activations(effective_height),
+            vec![validator_address.clone()]
+        );
+        assert!(
+            validator_manager
+                .apply_pending_shadow_activations(effective_height)
+                .is_empty(),
+            "activation promotion must be idempotent across repeated boundary processing"
+        );
+
+        let mut replay_chain = BlockChain::new();
+        replay_chain.add_block(Block::new_with_timestamp(
+            activation_height,
+            vec![activation_tx],
+            "genesis".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            1,
+        ));
+        replay_chain.add_block(Block::new_with_timestamp(
+            recorded_height,
+            Vec::new(),
+            "activation-record-block".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            2,
+        ));
+        replay_chain.add_block(Block::new_with_timestamp(
+            effective_height,
+            Vec::new(),
+            "activation-effective-block".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            3,
+        ));
+
+        let restarted_manager = Arc::new(ValidatorManager::new());
+        let (applied, failed) = replay_validator_activation_transactions(
+            &replay_chain,
+            &token_manager,
+            &restarted_manager,
+        );
+        assert_eq!((applied, failed), (1, 0));
+        let restarted = restarted_manager
+            .get_validator(&validator_address)
+            .expect("restart replay should restore activated validator");
+        assert_eq!(restarted.status, ValidatorStatus::Active);
+        assert_eq!(
+            restarted.activation_tx_hash.as_deref(),
+            Some(activation_hash.as_str())
+        );
+
+        let (applied_again, failed_again) = replay_validator_activation_transactions(
+            &replay_chain,
+            &token_manager,
+            &restarted_manager,
+        );
+        assert_eq!(failed_again, 0);
+        assert_eq!(applied_again, 1);
+        assert_eq!(
+            restarted_manager.get_active_validators().len(),
+            1,
+            "replaying the same activation chain must not duplicate validators"
+        );
+    }
+
+    #[test]
+    fn multi_validator_shadow_membership_changes_only_at_effective_boundaries() {
+        let mut registry = active_registry(5);
+        let first = pending_registration(100);
+        let first_address = first.address.clone();
+        let second = pending_registration(101);
+        let second_address = second.address.clone();
+        registry
+            .register_validator(first)
+            .expect("first pending registration should be accepted");
+        registry
+            .register_validator(second)
+            .expect("second pending registration should be accepted");
+
+        registry
+            .start_shadow_activation(&first_address, 40)
+            .expect("first validator should enter shadow");
+        registry
+            .start_shadow_activation(&second_address, 41)
+            .expect("second validator should enter shadow");
+
+        registry.reorganize_clusters_for_epoch(1);
+        let active_before = registry
+            .get_active_validators()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(active_before.len(), 5);
+        assert!(
+            consensus_membership_validators(active_before)
+                .iter()
+                .all(|validator| validator.address != first_address
+                    && validator.address != second_address),
+            "shadow validators must not count toward epoch consensus membership"
+        );
+
+        let first_recorded = 40 + VALIDATOR_SHADOW_PHASE_BLOCKS;
+        let first_effective = first_recorded + 1;
+        let second_recorded = 41 + VALIDATOR_SHADOW_PHASE_BLOCKS;
+        let second_effective = second_recorded + 1;
+
+        assert!(registry
+            .apply_pending_shadow_activations(first_recorded)
+            .is_empty());
+        assert_eq!(
+            registry
+                .get_validator_by_address(&first_address)
+                .expect("first shadow validator should still exist")
+                .status,
+            ValidatorStatus::Shadow
+        );
+
+        assert_eq!(
+            registry.apply_pending_shadow_activations(first_effective),
+            vec![first_address.clone()]
+        );
+        let active_after_first = registry.get_active_validators();
+        assert_eq!(active_after_first.len(), 6);
+        assert_eq!(
+            registry
+                .get_validator_by_address(&second_address)
+                .expect("second shadow validator should still exist")
+                .status,
+            ValidatorStatus::Shadow
+        );
+
+        assert!(registry
+            .apply_pending_shadow_activations(second_recorded)
+            .is_empty());
+        assert_eq!(
+            registry.apply_pending_shadow_activations(second_effective),
+            vec![second_address.clone()]
+        );
+        registry.reorganize_clusters_for_epoch(2);
+        let active_after_second = registry
+            .get_active_validators()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let membership_addresses = consensus_membership_validators(active_after_second)
+            .into_iter()
+            .map(|validator| validator.address)
+            .collect::<HashSet<_>>();
+        assert!(membership_addresses.contains(&first_address));
+        assert!(membership_addresses.contains(&second_address));
     }
 
     #[test]

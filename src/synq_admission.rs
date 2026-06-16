@@ -4,6 +4,10 @@ use std::fmt;
 use crate::synergy_types::{
     Transaction, SYNERGY_TESTNET_V2_CHAIN_ID, SYNERGY_TESTNET_V2_NETWORK_ID,
 };
+use pqsynq::{
+    AegisSynQVerifier, AlgorithmId, ChainId, ContractCallEnvelope, ContractDeployEnvelope,
+    DomainTag, NetworkId, SynQSecurityPolicy, VerificationContext,
+};
 
 pub const SYNQ_ADMISSION_CARRIER_PREFIX: &[u8] = b"synq-admission-v1:";
 pub const SYNQ_ADMISSION_VERSION: u16 = 1;
@@ -35,6 +39,12 @@ pub struct SynQAdmissionEnvelope {
     pub manifest_hash: Option<[u8; 32]>,
     pub abi_hash: Option<[u8; 32]>,
     pub encoded_pqsynq_envelope: Vec<u8>,
+    #[serde(default)]
+    pub bytecode: Option<Vec<u8>>,
+    #[serde(default)]
+    pub abi_json: Option<String>,
+    #[serde(default)]
+    pub manifest_json: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +196,136 @@ pub fn is_synq_admission_carrier(payload: &[u8]) -> bool {
     payload.starts_with(SYNQ_ADMISSION_CARRIER_PREFIX)
 }
 
+pub fn build_deploy_admission_envelope_from_pqsynq_bytes(
+    chain_id: u64,
+    network_id: &str,
+    encoded_pqsynq_envelope: &[u8],
+    now_unix: u64,
+) -> Result<SynQAdmissionEnvelope, SynQAdmissionError> {
+    let deploy: ContractDeployEnvelope =
+        decode_pqsynq_envelope(encoded_pqsynq_envelope, "decode SynQ deploy envelope")?;
+    let envelope = SynQAdmissionEnvelope {
+        version: SYNQ_ADMISSION_VERSION,
+        kind: SynQAdmissionKind::Deploy,
+        chain_id,
+        network_id: network_id.to_string(),
+        signer: deploy
+            .signing_payload
+            .signer_address
+            .to_testnet_debug_string(),
+        payload_hash: deploy.signing_payload.payload_hash,
+        bytecode_hash: Some(deploy.bytecode_hash),
+        manifest_hash: Some(deploy.manifest_hash),
+        abi_hash: Some(deploy.abi_hash),
+        encoded_pqsynq_envelope: encoded_pqsynq_envelope.to_vec(),
+        bytecode: None,
+        abi_json: None,
+        manifest_json: None,
+    };
+    verify_synq_deploy_for_chain_admission(&envelope, now_unix)?;
+    Ok(envelope)
+}
+
+pub fn build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts(
+    chain_id: u64,
+    network_id: &str,
+    encoded_pqsynq_envelope: &[u8],
+    bytecode: Vec<u8>,
+    abi_json: String,
+    manifest_json: String,
+    now_unix: u64,
+) -> Result<SynQAdmissionEnvelope, SynQAdmissionError> {
+    let mut envelope = build_deploy_admission_envelope_from_pqsynq_bytes(
+        chain_id,
+        network_id,
+        encoded_pqsynq_envelope,
+        now_unix,
+    )?;
+    attach_deploy_artifacts(&mut envelope, bytecode, abi_json, manifest_json)?;
+    Ok(envelope)
+}
+
+pub fn build_call_admission_envelope_from_pqsynq_bytes(
+    chain_id: u64,
+    network_id: &str,
+    encoded_pqsynq_envelope: &[u8],
+    now_unix: u64,
+) -> Result<SynQAdmissionEnvelope, SynQAdmissionError> {
+    let call: ContractCallEnvelope =
+        decode_pqsynq_envelope(encoded_pqsynq_envelope, "decode SynQ call envelope")?;
+    let envelope = SynQAdmissionEnvelope {
+        version: SYNQ_ADMISSION_VERSION,
+        kind: SynQAdmissionKind::Call,
+        chain_id,
+        network_id: network_id.to_string(),
+        signer: call
+            .signing_payload
+            .signer_address
+            .to_testnet_debug_string(),
+        payload_hash: call.signing_payload.payload_hash,
+        bytecode_hash: None,
+        manifest_hash: None,
+        abi_hash: None,
+        encoded_pqsynq_envelope: encoded_pqsynq_envelope.to_vec(),
+        bytecode: None,
+        abi_json: None,
+        manifest_json: None,
+    };
+    verify_synq_call_for_chain_admission(&envelope, now_unix)?;
+    Ok(envelope)
+}
+
+pub fn build_deploy_admission_carrier_from_pqsynq_bytes(
+    chain_id: u64,
+    network_id: &str,
+    encoded_pqsynq_envelope: &[u8],
+    now_unix: u64,
+) -> Result<Vec<u8>, SynQAdmissionError> {
+    let envelope = build_deploy_admission_envelope_from_pqsynq_bytes(
+        chain_id,
+        network_id,
+        encoded_pqsynq_envelope,
+        now_unix,
+    )?;
+    encode_synq_admission_carrier(&envelope)
+}
+
+pub fn build_deploy_admission_carrier_from_pqsynq_bytes_with_artifacts(
+    chain_id: u64,
+    network_id: &str,
+    encoded_pqsynq_envelope: &[u8],
+    bytecode: Vec<u8>,
+    abi_json: String,
+    manifest_json: String,
+    now_unix: u64,
+) -> Result<Vec<u8>, SynQAdmissionError> {
+    let envelope = build_deploy_admission_envelope_from_pqsynq_bytes_with_artifacts(
+        chain_id,
+        network_id,
+        encoded_pqsynq_envelope,
+        bytecode,
+        abi_json,
+        manifest_json,
+        now_unix,
+    )?;
+    encode_synq_admission_carrier(&envelope)
+}
+
+pub fn build_call_admission_carrier_from_pqsynq_bytes(
+    chain_id: u64,
+    network_id: &str,
+    encoded_pqsynq_envelope: &[u8],
+    now_unix: u64,
+) -> Result<Vec<u8>, SynQAdmissionError> {
+    let envelope = build_call_admission_envelope_from_pqsynq_bytes(
+        chain_id,
+        network_id,
+        encoded_pqsynq_envelope,
+        now_unix,
+    )?;
+    encode_synq_admission_carrier(&envelope)
+}
+
 pub fn verify_transaction_payload_for_chain_admission(
     tx: &Transaction,
     now_unix: u64,
@@ -223,31 +363,182 @@ pub fn verify_synq_carrier_for_chain_admission(
 
 pub fn verify_synq_deploy_for_chain_admission(
     envelope: &SynQAdmissionEnvelope,
-    _now_unix: u64,
+    now_unix: u64,
 ) -> Result<SynQVerificationSummary, SynQAdmissionError> {
     ensure_version(envelope)?;
     ensure_kind(envelope, SynQAdmissionKind::Deploy)?;
     ensure_required_hash(envelope.bytecode_hash, "bytecode_hash")?;
     ensure_required_hash(envelope.manifest_hash, "manifest_hash")?;
     ensure_required_hash(envelope.abi_hash, "abi_hash")?;
-    normalize_synq_network(envelope.chain_id, &envelope.network_id)?;
-    Err(SynQAdmissionError::PqSynQ {
-        code: "SYNQ-DISABLED",
-        message: "SynQ admission requires a release-safe aegis-pqsynq verifier; default launch runtime rejects SynQ carriers fail-closed".to_string(),
-    })
+    let normalized = normalize_synq_network(envelope.chain_id, &envelope.network_id)?;
+    let deploy: ContractDeployEnvelope = decode_pqsynq_envelope(
+        &envelope.encoded_pqsynq_envelope,
+        "decode SynQ deploy envelope",
+    )?;
+    let context = pqsynq_context(envelope.chain_id, &normalized.pqsynq_network_id, now_unix);
+    let verified = AegisSynQVerifier::testnet_1264()
+        .verify_contract_deploy(&deploy, &context)
+        .map_err(pqsynq_error)?;
+
+    let bytecode_hash = envelope
+        .bytecode_hash
+        .expect("checked required bytecode_hash");
+    let manifest_hash = envelope
+        .manifest_hash
+        .expect("checked required manifest_hash");
+    let abi_hash = envelope.abi_hash.expect("checked required abi_hash");
+    if deploy.signing_payload.payload_hash != envelope.payload_hash
+        || verified.bytecode_hash != bytecode_hash
+        || verified.manifest_hash != manifest_hash
+        || verified.abi_hash != abi_hash
+        || verified.deployer.to_testnet_debug_string() != envelope.signer
+    {
+        return Err(SynQAdmissionError::InvalidCarrier {
+            code: "AEGIS-CANON",
+            message: "SynQ deploy carrier fields do not match verified aegis-pqsynq envelope"
+                .to_string(),
+        });
+    }
+
+    Ok(summary_from_payload(
+        envelope,
+        &normalized,
+        deploy.signing_payload.domain_tag,
+        deploy.signing_payload.algorithm_id,
+    ))
 }
 
 pub fn verify_synq_call_for_chain_admission(
     envelope: &SynQAdmissionEnvelope,
-    _now_unix: u64,
+    now_unix: u64,
 ) -> Result<SynQVerificationSummary, SynQAdmissionError> {
     ensure_version(envelope)?;
     ensure_kind(envelope, SynQAdmissionKind::Call)?;
-    normalize_synq_network(envelope.chain_id, &envelope.network_id)?;
-    Err(SynQAdmissionError::PqSynQ {
-        code: "SYNQ-DISABLED",
-        message: "SynQ admission requires a release-safe aegis-pqsynq verifier; default launch runtime rejects SynQ carriers fail-closed".to_string(),
+    let normalized = normalize_synq_network(envelope.chain_id, &envelope.network_id)?;
+    let call: ContractCallEnvelope = decode_pqsynq_envelope(
+        &envelope.encoded_pqsynq_envelope,
+        "decode SynQ call envelope",
+    )?;
+    let context = pqsynq_context(envelope.chain_id, &normalized.pqsynq_network_id, now_unix);
+    let verified = AegisSynQVerifier::testnet_1264()
+        .verify_contract_call(&call, &context)
+        .map_err(pqsynq_error)?;
+
+    if call.signing_payload.payload_hash != envelope.payload_hash
+        || verified.caller.to_testnet_debug_string() != envelope.signer
+    {
+        return Err(SynQAdmissionError::InvalidCarrier {
+            code: "AEGIS-CANON",
+            message: "SynQ call carrier fields do not match verified aegis-pqsynq envelope"
+                .to_string(),
+        });
+    }
+
+    Ok(summary_from_payload(
+        envelope,
+        &normalized,
+        call.signing_payload.domain_tag,
+        call.signing_payload.algorithm_id,
+    ))
+}
+
+fn decode_pqsynq_envelope<T: for<'de> Deserialize<'de>>(
+    bytes: &[u8],
+    context: &'static str,
+) -> Result<T, SynQAdmissionError> {
+    serde_json::from_slice(bytes).map_err(|error| SynQAdmissionError::Decode {
+        code: "AEGIS-CANON",
+        message: format!("{context}: {error}"),
     })
+}
+
+fn attach_deploy_artifacts(
+    envelope: &mut SynQAdmissionEnvelope,
+    bytecode: Vec<u8>,
+    abi_json: String,
+    manifest_json: String,
+) -> Result<(), SynQAdmissionError> {
+    ensure_kind(envelope, SynQAdmissionKind::Deploy)?;
+    let bytecode_hash = sha256_array(&bytecode);
+    let abi_hash = sha256_array(abi_json.as_bytes());
+    let manifest_hash = sha256_array(manifest_json.as_bytes());
+    if envelope.bytecode_hash != Some(bytecode_hash)
+        || envelope.abi_hash != Some(abi_hash)
+        || envelope.manifest_hash != Some(manifest_hash)
+    {
+        return Err(SynQAdmissionError::InvalidCarrier {
+            code: "AEGIS-CANON",
+            message:
+                "SynQ deploy artifact bytes do not match the verified aegis-pqsynq hash envelope"
+                    .to_string(),
+        });
+    }
+    envelope.bytecode = Some(bytecode);
+    envelope.abi_json = Some(abi_json);
+    envelope.manifest_json = Some(manifest_json);
+    Ok(())
+}
+
+fn sha256_array(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(bytes);
+    let mut out = [0_u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+fn pqsynq_context(chain_id: u64, network_id: &str, now_unix: u64) -> VerificationContext {
+    VerificationContext {
+        chain_id: ChainId(chain_id),
+        network_id: NetworkId(network_id.to_string()),
+        now_unix,
+        policy: SynQSecurityPolicy::testnet_1264_policy(),
+    }
+}
+
+fn pqsynq_error(error: pqsynq::AegisSynQError) -> SynQAdmissionError {
+    SynQAdmissionError::PqSynQ {
+        code: error.code(),
+        message: error.to_string(),
+    }
+}
+
+fn summary_from_payload(
+    envelope: &SynQAdmissionEnvelope,
+    normalized: &NormalizedSynQNetwork,
+    domain: DomainTag,
+    algorithm: AlgorithmId,
+) -> SynQVerificationSummary {
+    SynQVerificationSummary {
+        chain_id: envelope.chain_id,
+        normalized_network_id: normalized.pqsynq_network_id.clone(),
+        node_network_id: normalized.node_network_id.clone(),
+        domain: domain.as_str().to_string(),
+        algorithm: algorithm_name(algorithm).to_string(),
+        signer: envelope.signer.clone(),
+        payload_hash: envelope.payload_hash,
+        bytecode_hash: envelope.bytecode_hash,
+        manifest_hash: envelope.manifest_hash,
+        abi_hash: envelope.abi_hash,
+        verified_at_admission: true,
+    }
+}
+
+fn algorithm_name(algorithm: AlgorithmId) -> &'static str {
+    match algorithm {
+        AlgorithmId::MlDsa44 => "ML-DSA-44",
+        AlgorithmId::MlDsa65 => "ML-DSA-65",
+        AlgorithmId::MlDsa87 => "ML-DSA-87",
+        AlgorithmId::SlhDsaSha2_128s => "SLH-DSA-SHA2-128s",
+        AlgorithmId::SlhDsaSha2_192s => "SLH-DSA-SHA2-192s",
+        AlgorithmId::SlhDsaSha2_256s => "SLH-DSA-SHA2-256s",
+        AlgorithmId::FnDsa => "FN-DSA",
+        AlgorithmId::Hqc128 => "HQC-128",
+        AlgorithmId::Hqc192 => "HQC-192",
+        AlgorithmId::Hqc256 => "HQC-256",
+        AlgorithmId::ClassicMcEliece348864 => "Classic-McEliece-348864",
+    }
 }
 
 fn ensure_version(envelope: &SynQAdmissionEnvelope) -> Result<(), SynQAdmissionError> {
@@ -286,44 +577,166 @@ fn ensure_required_hash(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
     use super::*;
+    use pqsynq::{
+        canonicalize_signing_payload, derive_synq_address, hash_contract_call_body,
+        hash_contract_deploy_body, DigitalSignature, Sign, SignaturePurpose, SynQAddress,
+        SynQPublicKey, SynQSignature, SynQSigningPayload,
+    };
 
-    const TEST_NOW: u64 = 1_800_000_000;
+    pub(crate) const TEST_NOW: u64 = 1_800_000_000;
 
-    fn hash(byte: u8) -> [u8; 32] {
+    pub(crate) fn hash(byte: u8) -> [u8; 32] {
         [byte; 32]
     }
 
-    fn deploy_carrier(network_id: &str) -> SynQAdmissionEnvelope {
+    pub(crate) fn deploy_carrier(network_id: &str) -> SynQAdmissionEnvelope {
+        let (public_key, private_key, signer) = test_identity();
+        let bytecode_hash = hash(1);
+        let manifest_hash = hash(2);
+        let abi_hash = hash(3);
+        let constructor_args_hash = hash(4);
+        let payload_hash = hash_contract_deploy_body(
+            &bytecode_hash,
+            &manifest_hash,
+            &abi_hash,
+            signer.as_bytes(),
+            &constructor_args_hash,
+        );
+        let signing_payload = signing_payload(
+            DomainTag::SynqContractDeployV1,
+            SignaturePurpose::ContractDeploy,
+            signer,
+            payload_hash,
+            41,
+        );
+        let signature = sign_payload(&signing_payload, &private_key);
+        let deploy = ContractDeployEnvelope {
+            signing_payload,
+            public_key,
+            signature: SynQSignature::new(signature),
+            bytecode_hash,
+            manifest_hash,
+            abi_hash,
+            constructor_args_hash,
+        };
+
         SynQAdmissionEnvelope {
             version: SYNQ_ADMISSION_VERSION,
             kind: SynQAdmissionKind::Deploy,
             chain_id: SYNERGY_TESTNET_V2_CHAIN_ID,
             network_id: network_id.to_string(),
-            signer: "synq-test-signer".to_string(),
-            payload_hash: hash(9),
-            bytecode_hash: Some(hash(1)),
-            manifest_hash: Some(hash(2)),
-            abi_hash: Some(hash(3)),
-            encoded_pqsynq_envelope: b"{}".to_vec(),
+            signer: deploy
+                .signing_payload
+                .signer_address
+                .to_testnet_debug_string(),
+            payload_hash,
+            bytecode_hash: Some(bytecode_hash),
+            manifest_hash: Some(manifest_hash),
+            abi_hash: Some(abi_hash),
+            encoded_pqsynq_envelope: serde_json::to_vec(&deploy).unwrap(),
+            bytecode: None,
+            abi_json: None,
+            manifest_json: None,
         }
     }
 
-    fn call_carrier(network_id: &str) -> SynQAdmissionEnvelope {
+    pub(crate) fn call_carrier(network_id: &str) -> SynQAdmissionEnvelope {
+        let (public_key, private_key, signer) = test_identity();
+        let contract_address = signer;
+        let method_selector = [0x58, 0x42, 0xf1, 0xbe];
+        let encoded_args_hash = hash(5);
+        let payload_hash = hash_contract_call_body(
+            contract_address.as_bytes(),
+            &method_selector,
+            &encoded_args_hash,
+            signer.as_bytes(),
+        );
+        let signing_payload = signing_payload(
+            DomainTag::SynqContractCallV1,
+            SignaturePurpose::ContractCall,
+            signer,
+            payload_hash,
+            42,
+        );
+        let signature = sign_payload(&signing_payload, &private_key);
+        let call = ContractCallEnvelope {
+            signing_payload,
+            public_key,
+            signature: SynQSignature::new(signature),
+            contract_address,
+            method_selector,
+            encoded_args_hash,
+        };
+
         SynQAdmissionEnvelope {
             version: SYNQ_ADMISSION_VERSION,
             kind: SynQAdmissionKind::Call,
             chain_id: SYNERGY_TESTNET_V2_CHAIN_ID,
             network_id: network_id.to_string(),
-            signer: "synq-test-signer".to_string(),
-            payload_hash: hash(9),
+            signer: call
+                .signing_payload
+                .signer_address
+                .to_testnet_debug_string(),
+            payload_hash,
             bytecode_hash: None,
             manifest_hash: None,
             abi_hash: None,
-            encoded_pqsynq_envelope: b"{}".to_vec(),
+            encoded_pqsynq_envelope: serde_json::to_vec(&call).unwrap(),
+            bytecode: None,
+            abi_json: None,
+            manifest_json: None,
         }
     }
+
+    fn test_identity() -> (SynQPublicKey, Vec<u8>, SynQAddress) {
+        let signer = Sign::mldsa65();
+        let (public_key, private_key) = signer.keygen().expect("ML-DSA-65 keygen");
+        let public_key = SynQPublicKey::new(public_key);
+        let address = derive_synq_address(
+            &public_key,
+            AlgorithmId::MlDsa65,
+            &NetworkId(SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string()),
+        )
+        .expect("derive SynQ address");
+        (public_key, private_key, address)
+    }
+
+    fn signing_payload(
+        domain_tag: DomainTag,
+        signature_purpose: SignaturePurpose,
+        signer_address: SynQAddress,
+        payload_hash: [u8; 32],
+        nonce: u64,
+    ) -> SynQSigningPayload {
+        SynQSigningPayload {
+            domain_tag,
+            chain_id: ChainId(SYNERGY_TESTNET_V2_CHAIN_ID),
+            network_id: NetworkId(SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string()),
+            protocol_version: 1,
+            algorithm_id: AlgorithmId::MlDsa65,
+            signature_purpose,
+            nonce,
+            not_before_unix: 0,
+            expiration_unix: 4_102_444_800,
+            signer_address,
+            payload_hash,
+        }
+    }
+
+    fn sign_payload(payload: &SynQSigningPayload, private_key: &[u8]) -> Vec<u8> {
+        let canonical = canonicalize_signing_payload(payload).expect("canonical payload");
+        Sign::mldsa65()
+            .detached_sign(&canonical, private_key)
+            .expect("ML-DSA-65 sign")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
 
     #[test]
     fn network_alias_normalization_accepts_testnet_names_for_chain_1264() {
@@ -358,23 +771,28 @@ mod tests {
     }
 
     #[test]
-    fn synq_deploy_carrier_fails_closed_without_release_safe_verifier() {
-        let error = verify_synq_deploy_for_chain_admission(
+    fn synq_deploy_carrier_verifies_through_pqsynq() {
+        let summary = verify_synq_deploy_for_chain_admission(
             &deploy_carrier(SYNERGY_TESTNET_V2_NETWORK_ID),
             TEST_NOW,
         )
-        .expect_err("SynQ deploy carrier rejected without linked verifier");
-        assert_eq!(error.code(), "SYNQ-DISABLED");
+        .expect("SynQ deploy carrier verified");
+        assert_eq!(summary.domain, "SYNQ_CONTRACT_DEPLOY_V1");
+        assert_eq!(summary.algorithm, "ML-DSA-65");
+        assert!(summary.verified_at_admission);
+        assert_eq!(summary.bytecode_hash, Some(hash(1)));
     }
 
     #[test]
-    fn synq_call_carrier_fails_closed_without_release_safe_verifier() {
-        let error = verify_synq_call_for_chain_admission(
+    fn synq_call_carrier_verifies_through_pqsynq() {
+        let summary = verify_synq_call_for_chain_admission(
             &call_carrier(SYNERGY_TESTNET_V2_NETWORK_ID),
             TEST_NOW,
         )
-        .expect_err("SynQ call carrier rejected without linked verifier");
-        assert_eq!(error.code(), "SYNQ-DISABLED");
+        .expect("SynQ call carrier verified");
+        assert_eq!(summary.domain, "SYNQ_CONTRACT_CALL_V1");
+        assert_eq!(summary.algorithm, "ML-DSA-65");
+        assert!(summary.verified_at_admission);
     }
 
     #[test]
@@ -391,5 +809,55 @@ mod tests {
         let error = decode_synq_admission_carrier(b"synq-admission-v1:{not-json")
             .expect_err("malformed carrier rejected");
         assert_eq!(error.code(), "AEGIS-CANON");
+    }
+
+    #[test]
+    fn invalid_inner_signature_preserves_pqsynq_error_code() {
+        let mut carrier = deploy_carrier(SYNERGY_TESTNET_V2_NETWORK_ID);
+        let mut deploy: ContractDeployEnvelope =
+            serde_json::from_slice(&carrier.encoded_pqsynq_envelope).unwrap();
+        deploy.signature.bytes[0] ^= 0x01;
+        carrier.encoded_pqsynq_envelope = serde_json::to_vec(&deploy).unwrap();
+
+        let error = verify_synq_deploy_for_chain_admission(&carrier, TEST_NOW)
+            .expect_err("invalid signature rejected");
+        assert_eq!(error.code(), "AEGIS-SIG");
+    }
+
+    #[test]
+    fn pqsynq_deploy_bytes_wrap_into_versioned_admission_carrier() {
+        let source = deploy_carrier(SYNERGY_TESTNET_V2_NETWORK_ID);
+        let bytes = build_deploy_admission_carrier_from_pqsynq_bytes(
+            SYNERGY_TESTNET_V2_CHAIN_ID,
+            SYNERGY_TESTNET_V2_NETWORK_ID,
+            &source.encoded_pqsynq_envelope,
+            TEST_NOW,
+        )
+        .expect("wrap deploy envelope");
+        let decoded = decode_synq_admission_carrier(&bytes)
+            .expect("decode carrier")
+            .expect("carrier present");
+        assert_eq!(decoded.kind, SynQAdmissionKind::Deploy);
+        assert_eq!(decoded.payload_hash, source.payload_hash);
+        assert_eq!(decoded.bytecode_hash, source.bytecode_hash);
+        assert_eq!(decoded.signer, source.signer);
+    }
+
+    #[test]
+    fn pqsynq_call_bytes_wrap_into_versioned_admission_carrier() {
+        let source = call_carrier(SYNERGY_TESTNET_V2_NETWORK_ID);
+        let bytes = build_call_admission_carrier_from_pqsynq_bytes(
+            SYNERGY_TESTNET_V2_CHAIN_ID,
+            SYNERGY_TESTNET_V2_NETWORK_ID,
+            &source.encoded_pqsynq_envelope,
+            TEST_NOW,
+        )
+        .expect("wrap call envelope");
+        let decoded = decode_synq_admission_carrier(&bytes)
+            .expect("decode carrier")
+            .expect("carrier present");
+        assert_eq!(decoded.kind, SynQAdmissionKind::Call);
+        assert_eq!(decoded.payload_hash, source.payload_hash);
+        assert_eq!(decoded.signer, source.signer);
     }
 }

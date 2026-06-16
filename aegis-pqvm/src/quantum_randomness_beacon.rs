@@ -15,12 +15,12 @@ use crate::pqc::kem::mlkem::mlkem768::{
     encapsulate as mlkem768_encapsulate, PublicKey as MLKEM768PublicKey,
 };
 
-#[cfg(feature = "mldsa")]
-use crate::pqc::signatures::mldsa::mldsa87::{
-    detached_sign as mldsa87_detached_sign, keypair as mldsa87_keypair,
-    verify_detached_signature as mldsa87_verify_detached_signature,
-    DetachedSignature as MLDSA87DetachedSignature, PublicKey as MLDSA87PublicKey,
-    SecretKey as MLDSA87SecretKey,
+#[cfg(feature = "fndsa")]
+use crate::pqc::signatures::fndsa::fndsa1024::{
+    detached_sign as fndsa1024_detached_sign, keypair as fndsa1024_keypair,
+    verify_detached_signature as fndsa1024_verify_detached_signature,
+    DetachedSignature as FNDSA1024DetachedSignature, PublicKey as FNDSA1024PublicKey,
+    SecretKey as FNDSA1024SecretKey,
 };
 
 /// Beacon output with cryptographic proof
@@ -42,7 +42,7 @@ pub struct BeaconProof {
     pub entropy_sources_used: Vec<String>,
     pub hardware_entropy_sources_used: Vec<String>,
     pub mlkem_ciphertext: Vec<u8>,
-    pub signature: Vec<u8>,   // ML-DSA signature
+    pub signature: Vec<u8>,   // FN-DSA signature
     pub commitment: [u8; 32], // Commitment to inputs
 }
 
@@ -172,7 +172,7 @@ pub struct QuantumBeacon {
     previous_output: [u8; 32],
     beacon_chain: Vec<BeaconOutput>,
     entropy_sources: Vec<RegisteredEntropySource>,
-    signing_keypair: Option<(Vec<u8>, Vec<u8>)>, // (pk, sk) for ML-DSA signing
+    signing_keypair: Option<(Vec<u8>, Vec<u8>)>, // (pk, sk) for FN-DSA signing
     policy_map: HashMap<String, BeaconPolicy>,
     last_beacon_timestamp: Option<u64>,
 }
@@ -212,11 +212,11 @@ impl QuantumBeacon {
             last_beacon_timestamp: None,
         };
 
-        // Generate signing keypair for ML-DSA
-        #[cfg(feature = "mldsa")]
+        // Generate signing keypair for FN-DSA
+        #[cfg(feature = "fndsa")]
         {
             use pqrust_traits::sign::{PublicKey as _, SecretKey as _};
-            let (pk, sk) = mldsa87_keypair();
+            let (pk, sk) = fndsa1024_keypair();
             beacon.signing_keypair = Some((pk.as_bytes().to_vec(), sk.as_bytes().to_vec()));
         }
 
@@ -339,7 +339,7 @@ impl QuantumBeacon {
             mlkem_ciphertext: &mlkem_ciphertext,
         });
 
-        // Step 7: Create ML-DSA signature for proof
+        // Step 7: Create FN-DSA signature for proof
         let signature = self.sign_beacon_output(&randomness, timestamp, policy_id)?;
 
         // Create proof
@@ -534,19 +534,21 @@ impl QuantumBeacon {
         let message = QuantumBeacon::construct_signature_message(randomness, timestamp, policy_id);
 
         if let Some((_, ref sk_bytes)) = self.signing_keypair {
-            #[cfg(feature = "mldsa")]
+            #[cfg(not(feature = "fndsa"))]
+            let _ = (&message, sk_bytes);
+            #[cfg(feature = "fndsa")]
             {
                 use pqrust_traits::sign::{DetachedSignature as _, SecretKey as _};
-                if let Ok(sk) = MLDSA87SecretKey::from_bytes(sk_bytes) {
-                    let signature = mldsa87_detached_sign(&message, &sk);
+                if let Ok(sk) = FNDSA1024SecretKey::from_bytes(sk_bytes) {
+                    let signature = fndsa1024_detached_sign(&message, &sk);
                     Ok(signature.as_bytes().to_vec())
                 } else {
                     Err("Invalid secret key".to_string())
                 }
             }
-            #[cfg(not(feature = "mldsa"))]
+            #[cfg(not(feature = "fndsa"))]
             {
-                Err("ML-DSA feature not enabled".to_string())
+                Err("FN-DSA feature not enabled".to_string())
             }
         } else {
             Err("Signing keypair not initialized".to_string())
@@ -563,12 +565,14 @@ impl QuantumBeacon {
         let message = QuantumBeacon::construct_signature_message(randomness, timestamp, policy_id);
 
         if let Some((ref pk_bytes, _)) = self.signing_keypair {
-            #[cfg(feature = "mldsa")]
+            #[cfg(not(feature = "fndsa"))]
+            let _ = (&message, signature, pk_bytes);
+            #[cfg(feature = "fndsa")]
             {
                 use pqrust_traits::sign::{DetachedSignature as _, PublicKey as _};
-                if let Ok(pk) = MLDSA87PublicKey::from_bytes(pk_bytes) {
-                    if let Ok(detached_sig) = MLDSA87DetachedSignature::from_bytes(signature) {
-                        mldsa87_verify_detached_signature(&detached_sig, &message, &pk).is_ok()
+                if let Ok(pk) = FNDSA1024PublicKey::from_bytes(pk_bytes) {
+                    if let Ok(detached_sig) = FNDSA1024DetachedSignature::from_bytes(signature) {
+                        fndsa1024_verify_detached_signature(&detached_sig, &message, &pk).is_ok()
                     } else {
                         false
                     }
@@ -576,7 +580,7 @@ impl QuantumBeacon {
                     false
                 }
             }
-            #[cfg(not(feature = "mldsa"))]
+            #[cfg(not(feature = "fndsa"))]
             {
                 false
             }
@@ -672,14 +676,17 @@ pub fn verify_beacon_standalone(
         output.proof.timestamp,
         &output.proof.policy_id,
     );
+    #[cfg(not(feature = "fndsa"))]
+    let _ = (verification_key, &message);
 
-    #[cfg(feature = "mldsa")]
+    #[cfg(feature = "fndsa")]
     let signature_valid = {
         use pqrust_traits::sign::{DetachedSignature as _, PublicKey as _};
-        if let Ok(pk) = MLDSA87PublicKey::from_bytes(verification_key) {
-            if let Ok(detached_sig) = MLDSA87DetachedSignature::from_bytes(&output.proof.signature)
+        if let Ok(pk) = FNDSA1024PublicKey::from_bytes(verification_key) {
+            if let Ok(detached_sig) =
+                FNDSA1024DetachedSignature::from_bytes(&output.proof.signature)
             {
-                mldsa87_verify_detached_signature(&detached_sig, &message, &pk).is_ok()
+                fndsa1024_verify_detached_signature(&detached_sig, &message, &pk).is_ok()
             } else {
                 false
             }
@@ -687,7 +694,7 @@ pub fn verify_beacon_standalone(
             false
         }
     };
-    #[cfg(not(feature = "mldsa"))]
+    #[cfg(not(feature = "fndsa"))]
     let signature_valid = false;
 
     if !signature_valid {

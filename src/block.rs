@@ -1,7 +1,7 @@
 use crate::transaction::Transaction;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,6 +10,8 @@ use crate::consensus::consensus_fork::{
 };
 use crate::crypto::pqc::{PQCManager, PQCPublicKey, PQCSignature};
 use crate::genesis::canonical_genesis;
+
+pub const HOT_CHAIN_RETENTION_BLOCKS_ENV: &str = "SYNERGY_HOT_CHAIN_RETENTION_BLOCKS";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Block {
@@ -276,6 +278,41 @@ impl BlockChain {
         }
     }
 
+    pub fn compact_to_recent_blocks(&mut self, retain_recent_blocks: u64) -> usize {
+        if retain_recent_blocks == 0 {
+            return 0;
+        }
+
+        let Some(tip_height) = self.last().map(|block| block.block_index) else {
+            return 0;
+        };
+        if tip_height < retain_recent_blocks {
+            return 0;
+        }
+
+        let first_retained_height = tip_height
+            .saturating_sub(retain_recent_blocks)
+            .saturating_add(1);
+        let prune_count = self
+            .chain
+            .iter()
+            .take_while(|block| block.block_index < first_retained_height)
+            .count();
+        if prune_count == 0 {
+            return 0;
+        }
+
+        self.chain.drain(0..prune_count);
+        self.chain.shrink_to_fit();
+        prune_count
+    }
+
+    pub fn compact_from_env(&mut self) -> Option<(u64, usize)> {
+        let retain_recent_blocks = configured_hot_chain_retention_blocks()?;
+        let removed = self.compact_to_recent_blocks(retain_recent_blocks);
+        Some((retain_recent_blocks, removed))
+    }
+
     pub fn genesis(&mut self) -> Result<(), String> {
         let genesis = canonical_genesis()?;
         let genesis_block = Block {
@@ -329,8 +366,6 @@ impl BlockChain {
     }
 
     fn save_to_file_atomic(&self, path: &str) -> Result<(), String> {
-        let json =
-            serde_json::to_vec(&self.chain).map_err(|error| format!("serialize chain: {error}"))?;
         let target = Path::new(path);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|error| {
@@ -350,13 +385,17 @@ impl BlockChain {
             target.with_file_name(format!("{file_name}.tmp-{}-{suffix}", std::process::id()));
 
         {
-            let mut file = File::create(&temp_path).map_err(|error| {
+            let file = File::create(&temp_path).map_err(|error| {
                 format!("create temp chain state {}: {error}", temp_path.display())
             })?;
-            file.write_all(&json).map_err(|error| {
+            let mut writer = BufWriter::new(file);
+            serde_json::to_writer(&mut writer, &self.chain).map_err(|error| {
                 format!("write temp chain state {}: {error}", temp_path.display())
             })?;
-            file.sync_all().map_err(|error| {
+            writer.flush().map_err(|error| {
+                format!("flush temp chain state {}: {error}", temp_path.display())
+            })?;
+            writer.get_ref().sync_all().map_err(|error| {
                 format!("sync temp chain state {}: {error}", temp_path.display())
             })?;
         }
@@ -374,20 +413,25 @@ impl BlockChain {
 
     pub fn load_from_file(path: &str) -> Option<Self> {
         if Path::new(path).exists() {
-            if let Ok(mut file) = File::open(path) {
-                let mut contents = String::new();
-                if file.read_to_string(&mut contents).is_ok() {
-                    let mut deserializer = serde_json::Deserializer::from_str(&contents);
-                    if let Ok(blocks) = Vec::<Block>::deserialize(&mut deserializer) {
-                        if deserializer.end().is_ok() {
-                            return Some(BlockChain { chain: blocks });
-                        }
+            if let Ok(file) = File::open(path) {
+                let reader = BufReader::new(file);
+                let mut deserializer = serde_json::Deserializer::from_reader(reader);
+                if let Ok(blocks) = Vec::<Block>::deserialize(&mut deserializer) {
+                    if deserializer.end().is_ok() {
+                        return Some(BlockChain { chain: blocks });
                     }
                 }
             }
         }
         None
     }
+}
+
+pub fn configured_hot_chain_retention_blocks() -> Option<u64> {
+    std::env::var(HOT_CHAIN_RETENTION_BLOCKS_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
 }
 
 #[cfg(test)]
@@ -482,5 +526,33 @@ mod tests {
             .expect_err("wrong-parent child rejected");
         assert!(error.contains("does not match local tip hash"));
         assert_eq!(chain.chain.len(), 1);
+    }
+
+    #[test]
+    fn compact_to_recent_blocks_keeps_contiguous_tip_window() {
+        let genesis = block(0, "genesis".to_string(), "validator-1");
+        let mut chain = BlockChain {
+            chain: vec![genesis.clone()],
+        };
+        let mut previous = genesis;
+        for height in 1..=10 {
+            let next = block(height, previous.hash.clone(), "validator-1");
+            chain.add_block_extending_tip(next.clone()).unwrap();
+            previous = next;
+        }
+
+        let removed = chain.compact_to_recent_blocks(4);
+
+        assert_eq!(removed, 7);
+        assert_eq!(
+            chain
+                .chain
+                .iter()
+                .map(|block| block.block_index)
+                .collect::<Vec<_>>(),
+            vec![7, 8, 9, 10]
+        );
+        let next = block(11, previous.hash.clone(), "validator-1");
+        assert_eq!(chain.add_block_extending_tip(next), Ok(true));
     }
 }

@@ -912,11 +912,14 @@ fn decode_key_material(s: &str) -> Result<Vec<u8>, String> {
 }
 
 fn parse_signature_algorithm(value: &str) -> Result<PQCAlgorithm, String> {
-    match value {
-        "mldsa" => Ok(PQCAlgorithm::MLDSA),
-        "fndsa" => Ok(PQCAlgorithm::FNDSA),
-        "slhdsa" => Ok(PQCAlgorithm::SLHDSA),
-        _ => Err(format!("Unsupported signature algorithm: {}", value)),
+    match value.trim().to_ascii_lowercase().as_str() {
+        "fndsa" | "fn-dsa" | "fn-dsa-512" | "fn-dsa-1024" | "falcon" | "falcon-1024" => {
+            Ok(PQCAlgorithm::FNDSA)
+        }
+        _ => Err(format!(
+            "Unsupported signature algorithm: {}; use fndsa",
+            value
+        )),
     }
 }
 

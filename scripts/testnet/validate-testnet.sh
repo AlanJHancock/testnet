@@ -200,12 +200,12 @@ for bundle in bootnode1 bootnode2 bootnode3; do
     echo "[$bundle] p2p_port must be 5620" >&2
     failures=$((failures + 1))
   fi
-  if ! rg -q '^validator_cluster_size = 5$' "$node_config"; then
-    echo "[$bundle] validator_cluster_size must be 5" >&2
+  if ! rg -q '^validator_cluster_size = 7$' "$node_config"; then
+    echo "[$bundle] validator_cluster_size must be 7" >&2
     failures=$((failures + 1))
   fi
   if ! rg -q '^max_validators = 100$' "$node_config"; then
-    echo "[$bundle] max_validators must be 5" >&2
+    echo "[$bundle] max_validators must be 100" >&2
     failures=$((failures + 1))
   fi
   if rg -q '38638|48638|58638|18080|5730|5830|5930' "$node_config"; then

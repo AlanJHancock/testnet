@@ -48,7 +48,9 @@ fn get_chain_path() -> String {
 const VALIDATOR_REGISTRY_PATH: &str = "data/validator_registry.json";
 const VERBOSE_CONSENSUS_LOGS: bool = false;
 const POST_COMMIT_PARENT_PROPAGATION_GRACE_MILLIS: u64 = 250;
+const MAX_BLOCK_TIMESTAMP_CATCH_UP_STEP_SECS: u64 = 300;
 const SAFE_HEAD_CATCHUP_WITHOUT_MESH_RESET_BLOCKS: u64 = 1;
+const DEFAULT_MAX_CHAIN_SNAPSHOT_CLONE_HEIGHT: u64 = 50_000;
 
 macro_rules! consensus_log {
     ($($arg:tt)*) => {
@@ -892,12 +894,19 @@ impl ProofOfSynergy {
                         // different same-height leaders after a restart or partition, which
                         // recreates transient vote-lock splits at H+1.
                         let view_anchor_timestamp = latest_block_clone.timestamp;
-                        let view_offset = Self::deterministic_view_offset_for_next_block_slot(
+                        let shared_view_offset =
+                            Self::deterministic_view_offset_for_next_block_slot(
                             latest_block_clone.block_index,
                             view_anchor_timestamp,
                             block_time_secs,
                             leader_timeout_secs,
                             Self::current_timestamp(),
+                            );
+                        let view_offset = Self::cap_view_offset_by_tip_observation(
+                            shared_view_offset,
+                            last_tip_observed_at,
+                            leader_timeout_secs,
+                            current_time,
                         );
                         let transient_recovery_min_age_secs =
                             Self::transient_vote_recovery_min_age_secs(
@@ -917,25 +926,93 @@ impl ProofOfSynergy {
                             epoch_length,
                         );
                         let local_validator_address = Self::resolve_local_validator_address();
+                        // Leader scheduling must use the canonical consensus membership, not
+                        // each node's locally visible peer subset. The live subset is still
+                        // used above as a readiness gate; using it here lets nodes with 4 vs 5
+                        // visible peers compute different proposer rotations for the same
+                        // height and wait through avoidable leader timeouts.
                         let selected_validator = Self::select_leader_for_block(
-                            &live_active_validators,
+                            &active_validators,
                             next_block_index,
                             &synergy_calculator,
                             &epoch_randomness,
                             epoch_length,
                             view_offset,
                         );
+                        let selected_validator = if live_active_validators
+                            .iter()
+                            .any(|validator| validator.address == selected_validator.address)
+                        {
+                            selected_validator
+                        } else if !live_active_validators.is_empty() {
+                            let live_selected_validator = Self::select_leader_for_block(
+                                &live_active_validators,
+                                next_block_index,
+                                &synergy_calculator,
+                                &epoch_randomness,
+                                epoch_length,
+                                view_offset,
+                            );
+                            warn!(
+                                "consensus",
+                                "Scheduled leader is not live; selecting live validator leader",
+                                "scheduled_leader" => selected_validator.address.clone(),
+                                "live_leader" => live_selected_validator.address.clone(),
+                                "live_validators" => live_active_validators.len() as u64,
+                                "active_validators" => active_validators.len() as u64,
+                                "block_height" => next_block_index,
+                                "view_offset" => view_offset
+                            );
+                            live_selected_validator
+                        } else {
+                            selected_validator
+                        };
                         let selected_validator = Self::prefer_local_vote_lock_leader(
                             selected_validator,
+                            &active_validators,
                             &live_active_validators,
                             local_validator_address.as_deref(),
                             current_epoch,
                             next_block_index,
+                            next_block_index.saturating_sub(1),
+                            transient_recovery_min_age_secs,
                         );
 
                         if local_validator_address.as_deref()
                             != Some(selected_validator.address.as_str())
                         {
+                            if let Some(network) = crate::p2p::get_p2p_network() {
+                                let required_sync_support =
+                                    status_ready_required_validators.saturating_sub(1).max(1);
+                                let local_height = latest_block_clone.block_index;
+                                let fresh_best_validator_height = network
+                                    .get_best_validator_peer_height_with_support(
+                                        required_sync_support,
+                                    );
+                                if fresh_best_validator_height > local_height {
+                                    info!(
+                                        "consensus",
+                                        "Skipping non-leader wait because validator peers advanced tip",
+                                        "local_height" => local_height,
+                                        "best_validator_height" => fresh_best_validator_height,
+                                        "required_sync_support" => required_sync_support as u64,
+                                        "leader" => selected_validator.address.clone(),
+                                        "local_validator" => local_validator_address.clone().unwrap_or_default(),
+                                        "block_height" => next_block_index
+                                    );
+                                    drop(chain_guard);
+                                    drop(pool);
+                                    let _ = Self::sync_validator_to_network_tip(
+                                        &network,
+                                        local_height,
+                                        fresh_best_validator_height,
+                                        required_sync_support,
+                                    );
+                                    thread::sleep(Duration::from_millis(100));
+                                    continue;
+                                }
+                            }
+
                             let wait_elapsed =
                                 Self::leader_wait_elapsed_since_tip_observed(last_tip_observed_at);
 
@@ -1376,9 +1453,15 @@ impl ProofOfSynergy {
                                             .map(|block| block.block_index)
                                             .unwrap_or(new_block.block_index);
                                         if Self::should_persist_consensus_chain_tip(tip_height) {
-                                            let snapshot = chain_guard.clone();
                                             Self::note_consensus_chain_persist(tip_height);
-                                            Some((snapshot, tip_height))
+                                            if Self::can_clone_consensus_chain_for_snapshot(
+                                                tip_height,
+                                            ) {
+                                                let snapshot = chain_guard.clone();
+                                                Some((snapshot, tip_height))
+                                            } else {
+                                                None
+                                            }
                                         } else {
                                             None
                                         }
@@ -1418,6 +1501,7 @@ impl ProofOfSynergy {
                                             tx,
                                             &token_manager,
                                             &validator_manager,
+                                            new_block.block_index,
                                         ) {
                                             Ok(message) => {
                                                 applied_validator_activations += 1;
@@ -1442,7 +1526,11 @@ impl ProofOfSynergy {
                                 if let Err(e) = token_manager.save_state("data/token_state.json") {
                                     warn!("consensus", "Failed to persist token state", "error" => e.to_string());
                                 }
-                                if applied_validator_activations > 0 {
+                                let activated_validators = validator_manager
+                                    .apply_pending_shadow_activations(new_block.block_index);
+                                if applied_validator_activations > 0
+                                    || !activated_validators.is_empty()
+                                {
                                     if let Err(e) =
                                         validator_manager.save_registry(VALIDATOR_REGISTRY_PATH)
                                     {
@@ -1450,6 +1538,14 @@ impl ProofOfSynergy {
                                             "consensus",
                                             "Failed to persist validator registry after activation",
                                             "error" => e.to_string()
+                                        );
+                                    }
+                                    if !activated_validators.is_empty() {
+                                        info!(
+                                            "consensus",
+                                            "Activated shadow validators after finalized boundary",
+                                            "height" => new_block.block_index,
+                                            "activated_validators" => activated_validators.join(",")
                                         );
                                     }
                                 }
@@ -1620,16 +1716,14 @@ impl ProofOfSynergy {
                                 println!("⚠️ Block proposal failed: {}", e);
                                 consecutive_failures += 1;
 
-                                if Self::consensus_failure_needs_transient_lock_recovery(&e)
-                                    && consecutive_failures >= 3
-                                {
+                                if Self::consensus_failure_needs_transient_lock_recovery(&e) {
                                     let finalized_height = new_block.block_index.saturating_sub(1);
                                     let min_age_secs = Self::transient_vote_recovery_min_age_secs(
                                         leader_timeout_secs,
                                         block_time_secs,
                                     );
                                     let reason = format!(
-                                        "automatic consensus liveness recovery after {consecutive_failures} consecutive failures at proposed_height={} proposed_hash={}: {e}",
+                                        "automatic consensus liveness recovery after transient same-height vote conflict at proposed_height={} proposed_hash={} consecutive_failures={consecutive_failures}: {e}",
                                         new_block.block_index, new_block.hash
                                     );
                                     match (
@@ -1965,9 +2059,18 @@ impl ProofOfSynergy {
         block_time_secs: u64,
         current_timestamp_secs: u64,
     ) -> u64 {
-        previous_block_timestamp_secs
-            .saturating_add(block_time_secs.max(1))
+        let target_timestamp = previous_block_timestamp_secs.saturating_add(block_time_secs.max(1));
+        let max_catch_up_timestamp = previous_block_timestamp_secs
+            .saturating_add(block_time_secs.max(MAX_BLOCK_TIMESTAMP_CATCH_UP_STEP_SECS));
+
+        // The block timestamp is user-facing launch metadata as well as a
+        // consensus input. Preserve normal cadence when production is healthy,
+        // but allow bounded wall-clock catch-up after stalls or recovery work.
+        // A cap equal to the target block interval keeps stale timestamps stale
+        // forever once drift exists.
+        target_timestamp
             .max(current_timestamp_secs)
+            .min(max_catch_up_timestamp)
     }
 
     fn next_block_pacing_anchor(block_timestamp_secs: u64, block_time_secs: u64) -> SystemTime {
@@ -2011,19 +2114,77 @@ impl ProofOfSynergy {
             .unwrap_or_default()
     }
 
+    fn cap_view_offset_by_tip_observation(
+        shared_view_offset: usize,
+        last_tip_observed_at: SystemTime,
+        leader_timeout_secs: u64,
+        current_time: SystemTime,
+    ) -> usize {
+        let local_elapsed =
+            Self::leader_wait_elapsed_since_tip_observed_at(last_tip_observed_at, current_time);
+        let local_view_offset = (local_elapsed.as_secs() / leader_timeout_secs.max(1)) as usize;
+        shared_view_offset.min(local_view_offset)
+    }
+
     fn should_persist_consensus_chain_tip(tip_height: u64) -> bool {
         if tip_height <= 32 {
             return true;
         }
 
+        let gap_blocks = Self::consensus_chain_persist_gap_blocks();
+        let elapsed_secs = Self::consensus_chain_persist_elapsed_secs();
         let state = LAST_CONSENSUS_CHAIN_PERSIST.lock().unwrap();
         match *state {
             Some((last_height, last_at)) => {
-                tip_height.saturating_sub(last_height) >= 250
-                    || last_at.elapsed() >= Duration::from_secs(600)
+                tip_height.saturating_sub(last_height) >= gap_blocks
+                    || last_at.elapsed() >= Duration::from_secs(elapsed_secs)
             }
-            None => tip_height % 250 == 0,
+            None => tip_height % gap_blocks == 0,
         }
+    }
+
+    fn consensus_chain_persist_gap_blocks() -> u64 {
+        std::env::var("SYNERGY_CHAIN_PERSIST_GAP_BLOCKS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(250)
+    }
+
+    fn consensus_chain_persist_elapsed_secs() -> u64 {
+        std::env::var("SYNERGY_CHAIN_PERSIST_MIN_SECS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(600)
+    }
+
+    fn consensus_chain_snapshot_max_clone_height() -> u64 {
+        std::env::var("SYNERGY_CHAIN_SNAPSHOT_MAX_CLONE_HEIGHT")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_MAX_CHAIN_SNAPSHOT_CLONE_HEIGHT)
+    }
+
+    fn consensus_chain_snapshot_clone_allowed(tip_height: u64, max_clone_height: u64) -> bool {
+        tip_height <= max_clone_height
+    }
+
+    fn can_clone_consensus_chain_for_snapshot(tip_height: u64) -> bool {
+        let max_clone_height = Self::consensus_chain_snapshot_max_clone_height();
+        if Self::consensus_chain_snapshot_clone_allowed(tip_height, max_clone_height) {
+            return true;
+        }
+
+        warn!(
+            "consensus",
+            "Skipping full-chain snapshot persistence because chain height exceeds clone safety limit",
+            "height" => tip_height,
+            "max_clone_height" => max_clone_height,
+            "override_env" => "SYNERGY_CHAIN_SNAPSHOT_MAX_CLONE_HEIGHT"
+        );
+        false
     }
 
     fn note_consensus_chain_persist(tip_height: u64) {
@@ -2073,8 +2234,7 @@ impl ProofOfSynergy {
             .max(MIN_LAUNCH_VOTE_TIMEOUT_SECS);
         let min_timeout_covering_vote_window = vote_timeout_secs
             .saturating_add(block_time_secs)
-            .saturating_add(1)
-            .max((block_time_secs * 2).max(3));
+            .max(block_time_secs.saturating_mul(2).max(2));
 
         if configured_leader_timeout_secs == 0 {
             min_timeout_covering_vote_window
@@ -2432,9 +2592,12 @@ impl ProofOfSynergy {
     fn prefer_local_vote_lock_leader(
         selected_validator: Validator,
         active_validators: &[Validator],
+        live_validators: &[Validator],
         local_validator_address: Option<&str>,
         current_epoch: u64,
         next_block_index: u64,
+        finalized_height: u64,
+        transient_recovery_min_age_secs: u64,
     ) -> Validator {
         let Some(local_validator_address) = local_validator_address else {
             return selected_validator;
@@ -2476,19 +2639,115 @@ impl ProofOfSynergy {
             return selected_validator;
         }
 
+        let Some(locked_proposer) = live_validators
+            .iter()
+            .find(|validator| validator.address == locked_vote.proposer)
+            .cloned()
+        else {
+            warn!(
+                "consensus",
+                "Ignoring local same-height vote lock because its proposer is not live",
+                "local_validator" => local_validator_address.to_string(),
+                "locked_proposer" => locked_vote.proposer,
+                "locked_block_hash" => locked_vote.block_hash,
+                "locked_first_round" => locked_vote.first_round_number,
+                "locked_latest_round" => locked_vote.latest_round_number,
+                "epoch" => current_epoch,
+                "height" => next_block_index
+            );
+            return selected_validator;
+        };
+
         if locked_vote.proposer != selected_validator.address {
+            let lock_age_secs = Self::current_timestamp().saturating_sub(locked_vote.updated_at);
+            if transient_recovery_min_age_secs != u64::MAX
+                && lock_age_secs >= transient_recovery_min_age_secs
+                && live_validators
+                    .iter()
+                    .any(|validator| validator.address == selected_validator.address)
+            {
+                let reason = format!(
+                    "leader selection stale same-height vote-lock recovery: local_validator={} height={} locked_hash={} locked_proposer={} locked_latest_round={} scheduled_leader={} lock_age_secs={} min_age_secs={}",
+                    local_validator_address,
+                    next_block_index,
+                    locked_vote.block_hash,
+                    locked_vote.proposer,
+                    locked_vote.latest_round_number,
+                    selected_validator.address,
+                    lock_age_secs,
+                    transient_recovery_min_age_secs
+                );
+                match DualQuorumConsensus::recover_transient_vote_locks_above_finalized_height(
+                    finalized_height,
+                    transient_recovery_min_age_secs,
+                    &reason,
+                ) {
+                    Ok(report) if report.mutated => {
+                        warn!(
+                            "consensus",
+                            "Recovered stale same-height vote lock before leader selection",
+                            "local_validator" => local_validator_address.to_string(),
+                            "scheduled_leader" => selected_validator.address.clone(),
+                            "locked_proposer" => locked_vote.proposer.clone(),
+                            "locked_block_hash" => locked_vote.block_hash.clone(),
+                            "locked_latest_round" => locked_vote.latest_round_number,
+                            "lock_age_secs" => lock_age_secs,
+                            "min_age_secs" => transient_recovery_min_age_secs,
+                            "removed_count" => report.removed_count as u64,
+                            "evidence_path" => report.evidence_path.clone(),
+                            "epoch" => current_epoch,
+                            "height" => next_block_index
+                        );
+                        return selected_validator;
+                    }
+                    Ok(report) => {
+                        info!(
+                            "consensus",
+                            "Stale same-height vote lock recovery checked but no lock was eligible",
+                            "local_validator" => local_validator_address.to_string(),
+                            "scheduled_leader" => selected_validator.address.clone(),
+                            "locked_proposer" => locked_vote.proposer.clone(),
+                            "locked_block_hash" => locked_vote.block_hash.clone(),
+                            "lock_age_secs" => lock_age_secs,
+                            "min_age_secs" => transient_recovery_min_age_secs,
+                            "removed_count" => report.removed_count as u64,
+                            "epoch" => current_epoch,
+                            "height" => next_block_index
+                        );
+                    }
+                    Err(error) => {
+                        warn!(
+                            "consensus",
+                            "Failed closed while recovering stale same-height vote lock before leader selection",
+                            "local_validator" => local_validator_address.to_string(),
+                            "scheduled_leader" => selected_validator.address.clone(),
+                            "locked_proposer" => locked_vote.proposer.clone(),
+                            "locked_block_hash" => locked_vote.block_hash.clone(),
+                            "lock_age_secs" => lock_age_secs,
+                            "min_age_secs" => transient_recovery_min_age_secs,
+                            "epoch" => current_epoch,
+                            "height" => next_block_index,
+                            "error" => error
+                        );
+                    }
+                }
+            }
+
             info!(
                 "consensus",
-                "Ignoring local same-height vote lock for leader selection",
+                "Preferring live same-height vote lock leader",
                 "local_validator" => local_validator_address.to_string(),
                 "scheduled_leader" => selected_validator.address.clone(),
                 "locked_proposer" => locked_vote.proposer.clone(),
                 "locked_block_hash" => locked_vote.block_hash.clone(),
                 "locked_first_round" => locked_vote.first_round_number,
                 "locked_latest_round" => locked_vote.latest_round_number,
+                "lock_age_secs" => lock_age_secs,
+                "min_age_secs" => transient_recovery_min_age_secs,
                 "epoch" => current_epoch,
                 "height" => next_block_index
             );
+            return locked_proposer;
         }
 
         selected_validator
@@ -2865,14 +3124,10 @@ impl ProofOfSynergy {
     fn consensus_failure_needs_transient_lock_recovery(error: &str) -> bool {
         error.contains("same-height vote supersede")
             || error.contains("already locally voted for different block")
-            || error.contains("Insufficient validator votes")
     }
 
     fn transient_vote_recovery_min_age_secs(leader_timeout_secs: u64, block_time_secs: u64) -> u64 {
-        leader_timeout_secs
-            .saturating_mul(2)
-            .max(block_time_secs.saturating_mul(3))
-            .max(6)
+        leader_timeout_secs.max(block_time_secs).max(1)
     }
 
     pub(crate) fn validate_transaction_for_mempool(
@@ -2968,7 +3223,7 @@ impl ProofOfSynergy {
     pub(crate) fn validate_transaction_nonce_for_mempool(
         tx: &crate::transaction::Transaction,
     ) -> Result<(), String> {
-        let committed_sender_nonces = {
+        let mut committed_sender_nonces = {
             let chain = SHARED_CHAIN.lock().unwrap();
             chain
                 .chain
@@ -2978,6 +3233,9 @@ impl ProofOfSynergy {
                 .map(|committed| committed.nonce)
                 .collect::<Vec<_>>()
         };
+        committed_sender_nonces.extend(crate::dag::committed_sender_nonces(&tx.sender));
+        committed_sender_nonces.sort_unstable();
+        committed_sender_nonces.dedup();
         let pending_sender_nonces = {
             let tx_hash = tx.hash();
             let pool = TX_POOL.lock().unwrap();
@@ -3316,6 +3574,16 @@ mod tests {
     }
 
     #[test]
+    fn consensus_snapshot_clone_guard_blocks_large_live_chains() {
+        assert!(ProofOfSynergy::consensus_chain_snapshot_clone_allowed(
+            50_000, 50_000
+        ));
+        assert!(!ProofOfSynergy::consensus_chain_snapshot_clone_allowed(
+            50_001, 50_000
+        ));
+    }
+
+    #[test]
     fn deep_or_unverified_catchup_resets_mesh_readiness() {
         let deep = catchup_decision(100, 105, Some(105), true, 5, 5);
         assert!(!deep.preserve_mesh_readiness);
@@ -3479,6 +3747,18 @@ mod tests {
     }
 
     #[test]
+    fn bounded_consensus_timestamp_caps_large_wall_clock_catchup() {
+        let previous_timestamp = 1_000;
+        let next_timestamp =
+            ProofOfSynergy::bounded_consensus_timestamp(previous_timestamp, 4, 2_000);
+
+        assert_eq!(
+            next_timestamp.saturating_sub(previous_timestamp),
+            MAX_BLOCK_TIMESTAMP_CATCH_UP_STEP_SECS
+        );
+    }
+
+    #[test]
     fn proposer_penalty_is_skipped_when_penalization_is_disabled() {
         let validator_address = "synv1proposer";
         let manager = active_validator_manager(validator_address);
@@ -3523,13 +3803,18 @@ mod tests {
     fn effective_leader_timeout_covers_enforced_vote_window() {
         assert_eq!(
             ProofOfSynergy::effective_leader_timeout_secs_for_config(2, 4, 2),
-            7,
+            4,
             "configured leader timeout must not expire while the enforced vote window is still open"
         );
         assert_eq!(
             ProofOfSynergy::effective_leader_timeout_secs_for_config(2, 0, 2),
-            7,
-            "auto leader timeout must include block slot, vote window, and propagation margin"
+            4,
+            "auto leader timeout must include the block slot and vote window"
+        );
+        assert_eq!(
+            ProofOfSynergy::effective_leader_timeout_secs_for_config(1, 2, 1),
+            2,
+            "one-second launch vote windows must allow sub-five-second missed-slot recovery"
         );
         assert_eq!(
             ProofOfSynergy::effective_leader_timeout_secs_for_config(2, 12, 2),
@@ -3722,6 +4007,24 @@ mod tests {
                 .duration_since(UNIX_EPOCH + Duration::from_secs(stale_header_timestamp))
                 .unwrap()
                 > Duration::from_secs(800)
+        );
+    }
+
+    #[test]
+    fn shared_view_offset_is_capped_by_local_tip_observation_window() {
+        let now = UNIX_EPOCH + Duration::from_secs(10_100);
+        let observed_tip_at = now - Duration::from_secs(1);
+
+        assert_eq!(
+            ProofOfSynergy::cap_view_offset_by_tip_observation(4, observed_tip_at, 4, now),
+            0,
+            "a locally fresh tip must not skip through leaders just because its block timestamp is stale"
+        );
+
+        let observed_tip_at = now - Duration::from_secs(4);
+        assert_eq!(
+            ProofOfSynergy::cap_view_offset_by_tip_observation(4, observed_tip_at, 4, now),
+            1
         );
     }
 
@@ -4261,7 +4564,42 @@ mod tests {
     }
 
     #[test]
-    fn leader_selection_does_not_pin_to_stale_local_same_height_vote_lock() {
+    fn insufficient_votes_do_not_trigger_transient_proposal_recovery() {
+        assert!(
+            !ProofOfSynergy::consensus_failure_needs_transient_lock_recovery(
+                "Insufficient validator votes: 2 votes, 4 required for quorum"
+            )
+        );
+        assert!(
+            ProofOfSynergy::consensus_failure_needs_transient_lock_recovery(
+                "same-height vote supersede requires a durable finalized canonical parent lock"
+            )
+        );
+        assert!(
+            ProofOfSynergy::consensus_failure_needs_transient_lock_recovery(
+                "already locally voted for different block at height 256039"
+            )
+        );
+    }
+
+    #[test]
+    fn transient_vote_recovery_age_tracks_leader_timeout() {
+        assert_eq!(
+            ProofOfSynergy::transient_vote_recovery_min_age_secs(4, 1),
+            4
+        );
+        assert_eq!(
+            ProofOfSynergy::transient_vote_recovery_min_age_secs(2, 3),
+            3
+        );
+        assert_eq!(
+            ProofOfSynergy::transient_vote_recovery_min_age_secs(0, 0),
+            1
+        );
+    }
+
+    #[test]
+    fn leader_selection_prefers_live_local_vote_lock_over_scheduled_leader() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
 
@@ -4308,12 +4646,212 @@ mod tests {
         let selected = ProofOfSynergy::prefer_local_vote_lock_leader(
             scheduled.clone(),
             &active_validators,
+            &active_validators,
             Some("validator-local"),
             55,
             810,
+            809,
+            u64::MAX,
+        );
+
+        assert_eq!(selected.address, locked.address);
+
+        DualQuorumConsensus::set_test_local_vote_lock_path(None);
+        if let Some(root) = path.parent().and_then(|data| data.parent()) {
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn leader_selection_prefers_live_vote_lock_when_scheduled_leader_is_offline() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        let path = unique_vote_lock_path("offline-scheduled-leader-lock-preference");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("vote lock test directory should be created");
+        }
+        let locks = serde_json::json!({
+            "55:810:validator-local": {
+                "validator_address": "validator-local",
+                "block_hash": "locked-block-hash",
+                "block_index": 810,
+                "epoch_number": 55,
+                "first_round_number": 1,
+                "latest_round_number": 4,
+                "proposer": "validator-locked",
+                "created_at": 1_777_426_401u64,
+                "updated_at": 1_777_426_404u64
+            }
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec(&locks).expect("vote lock JSON should encode"),
+        )
+        .expect("vote lock file should be written");
+        DualQuorumConsensus::set_test_local_vote_lock_path(Some(path.clone()));
+
+        let mut scheduled = Validator::new(
+            "validator-scheduled".to_string(),
+            "scheduled-pubkey".to_string(),
+            "Scheduled".to_string(),
+            1_000,
+        );
+        scheduled.status = ValidatorStatus::Active;
+        let mut locked = Validator::new(
+            "validator-locked".to_string(),
+            "locked-pubkey".to_string(),
+            "Locked".to_string(),
+            1_000,
+        );
+        locked.status = ValidatorStatus::Active;
+        let active_validators = vec![scheduled.clone(), locked.clone()];
+        let live_validators = vec![locked.clone()];
+
+        let selected = ProofOfSynergy::prefer_local_vote_lock_leader(
+            scheduled,
+            &active_validators,
+            &live_validators,
+            Some("validator-local"),
+            55,
+            810,
+            809,
+            u64::MAX,
+        );
+
+        assert_eq!(selected.address, locked.address);
+
+        DualQuorumConsensus::set_test_local_vote_lock_path(None);
+        if let Some(root) = path.parent().and_then(|data| data.parent()) {
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn leader_selection_does_not_pin_to_offline_local_same_height_vote_lock() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        let path = unique_vote_lock_path("offline-leader-lock-preference");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("vote lock test directory should be created");
+        }
+        let locks = serde_json::json!({
+            "55:810:validator-local": {
+                "validator_address": "validator-local",
+                "block_hash": "locked-block-hash",
+                "block_index": 810,
+                "epoch_number": 55,
+                "first_round_number": 1,
+                "latest_round_number": 4,
+                "proposer": "validator-locked",
+                "created_at": 1_777_426_401u64,
+                "updated_at": 1_777_426_404u64
+            }
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec(&locks).expect("vote lock JSON should encode"),
+        )
+        .expect("vote lock file should be written");
+        DualQuorumConsensus::set_test_local_vote_lock_path(Some(path.clone()));
+
+        let mut scheduled = Validator::new(
+            "validator-scheduled".to_string(),
+            "scheduled-pubkey".to_string(),
+            "Scheduled".to_string(),
+            1_000,
+        );
+        scheduled.status = ValidatorStatus::Active;
+        let mut locked = Validator::new(
+            "validator-locked".to_string(),
+            "locked-pubkey".to_string(),
+            "Locked".to_string(),
+            1_000,
+        );
+        locked.status = ValidatorStatus::Active;
+        let active_validators = vec![scheduled.clone(), locked];
+        let live_validators = vec![scheduled.clone()];
+
+        let selected = ProofOfSynergy::prefer_local_vote_lock_leader(
+            scheduled.clone(),
+            &active_validators,
+            &live_validators,
+            Some("validator-local"),
+            55,
+            810,
+            809,
+            u64::MAX,
         );
 
         assert_eq!(selected.address, scheduled.address);
+
+        DualQuorumConsensus::set_test_local_vote_lock_path(None);
+        if let Some(root) = path.parent().and_then(|data| data.parent()) {
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn leader_selection_recovers_stale_local_vote_lock_before_following_scheduled_leader() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        let path = unique_vote_lock_path("stale-leader-lock-recovery");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("vote lock test directory should be created");
+        }
+        let locks = serde_json::json!({
+            "55:810:validator-local": {
+                "validator_address": "validator-local",
+                "block_hash": "locked-block-hash",
+                "block_index": 810,
+                "epoch_number": 55,
+                "first_round_number": 1,
+                "latest_round_number": 4,
+                "proposer": "validator-locked",
+                "created_at": 1u64,
+                "updated_at": 1u64
+            }
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec(&locks).expect("vote lock JSON should encode"),
+        )
+        .expect("vote lock file should be written");
+        DualQuorumConsensus::set_test_local_vote_lock_path(Some(path.clone()));
+
+        let mut scheduled = Validator::new(
+            "validator-scheduled".to_string(),
+            "scheduled-pubkey".to_string(),
+            "Scheduled".to_string(),
+            1_000,
+        );
+        scheduled.status = ValidatorStatus::Active;
+        let mut locked = Validator::new(
+            "validator-locked".to_string(),
+            "locked-pubkey".to_string(),
+            "Locked".to_string(),
+            1_000,
+        );
+        locked.status = ValidatorStatus::Active;
+        let active_validators = vec![scheduled.clone(), locked.clone()];
+
+        let selected = ProofOfSynergy::prefer_local_vote_lock_leader(
+            scheduled.clone(),
+            &active_validators,
+            &active_validators,
+            Some("validator-local"),
+            55,
+            810,
+            809,
+            1,
+        );
+
+        assert_eq!(selected.address, scheduled.address);
+        let lock = DualQuorumConsensus::local_locked_vote_for_height("validator-local", 55, 810)
+            .expect("vote lock lookup should succeed");
+        assert!(lock.is_none());
 
         DualQuorumConsensus::set_test_local_vote_lock_path(None);
         if let Some(root) = path.parent().and_then(|data| data.parent()) {

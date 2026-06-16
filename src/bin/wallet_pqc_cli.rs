@@ -19,16 +19,16 @@ fn usage() {
         "wallet-pqc-cli
 
 Usage:
-  wallet-pqc-cli gen-keypair [--algo fndsa|mldsa|slhdsa]
-      Generate a real Aegis PQC signing keypair and emit public/private key material as base64.
+  wallet-pqc-cli gen-keypair [--algo fndsa]
+      Generate a real FN-DSA Aegis PQC signing keypair and emit public/private key material as base64.
 
   wallet-pqc-cli passcode --passcode <secret> --mnemonic <bip39 words>
       Derive ML-KEM-1024 keypair, encapsulate, and seal the passcode with AES-GCM using SHA3-256(shared_secret || mnemonic).
 
-  wallet-pqc-cli sign-tx --private-key <hex> --tx '<json>' [--algo fndsa|mldsa|slhdsa]
+  wallet-pqc-cli sign-tx --private-key <hex> --tx '<json>' [--algo fndsa]
       Sign a Synergy transaction payload with the provided FN-DSA-1024 (default) private key and emit a signed transaction JSON.
 
-  wallet-pqc-cli sign-message --private-key-b64 <base64> --message <text> [--algo fndsa|mldsa|slhdsa]
+  wallet-pqc-cli sign-message --private-key-b64 <base64> --message <text> [--algo fndsa]
       Sign arbitrary UTF-8 message bytes and emit detached signature JSON (base64 + hex).
 "
     );
@@ -78,11 +78,12 @@ fn parse_algorithm(value: Option<&String>) -> Result<PQCAlgorithm, String> {
         "" | "fndsa" | "fn-dsa" | "fn-dsa-512" | "fn-dsa-1024" | "falcon" | "falcon-1024" => {
             Ok(PQCAlgorithm::FNDSA)
         }
-        "mldsa" | "ml-dsa" | "ml-dsa-44" | "ml-dsa-65" | "ml-dsa-87" | "dilithium"
-        | "dilithium-65" => Ok(PQCAlgorithm::MLDSA),
-        "slhdsa" | "slh-dsa" => Ok(PQCAlgorithm::SLHDSA),
+        "slhdsa" | "slh-dsa" => Err(format!(
+            "unsupported PQC signing algorithm '{}'; use fndsa",
+            value
+        )),
         "pqc" | "aegis" => Err(format!(
-            "ambiguous PQC signing algorithm '{}'; use fndsa, mldsa, or slhdsa",
+            "ambiguous PQC signing algorithm '{}'; use fndsa",
             value
         )),
         other => Err(format!("unsupported PQC signing algorithm '{other}'")),
@@ -297,6 +298,8 @@ mod tests {
 
     #[test]
     fn wallet_cli_rejects_ambiguous_or_unknown_algorithms() {
+        assert!(parse("unsupported-signature").is_err());
+        assert!(parse("slhdsa").is_err());
         assert!(parse("pqc").is_err());
         assert!(parse("aegis").is_err());
         assert!(parse("not-an-algorithm").is_err());

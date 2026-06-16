@@ -157,7 +157,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max((synergy_block_height{job=\"synergy-validators\"} or ((synergy_chain_height{job=\"synergy-validators\",host=\"val5\"} > 0) or synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"})) or synergy_chain_height{job=~\"synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "expr": "max(synergy_chain_height{job=\"synergy-validators\"} or synergy_chain_height{job=~\"synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
           "legendFormat": "height",
           "instant": true
         }
@@ -198,7 +198,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max((synergy_block_height{job=\"synergy-validators\"} or ((synergy_chain_height{job=\"synergy-validators\",host=\"val5\"} > 0) or synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"}))) - min((synergy_block_height{job=\"synergy-validators\"} or ((synergy_chain_height{job=\"synergy-validators\",host=\"val5\"} > 0) or synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"})))",
+          "expr": "max(synergy_chain_height{job=\"synergy-validators\"}) - min(synergy_chain_height{job=\"synergy-validators\"})",
           "legendFormat": "difference",
           "instant": true
         }
@@ -314,7 +314,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "300 / clamp_min(max((delta(synergy_block_height{job=\"synergy-validators\"}[5m]) or delta(synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"}[5m]))), 1)",
+          "expr": "300 / clamp_min(max(delta(synergy_chain_height{job=\"synergy-validators\"}[5m])), 1)",
           "legendFormat": "seconds/block",
           "instant": true
         }
@@ -353,7 +353,7 @@
           }
         }
       },
-      "description": "Average seconds per block over the selected window. Lower is faster. This answers: \"How quickly are blocks being created?\" Formula for the 5 minute panel: 300 / max(delta(synergy_block_height{job=\"synergy-validators\"}[5m])). The denominator is clamped to 1 so a stalled window is visible instead of blank."
+      "description": "Average seconds per block over the selected window. Lower is faster. This answers: \"How quickly are blocks being created?\" Formula for the 5 minute panel: 300 / max(delta(synergy_chain_height{job=\"synergy-validators\"}[5m])). The denominator is clamped to 1 so a stalled window is visible instead of blank."
     },
     {
       "type": "table",
@@ -379,7 +379,7 @@
         },
         {
           "refId": "B",
-          "expr": "(synergy_block_height{job=\"synergy-validators\"} or ((synergy_chain_height{job=\"synergy-validators\",host=\"val5\"} > 0) or synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"})) or synergy_chain_height{job=~\"synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
+          "expr": "synergy_chain_height{job=\"synergy-validators\"} or synergy_chain_height{job=~\"synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
           "legendFormat": "Block Height",
           "instant": true,
           "format": "table"
@@ -527,7 +527,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(synergy_block_height{job=\"synergy-validators\"} or ((synergy_chain_height{job=\"synergy-validators\",host=\"val5\"} > 0) or synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"}))",
+          "expr": "synergy_chain_height{job=\"synergy-validators\"}",
           "legendFormat": "{{instance_label}}"
         }
       ],
@@ -752,7 +752,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "60 * max((rate(synergy_block_height{job=\"synergy-validators\"}[5m]) or rate(synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"}[5m])))",
+          "expr": "60 * max(rate(synergy_chain_height{job=\"synergy-validators\"}[5m]))",
           "legendFormat": "blocks/min",
           "instant": true
         }
@@ -973,7 +973,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(synergy_block_height{job=\"synergy-validators\"} or ((synergy_chain_height{job=\"synergy-validators\",host=\"val5\"} > 0) or synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"})) or synergy_chain_height{job=~\"synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
+          "expr": "synergy_chain_height{job=\"synergy-validators\"} or synergy_chain_height{job=~\"synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
           "legendFormat": "{{instance_label}}"
         }
       ],

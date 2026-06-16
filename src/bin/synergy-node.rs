@@ -1,7 +1,9 @@
+use std::fs;
 use synergy_testnet::aegis_tx_tool::{
     build_fixture_report, sign_with_new_aegis_transaction_key, AegisTxBuildOptions,
 };
-use synergy_testnet::synergy_types::{ChainId, NetworkId};
+use synergy_testnet::gas::GasSchedule;
+use synergy_testnet::synergy_types::{ChainId, Hash, NetworkId};
 
 fn main() {
     if let Err(error) = run() {
@@ -483,7 +485,7 @@ fn run_tx_command(args: &[String]) -> Result<(), String> {
         }
         _ => {
             println!("Commands:");
-            println!("  synergy-node tx create-aegis --chain-id 1264 --network-id synergy-testnet-v2 [--sender <uma>] [--receiver <uma>] [--nonce <n>] [--amount-nwei <n>] [--gas-limit <n>] [--max-fee-nwei <n>] [--ttl-height <h>] [--read <key>] [--write <key>] [--dependency <tx_id>] [--payload <text>]");
+            println!("  synergy-node tx create-aegis --chain-id 1264 --network-id synergy-testnet-v2 [--sender <uma>] [--receiver <uma>] [--nonce <n>] [--amount-nwei <n>] [--gas-limit <n>] [--max-fee-nwei <n>] [--ttl-height <h>] [--read <key>] [--write <key>] [--dependency <tx_id>] [--payload <text> | --synq-deploy-envelope <ContractDeployEnvelope.json> [--synq-bytecode <Counter.compiled.synq> --synq-manifest <Counter.manifest.json> --synq-abi <Counter.abi.json>] | --synq-call-envelope <ContractCallEnvelope.json>]");
             println!("  synergy-node tx sign-aegis --chain-id 1264 --network-id synergy-testnet-v2 [same options]");
             println!("  synergy-node tx submit-aegis --chain-id 1264 --network-id synergy-testnet-v2 [same options]");
         }
@@ -579,6 +581,7 @@ fn signed_tx_summary(
         "aegis_public_key": report.public_key,
         "key_lifecycle_record": report.lifecycle_record,
         "rpc_transaction": report.rpc_transaction,
+        "synq_verification": report.synq_verification,
     })
 }
 
@@ -623,6 +626,7 @@ fn submit_aegis_transaction(
 
 fn tx_options_from_args(args: &[String]) -> Result<AegisTxBuildOptions, String> {
     let mut options = AegisTxBuildOptions::default();
+    let gas_limit_was_explicit = arg_value(args, "--gas-limit").is_some();
     if let Some(sender) = arg_value(args, "--sender") {
         options.sender = sender.clone();
         options.signer_uma_id = sender;
@@ -663,16 +667,137 @@ fn tx_options_from_args(args: &[String]) -> Result<AegisTxBuildOptions, String> 
             .parse::<u64>()
             .map_err(|error| format!("invalid --epoch: {error}"))?;
     }
-    if let Some(payload) = arg_value(args, "--payload") {
-        options.payload = payload.into_bytes();
-    }
+    let synq_write_hint = apply_payload_args(args, &mut options, gas_limit_was_explicit)?;
     options.read_set_hint = arg_values(args, "--read");
     let writes = arg_values(args, "--write");
     if !writes.is_empty() {
         options.write_set_hint = writes;
+    } else if let Some(write_hint) = synq_write_hint {
+        options.write_set_hint = vec![write_hint];
     }
     options.explicit_dependencies = arg_values(args, "--dependency");
     Ok(options)
+}
+
+fn apply_payload_args(
+    args: &[String],
+    options: &mut AegisTxBuildOptions,
+    gas_limit_was_explicit: bool,
+) -> Result<Option<String>, String> {
+    let raw_payload = arg_value(args, "--payload");
+    let deploy_envelope = arg_value(args, "--synq-deploy-envelope");
+    let call_envelope = arg_value(args, "--synq-call-envelope");
+    let synq_bytecode = arg_value(args, "--synq-bytecode");
+    let synq_manifest = arg_value(args, "--synq-manifest");
+    let synq_abi = arg_value(args, "--synq-abi");
+    let payload_source_count = raw_payload.is_some() as u8
+        + deploy_envelope.is_some() as u8
+        + call_envelope.is_some() as u8;
+    if payload_source_count > 1 {
+        return Err(
+            "choose only one of --payload, --synq-deploy-envelope, or --synq-call-envelope"
+                .to_string(),
+        );
+    }
+    if deploy_envelope.is_none()
+        && (synq_bytecode.is_some() || synq_manifest.is_some() || synq_abi.is_some())
+    {
+        return Err(
+            "--synq-bytecode, --synq-manifest, and --synq-abi are only valid with --synq-deploy-envelope"
+                .to_string(),
+        );
+    }
+
+    if let Some(payload) = raw_payload {
+        options.payload = payload.into_bytes();
+        return Ok(None);
+    }
+
+    let schedule = GasSchedule::default();
+    if let Some(path) = deploy_envelope {
+        let pqsynq_bytes =
+            fs::read(&path).map_err(|error| format!("failed to read {path}: {error}"))?;
+        let artifact_arg_count = synq_bytecode.is_some() as u8
+            + synq_manifest.is_some() as u8
+            + synq_abi.is_some() as u8;
+        options.payload = if artifact_arg_count == 0 {
+            synergy_testnet::synq_admission::build_deploy_admission_carrier_from_pqsynq_bytes(
+                ChainId::synergy_testnet_v2().0,
+                &NetworkId::synergy_testnet_v2().0,
+                &pqsynq_bytes,
+                current_timestamp(),
+            )
+            .map_err(|error| {
+                format!(
+                    "SynQ deploy admission carrier rejected [{}]: {error}",
+                    error.code()
+                )
+            })?
+        } else if artifact_arg_count == 3 {
+            let bytecode_path = synq_bytecode.expect("checked artifact_arg_count");
+            let manifest_path = synq_manifest.expect("checked artifact_arg_count");
+            let abi_path = synq_abi.expect("checked artifact_arg_count");
+            let bytecode = fs::read(&bytecode_path)
+                .map_err(|error| format!("failed to read {bytecode_path}: {error}"))?;
+            let manifest_json = fs::read_to_string(&manifest_path)
+                .map_err(|error| format!("failed to read {manifest_path}: {error}"))?;
+            let abi_json = fs::read_to_string(&abi_path)
+                .map_err(|error| format!("failed to read {abi_path}: {error}"))?;
+            synergy_testnet::synq_admission::build_deploy_admission_carrier_from_pqsynq_bytes_with_artifacts(
+                ChainId::synergy_testnet_v2().0,
+                &NetworkId::synergy_testnet_v2().0,
+                &pqsynq_bytes,
+                bytecode,
+                abi_json,
+                manifest_json,
+                current_timestamp(),
+            )
+            .map_err(|error| {
+                format!(
+                    "SynQ executable deploy admission carrier rejected [{}]: {error}",
+                    error.code()
+                )
+            })?
+        } else {
+            return Err(
+                "--synq-bytecode, --synq-manifest, and --synq-abi must be supplied together with --synq-deploy-envelope"
+                    .to_string(),
+            );
+        };
+        if !gas_limit_was_explicit {
+            options.gas_limit = schedule.synq_contract_deploy_base_gas;
+        }
+        return Ok(Some(synq_write_hint("deploy", &options.payload)));
+    }
+
+    if let Some(path) = call_envelope {
+        let pqsynq_bytes =
+            fs::read(&path).map_err(|error| format!("failed to read {path}: {error}"))?;
+        options.payload =
+            synergy_testnet::synq_admission::build_call_admission_carrier_from_pqsynq_bytes(
+                ChainId::synergy_testnet_v2().0,
+                &NetworkId::synergy_testnet_v2().0,
+                &pqsynq_bytes,
+                current_timestamp(),
+            )
+            .map_err(|error| {
+                format!(
+                    "SynQ call admission carrier rejected [{}]: {error}",
+                    error.code()
+                )
+            })?;
+        if !gas_limit_was_explicit {
+            options.gas_limit = schedule.synq_contract_call_base_gas;
+        }
+        return Ok(Some(synq_write_hint("call", &options.payload)));
+    }
+
+    Ok(None)
+}
+
+fn synq_write_hint(kind: &str, carrier: &[u8]) -> String {
+    let hash = Hash::from_domain_bytes("SYNERGY_SYNQ_ADMISSION_WRITE_HINT_V1", carrier).to_hex();
+    format!("synq-{kind}:{}", &hash[..16])
 }
 
 fn diagnose_sync_target(
@@ -876,6 +1001,13 @@ fn arg_value(args: &[String], name: &str) -> Option<String> {
 
 fn arg_flag(args: &[String], name: &str) -> bool {
     args.iter().any(|arg| arg == name)
+}
+
+fn current_timestamp() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
 }
 
 fn arg_values(args: &[String], name: &str) -> Vec<String> {

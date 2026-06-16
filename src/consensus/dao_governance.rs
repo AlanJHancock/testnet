@@ -578,6 +578,9 @@ impl SynergyOracle {
             email: None,
             total_transactions_validated: metrics.correct_votes,
             activation_tx_hash: None,
+            shadow_started_at_height: None,
+            activation_recorded_height: None,
+            activation_effective_height: None,
         }
     }
 

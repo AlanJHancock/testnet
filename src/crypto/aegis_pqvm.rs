@@ -6,6 +6,7 @@ use crate::synergy_types::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 pub const SYNERGY_TX_V1: &str = "SYNERGY_TX_V1";
 pub const SYNERGY_BLOCK_V1: &str = "SYNERGY_BLOCK_V1";
@@ -302,29 +303,47 @@ pub struct AegisPqvmSigner {
     initialized: bool,
 }
 
+static AEGIS_PQVM_SIGNER_SMOKE: OnceLock<Result<(), String>> = OnceLock::new();
+static AEGIS_PQVM_VERIFIER_SMOKE: OnceLock<Result<(), String>> = OnceLock::new();
+
+fn run_aegis_pqvm_fndsa_smoke(message: &[u8], context: &str) -> Result<(), String> {
+    let mut manager = PQCManager::new();
+    let (public_key, private_key) = manager
+        .generate_keypair(PQCAlgorithm::FNDSA)
+        .map_err(|error| format!("{context} key generation failed: {error}"))?;
+    let signature = manager
+        .sign(&private_key, message)
+        .map_err(|error| format!("{context} signing failed: {error}"))?;
+    let verified = manager
+        .verify(&public_key, &signature, message)
+        .map_err(|error| format!("{context} verification failed: {error}"))?;
+    if verified {
+        Ok(())
+    } else {
+        Err(format!("{context} verification returned false"))
+    }
+}
+
+fn ensure_cached_aegis_pqvm_smoke(
+    cache: &'static OnceLock<Result<(), String>>,
+    message: &'static [u8],
+    context: &'static str,
+) -> Result<(), AegisPqvmError> {
+    cache
+        .get_or_init(|| run_aegis_pqvm_fndsa_smoke(message, context))
+        .clone()
+        .map_err(AegisPqvmError)
+}
+
 impl AegisPqvmSigner {
     pub fn initialize_required() -> Result<Self, AegisPqvmError> {
-        let mut manager = PQCManager::new();
-        let smoke = manager
-            .generate_keypair(PQCAlgorithm::FNDSA)
-            .map_err(|error| {
-                AegisPqvmError(format!("aegis-pqvm smoke key generation failed: {error}"))
-            })?;
-        let signature = manager
-            .sign(&smoke.1, b"aegis-pqvm-required-smoke-test")
-            .map_err(|error| AegisPqvmError(format!("aegis-pqvm smoke signing failed: {error}")))?;
-        let verified = manager
-            .verify(&smoke.0, &signature, b"aegis-pqvm-required-smoke-test")
-            .map_err(|error| {
-                AegisPqvmError(format!("aegis-pqvm smoke verification failed: {error}"))
-            })?;
-        if !verified {
-            return Err(AegisPqvmError(
-                "aegis-pqvm smoke verification returned false".to_string(),
-            ));
-        }
+        ensure_cached_aegis_pqvm_smoke(
+            &AEGIS_PQVM_SIGNER_SMOKE,
+            b"aegis-pqvm-required-smoke-test",
+            "aegis-pqvm smoke",
+        )?;
         Ok(Self {
-            manager,
+            manager: PQCManager::new(),
             registry: AegisPqvmKeyRegistry::default(),
             initialized: true,
         })
@@ -486,27 +505,11 @@ pub struct AegisPqvmVerifier {
 
 impl AegisPqvmVerifier {
     pub fn initialize_required(registry: AegisPqvmKeyRegistry) -> Result<Self, AegisPqvmError> {
-        let mut manager = PQCManager::new();
-        let (pk, sk) = manager
-            .generate_keypair(PQCAlgorithm::FNDSA)
-            .map_err(|error| {
-                AegisPqvmError(format!("aegis-pqvm verifier smoke key failed: {error}"))
-            })?;
-        let sig = manager
-            .sign(&sk, b"aegis-pqvm-verifier-smoke-test")
-            .map_err(|error| {
-                AegisPqvmError(format!("aegis-pqvm verifier smoke sign failed: {error}"))
-            })?;
-        let ok = manager
-            .verify(&pk, &sig, b"aegis-pqvm-verifier-smoke-test")
-            .map_err(|error| {
-                AegisPqvmError(format!("aegis-pqvm verifier smoke verify failed: {error}"))
-            })?;
-        if !ok {
-            return Err(AegisPqvmError(
-                "aegis-pqvm verifier smoke verification returned false".to_string(),
-            ));
-        }
+        ensure_cached_aegis_pqvm_smoke(
+            &AEGIS_PQVM_VERIFIER_SMOKE,
+            b"aegis-pqvm-verifier-smoke-test",
+            "aegis-pqvm verifier smoke",
+        )?;
         Ok(Self {
             registry,
             initialized: true,
@@ -1014,10 +1017,8 @@ fn domain_payload(domain: &str, payload: &[u8]) -> Vec<u8> {
 fn parse_algorithm(value: &str) -> Result<PQCAlgorithm, AegisPqvmError> {
     match value {
         "fndsa" => Ok(PQCAlgorithm::FNDSA),
-        "mldsa" => Ok(PQCAlgorithm::MLDSA),
-        "slhdsa" => Ok(PQCAlgorithm::SLHDSA),
         other => Err(AegisPqvmError(format!(
-            "unsupported Aegis PQC signature algorithm: {other}"
+            "unsupported Aegis PQC signature algorithm: {other}; use fndsa"
         ))),
     }
 }
@@ -1025,7 +1026,6 @@ fn parse_algorithm(value: &str) -> Result<PQCAlgorithm, AegisPqvmError> {
 fn algorithm_name(algorithm: &PQCAlgorithm) -> &'static str {
     match algorithm {
         PQCAlgorithm::FNDSA => "fndsa",
-        PQCAlgorithm::MLDSA => "mldsa",
         PQCAlgorithm::SLHDSA => "slhdsa",
         PQCAlgorithm::MLKEM1024 => "mlkem1024",
         PQCAlgorithm::HQCKEM => "hqckem",
@@ -1228,6 +1228,15 @@ mod tests {
             Hash::zero(),
         );
         assert!(!signer.verifier().verify_vote_signature(&vote, &record));
+    }
+
+    #[test]
+    fn verifier_initialize_reuses_required_smoke_check() {
+        for _ in 0..3 {
+            let verifier = AegisPqvmVerifier::initialize_required(AegisPqvmKeyRegistry::default())
+                .expect("cached verifier smoke check should initialize");
+            assert!(verifier.initialized);
+        }
     }
 
     #[test]

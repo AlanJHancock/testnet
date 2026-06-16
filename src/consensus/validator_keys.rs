@@ -15,9 +15,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1952;
-const ML_DSA_65_PRIVATE_KEY_BYTES: usize = 4032;
-
 lazy_static! {
     static ref LOCAL_VALIDATOR_SIGNING_KEYS: Mutex<HashMap<String, (PQCPublicKey, PQCPrivateKey)>> =
         Mutex::new(HashMap::new());
@@ -25,7 +22,6 @@ lazy_static! {
 
 pub fn consensus_algorithm_label(algorithm: &PQCAlgorithm) -> &'static str {
     match algorithm {
-        PQCAlgorithm::MLDSA => "ml-dsa",
         PQCAlgorithm::FNDSA => "fn-dsa",
         PQCAlgorithm::SLHDSA => "slh-dsa",
         PQCAlgorithm::MLKEM1024 => "ml-kem-1024",
@@ -37,18 +33,11 @@ pub fn expected_validator_public_key(
     validator_address: &str,
     validator_manager: &ValidatorManager,
 ) -> Result<PQCPublicKey, String> {
-    let validator = validator_manager
-        .get_validator(validator_address)
-        .ok_or_else(|| format!("validator {validator_address} is not registered"))?;
-    parse_validator_public_key(validator_address, &validator.public_key).or_else(|error| {
-        if !error.contains("missing consensus key algorithm prefix") {
-            return Err(error);
-        }
-        parse_legacy_registry_public_key_with_genesis_algorithm(
-            validator_address,
-            &validator.public_key,
-        )
-    })
+    expected_validator_public_key_from_registry_at_height(
+        None,
+        validator_address,
+        validator_manager,
+    )
 }
 
 pub fn expected_validator_public_key_for_height(
@@ -56,12 +45,90 @@ pub fn expected_validator_public_key_for_height(
     validator_address: &str,
     validator_manager: &ValidatorManager,
 ) -> Result<PQCPublicKey, String> {
-    if let Some(fork_key) =
-        consensus_fork::validator_public_key_for_height(height, validator_address)?
-    {
-        return Ok(fork_key);
+    match consensus_fork::validator_public_key_for_height(height, validator_address) {
+        Ok(Some(fork_key)) => return Ok(fork_key),
+        Ok(None) => {}
+        Err(error) if is_missing_from_checkpoint_fork(&error, validator_address) => {
+            if is_canonical_genesis_validator(validator_address)? {
+                return Err(error);
+            }
+        }
+        Err(error) => return Err(error),
     }
-    expected_validator_public_key(validator_address, validator_manager)
+
+    let public_key = expected_validator_public_key_from_registry_at_height(
+        Some(height),
+        validator_address,
+        validator_manager,
+    )?;
+    validate_consensus_key_algorithm_for_height(height, &public_key.algorithm)?;
+    Ok(public_key)
+}
+
+fn is_missing_from_checkpoint_fork(error: &str, validator_address: &str) -> bool {
+    error.contains("post-fork consensus registry missing validator")
+        && error.contains(validator_address)
+}
+
+fn is_canonical_genesis_validator(validator_address: &str) -> Result<bool, String> {
+    let genesis = canonical_genesis().map_err(|error| {
+        format!("load canonical genesis for checkpoint validator lookup: {error}")
+    })?;
+    Ok(genesis
+        .validators()
+        .iter()
+        .any(|validator| validator.operator_address == validator_address))
+}
+
+fn expected_validator_public_key_from_registry_at_height(
+    height: Option<u64>,
+    validator_address: &str,
+    validator_manager: &ValidatorManager,
+) -> Result<PQCPublicKey, String> {
+    let validator = validator_manager
+        .get_validator(validator_address)
+        .ok_or_else(|| format!("validator {validator_address} is not registered"))?;
+    parse_validator_public_key(validator_address, &validator.public_key).or_else(|error| {
+        if !error.contains("missing consensus key algorithm prefix") {
+            return Err(error);
+        }
+        if is_canonical_genesis_validator(validator_address)? {
+            return parse_legacy_registry_public_key_with_genesis_algorithm(
+                validator_address,
+                &validator.public_key,
+            );
+        }
+        let Some(height) = height else {
+            return parse_legacy_registry_public_key_with_genesis_algorithm(
+                validator_address,
+                &validator.public_key,
+            );
+        };
+        parse_post_genesis_untyped_registry_public_key_for_height(
+            height,
+            validator_address,
+            &validator.public_key,
+        )
+    })
+}
+
+fn parse_post_genesis_untyped_registry_public_key_for_height(
+    height: u64,
+    validator_address: &str,
+    encoded: &str,
+) -> Result<PQCPublicKey, String> {
+    let Some(migration) = consensus_fork::active_consensus_fork_migration()? else {
+        return Err(format!(
+            "validator {validator_address} has an untyped post-genesis consensus key without an active consensus fork"
+        ));
+    };
+    if !migration.applies_to_height(height) {
+        return Err(format!(
+            "validator {validator_address} has an untyped post-genesis consensus key before consensus fork {}",
+            migration.fork_height
+        ));
+    }
+    parse_validator_public_key_with_declared_algorithm(validator_address, encoded, "FN-DSA")
 }
 
 pub fn parse_validator_public_key(
@@ -148,6 +215,11 @@ fn parse_validator_public_key_inner(
         split_algorithm_prefix(encoded, declared_algorithm_label).map_err(|error| {
             format!("validator {validator_address} consensus key algorithm is invalid: {error}")
         })?;
+    if algorithm != PQCAlgorithm::FNDSA {
+        return Err(format!(
+            "validator {validator_address} consensus key algorithm must be FN-DSA"
+        ));
+    }
     let key_data = decode_key_material(material).map_err(|error| {
         format!("validator {validator_address} consensus public key is invalid: {error}")
     })?;
@@ -413,12 +485,10 @@ fn ensure_private_key_matches_public_key(
         ));
     }
 
-    if expected_public_key.algorithm == PQCAlgorithm::MLDSA {
-        return ensure_legacy_mldsa_key_material_is_well_formed(
-            validator_address,
-            expected_public_key,
-            private_key,
-        );
+    if expected_public_key.algorithm != PQCAlgorithm::FNDSA {
+        return Err(format!(
+            "Aegis PQC consensus key self-test for validator {validator_address} requires FN-DSA"
+        ));
     }
 
     let challenge = local_key_binding_challenge(validator_address, expected_public_key);
@@ -442,26 +512,6 @@ fn ensure_private_key_matches_public_key(
                 ))
             }
         })
-}
-
-fn ensure_legacy_mldsa_key_material_is_well_formed(
-    validator_address: &str,
-    expected_public_key: &PQCPublicKey,
-    private_key: &PQCPrivateKey,
-) -> Result<(), String> {
-    if expected_public_key.key_data.len() != ML_DSA_65_PUBLIC_KEY_BYTES {
-        return Err(format!(
-            "Aegis PQC consensus ML-DSA public key for validator {validator_address} has {} bytes, expected {ML_DSA_65_PUBLIC_KEY_BYTES}",
-            expected_public_key.key_data.len()
-        ));
-    }
-    if private_key.key_data.len() != ML_DSA_65_PRIVATE_KEY_BYTES {
-        return Err(format!(
-            "Aegis PQC consensus ML-DSA private key for validator {validator_address} has {} bytes, expected {ML_DSA_65_PRIVATE_KEY_BYTES}",
-            private_key.key_data.len()
-        ));
-    }
-    Ok(())
 }
 
 fn local_key_binding_challenge(
@@ -707,7 +757,10 @@ fn split_algorithm_prefix<'a>(
     }
 
     let Some(label) = declared_algorithm_label else {
-        return Err("missing consensus key algorithm prefix; expected fn-dsa:<base64>, falcon:<base64>, or ml-dsa:<base64>".to_string());
+        return Err(
+            "missing consensus key algorithm prefix; expected fn-dsa:<base64> or falcon:<base64>"
+                .to_string(),
+        );
     };
     Ok((algorithm_from_label(label)?, encoded))
 }
@@ -757,6 +810,59 @@ pub(crate) fn register_test_validator_signing_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestConsensusForkEnv {
+        previous: Option<String>,
+    }
+
+    impl Drop for TestConsensusForkEnv {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => env::set_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV, value),
+                None => env::remove_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV),
+            }
+        }
+    }
+
+    fn install_test_consensus_fork(entries: Vec<serde_json::Value>) -> TestConsensusForkEnv {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let dir = env::temp_dir().join(format!(
+            "synergy-validator-keys-fork-test-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("create test fork directory");
+        let path = dir.join("consensus-fork-migration.json");
+        let payload = serde_json::json!({
+            "fork_height": 204216,
+            "parent_height": 204215,
+            "parent_hash": "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816",
+            "state_root": "test-state-root",
+            "old_consensus_algorithm": "FN-DSA",
+            "new_consensus_algorithm": "FN-DSA",
+            "new_validator_registry": entries,
+            "migration_reason": "unit test checkpoint fork",
+            "parser_mode": "fail_closed"
+        });
+        fs::write(&path, serde_json::to_string_pretty(&payload).unwrap())
+            .expect("write test fork file");
+        let previous = env::var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV).ok();
+        env::set_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV, &path);
+        TestConsensusForkEnv { previous }
+    }
+
+    fn fork_entry(validator_address: &str, key_byte: u8) -> serde_json::Value {
+        serde_json::json!({
+            "validator_address": validator_address,
+            "consensus_key_type": "FN-DSA",
+            "consensus_public_key": format!(
+                "fn-dsa:{}",
+                general_purpose::STANDARD.encode(vec![key_byte; 128])
+            )
+        })
+    }
 
     #[test]
     fn candidate_private_key_paths_include_workspace_key_file() {
@@ -837,12 +943,26 @@ mod tests {
 
     #[test]
     fn rejects_mismatched_prefixed_and_declared_validator_algorithms() {
-        let encoded = format!("ml-dsa:{}", general_purpose::STANDARD.encode([1, 2, 3, 4]));
+        let encoded = format!("slh-dsa:{}", general_purpose::STANDARD.encode([1, 2, 3, 4]));
         let error =
             parse_validator_public_key_with_declared_algorithm("synval1test", &encoded, "falcon")
                 .unwrap_err();
 
         assert!(error.contains("does not match declared algorithm"));
+    }
+
+    #[test]
+    fn rejects_unsupported_validator_public_key_prefix() {
+        let encoded = format!(
+            "unsupported-signature:{}",
+            general_purpose::STANDARD.encode([1, 2, 3, 4])
+        );
+        let error = parse_validator_public_key("synval1test", &encoded).unwrap_err();
+
+        assert!(
+            error.contains("must be FN-DSA")
+                || error.contains("unsupported consensus key algorithm")
+        );
     }
 
     #[test]
@@ -856,40 +976,107 @@ mod tests {
     }
 
     #[test]
-    fn legacy_mldsa_startup_preflight_accepts_expected_key_lengths() {
-        let public_key = PQCPublicKey {
-            algorithm: PQCAlgorithm::MLDSA,
-            key_data: vec![7; ML_DSA_65_PUBLIC_KEY_BYTES],
-            key_id: "validator-consensus:synval1test".to_string(),
-            created_at: 0,
-        };
-        let private_key = PQCPrivateKey {
-            algorithm: PQCAlgorithm::MLDSA,
-            key_data: vec![9; ML_DSA_65_PRIVATE_KEY_BYTES],
-            public_key_id: public_key.key_id.clone(),
-            created_at: 0,
-        };
+    fn post_genesis_validator_key_falls_back_to_finalized_registry_after_checkpoint_fork() {
+        let _fork_env = install_test_consensus_fork(vec![fork_entry(
+            "synv1checkpointvalidator0000000000000000",
+            7,
+        )]);
+        let manager = ValidatorManager::new();
+        let validator_address = "synv11wsfus6ghzgjvm4glpatuy8tnyacrwealyjv";
+        let key_bytes = vec![42; 128];
+        let public_key = format!("fn-dsa:{}", general_purpose::STANDARD.encode(&key_bytes));
+        manager
+            .register_validator(crate::validator::ValidatorRegistration {
+                address: validator_address.to_string(),
+                public_key,
+                name: "post genesis validator".to_string(),
+                stake_amount: crate::validator::TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+                submitted_at: 1,
+                registration_tx_hash: "syntxn-post-genesis-key-test".to_string(),
+            })
+            .expect("register validator");
+        manager
+            .approve_validator(validator_address)
+            .expect("activate validator");
 
-        ensure_private_key_matches_public_key("synval1test", &public_key, &private_key).unwrap();
+        let resolved =
+            expected_validator_public_key_for_height(204_300, validator_address, &manager)
+                .expect("post-genesis validator should resolve from finalized registry");
+
+        assert_eq!(resolved.algorithm, PQCAlgorithm::FNDSA);
+        assert_eq!(resolved.key_data, key_bytes);
     }
 
     #[test]
-    fn legacy_mldsa_startup_preflight_rejects_wrong_key_lengths() {
+    fn post_genesis_untyped_validator_key_uses_fndsa_after_checkpoint_fork() {
+        let _fork_env = install_test_consensus_fork(vec![fork_entry(
+            "synv1checkpointvalidator0000000000000000",
+            7,
+        )]);
+        let manager = ValidatorManager::new();
+        let validator_address = "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx";
+        let key_bytes = vec![24; 128];
+        manager
+            .register_validator(crate::validator::ValidatorRegistration {
+                address: validator_address.to_string(),
+                public_key: general_purpose::STANDARD.encode(&key_bytes),
+                name: "post genesis untyped validator".to_string(),
+                stake_amount: crate::validator::TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+                submitted_at: 1,
+                registration_tx_hash: "syntxn-post-genesis-untyped-key-test".to_string(),
+            })
+            .expect("register validator");
+        manager
+            .approve_validator(validator_address)
+            .expect("activate validator");
+
+        let resolved =
+            expected_validator_public_key_for_height(204_300, validator_address, &manager)
+                .expect("post-genesis untyped validator should resolve as FN-DSA");
+
+        assert_eq!(resolved.algorithm, PQCAlgorithm::FNDSA);
+        assert_eq!(resolved.key_data, key_bytes);
+    }
+
+    #[test]
+    fn missing_genesis_validator_in_checkpoint_fork_still_fails_closed() {
+        let genesis = canonical_genesis().expect("canonical genesis should load");
+        let missing_validator = genesis
+            .validators()
+            .first()
+            .expect("genesis validator should exist")
+            .operator_address
+            .clone();
+        let _fork_env = install_test_consensus_fork(vec![fork_entry(
+            "synv1checkpointvalidator0000000000000000",
+            8,
+        )]);
+        let manager = ValidatorManager::new();
+
+        let error = expected_validator_public_key_for_height(204_300, &missing_validator, &manager)
+            .unwrap_err();
+
+        assert!(error.contains("post-fork consensus registry missing validator"));
+    }
+
+    #[test]
+    fn non_fndsa_startup_preflight_rejects_key_material() {
         let public_key = PQCPublicKey {
-            algorithm: PQCAlgorithm::MLDSA,
-            key_data: vec![7; ML_DSA_65_PUBLIC_KEY_BYTES - 1],
+            algorithm: PQCAlgorithm::SLHDSA,
+            key_data: vec![7; 1952],
             key_id: "validator-consensus:synval1test".to_string(),
             created_at: 0,
         };
         let private_key = PQCPrivateKey {
-            algorithm: PQCAlgorithm::MLDSA,
-            key_data: vec![9; ML_DSA_65_PRIVATE_KEY_BYTES],
+            algorithm: PQCAlgorithm::SLHDSA,
+            key_data: vec![9; 4032],
             public_key_id: public_key.key_id.clone(),
             created_at: 0,
         };
+
         let error = ensure_private_key_matches_public_key("synval1test", &public_key, &private_key)
             .unwrap_err();
 
-        assert!(error.contains("expected 1952"));
+        assert!(error.contains("requires FN-DSA"));
     }
 }

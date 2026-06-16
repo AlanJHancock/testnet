@@ -159,7 +159,7 @@ impl InteroperabilityLayer {
             message_routing: Arc::new(Mutex::new(HashMap::new())),
             pqc_manager: pqc_manager.clone(),
             security_config: SecurityConfiguration {
-                default_pqc_algorithm: PQCAlgorithm::MLDSA,
+                default_pqc_algorithm: PQCAlgorithm::FNDSA,
                 minimum_security_level: SecurityLevel::Enhanced,
                 require_validator_attestation: true,
                 enable_zero_knowledge_proofs: true,
@@ -203,7 +203,7 @@ impl InteroperabilityLayer {
         match message.security_level {
             SecurityLevel::Basic => {
                 // Basic security - just hash the message
-                message.pqc_algorithm = PQCAlgorithm::MLDSA;
+                message.pqc_algorithm = PQCAlgorithm::FNDSA;
             },
             SecurityLevel::Enhanced => {
                 // Enhanced security - encrypt payload
@@ -286,8 +286,8 @@ impl InteroperabilityLayer {
             .lock()
             .map_err(|_| "Aegis PQC manager lock poisoned".to_string())?;
 
-        for algorithm in [PQCAlgorithm::MLDSA, PQCAlgorithm::FNDSA, PQCAlgorithm::SLHDSA] {
-            let (_, private_key) = pqc_manager.generate_keypair(algorithm.clone())?;
+        for algorithm in [PQCAlgorithm::FNDSA] {
+            let (_, private_key) = pqc_manager.generate_keypair(algorithm)?;
             let signature = pqc_manager.sign_message(&private_key.public_key_id, message)?;
             signatures.push(signature.public_key_id);
         }
@@ -303,8 +303,8 @@ impl InteroperabilityLayer {
             .lock()
             .map_err(|_| "Aegis PQC manager lock poisoned".to_string())?;
 
-        for algorithm in [PQCAlgorithm::MLDSA, PQCAlgorithm::FNDSA, PQCAlgorithm::SLHDSA] {
-            let (_, private_key) = pqc_manager.generate_keypair(algorithm.clone())?;
+        for algorithm in [PQCAlgorithm::FNDSA] {
+            let (_, private_key) = pqc_manager.generate_keypair(algorithm)?;
             let signature = pqc_manager.sign_message(&private_key.public_key_id, message)?;
             signatures.push(signature.public_key_id);
         }

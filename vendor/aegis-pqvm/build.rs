@@ -211,59 +211,6 @@ fn main() {
         }
     }
 
-    if feature_enabled("mldsa") {
-        // ML-DSA implementations (PQClean)
-        let mldsa_configs = [("ml-dsa-44", 44), ("ml-dsa-65", 65), ("ml-dsa-87", 87)];
-
-        for (scheme, _level) in mldsa_configs {
-            // Always build the clean implementation.
-            let clean_dir = pqclean_root.join("crypto_sign").join(scheme).join("clean");
-            if clean_dir.exists() {
-                let sources = collect_sources(&clean_dir, &[]);
-                let include_dirs = vec![
-                    clean_dir.clone(),
-                    pqcrypto_internals_include.clone(),
-                    pqclean_common.clone(),
-                ];
-                compile_static_lib(&format!("{}_clean", scheme), &include_dirs, &sources);
-            } else {
-                eprintln!(
-                    "Warning: PQClean directory not found: {}",
-                    clean_dir.display()
-                );
-            }
-
-            // Optional optimized implementations.
-            if enable_avx2 {
-                let avx2_dir = pqclean_root.join("crypto_sign").join(scheme).join("avx2");
-                if avx2_dir.exists() {
-                    let sources = collect_sources(&avx2_dir, &[]);
-                    let include_dirs = vec![
-                        avx2_dir.clone(),
-                        pqcrypto_internals_include.clone(),
-                        pqclean_common.clone(),
-                    ];
-                    compile_static_lib(&format!("{}_avx2", scheme), &include_dirs, &sources);
-                }
-            }
-            if enable_aarch64 {
-                let aarch64_dir = pqclean_root
-                    .join("crypto_sign")
-                    .join(scheme)
-                    .join("aarch64");
-                if aarch64_dir.exists() {
-                    let sources = collect_sources(&aarch64_dir, &[]);
-                    let include_dirs = vec![
-                        aarch64_dir.clone(),
-                        pqcrypto_internals_include.clone(),
-                        pqclean_common.clone(),
-                    ];
-                    compile_static_lib(&format!("{}_aarch64", scheme), &include_dirs, &sources);
-                }
-            }
-        }
-    }
-
     if feature_enabled("fndsa") {
         // FN-DSA (Falcon) implementations (PQClean), including padded variants
         let fndsa_configs = [

@@ -40,7 +40,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max((synergy_block_height{job=\"synergy-validators\"} or ((synergy_chain_height{job=\"synergy-validators\",host=\"val5\"} > 0) or synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"})))",
+          "expr": "max(synergy_chain_height{job=\"synergy-validators\"})",
           "legendFormat": "height",
           "instant": true
         }
@@ -97,7 +97,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "min((synergy_block_height{job=\"synergy-validators\"} or ((synergy_chain_height{job=\"synergy-validators\",host=\"val5\"} > 0) or synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"})))",
+          "expr": "min(synergy_chain_height{job=\"synergy-validators\"})",
           "legendFormat": "height",
           "instant": true
         }
@@ -154,7 +154,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max((synergy_block_height{job=\"synergy-validators\"} or ((synergy_chain_height{job=\"synergy-validators\",host=\"val5\"} > 0) or synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"}))) - min((synergy_block_height{job=\"synergy-validators\"} or ((synergy_chain_height{job=\"synergy-validators\",host=\"val5\"} > 0) or synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"})))",
+          "expr": "max(synergy_chain_height{job=\"synergy-validators\"}) - min(synergy_chain_height{job=\"synergy-validators\"})",
           "legendFormat": "difference",
           "instant": true
         }
@@ -382,7 +382,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "300 / clamp_min(max((delta(synergy_block_height{job=\"synergy-validators\"}[5m]) or delta(synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"}[5m]))), 1)",
+          "expr": "300 / clamp_min(max(delta(synergy_chain_height{job=\"synergy-validators\"}[5m])), 1)",
           "legendFormat": "seconds/block",
           "instant": true
         }
@@ -412,7 +412,7 @@
         },
         "overrides": []
       },
-      "description": "Average seconds per block over the selected window. Lower is faster. This answers: \"How quickly are blocks being created?\" Formula for the 5 minute panel: 300 / max(delta(synergy_block_height{job=\"synergy-validators\"}[5m])). The denominator is clamped to 1 so a stalled window is visible instead of blank."
+      "description": "Average seconds per block over the selected window. Lower is faster. This answers: \"How quickly are blocks being created?\" Formula for the 5 minute panel: 300 / max(delta(synergy_chain_height{job=\"synergy-validators\"}[5m])). The denominator is clamped to 1 so a stalled window is visible instead of blank."
     },
     {
       "id": 8,
@@ -431,7 +431,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "60 * (rate(synergy_block_height{job=\"synergy-validators\"}[5m]) or rate(synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"}[5m]))",
+          "expr": "60 * rate(synergy_chain_height{job=\"synergy-validators\"}[5m])",
           "legendFormat": "{{instance_label}}"
         }
       ],
@@ -527,7 +527,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(synergy_p2p_status_ready_validators{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} or synergy_status_ready_validators{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "expr": "count(synergy_node_qrpc_up{role=\"validator\"} == 1)",
           "legendFormat": "{{instance_label}}"
         }
       ],
@@ -575,7 +575,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(synergy_block_height{job=\"synergy-validators\"} or ((synergy_chain_height{job=\"synergy-validators\",host=\"val5\"} > 0) or synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"}))",
+          "expr": "synergy_chain_height{job=\"synergy-validators\"}",
           "legendFormat": "{{instance_label}} local"
         },
         {
@@ -724,7 +724,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "synergy_mempool_pending_transactions{job=~\"synergy-validators|synergy-relayers\"}",
+          "expr": "(synergy_mempool_pending_transactions{job=~\"synergy-validators|synergy-relayers\"} or (up{job=~\"synergy-validators|synergy-relayers\"} * 0))",
           "legendFormat": "{{instance_label}}"
         }
       ],
@@ -772,7 +772,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "synergy_mempool_fee_nwei_total{job=~\"synergy-validators|synergy-relayers\"}",
+          "expr": "(synergy_mempool_fee_nwei_total{job=~\"synergy-validators|synergy-relayers\"} or (up{job=~\"synergy-validators|synergy-relayers\"} * 0))",
           "legendFormat": "{{instance_label}}"
         }
       ],
@@ -820,7 +820,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "synergy_chain_recent_gas_utilization_ratio{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
+          "expr": "(synergy_chain_recent_gas_utilization_ratio{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} or (up{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} * 0))",
           "legendFormat": "{{instance_label}}"
         }
       ],
@@ -868,7 +868,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "synergy_chain_latest_block_transactions{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
+          "expr": "(synergy_chain_latest_block_transactions{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} or (up{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} * 0))",
           "legendFormat": "{{instance_label}}"
         }
       ],
@@ -916,7 +916,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "synergy_chain_recent_avg_transactions_per_block{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
+          "expr": "(synergy_chain_recent_avg_transactions_per_block{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} or (up{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} * 0))",
           "legendFormat": "{{instance_label}}"
         }
       ],
@@ -964,7 +964,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "synergy_chain_recent_avg_gas_nwei_per_block{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
+          "expr": "(synergy_chain_recent_avg_gas_nwei_per_block{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} or (up{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} * 0))",
           "legendFormat": "{{instance_label}}"
         }
       ],
@@ -1012,7 +1012,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (label) (synergy_validator_blocks_produced_total{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "expr": "max by (name, status, validator) (synergy_validator_blocks_produced_total{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
           "legendFormat": "{{name}} {{status}}"
         }
       ],
@@ -1060,17 +1060,17 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (label) (synergy_validator_missed_blocks_total{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "expr": "max by (name, status, validator) (synergy_validator_missed_blocks_total{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
           "legendFormat": "{{name}} missed blocks"
         },
         {
           "refId": "B",
-          "expr": "max by (label) (synergy_validator_missed_vote_window{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "expr": "max by (name, status, validator) (synergy_validator_missed_vote_window{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
           "legendFormat": "{{name}} missed vote window"
         },
         {
           "refId": "C",
-          "expr": "max by (label) (synergy_validator_consecutive_missed_votes{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "expr": "max by (name, status, validator) (synergy_validator_consecutive_missed_votes{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
           "legendFormat": "{{name}} consecutive missed votes"
         }
       ],
@@ -1118,7 +1118,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (label) (synergy_validator_synergy_score{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} or synergy_validator_score{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "expr": "max by (name, status, validator) (synergy_validator_synergy_score{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"} or synergy_validator_score{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
           "legendFormat": "{{name}} {{status}}"
         }
       ],
@@ -1166,7 +1166,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (label) (synergy_validator_uptime_percent{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "expr": "max by (name, status, validator) (synergy_validator_uptime_percent{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
           "legendFormat": "{{name}} {{status}}"
         }
       ],
@@ -1599,7 +1599,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "900 / clamp_min(max((delta(synergy_block_height{job=\"synergy-validators\"}[15m]) or delta(synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"}[15m]))), 1)",
+          "expr": "900 / clamp_min(max(delta(synergy_chain_height{job=\"synergy-validators\"}[15m])), 1)",
           "legendFormat": "seconds/block",
           "instant": true
         }
@@ -1637,7 +1637,7 @@
         },
         "overrides": []
       },
-      "description": "Average seconds per block over the last 15 minutes. Formula: 900 / max(delta(synergy_block_height{job=\"synergy-validators\"}[15m])). Lower is faster."
+      "description": "Average seconds per block over the last 15 minutes. Formula: 900 / max(delta(synergy_chain_height{job=\"synergy-validators\"}[15m])). Lower is faster."
     },
     {
       "id": 33,
@@ -1656,7 +1656,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "60 * max((rate(synergy_block_height{job=\"synergy-validators\"}[5m]) or rate(synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"}[5m])))",
+          "expr": "60 * max(rate(synergy_chain_height{job=\"synergy-validators\"}[5m]))",
           "legendFormat": "blocks/min",
           "instant": true
         }
@@ -1713,7 +1713,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(synergy_block_height{job=\"synergy-validators\"} or ((synergy_chain_height{job=\"synergy-validators\",host=\"val5\"} > 0) or synergy_p2p_best_validator_peer_height{job=\"synergy-validators\",host=\"val5\"})) or synergy_chain_height{job=~\"synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
+          "expr": "synergy_chain_height{job=\"synergy-validators\"} or synergy_chain_height{job=~\"synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"}",
           "legendFormat": "{{instance_label}}"
         }
       ],

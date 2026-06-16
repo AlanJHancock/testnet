@@ -27,6 +27,7 @@ testnet/runtime/reports/
 tools/control-panel-workspace-files-copies/
 bootstrap-bundles/
 node-control-panel/
+release-artifacts/v*/
 
 # Build artifacts
 *.o

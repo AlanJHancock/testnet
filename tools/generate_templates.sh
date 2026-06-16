@@ -36,7 +36,10 @@ generate_template() {
     local cors_enabled="false"
     local cors_origins="[]"
     local metrics_bind="127.0.0.1:${metrics_port}"
-    local strict_allowlist="true"
+    local strict_allowlist="false"
+    if [[ "$compiled_profile" == "validator_node" ]]; then
+        strict_allowlist="true"
+    fi
 
     case "$bootstrap_mode" in
         validator-mesh)
@@ -112,9 +115,9 @@ algorithm = "Proof of Synergy"
 block_time_secs = 2
 epoch_length = 1000
 min_validators = 3
-validator_cluster_size = 5
+validator_cluster_size = 7
 validator_vote_threshold = 4
-max_validators = 5
+max_validators = 100
 status_ready_gate_enabled = true
 status_ready_min_validators = 3
 status_ready_genesis_grace_secs = 0
@@ -201,13 +204,13 @@ generate_template "security-council" "security_council" "security_council_node" 
 generate_template "treasury-controller" "treasury_controller" "treasury_controller_node" "treasury-controller-01" 5622 5640 5660 5680 6030 "data/logs/treasury-controller.log" false true "public-bootstrap"
 
 generate_template "oracle" "oracle" "oracle_node" "oracle-node-01" 5622 5640 5660 5680 6030 "data/logs/oracle.log" true false "public-bootstrap"
-generate_template "observer" "observer" "observer_light_node" "observer-node-01" 5628 5648 5668 5688 6038 "data/logs/observer.log" true false "sentry-edge"
-generate_template "indexer" "indexer" "indexer_and_explorer_node" "indexer-node-01" 5627 5647 5667 5687 6037 "data/logs/indexer.log" false false "sentry-edge"
+generate_template "observer" "observer" "observer_light_node" "observer-node-01" 5622 5640 5660 5680 6030 "data/logs/observer.log" true false "sentry-edge"
+generate_template "indexer" "indexer" "indexer_and_explorer_node" "indexer-node-01" 5622 5640 5660 5680 6030 "data/logs/indexer.log" false false "sentry-edge"
 generate_template "data-availability" "data_availability" "data_availability_node" "data-availability-01" 5622 5640 5660 5680 6030 "data/logs/data-availability.log" false false "public-bootstrap"
 generate_template "cross-chain-verifier" "cross_chain_verifier" "cross_chain_verifier_node" "cross-chain-verifier-01" 5622 5640 5660 5680 6030 "data/logs/cross-chain-verifier.log" true false "public-bootstrap"
 generate_template "relayer" "relayer" "relayer_node" "relayer-node-01" 5622 5640 5660 5680 6030 "data/logs/relayer.log" true false "validator-mesh"
-generate_template "rpc" "rpc_gateway" "rpc_gateway_node" "rpc-node-01" 5626 5646 5666 5686 6036 "data/logs/rpc.log" true false "sentry-edge"
-generate_template "rpc-gateway" "rpc_gateway" "rpc_gateway_node" "rpc-gateway-01" 5626 5646 5666 5686 6036 "data/logs/rpc-gateway.log" true false "sentry-edge"
+generate_template "rpc" "rpc_gateway" "rpc_gateway_node" "rpc-node-01" 5623 5641 5661 5681 6031 "data/logs/rpc.log" true false "sentry-edge"
+generate_template "rpc-gateway" "rpc_gateway" "rpc_gateway_node" "rpc-gateway-01" 5623 5641 5661 5681 6031 "data/logs/rpc-gateway.log" true false "sentry-edge"
 generate_template "witness" "witness" "witness_node" "witness-node-01" 5622 5640 5660 5680 6030 "data/logs/witness.log" true false "public-bootstrap"
 
 generate_template "ai-inference" "ai_inference" "analytics_simulation_node" "ai-inference-01" 5622 5640 5660 5680 6030 "data/logs/ai-inference.log" true false "public-bootstrap"

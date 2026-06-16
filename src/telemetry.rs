@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -11,6 +12,12 @@ use crate::sync::SyncState;
 use crate::validator::{ValidatorStatus, VALIDATOR_MANAGER};
 
 const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+
+type ChainMetricsSnapshot = (u64, u64, u64, u64, u64, u64, u64, u64, f64, f64, f64);
+
+lazy_static::lazy_static! {
+    static ref LAST_CHAIN_METRICS_SNAPSHOT: Mutex<Option<ChainMetricsSnapshot>> = Mutex::new(None);
+}
 
 pub fn start_metrics_server(bind_address: &str, config: NodeConfig, start_time: SystemTime) {
     let listener = match TcpListener::bind(bind_address) {
@@ -117,30 +124,29 @@ fn write_response(
     stream.write_all(response.as_bytes())
 }
 
-fn render_metrics(config: &NodeConfig, start_time: SystemTime) -> String {
-    let start_time_seconds = start_time
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let now_seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let uptime_seconds = now_seconds.saturating_sub(start_time_seconds);
+fn empty_chain_metrics_snapshot() -> ChainMetricsSnapshot {
+    (0, 0, 0, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0)
+}
 
-    let (
-        chain_height,
-        chain_blocks_total,
-        last_block_timestamp_seconds,
-        latest_block_transactions,
-        latest_block_gas_nwei,
-        latest_block_interval_seconds,
-        chain_transactions_total,
-        recent_transactions_total,
-        recent_avg_block_time_seconds,
-        recent_avg_txs_per_block,
-        recent_avg_gas_nwei,
-    ) = match SHARED_CHAIN.try_lock() {
+fn cached_chain_metrics_snapshot() -> ChainMetricsSnapshot {
+    LAST_CHAIN_METRICS_SNAPSHOT
+        .lock()
+        .ok()
+        .and_then(|snapshot| *snapshot)
+        .unwrap_or_else(empty_chain_metrics_snapshot)
+}
+
+fn update_cached_chain_metrics_snapshot(snapshot: ChainMetricsSnapshot) {
+    if snapshot.0 == 0 {
+        return;
+    }
+    if let Ok(mut cached) = LAST_CHAIN_METRICS_SNAPSHOT.lock() {
+        *cached = Some(snapshot);
+    }
+}
+
+fn collect_chain_metrics_snapshot() -> ChainMetricsSnapshot {
+    match SHARED_CHAIN.try_lock() {
         Ok(chain) => {
             let height = chain.last().map(|block| block.block_index).unwrap_or(0);
             let block_count = chain.chain.len() as u64;
@@ -210,7 +216,7 @@ fn render_metrics(config: &NodeConfig, start_time: SystemTime) -> String {
             } else {
                 recent_gas as f64 / recent_blocks.len() as f64
             };
-            (
+            let snapshot = (
                 height,
                 block_count,
                 last_timestamp,
@@ -222,10 +228,38 @@ fn render_metrics(config: &NodeConfig, start_time: SystemTime) -> String {
                 recent_avg_block_time,
                 recent_avg_txs,
                 recent_avg_gas,
-            )
+            );
+            update_cached_chain_metrics_snapshot(snapshot);
+            snapshot
         }
-        Err(_) => (0, 0, 0, 0, 0, 0, 0, 0, 0.0, 0.0, 0.0),
-    };
+        Err(_) => cached_chain_metrics_snapshot(),
+    }
+}
+
+fn render_metrics(config: &NodeConfig, start_time: SystemTime) -> String {
+    let start_time_seconds = start_time
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let now_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let uptime_seconds = now_seconds.saturating_sub(start_time_seconds);
+
+    let (
+        chain_height,
+        chain_blocks_total,
+        last_block_timestamp_seconds,
+        latest_block_transactions,
+        latest_block_gas_nwei,
+        latest_block_interval_seconds,
+        chain_transactions_total,
+        recent_transactions_total,
+        recent_avg_block_time_seconds,
+        recent_avg_txs_per_block,
+        recent_avg_gas_nwei,
+    ) = collect_chain_metrics_snapshot();
     let last_block_age_seconds = if last_block_timestamp_seconds == 0 {
         0
     } else {
@@ -268,7 +302,6 @@ fn render_metrics(config: &NodeConfig, start_time: SystemTime) -> String {
         sync_in_progress,
         sync_highest_block,
         sync_starting_block,
-        sync_gap_blocks,
         sync_progress_percent,
     ) = match SYNC_MANAGER.try_lock() {
         Ok(manager) => {
@@ -280,11 +313,10 @@ fn render_metrics(config: &NodeConfig, start_time: SystemTime) -> String {
                 !matches!(state, SyncState::Synced | SyncState::Idle),
                 highest,
                 starting,
-                highest.saturating_sub(chain_height),
                 manager.get_progress_percentage(),
             )
         }
-        Err(_) => ("unknown".to_string(), false, 0, 0, 0, 0.0),
+        Err(_) => ("unknown".to_string(), false, 0, 0, 0.0),
     };
 
     let (
@@ -347,6 +379,12 @@ fn render_metrics(config: &NodeConfig, start_time: SystemTime) -> String {
         None => (0, 0, 0, String::new()),
     };
 
+    let sync_gap_blocks = observed_sync_gap_blocks(
+        chain_height,
+        sync_highest_block,
+        p2p_best_validator_peer_height,
+    );
+
     let (
         validators_total,
         validator_pending_total,
@@ -368,6 +406,7 @@ fn render_metrics(config: &NodeConfig, start_time: SystemTime) -> String {
                     ValidatorStatus::Jailed => jailed += 1,
                     ValidatorStatus::Slashed => slashed += 1,
                     ValidatorStatus::Pending => {}
+                    ValidatorStatus::Shadow => {}
                 }
             }
             (
@@ -971,6 +1010,16 @@ fn sync_state_name(state: SyncState) -> &'static str {
     }
 }
 
+fn observed_sync_gap_blocks(
+    chain_height: u64,
+    sync_manager_highest_block: u64,
+    p2p_best_validator_peer_height: u64,
+) -> u64 {
+    sync_manager_highest_block
+        .max(p2p_best_validator_peer_height)
+        .saturating_sub(chain_height)
+}
+
 fn validator_status_name(status: &ValidatorStatus) -> &'static str {
     match status {
         ValidatorStatus::Active => "active",
@@ -978,13 +1027,16 @@ fn validator_status_name(status: &ValidatorStatus) -> &'static str {
         ValidatorStatus::Jailed => "jailed",
         ValidatorStatus::Slashed => "slashed",
         ValidatorStatus::Pending => "pending",
+        ValidatorStatus::Shadow => "shadow",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::render_metrics;
+    use crate::block::{Block, BlockChain};
     use crate::config::NodeConfig;
+    use crate::rpc::rpc_server::SHARED_CHAIN;
     use std::env;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1061,6 +1113,19 @@ mod tests {
     }
 
     #[test]
+    fn sync_gap_uses_p2p_validator_height_when_sync_manager_is_idle() {
+        assert_eq!(super::observed_sync_gap_blocks(303_717, 0, 303_725), 8);
+        assert_eq!(
+            super::observed_sync_gap_blocks(303_717, 303_720, 303_725),
+            8
+        );
+        assert_eq!(
+            super::observed_sync_gap_blocks(303_725, 303_720, 303_717),
+            0
+        );
+    }
+
+    #[test]
     fn render_metrics_includes_chain_mempool_sync_p2p_and_validator_series() {
         let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1076,5 +1141,55 @@ mod tests {
         assert!(body.contains("synergy_p2p_peers_connected"));
         assert!(body.contains("synergy_consensus_config"));
         assert!(body.contains("synergy_validator_blocks_produced_total"));
+    }
+
+    #[test]
+    fn render_metrics_reuses_last_chain_height_when_chain_lock_is_busy() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crate manifest should live under repo root");
+        let _runtime = TestRuntimeGuard::set(repo_root);
+        let previous_chain = {
+            let mut chain = SHARED_CHAIN
+                .lock()
+                .expect("shared chain lock should succeed");
+            let previous = chain.clone();
+            let genesis = Block::new_with_timestamp(
+                0,
+                Vec::new(),
+                "genesis-parent".to_string(),
+                "validator-1".to_string(),
+                0,
+                1_700_000_000,
+            );
+            let child = Block::new_with_timestamp(
+                1,
+                Vec::new(),
+                genesis.hash.clone(),
+                "validator-2".to_string(),
+                1,
+                1_700_000_004,
+            );
+            *chain = BlockChain {
+                chain: vec![genesis, child],
+            };
+            previous
+        };
+
+        let body = render_metrics(&NodeConfig::default(), SystemTime::now());
+        assert!(body.contains("synergy_chain_height 1\n"));
+
+        let chain_guard = SHARED_CHAIN
+            .lock()
+            .expect("shared chain lock should succeed");
+        let contended_body = render_metrics(&NodeConfig::default(), SystemTime::now());
+        drop(chain_guard);
+
+        assert!(contended_body.contains("synergy_chain_height 1\n"));
+
+        let mut chain = SHARED_CHAIN
+            .lock()
+            .expect("shared chain lock should succeed");
+        *chain = previous_chain;
     }
 }

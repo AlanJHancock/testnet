@@ -907,9 +907,9 @@ fn active_validator_addresses_for_snapshot_height(
                     Ok(validator.validator_address.clone())
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            if validators.len() != 5 {
+            if validators.len() < 5 {
                 return Err(format!(
-                    "post-fork active validator set has {} validator(s); expected 5",
+                    "post-fork active validator set has {} validator(s); expected at least 5",
                     validators.len()
                 ));
             }
@@ -937,6 +937,14 @@ fn snapshot_source_node_id() -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .or_else(crate::config::resolve_runtime_validator_address)
+        .or_else(|| {
+            crate::config::load_node_config(None)
+                .ok()
+                .and_then(|config| {
+                    let node_id = config.identity.node_id.trim();
+                    (!node_id.is_empty()).then(|| node_id.to_string())
+                })
+        })
         .unwrap_or_else(|| "unknown-validator".to_string())
 }
 
@@ -2333,7 +2341,7 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
             signer_set: signer_set.clone(),
             aegis_pqc_verified: qc.verified,
             duplicate_signer_check_passed: signer_set_unique,
-            active_validator_set_is_genesis_5: active_validator_set.len() == 5,
+            active_validator_set_is_genesis_5: active_validator_set.len() >= 5,
             relayers_rpc_support_counted_toward_quorum: false,
         },
         active_validator_set: active_validator_set.clone(),
@@ -2866,7 +2874,9 @@ pub fn start_shadow_observe_with_options(
     }
     let status = read_self_heal_status_file();
     let previous_state = status_state(status.as_ref()).unwrap_or_else(|| "QUARANTINED".to_string());
-    if previous_state != "CAUGHT_UP" && previous_state != "HEAD_MATCHED" {
+    let explicit_shadow_reset =
+        previous_state == "SHADOW_OBSERVING" && options.required_blocks.is_some();
+    if previous_state != "CAUGHT_UP" && previous_state != "HEAD_MATCHED" && !explicit_shadow_reset {
         return Ok(json!(fail_closed_mutation_response(
             validator_id,
             RealignmentState::Quarantined,
@@ -3206,9 +3216,10 @@ mod tests {
         quarantine_status, quarantine_stopped_validator_with_options, read_block_at_height,
         read_latest_block_summary, rejoin_eligibility, request_rejoin_with_options,
         self_heal_from_snapshot, shadow_status, snapshot_metadata_consistency_report,
-        start_shadow_observe_with_options, sync_from_canonical_peer_with_options, BlockSummary,
-        CommittedBlockLogEntry, CreateSnapshotOptions, OperatorQuarantineOptions,
-        RejoinRequestOptions, SnapshotCanonicalLockMaterialization, StartShadowObserveOptions,
+        snapshot_source_node_id, start_shadow_observe_with_options,
+        sync_from_canonical_peer_with_options, BlockSummary, CommittedBlockLogEntry,
+        CreateSnapshotOptions, OperatorQuarantineOptions, RejoinRequestOptions,
+        SnapshotCanonicalLockMaterialization, StartShadowObserveOptions,
         SyncFromCanonicalPeerOptions, DIAGNOSTIC_STALE_TRANSIENT_VOTE_LOCK_SECS, EXPECTED_CHAIN_ID,
         EXPECTED_NETWORK_ID,
     };
@@ -3310,7 +3321,7 @@ mod tests {
                 "parent_height": 204215,
                 "parent_hash": "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816",
                 "state_root": "test-state-root",
-                "old_consensus_algorithm": "ML-DSA-65",
+                "old_consensus_algorithm": "FN-DSA",
                 "new_consensus_algorithm": "FN-DSA",
                 "new_validator_registry": registry,
                 "migration_reason": "test fork registry overlay",
@@ -3693,6 +3704,51 @@ mod tests {
         });
         let error = result.expect_err("snapshot creation should fail closed without proof");
         assert!(error.contains("source_node_majority_branch_proven"));
+    }
+
+    #[test]
+    fn snapshot_source_node_id_falls_back_to_config_identity() {
+        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
+            .lock()
+            .expect("diagnostics env lock should succeed");
+        let root = test_runtime_root("snapshot-source-node-id");
+        let config_path = root.join("config/node.toml");
+        let mut config = NodeConfig::default();
+        config.network.id = EXPECTED_CHAIN_ID;
+        config.network.network_id = EXPECTED_NETWORK_ID.to_string();
+        config.blockchain.chain_id = EXPECTED_CHAIN_ID;
+        config.identity.node_id = "archive-validator-01".to_string();
+        config.identity.role = "archive_validator".to_string();
+        config.identity.role_display = "archive-validator".to_string();
+        fs::write(
+            &config_path,
+            toml::to_string_pretty(&config).expect("test config should serialize"),
+        )
+        .expect("test config should be updated");
+
+        let previous_source = std::env::var("SYNERGY_SNAPSHOT_SOURCE_NODE_ID").ok();
+        let previous_validator = std::env::var("SYNERGY_VALIDATOR_ADDRESS").ok();
+        let previous_node_address = std::env::var("NODE_ADDRESS").ok();
+        std::env::remove_var("SYNERGY_SNAPSHOT_SOURCE_NODE_ID");
+        std::env::remove_var("SYNERGY_VALIDATOR_ADDRESS");
+        std::env::remove_var("NODE_ADDRESS");
+
+        let resolved = with_runtime_root(&root, snapshot_source_node_id);
+
+        match previous_source {
+            Some(value) => std::env::set_var("SYNERGY_SNAPSHOT_SOURCE_NODE_ID", value),
+            None => std::env::remove_var("SYNERGY_SNAPSHOT_SOURCE_NODE_ID"),
+        }
+        match previous_validator {
+            Some(value) => std::env::set_var("SYNERGY_VALIDATOR_ADDRESS", value),
+            None => std::env::remove_var("SYNERGY_VALIDATOR_ADDRESS"),
+        }
+        match previous_node_address {
+            Some(value) => std::env::set_var("NODE_ADDRESS", value),
+            None => std::env::remove_var("NODE_ADDRESS"),
+        }
+
+        assert_eq!(resolved, "archive-validator-01");
     }
 
     #[test]
@@ -5031,7 +5087,7 @@ mod tests {
         let root = test_runtime_root("post-fork-snapshot-active-set");
         install_test_config(&root, EXPECTED_CHAIN_ID, EXPECTED_NETWORK_ID);
         install_test_genesis(&root);
-        let fork_validators = (1..=5)
+        let fork_validators = (1..=6)
             .map(|index| format!("synv1forktest{index}"))
             .collect::<Vec<_>>();
         install_test_consensus_fork(&root, &fork_validators);

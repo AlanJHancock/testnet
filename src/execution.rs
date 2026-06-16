@@ -1,6 +1,11 @@
 use crate::crypto::aegis_pqvm::{SYNERGY_RECEIPT_ROOT_V1, SYNERGY_STATE_ROOT_V1};
 use crate::synergy_types::{Block, CanonicalSerialize, Hash, Transaction, TxId};
 use crate::synq_admission::SynQVerificationSummary;
+use crate::synq_execution::{
+    execute_synq_transaction, SynQAivmReceiptSummary, SynQArtifactKey, SynQContractArtifact,
+    SynQDeploymentRecord,
+};
+use aivm_core::state::ContractState;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9,6 +14,9 @@ pub struct ExecutionState {
     pub verified_authorizations: BTreeMap<TxId, Hash>,
     pub synq_verifications: BTreeMap<TxId, SynQVerificationSummary>,
     pub synq_errors: BTreeMap<TxId, (String, String)>,
+    pub synq_artifacts: BTreeMap<SynQArtifactKey, SynQContractArtifact>,
+    pub synq_contracts: BTreeMap<String, SynQDeploymentRecord>,
+    pub synq_aivm_state: ContractState,
 }
 
 impl ExecutionState {
@@ -18,6 +26,9 @@ impl ExecutionState {
             verified_authorizations: BTreeMap::new(),
             synq_verifications: BTreeMap::new(),
             synq_errors: BTreeMap::new(),
+            synq_artifacts: BTreeMap::new(),
+            synq_contracts: BTreeMap::new(),
+            synq_aivm_state: ContractState::default(),
         }
     }
 
@@ -68,6 +79,7 @@ pub struct TransactionReceipt {
     pub error: String,
     pub state_root_after: Hash,
     pub synq_verification: Option<SynQVerificationSummary>,
+    pub synq_aivm: Option<SynQAivmReceiptSummary>,
     pub synq_error_code: Option<String>,
     pub synq_error_message: Option<String>,
 }
@@ -159,7 +171,32 @@ pub fn merge_results_in_canonical_order(
 }
 
 pub fn compute_state_root_after(state: &ExecutionState) -> Result<Hash, String> {
-    serde_json::to_vec(&state.balances_nwei)
+    #[derive(serde::Serialize)]
+    struct ArtifactRootEntry<'a> {
+        key: &'a SynQArtifactKey,
+        artifact: &'a SynQContractArtifact,
+    }
+
+    #[derive(serde::Serialize)]
+    struct StateRootPayload<'a> {
+        balances_nwei: &'a BTreeMap<String, u128>,
+        synq_artifacts: Vec<ArtifactRootEntry<'a>>,
+        synq_contracts: &'a BTreeMap<String, SynQDeploymentRecord>,
+        synq_aivm_state_root: [u8; 32],
+    }
+
+    let synq_artifacts = state
+        .synq_artifacts
+        .iter()
+        .map(|(key, artifact)| ArtifactRootEntry { key, artifact })
+        .collect::<Vec<_>>();
+    let payload = StateRootPayload {
+        balances_nwei: &state.balances_nwei,
+        synq_artifacts,
+        synq_contracts: &state.synq_contracts,
+        synq_aivm_state_root: state.synq_aivm_state.state_root(),
+    };
+    serde_json::to_vec(&payload)
         .map(|bytes| Hash::from_domain_bytes(SYNERGY_STATE_ROOT_V1, &bytes))
         .map_err(|error| format!("state root serialize failed: {error}"))
 }
@@ -199,6 +236,41 @@ fn execute_transaction(
     let synq_verification = state.synq_verifications.get(&id).cloned();
     let synq_error = state.synq_errors.get(&id).cloned();
     let receipt = if sender_balance >= total_debit {
+        let synq_aivm = if let Some(summary) = synq_verification.as_ref() {
+            execute_synq_transaction(
+                &id,
+                tx,
+                summary,
+                &mut state.synq_aivm_state,
+                &mut state.synq_artifacts,
+                &mut state.synq_contracts,
+            )?
+        } else {
+            None
+        };
+        if synq_aivm
+            .as_ref()
+            .is_some_and(|receipt| receipt.status != "succeeded")
+        {
+            let error = synq_aivm
+                .as_ref()
+                .and_then(|receipt| receipt.error_message.clone())
+                .unwrap_or_else(|| "SYNQ_AIVM_EXECUTION_FAILED".to_string());
+            return Ok(TransactionReceipt {
+                tx_id: id,
+                status: ReceiptStatus::Failed,
+                gas_used: synq_aivm
+                    .as_ref()
+                    .map(|receipt| receipt.gas_used)
+                    .unwrap_or_else(|| tx.gas_limit.min(21_000)),
+                error,
+                state_root_after: compute_state_root_after(state)?,
+                synq_verification,
+                synq_aivm,
+                synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
+                synq_error_message: synq_error.map(|(_, message)| message),
+            });
+        }
         state
             .balances_nwei
             .insert(sender.clone(), sender_balance - total_debit);
@@ -209,10 +281,14 @@ fn execute_transaction(
         TransactionReceipt {
             tx_id: id,
             status: ReceiptStatus::Success,
-            gas_used: tx.gas_limit.min(21_000),
+            gas_used: synq_aivm
+                .as_ref()
+                .map(|receipt| receipt.gas_used)
+                .unwrap_or_else(|| tx.gas_limit.min(21_000)),
             error: String::new(),
             state_root_after: compute_state_root_after(state)?,
             synq_verification,
+            synq_aivm,
             synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
             synq_error_message: synq_error.map(|(_, message)| message),
         }
@@ -224,6 +300,7 @@ fn execute_transaction(
             error: "INSUFFICIENT_FUNDS".to_string(),
             state_root_after: compute_state_root_after(state)?,
             synq_verification,
+            synq_aivm: None,
             synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
             synq_error_message: synq_error.map(|(_, message)| message),
         }
@@ -266,6 +343,15 @@ mod tests {
     use crate::synergy_types::{
         AegisPqKeyId, AegisPqSignature, ChainId, Epoch, Height, NetworkId, UmaId,
     };
+    use pqsynq::{
+        canonicalize_signing_payload, derive_synq_address, hash_contract_call_body,
+        hash_contract_deploy_body, AlgorithmId, ChainId as PqSynQChainId, ContractCallEnvelope,
+        ContractDeployEnvelope, DigitalSignature, DomainTag, NetworkId as PqSynQNetworkId, Sign,
+        SignaturePurpose, SynQAddress, SynQPublicKey, SynQSignature, SynQSigningPayload,
+    };
+    use sha2::{Digest, Sha256};
+    use std::fs;
+    use std::path::PathBuf;
 
     fn tx(sender: &str, receiver: &str, nonce: u64, amount: u128, write: &str) -> Transaction {
         Transaction {
@@ -345,6 +431,251 @@ mod tests {
         state
     }
 
+    #[derive(Clone)]
+    struct CounterSynQFixture {
+        public_key: SynQPublicKey,
+        private_key: Vec<u8>,
+        address: SynQAddress,
+        bytecode: Vec<u8>,
+        abi_json: String,
+        manifest_json: String,
+        bytecode_hash: [u8; 32],
+        manifest_hash: [u8; 32],
+        abi_hash: [u8; 32],
+    }
+
+    impl CounterSynQFixture {
+        fn new() -> Self {
+            let signer = Sign::mldsa65();
+            let (public_key_bytes, private_key) = signer.keygen().expect("ML-DSA-65 keygen");
+            let public_key = SynQPublicKey::new(public_key_bytes);
+            let address = derive_synq_address(
+                &public_key,
+                AlgorithmId::MlDsa65,
+                &PqSynQNetworkId(
+                    crate::synq_admission::SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string(),
+                ),
+            )
+            .expect("derive SynQ address");
+
+            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../../Volumes/xcode/Synergy-Network-Projects/synq-language/contracts");
+            let root = if root.exists() {
+                root
+            } else {
+                PathBuf::from("/Volumes/xcode/Synergy-Network-Projects/synq-language/contracts")
+            };
+            let bytecode = fs::read(root.join("Counter.compiled.synq")).expect("Counter bytecode");
+            let abi_json = fs::read_to_string(root.join("Counter.abi.json")).expect("Counter ABI");
+            let manifest_json =
+                fs::read_to_string(root.join("Counter.manifest.json")).expect("Counter manifest");
+            let bytecode_hash = sha256_array(&bytecode);
+            let manifest_hash = sha256_array(manifest_json.as_bytes());
+            let abi_hash = sha256_array(abi_json.as_bytes());
+
+            Self {
+                public_key,
+                private_key,
+                address,
+                bytecode,
+                abi_json,
+                manifest_json,
+                bytecode_hash,
+                manifest_hash,
+                abi_hash,
+            }
+        }
+
+        fn deploy_payload(&self, include_artifacts: bool) -> Vec<u8> {
+            let constructor_args_hash = sha256_array(&[]);
+            let payload_hash = hash_contract_deploy_body(
+                &self.bytecode_hash,
+                &self.manifest_hash,
+                &self.abi_hash,
+                self.address.as_bytes(),
+                &constructor_args_hash,
+            );
+            let signing_payload = self.signing_payload(
+                DomainTag::SynqContractDeployV1,
+                SignaturePurpose::ContractDeploy,
+                payload_hash,
+                101,
+            );
+            let signature = self.sign_payload(&signing_payload);
+            let deploy = ContractDeployEnvelope {
+                signing_payload,
+                public_key: self.public_key.clone(),
+                signature: SynQSignature::new(signature),
+                bytecode_hash: self.bytecode_hash,
+                manifest_hash: self.manifest_hash,
+                abi_hash: self.abi_hash,
+                constructor_args_hash,
+            };
+            let pqsynq_bytes = serde_json::to_vec(&deploy).expect("deploy JSON");
+            if include_artifacts {
+                crate::synq_admission::build_deploy_admission_carrier_from_pqsynq_bytes_with_artifacts(
+                    crate::synergy_types::SYNERGY_TESTNET_V2_CHAIN_ID,
+                    crate::synergy_types::SYNERGY_TESTNET_V2_NETWORK_ID,
+                    &pqsynq_bytes,
+                    self.bytecode.clone(),
+                    self.abi_json.clone(),
+                    self.manifest_json.clone(),
+                    crate::synq_admission::test_support::TEST_NOW,
+                )
+                .expect("deploy carrier with artifacts")
+            } else {
+                crate::synq_admission::build_deploy_admission_carrier_from_pqsynq_bytes(
+                    crate::synergy_types::SYNERGY_TESTNET_V2_CHAIN_ID,
+                    crate::synergy_types::SYNERGY_TESTNET_V2_NETWORK_ID,
+                    &pqsynq_bytes,
+                    crate::synq_admission::test_support::TEST_NOW,
+                )
+                .expect("deploy carrier")
+            }
+        }
+
+        fn call_payload(&self, method_selector: [u8; 4], nonce: u64) -> Vec<u8> {
+            let encoded_args_hash = sha256_array(&[]);
+            let payload_hash = hash_contract_call_body(
+                self.address.as_bytes(),
+                &method_selector,
+                &encoded_args_hash,
+                self.address.as_bytes(),
+            );
+            let signing_payload = self.signing_payload(
+                DomainTag::SynqContractCallV1,
+                SignaturePurpose::ContractCall,
+                payload_hash,
+                nonce,
+            );
+            let signature = self.sign_payload(&signing_payload);
+            let call = ContractCallEnvelope {
+                signing_payload,
+                public_key: self.public_key.clone(),
+                signature: SynQSignature::new(signature),
+                contract_address: self.address,
+                method_selector,
+                encoded_args_hash,
+            };
+            crate::synq_admission::build_call_admission_carrier_from_pqsynq_bytes(
+                crate::synergy_types::SYNERGY_TESTNET_V2_CHAIN_ID,
+                crate::synergy_types::SYNERGY_TESTNET_V2_NETWORK_ID,
+                &serde_json::to_vec(&call).expect("call JSON"),
+                crate::synq_admission::test_support::TEST_NOW,
+            )
+            .expect("call carrier")
+        }
+
+        fn signing_payload(
+            &self,
+            domain_tag: DomainTag,
+            signature_purpose: SignaturePurpose,
+            payload_hash: [u8; 32],
+            nonce: u64,
+        ) -> SynQSigningPayload {
+            SynQSigningPayload {
+                domain_tag,
+                chain_id: PqSynQChainId(crate::synergy_types::SYNERGY_TESTNET_V2_CHAIN_ID),
+                network_id: PqSynQNetworkId(
+                    crate::synq_admission::SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string(),
+                ),
+                protocol_version: 1,
+                algorithm_id: AlgorithmId::MlDsa65,
+                signature_purpose,
+                nonce,
+                not_before_unix: 0,
+                expiration_unix: 4_102_444_800,
+                signer_address: self.address,
+                payload_hash,
+            }
+        }
+
+        fn sign_payload(&self, payload: &SynQSigningPayload) -> Vec<u8> {
+            let canonical = canonicalize_signing_payload(payload).expect("canonical payload");
+            Sign::mldsa65()
+                .detached_sign(&canonical, &self.private_key)
+                .expect("ML-DSA-65 sign")
+        }
+    }
+
+    fn synq_tx(payload: Vec<u8>, nonce: u64, gas_limit: u64, write: &str) -> Transaction {
+        let mut transaction = tx("alice", "carol", nonce, 0, write);
+        transaction.payload = payload;
+        transaction.gas_limit = gas_limit;
+        transaction
+    }
+
+    fn run_counter_flow(
+        deploy_payload: Vec<u8>,
+        increment_payload: Vec<u8>,
+        get_payload: Vec<u8>,
+    ) -> (Hash, String, String, String, u64) {
+        let mut state = ExecutionState::new()
+            .with_balance("alice", 1_000_000)
+            .with_balance("carol", 0);
+
+        let deploy = synq_tx(deploy_payload, 0, 150_000, "synq-counter");
+        state.mark_authorized(&deploy).expect("deploy authorized");
+        let deploy_result = execute_block(&block(vec![deploy]), &state).expect("deploy executes");
+        let deploy_receipt = deploy_result.receipts.first().expect("deploy receipt");
+        assert_eq!(deploy_receipt.status, ReceiptStatus::Success);
+        let deploy_hash = deploy_receipt
+            .synq_aivm
+            .as_ref()
+            .expect("deploy AIVM receipt")
+            .receipt_hash
+            .clone();
+
+        let mut state = deploy_result.state;
+        let increment = synq_tx(increment_payload, 1, 30_000, "synq-counter");
+        state
+            .mark_authorized(&increment)
+            .expect("increment authorized");
+        let increment_result =
+            execute_block(&block(vec![increment]), &state).expect("increment executes");
+        let increment_receipt = increment_result
+            .receipts
+            .first()
+            .expect("increment receipt");
+        assert_eq!(increment_receipt.status, ReceiptStatus::Success);
+        let increment_aivm = increment_receipt
+            .synq_aivm
+            .as_ref()
+            .expect("increment AIVM receipt");
+        assert_eq!(decode_u256_hex(&increment_aivm.return_data_hex), 1);
+        let increment_hash = increment_aivm.receipt_hash.clone();
+
+        let mut state = increment_result.state;
+        let get = synq_tx(get_payload, 2, 30_000, "synq-counter");
+        state.mark_authorized(&get).expect("get authorized");
+        let get_result = execute_block(&block(vec![get]), &state).expect("get executes");
+        let get_receipt = get_result.receipts.first().expect("get receipt");
+        assert_eq!(get_receipt.status, ReceiptStatus::Success);
+        let get_aivm = get_receipt.synq_aivm.as_ref().expect("get AIVM receipt");
+        let get_value = decode_u256_hex(&get_aivm.return_data_hex);
+
+        (
+            get_result.state_root_after,
+            deploy_hash,
+            increment_hash,
+            get_aivm.receipt_hash.clone(),
+            get_value,
+        )
+    }
+
+    fn decode_u256_hex(value: &str) -> u64 {
+        let bytes = hex::decode(value).expect("return data hex");
+        assert_eq!(bytes.len(), 32);
+        u64::from_be_bytes(bytes[24..32].try_into().expect("u64 tail"))
+    }
+
+    fn sha256_array(bytes: &[u8]) -> [u8; 32] {
+        let digest = Sha256::digest(bytes);
+        let mut out = [0_u8; 32];
+        out.copy_from_slice(&digest);
+        out
+    }
+
     #[test]
     fn same_block_executed_repeatedly_produces_same_state_root() {
         let transactions = vec![
@@ -411,6 +742,118 @@ mod tests {
                 .map(|summary| summary.domain.as_str()),
             Some("SYNQ_CONTRACT_DEPLOY_V1")
         );
+    }
+
+    #[test]
+    fn synq_deploy_carrier_reaches_receipt_through_node_admission() {
+        let carrier = crate::synq_admission::test_support::deploy_carrier(
+            crate::synergy_types::SYNERGY_TESTNET_V2_NETWORK_ID,
+        );
+        let mut transaction = tx("alice", "carol", 0, 10, "synq-contract");
+        transaction.payload = crate::synq_admission::encode_synq_admission_carrier(&carrier)
+            .expect("encode SynQ admission carrier");
+        transaction.gas_limit = 150_000;
+
+        let block = block(vec![transaction.clone()]);
+        let mut state = ExecutionState::new()
+            .with_balance("alice", 1_000_000)
+            .with_balance("carol", 0);
+        state
+            .mark_authorized(&transaction)
+            .expect("SynQ carrier admitted by node authorization path");
+
+        let result = execute_block(&block, &state).expect("authorized block executes");
+        let receipt = result.receipts.first().expect("receipt");
+        let summary = receipt
+            .synq_verification
+            .as_ref()
+            .expect("receipt includes SynQ verification summary");
+        assert_eq!(summary.domain, "SYNQ_CONTRACT_DEPLOY_V1");
+        assert_eq!(summary.algorithm, "ML-DSA-65");
+        assert_eq!(summary.signer, carrier.signer);
+        assert_eq!(summary.payload_hash, carrier.payload_hash);
+        assert_eq!(summary.bytecode_hash, carrier.bytecode_hash);
+        assert!(summary.verified_at_admission);
+    }
+
+    #[test]
+    fn synq_counter_deploy_increment_get_execute_through_aivm_and_replay() {
+        let fixture = CounterSynQFixture::new();
+        let deploy_payload = fixture.deploy_payload(true);
+        let increment_payload =
+            fixture.call_payload(aivm_core::synq_runtime::COUNTER_INCREMENT_SELECTOR, 102);
+        let get_payload = fixture.call_payload(aivm_core::synq_runtime::COUNTER_GET_SELECTOR, 103);
+
+        let first = run_counter_flow(
+            deploy_payload.clone(),
+            increment_payload.clone(),
+            get_payload.clone(),
+        );
+        let replay = run_counter_flow(deploy_payload, increment_payload, get_payload);
+
+        assert_eq!(first, replay);
+        assert_eq!(first.4, 1);
+    }
+
+    #[test]
+    fn synq_hash_only_deploy_fails_closed_before_aivm_execution() {
+        let fixture = CounterSynQFixture::new();
+        let deploy = synq_tx(fixture.deploy_payload(false), 0, 150_000, "synq-counter");
+        let mut state = ExecutionState::new()
+            .with_balance("alice", 1_000_000)
+            .with_balance("carol", 0);
+        state.mark_authorized(&deploy).expect("deploy authorized");
+
+        let result = execute_block(&block(vec![deploy]), &state).expect("block executes");
+        let receipt = result.receipts.first().expect("receipt");
+        assert_eq!(receipt.status, ReceiptStatus::Failed);
+        let aivm = receipt
+            .synq_aivm
+            .as_ref()
+            .expect("failure includes AIVM summary");
+        assert_eq!(aivm.operation, "deploy");
+        assert_eq!(aivm.status, "failed");
+        assert_eq!(aivm.error_code.as_deref(), Some("SYNQ-AIVM-ARTIFACT"));
+        assert!(result.state.synq_contracts.is_empty());
+    }
+
+    #[test]
+    fn synq_bad_call_selector_rolls_back_aivm_state() {
+        let fixture = CounterSynQFixture::new();
+        let deploy = synq_tx(fixture.deploy_payload(true), 0, 150_000, "synq-counter");
+        let mut state = ExecutionState::new()
+            .with_balance("alice", 1_000_000)
+            .with_balance("carol", 0);
+        state.mark_authorized(&deploy).expect("deploy authorized");
+        let deploy_result = execute_block(&block(vec![deploy]), &state).expect("deploy executes");
+        assert_eq!(
+            deploy_result.receipts.first().expect("receipt").status,
+            ReceiptStatus::Success
+        );
+
+        let mut state = deploy_result.state;
+        let state_root_before = compute_state_root_after(&state).expect("state root");
+        let bad_call = synq_tx(
+            fixture.call_payload([0, 0, 0, 0], 104),
+            1,
+            30_000,
+            "synq-counter",
+        );
+        state
+            .mark_authorized(&bad_call)
+            .expect("bad call authorized");
+
+        let result = execute_block(&block(vec![bad_call]), &state).expect("bad call executes");
+        let receipt = result.receipts.first().expect("receipt");
+        assert_eq!(receipt.status, ReceiptStatus::Failed);
+        let aivm = receipt
+            .synq_aivm
+            .as_ref()
+            .expect("failure includes AIVM summary");
+        assert_eq!(aivm.operation, "call");
+        assert_eq!(aivm.status, "failed");
+        assert_eq!(aivm.error_code.as_deref(), Some("Abi"));
+        assert_eq!(result.state_root_after, state_root_before);
     }
 
     #[test]

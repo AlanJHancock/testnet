@@ -1,4 +1,4 @@
-use crate::block::{Block, BlockChain};
+use crate::block::{Block, BlockChain, HOT_CHAIN_RETENTION_BLOCKS_ENV};
 use crate::config::NodeConfig;
 use crate::consensus::anti_divergence::current_validator_quarantine_duty_block;
 use crate::consensus::chain_durability::append_committed_block_body;
@@ -32,6 +32,8 @@ use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use socket2::{SockRef, TcpKeepalive};
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -42,6 +44,12 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(test)]
+thread_local! {
+    static TEST_COMMIT_VERIFIER_VALIDATOR_MANAGER: RefCell<Option<Arc<ValidatorManager>>> =
+        RefCell::new(None);
+}
 
 // Type aliases to avoid nested generics parsing issues
 type PeerMap = HashMap<String, PeerConnection>;
@@ -56,15 +64,19 @@ const DEFAULT_BOOTSTRAP_REFRESH_SECS: u64 = 10;
 const NORMAL_BOOTSTRAP_REFRESH_SECS: u64 = 120;
 const TCP_KEEPALIVE_IDLE_SECS: u64 = 300;
 const TCP_KEEPALIVE_INTERVAL_SECS: u64 = 60;
-const IMMEDIATE_STATUS_SYNC_BATCH: u32 = 8;
-const MAX_STATUS_SYNC_BATCH: u32 = 16;
-const MAX_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 16;
-const MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS: u32 = 8;
+const IMMEDIATE_STATUS_SYNC_BATCH: u32 = 32;
+const MAX_STATUS_SYNC_BATCH: u32 = 64;
+const MAX_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 64;
+const MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS: u32 = 64;
+const MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 128;
 const MAX_SUPPORT_PEER_DEEP_SYNC_LAG: u64 = 64_000;
 const MAX_P2P_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const BLOCK_SYNC_RESPONSE_WRITE_TIMEOUT_SECS: u64 = 1;
+const SUPPORT_NODE_BLOCK_SYNC_RESPONSE_WRITE_TIMEOUT_SECS: u64 = 2;
 const VALIDATOR_SUPPORT_SYNC_RESPONSE_WRITE_TIMEOUT_MILLIS: u64 = 500;
-const BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS: u64 = 5;
+const BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS: u64 = 1;
+const VALIDATOR_SUPPORT_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS: u64 = 2;
+const SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS: u64 = 1;
 const CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS: u64 = 500;
 const VOTE_REQUEST_PARENT_SYNC_WAIT_MILLIS: u64 = 900;
 const VOTE_REQUEST_PARENT_SYNC_POLL_MILLIS: u64 = 25;
@@ -83,6 +95,25 @@ const TESTNET_NATIVE_CAIP2: &str = "synergy:testnet";
 const TESTNET_RESERVED_EIP155: &str = "eip155:1264";
 const TESTNET_NETWORK_ID_TEXT: &str = "synergy-testnet-v2";
 const TESTNET_AEGIS_PQVM_VERSION: &str = "aegis-pqvm";
+const DEFAULT_MAX_CHAIN_SNAPSHOT_CLONE_HEIGHT: u64 = 50_000;
+
+fn compact_hot_chain_state_from_env(chain: &mut BlockChain, context: &str) {
+    if let Some((retain_recent_blocks, removed_blocks)) = chain.compact_from_env() {
+        if removed_blocks > 0 {
+            debug!(
+                "p2p",
+                "Compacted hot chain state from retention setting",
+                "context" => context.to_string(),
+                "retention_env" => HOT_CHAIN_RETENTION_BLOCKS_ENV,
+                "retain_recent_blocks" => retain_recent_blocks,
+                "removed_blocks" => removed_blocks as u64,
+                "first_retained_height" => chain.chain.first().map(|block| block.block_index).unwrap_or(0),
+                "tip_height" => chain.last().map(|block| block.block_index).unwrap_or(0),
+                "hot_block_count" => chain.chain.len() as u64
+            );
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConnectionDirection {
@@ -150,6 +181,21 @@ struct PeerConnection {
 struct BlockSyncResponsePolicy {
     max_blocks: u32,
     write_timeout: Duration,
+}
+
+fn select_block_sync_response_blocks(
+    chain: &BlockChain,
+    from_height: u64,
+    response_count: u32,
+) -> Vec<Block> {
+    let start = chain
+        .chain
+        .partition_point(|block| block.block_index < from_height);
+    chain.chain[start..]
+        .iter()
+        .take(response_count as usize)
+        .cloned()
+        .collect()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -400,8 +446,9 @@ fn handshake_pq_signing_payload(message: &NetworkMessage) -> Result<Vec<u8>, Str
 fn parse_handshake_pqc_algorithm(value: &str) -> Result<PQCAlgorithm, String> {
     match value.trim() {
         "fndsa" | "FN-DSA-1024" => Ok(PQCAlgorithm::FNDSA),
-        "mldsa" | "ML-DSA-65" | "ML-DSA-87" => Ok(PQCAlgorithm::MLDSA),
-        "slhdsa" | "SLH-DSA" => Ok(PQCAlgorithm::SLHDSA),
+        "slhdsa" | "SLH-DSA" => Err(format!(
+            "unsupported Aegis PQC peer key algorithm: {value}; use fndsa"
+        )),
         other => Err(format!("unsupported Aegis PQC peer key algorithm: {other}")),
     }
 }
@@ -614,12 +661,17 @@ fn handshake_mismatch_reason(
 }
 
 fn resolve_local_genesis_hash(blockchain: &BlockchainArc) -> String {
+    let canonical = canonical_genesis_hash();
+    if !canonical.trim().is_empty() {
+        return canonical;
+    }
+
     blockchain
         .lock()
         .ok()
         .and_then(|chain| chain.get_genesis_hash())
         .filter(|hash| !hash.trim().is_empty())
-        .unwrap_or_else(canonical_genesis_hash)
+        .unwrap_or_default()
 }
 
 fn validator_status_genesis_grace_remaining_secs(connected_at: u64, now: u64) -> u64 {
@@ -2562,7 +2614,7 @@ impl P2PNetwork {
         let network = Arc::clone(self);
         let _ = spawn_named_thread("p2p-bootstrap", move || {
             let heartbeat =
-                std::time::Duration::from_secs(network.config.p2p.heartbeat_interval.max(5));
+                std::time::Duration::from_secs(network.config.p2p.heartbeat_interval.max(1));
             let mut bootnode_dials = Vec::<String>::new();
             let mut last_refresh = Instant::now()
                 - current_bootstrap_refresh_interval(&network.config, &network.connected_peers);
@@ -3410,21 +3462,26 @@ fn handle_get_blocks_message(
         return;
     }
 
-    info!(
-        "p2p",
-        "Block request",
-        "peer" => peer_address.to_string(),
-        "from_height" => from_height,
-        "count" => count as u64
-    );
-
+    let (policy, min_serve_interval_secs, refuse_deep_support_sync) = {
+        let local_height = {
+            let chain = blockchain.lock().unwrap();
+            chain.last().map(|block| block.block_index).unwrap_or(0)
+        };
+        let peers = connected_peers.lock().unwrap();
+        let peer = peers.get(peer_address);
+        (
+            block_sync_response_policy(config, peer),
+            block_sync_min_serve_interval_secs(config, peer),
+            support_peer_sync_request_is_too_deep(peer, local_height, from_height),
+        )
+    };
     let now = current_timestamp();
     let rate_limit_key = peer_socket_host(peer_address);
     let should_serve = BLOCK_SYNC_LAST_SERVED
         .lock()
         .map(|mut served| {
             let last_served = served.get(&rate_limit_key).copied().unwrap_or(0);
-            if now.saturating_sub(last_served) < BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS {
+            if now.saturating_sub(last_served) < min_serve_interval_secs {
                 return false;
             }
             served.insert(rate_limit_key.clone(), now);
@@ -3438,23 +3495,22 @@ fn handle_get_blocks_message(
             "peer" => peer_address.to_string(),
             "host" => rate_limit_key,
             "from_height" => from_height,
-            "count" => count as u64
+            "count" => count as u64,
+            "min_serve_interval_secs" => min_serve_interval_secs
         );
         return;
     }
 
-    let (policy, refuse_deep_support_sync) = {
-        let local_height = {
-            let chain = blockchain.lock().unwrap();
-            chain.last().map(|block| block.block_index).unwrap_or(0)
-        };
-        let peers = connected_peers.lock().unwrap();
-        let peer = peers.get(peer_address);
-        (
-            block_sync_response_policy(config, peer),
-            support_peer_sync_request_is_too_deep(peer, local_height, from_height),
-        )
-    };
+    debug!(
+        "p2p",
+        "Serving block sync response",
+        "peer" => peer_address.to_string(),
+        "host" => rate_limit_key,
+        "from_height" => from_height,
+        "count" => count as u64,
+        "max_blocks" => policy.max_blocks as u64
+    );
+
     if refuse_deep_support_sync {
         warn!(
             "p2p",
@@ -3470,13 +3526,7 @@ fn handle_get_blocks_message(
     let response_count = count.min(policy.max_blocks);
     let (blocks, quorum_certificates) = {
         let chain = blockchain.lock().unwrap();
-        let blocks = chain
-            .chain
-            .iter()
-            .filter(|b| b.block_index >= from_height)
-            .take(response_count as usize)
-            .cloned()
-            .collect::<Vec<_>>();
+        let blocks = select_block_sync_response_blocks(&chain, from_height, response_count);
         let quorum_certificates = blocks
             .iter()
             .filter_map(|block| DualQuorumConsensus::committed_qc_for_block_hash(&block.hash))
@@ -3578,9 +3628,14 @@ fn should_request_missing_blocks(config: &NodeConfig, sync_active: bool) -> bool
 fn local_node_runs_validator_consensus(config: &NodeConfig) -> bool {
     let identity_role = config.identity.role.trim().to_ascii_lowercase();
     let compiled_profile = config.role.compiled_profile.trim().to_ascii_lowercase();
+    let exposes_consensus_service = config
+        .role
+        .services
+        .iter()
+        .any(|service| service.trim().eq_ignore_ascii_case("consensus"));
     identity_role == "validator"
         || compiled_profile.contains("validator")
-        || !config.node.validator_address.trim().is_empty()
+        || exposes_consensus_service
 }
 
 fn peer_is_active_consensus_validator(peer: &PeerConnection) -> bool {
@@ -3599,9 +3654,16 @@ fn peer_is_active_consensus_validator(peer: &PeerConnection) -> bool {
 }
 
 fn block_sync_response_policy(
-    _config: &NodeConfig,
+    config: &NodeConfig,
     peer: Option<&PeerConnection>,
 ) -> BlockSyncResponsePolicy {
+    if !local_node_runs_validator_consensus(config) {
+        return BlockSyncResponsePolicy {
+            max_blocks: MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS,
+            write_timeout: Duration::from_secs(SUPPORT_NODE_BLOCK_SYNC_RESPONSE_WRITE_TIMEOUT_SECS),
+        };
+    }
+
     let serving_support_peer = !peer
         .map(peer_is_active_consensus_validator)
         .unwrap_or(false);
@@ -3621,6 +3683,19 @@ fn block_sync_response_policy(
     }
 }
 
+fn block_sync_min_serve_interval_secs(config: &NodeConfig, peer: Option<&PeerConnection>) -> u64 {
+    if !local_node_runs_validator_consensus(config) {
+        SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS
+    } else if peer
+        .map(peer_is_active_consensus_validator)
+        .unwrap_or(false)
+    {
+        BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS
+    } else {
+        VALIDATOR_SUPPORT_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS
+    }
+}
+
 fn support_peer_sync_request_is_too_deep(
     peer: Option<&PeerConnection>,
     local_height: u64,
@@ -3636,7 +3711,7 @@ fn support_peer_sync_request_is_too_deep(
 fn background_poll_interval(behind: u64, heartbeat: Duration, sync_active: bool) -> Duration {
     if sync_active {
         heartbeat
-    } else if behind > 10 {
+    } else if behind > 0 {
         Duration::from_millis(BACKGROUND_SYNC_POLL_MILLIS)
     } else {
         heartbeat
@@ -3772,7 +3847,8 @@ fn resolve_announced_validator_for_vote(
 }
 
 fn build_local_status_message(blockchain: &BlockchainArc, config: &NodeConfig) -> NetworkMessage {
-    let (block_height, best_block_hash, genesis_hash) = {
+    let genesis_hash = resolve_local_genesis_hash(blockchain);
+    let (block_height, best_block_hash) = {
         let chain = blockchain.lock().unwrap();
         (
             if config.node.bootstrap_only {
@@ -3785,10 +3861,6 @@ fn build_local_status_message(blockchain: &BlockchainArc, config: &NodeConfig) -
             } else {
                 chain.last().map(|b| b.hash.clone()).unwrap_or_default()
             },
-            chain
-                .get_genesis_hash()
-                .filter(|hash| !hash.trim().is_empty())
-                .unwrap_or_else(canonical_genesis_hash),
         )
     };
     let quarantine_block = current_validator_quarantine_duty_block();
@@ -5193,6 +5265,13 @@ fn verify_network_commit_certificate(
 }
 
 fn commit_verifier_validator_manager() -> Arc<ValidatorManager> {
+    #[cfg(test)]
+    if let Some(validator_manager) =
+        TEST_COMMIT_VERIFIER_VALIDATOR_MANAGER.with(|slot| slot.borrow().clone())
+    {
+        return validator_manager;
+    }
+
     let validator_manager = Arc::new(ValidatorManager::new());
     copy_active_validators_into_commit_verifier(&validator_manager, &VALIDATOR_MANAGER);
     if validator_manager.get_active_validators().is_empty() {
@@ -5451,8 +5530,14 @@ fn apply_block_if_new(
             candidate = next_tip.as_ref().and_then(take_pending_block_extending_tip);
         }
 
+        compact_hot_chain_state_from_env(&mut chain, "p2p_apply_block_if_new");
         let snapshot = if !applied_blocks.is_empty() && should_persist_chain_tip(final_tip_height) {
-            Some(chain.clone())
+            note_chain_persist(final_tip_height);
+            if can_clone_chain_for_snapshot(final_tip_height) {
+                Some(chain.clone())
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -5699,10 +5784,20 @@ fn apply_block_batch(
             applied += 1;
         }
 
+        compact_hot_chain_state_from_env(&mut chain, "p2p_apply_block_batch");
         let tip_height = chain.last().map(|entry| entry.block_index).unwrap_or(0);
         let should_snapshot = rollback_height.is_some() || should_persist_chain_tip(tip_height);
         let snapshot = if should_snapshot {
-            Some(chain.clone())
+            if rollback_height.is_some() {
+                Some(chain.clone())
+            } else {
+                note_chain_persist(tip_height);
+                if can_clone_chain_for_snapshot(tip_height) {
+                    Some(chain.clone())
+                } else {
+                    None
+                }
+            }
         } else {
             None
         };
@@ -5771,8 +5866,12 @@ fn apply_token_state_for_blocks(blocks: &[Block]) {
                 }
             }
             if is_validator_activation_transaction(tx) {
-                match apply_validator_activation_transaction(tx, &token_manager, &validator_manager)
-                {
+                match apply_validator_activation_transaction(
+                    tx,
+                    &token_manager,
+                    &validator_manager,
+                    block.block_index,
+                ) {
                     Ok(message) => {
                         applied_validator_activations += 1;
                         info!(
@@ -5792,6 +5891,17 @@ fn apply_token_state_for_blocks(blocks: &[Block]) {
                     ),
                 }
             }
+        }
+        let activated_validators =
+            validator_manager.apply_pending_shadow_activations(block.block_index);
+        if !activated_validators.is_empty() {
+            applied_validator_activations += activated_validators.len() as u64;
+            info!(
+                "p2p",
+                "Activated shadow validators after synced finalized boundary",
+                "block_height" => block.block_index,
+                "activated_validators" => activated_validators.join(",")
+            );
         }
     }
 
@@ -5830,6 +5940,8 @@ fn should_persist_chain_tip(tip_height: u64) -> bool {
         return true;
     }
 
+    let gap_blocks = chain_persist_gap_blocks();
+    let elapsed_secs = chain_persist_elapsed_secs();
     let state = LAST_CHAIN_PERSIST.lock().unwrap();
     match *state {
         Some((last_height, last_at)) => {
@@ -5837,10 +5949,54 @@ fn should_persist_chain_tip(tip_height: u64) -> bool {
             // Full chain snapshots are restart accelerators, not the hot durability path.
             let gap = tip_height.saturating_sub(last_height);
             let elapsed = last_at.elapsed();
-            gap >= 250 || elapsed >= Duration::from_secs(600)
+            gap >= gap_blocks || elapsed >= Duration::from_secs(elapsed_secs)
         }
-        None => tip_height % 250 == 0,
+        None => tip_height % gap_blocks == 0,
     }
+}
+
+fn chain_persist_gap_blocks() -> u64 {
+    std::env::var("SYNERGY_CHAIN_PERSIST_GAP_BLOCKS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(250)
+}
+
+fn chain_persist_elapsed_secs() -> u64 {
+    std::env::var("SYNERGY_CHAIN_PERSIST_MIN_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(600)
+}
+
+fn chain_snapshot_max_clone_height() -> u64 {
+    std::env::var("SYNERGY_CHAIN_SNAPSHOT_MAX_CLONE_HEIGHT")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_CHAIN_SNAPSHOT_CLONE_HEIGHT)
+}
+
+fn chain_snapshot_clone_allowed(tip_height: u64, max_clone_height: u64) -> bool {
+    tip_height <= max_clone_height
+}
+
+fn can_clone_chain_for_snapshot(tip_height: u64) -> bool {
+    let max_clone_height = chain_snapshot_max_clone_height();
+    if chain_snapshot_clone_allowed(tip_height, max_clone_height) {
+        return true;
+    }
+
+    warn!(
+        "p2p",
+        "Skipping full-chain snapshot persistence because chain height exceeds clone safety limit",
+        "height" => tip_height,
+        "max_clone_height" => max_clone_height,
+        "override_env" => "SYNERGY_CHAIN_SNAPSHOT_MAX_CLONE_HEIGHT"
+    );
+    false
 }
 
 fn note_chain_persist(tip_height: u64) {
@@ -5853,7 +6009,6 @@ fn persist_chain_snapshot_async(
     chain_path: std::path::PathBuf,
     tip_height: u64,
 ) {
-    note_chain_persist(tip_height);
     if CHAIN_PERSIST_IN_FLIGHT
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
@@ -5925,28 +6080,34 @@ fn dial_peer_async(
 mod tests {
     use super::{
         apply_block_batch, apply_block_if_new, background_poll_interval,
-        best_connected_validator_height, block_sync_request_range, block_sync_response_policy,
-        build_local_handshake, bypasses_shared_message_queue, cache_peer_state,
-        cache_pending_block, canonical_genesis_hash, collect_known_peer_addresses,
-        connected_validator_participants, current_bootstrap_refresh_interval, current_timestamp,
-        dial_with_timeout, disconnect_peer_after_poisoned_write, dispatch_peer_message,
+        best_connected_validator_height, block_sync_min_serve_interval_secs,
+        block_sync_request_range, block_sync_response_policy, build_local_handshake,
+        build_local_status_message, bypasses_shared_message_queue, cache_peer_state,
+        cache_pending_block, canonical_genesis_hash, chain_snapshot_clone_allowed,
+        collect_known_peer_addresses, connected_validator_participants,
+        current_bootstrap_refresh_interval, current_timestamp, dial_with_timeout,
+        disconnect_peer_after_poisoned_write, dispatch_peer_message,
         ensure_peer_status_allows_chain_data, handle_status_message, hydrate_peer_from_cache,
         local_node_runs_validator_consensus, local_peer_identity, merge_peer_state_from_existing,
         parse_bootnode_dial_address, peer_has_identifying_metadata, peer_identity_key,
         peer_is_eligible_block_sync_source, pending_incoming_connections_from_host,
         preferred_connection_direction, receive_message, resolve_bootstrap_dial_targets,
-        resolve_duplicate_connection, should_disconnect_for_status_genesis_mismatch,
-        should_prune_stale_peer, should_request_missing_blocks,
-        status_ready_validator_addresses_with_local_duty_gate, status_ready_validator_participants,
-        status_sync_batch, support_peer_sync_request_is_too_deep,
-        validate_vote_request_extends_local_tip, validator_status_genesis_grace_remaining_secs,
+        resolve_duplicate_connection, select_block_sync_response_blocks,
+        should_disconnect_for_status_genesis_mismatch, should_prune_stale_peer,
+        should_request_missing_blocks, status_ready_validator_addresses_with_local_duty_gate,
+        status_ready_validator_participants, status_sync_batch,
+        support_peer_sync_request_is_too_deep, validate_vote_request_extends_local_tip,
+        validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_handshake_pq_signature,
         vote_request_parent_sync_range, ConnectionDirection, DialTargetsArc, DuplicateResolution,
         PeerConnection, PeerEntryGuard, BACKGROUND_SYNC_POLL_MILLIS,
-        DEFAULT_BOOTSTRAP_REFRESH_SECS, IMMEDIATE_STATUS_SYNC_BATCH, MAX_P2P_FRAME_BYTES,
-        MAX_STATUS_SYNC_BATCH, MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS,
+        BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, DEFAULT_BOOTSTRAP_REFRESH_SECS,
+        IMMEDIATE_STATUS_SYNC_BATCH, MAX_P2P_FRAME_BYTES, MAX_STATUS_SYNC_BATCH,
+        MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS, MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS,
         NORMAL_BOOTSTRAP_REFRESH_SECS, PENDING_BLOCKS, STALE_UNIDENTIFIED_PEER_SECS,
-        STALE_VALIDATOR_STATUS_SECS,
+        STALE_VALIDATOR_STATUS_SECS, SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS,
+        TEST_COMMIT_VERIFIER_VALIDATOR_MANAGER,
+        VALIDATOR_SUPPORT_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS,
     };
     use crate::block::{Block, BlockChain};
     use crate::config::NodeConfig;
@@ -5963,14 +6124,16 @@ mod tests {
     };
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCSignature};
     use crate::p2p::messages::NetworkMessage;
-    use crate::validator::{Validator, ValidatorRegistration, ValidatorStatus, VALIDATOR_MANAGER};
+    use crate::validator::{
+        Validator, ValidatorManager, ValidatorRegistration, ValidatorStatus, VALIDATOR_MANAGER,
+    };
     use base64::{engine::general_purpose, Engine as _};
     use lazy_static::lazy_static;
     use std::collections::HashMap;
     use std::fs;
     use std::io;
     use std::net::TcpListener;
-    use std::sync::{mpsc, Arc, Mutex};
+    use std::sync::{mpsc, Arc, Mutex, MutexGuard};
     use std::thread;
     use std::time::Duration;
 
@@ -5979,6 +6142,12 @@ mod tests {
             "SYNERGY_GENESIS_FILE",
             concat!(env!("CARGO_MANIFEST_DIR"), "/../config/genesis.json"),
         );
+    }
+
+    #[test]
+    fn p2p_snapshot_clone_guard_blocks_large_live_chains() {
+        assert!(chain_snapshot_clone_allowed(50_000, 50_000));
+        assert!(!chain_snapshot_clone_allowed(50_001, 50_000));
     }
 
     fn test_peer_with_validator_address(validator_address: Option<&str>) -> PeerConnection {
@@ -6064,6 +6233,85 @@ mod tests {
 
     lazy_static! {
         static ref TEST_VALIDATOR_KEY_LOCK: Mutex<()> = Mutex::new(());
+        static ref TEST_BLOCK_APPLICATION_LOCK: Mutex<()> = Mutex::new(());
+    }
+
+    struct TestCommitVerifierGuard {
+        previous: Option<Arc<ValidatorManager>>,
+    }
+
+    impl Drop for TestCommitVerifierGuard {
+        fn drop(&mut self) {
+            let previous = self.previous.take();
+            TEST_COMMIT_VERIFIER_VALIDATOR_MANAGER.with(|slot| {
+                *slot.borrow_mut() = previous;
+            });
+        }
+    }
+
+    struct BlockApplicationTestGuard {
+        _block_guard: MutexGuard<'static, ()>,
+        _vote_guard: MutexGuard<'static, ()>,
+        _commit_verifier_guard: TestCommitVerifierGuard,
+    }
+
+    fn block_application_test_guard() -> BlockApplicationTestGuard {
+        let block_guard = TEST_BLOCK_APPLICATION_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let vote_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        let commit_verifier = Arc::new(ValidatorManager::new());
+        let previous =
+            TEST_COMMIT_VERIFIER_VALIDATOR_MANAGER.with(|slot| slot.replace(Some(commit_verifier)));
+        DualQuorumConsensus::reset_test_vote_tracking();
+        PENDING_BLOCKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        clear_legacy_canonical_locks_for_tests();
+        BlockApplicationTestGuard {
+            _block_guard: block_guard,
+            _vote_guard: vote_guard,
+            _commit_verifier_guard: TestCommitVerifierGuard { previous },
+        }
+    }
+
+    fn current_test_commit_verifier_manager() -> Option<Arc<ValidatorManager>> {
+        TEST_COMMIT_VERIFIER_VALIDATOR_MANAGER.with(|slot| slot.borrow().clone())
+    }
+
+    fn register_test_validator_in_manager(
+        validator_manager: &Arc<ValidatorManager>,
+        address: &str,
+        public_key: &crate::crypto::pqc::PQCPublicKey,
+    ) {
+        let encoded_public_key = format!(
+            "{}:{}",
+            consensus_algorithm_label(&public_key.algorithm),
+            general_purpose::STANDARD.encode(&public_key.key_data)
+        );
+        if let Ok(mut registry) = validator_manager.registry.lock() {
+            let mut validator = Validator::new(
+                address.to_string(),
+                encoded_public_key,
+                format!("Test validator {address}"),
+                50_000_000_000_000,
+            );
+            validator.status = ValidatorStatus::Active;
+            validator.synergy_score = 100.0;
+            validator.activation_tx_hash = Some(format!("syntxn-test-{address}"));
+            registry.validators.insert(address.to_string(), validator);
+            registry.pending_registrations.remove(address);
+        }
+    }
+
+    fn register_current_test_commit_verifier_validator(
+        address: &str,
+        public_key: &crate::crypto::pqc::PQCPublicKey,
+    ) {
+        if let Some(validator_manager) = current_test_commit_verifier_manager() {
+            register_test_validator_in_manager(&validator_manager, address, public_key);
+        }
     }
 
     fn sign_test_block(block: &mut Block) {
@@ -6112,8 +6360,9 @@ mod tests {
     }
 
     fn ensure_test_validator_key_locked(address: &str) {
-        if load_local_validator_keypair(address, &VALIDATOR_MANAGER).is_ok() {
+        if let Ok((public_key, _)) = load_local_validator_keypair(address, &VALIDATOR_MANAGER) {
             VALIDATOR_MANAGER.update_synergy_score(address, 100.0);
+            register_current_test_commit_verifier_validator(address, &public_key);
             return;
         }
 
@@ -6152,6 +6401,7 @@ mod tests {
             let _ = VALIDATOR_MANAGER.approve_validator(address);
         }
         VALIDATOR_MANAGER.update_synergy_score(address, 100.0);
+        register_current_test_commit_verifier_validator(address, &public_key);
     }
 
     fn ensure_test_qc_validators(addresses: &[&str]) {
@@ -6167,7 +6417,9 @@ mod tests {
         let signers = ["synv1qc01", "synv1qc02", "synv1qc03", "synv1qc04"];
         ensure_test_validator_key_locked(&block.validator_id);
         ensure_test_qc_validators(&signers);
-        let active_before_signing = VALIDATOR_MANAGER
+        let validator_manager =
+            current_test_commit_verifier_manager().unwrap_or_else(|| VALIDATOR_MANAGER.clone());
+        let active_before_signing = validator_manager
             .get_active_validators()
             .into_iter()
             .map(|validator| validator.address)
@@ -6175,7 +6427,7 @@ mod tests {
         for address in active_before_signing {
             ensure_test_validator_key_locked(&address);
         }
-        let mut signer_addresses = VALIDATOR_MANAGER
+        let mut signer_addresses = validator_manager
             .get_active_validators()
             .into_iter()
             .map(|validator| validator.address)
@@ -6184,8 +6436,14 @@ mod tests {
         let votes = signer_addresses
             .iter()
             .map(|validator| {
-                DualQuorumConsensus::create_vote_for_validator(validator, block, 0, 1)
-                    .expect("test vote should sign")
+                DualQuorumConsensus::create_vote_for_validator_with_manager(
+                    validator,
+                    block,
+                    0,
+                    1,
+                    &validator_manager,
+                )
+                .expect("test vote should sign")
             })
             .collect::<Vec<_>>();
         QuorumCertificate {
@@ -6912,6 +7170,43 @@ mod tests {
     }
 
     #[test]
+    fn local_status_uses_canonical_genesis_for_compact_chain() {
+        configure_canonical_genesis_path_for_tests();
+        let canonical_hash = canonical_genesis_hash();
+        assert!(!canonical_hash.is_empty());
+
+        let mut chain = BlockChain::new();
+        let mut retained = Block::new_with_timestamp(
+            123,
+            Vec::new(),
+            "retained-parent".to_string(),
+            "validator".to_string(),
+            0,
+            1,
+        );
+        retained.hash = "retained-block-hash".to_string();
+        chain.chain.push(retained);
+
+        let blockchain = Arc::new(Mutex::new(chain));
+        let config = NodeConfig::default();
+        let status = build_local_status_message(&blockchain, &config);
+
+        let NetworkMessage::Status {
+            block_height,
+            best_block_hash,
+            genesis_hash,
+            ..
+        } = status
+        else {
+            panic!("local status should build a status message");
+        };
+
+        assert_eq!(block_height, 123);
+        assert_eq!(best_block_hash, "retained-block-hash");
+        assert_eq!(genesis_hash, canonical_hash);
+    }
+
+    #[test]
     fn chain_data_is_rejected_until_peer_status_confirms_genesis() {
         configure_canonical_genesis_path_for_tests();
         let mut chain = BlockChain::new();
@@ -7052,6 +7347,43 @@ mod tests {
     }
 
     #[test]
+    fn block_sync_response_selection_seeks_into_compact_chain_window() {
+        let mut chain = BlockChain::new();
+        for height in 261_825..261_835 {
+            let mut block = Block::new_with_timestamp(
+                height,
+                Vec::new(),
+                format!("parent-{height}"),
+                "validator".to_string(),
+                0,
+                height,
+            );
+            block.hash = format!("hash-{height}");
+            chain.chain.push(block);
+        }
+
+        let selected = select_block_sync_response_blocks(&chain, 261_829, 4);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|block| block.block_index)
+                .collect::<Vec<_>>(),
+            vec![261_829, 261_830, 261_831, 261_832]
+        );
+
+        let before_window = select_block_sync_response_blocks(&chain, 0, 2);
+        assert_eq!(
+            before_window
+                .iter()
+                .map(|block| block.block_index)
+                .collect::<Vec<_>>(),
+            vec![261_825, 261_826]
+        );
+
+        assert!(select_block_sync_response_blocks(&chain, 999_999, 4).is_empty());
+    }
+
+    #[test]
     fn vote_messages_bypass_the_shared_message_queue() {
         let vote = Vote {
             validator_address: "synv1peer-a".to_string(),
@@ -7171,8 +7503,7 @@ mod tests {
 
     #[test]
     fn future_blocks_are_cached_and_applied_when_parent_arrives() {
-        clear_legacy_canonical_locks_for_tests();
-        PENDING_BLOCKS.lock().unwrap().clear();
+        let _guard = block_application_test_guard();
 
         let genesis = Block::new_with_timestamp(
             0,
@@ -7227,6 +7558,8 @@ mod tests {
 
     #[test]
     fn unsigned_network_block_is_rejected() {
+        let _guard = block_application_test_guard();
+
         let genesis = Block::new_with_timestamp(
             0,
             Vec::new(),
@@ -7253,7 +7586,7 @@ mod tests {
 
     #[test]
     fn peer_canonical_lock_conflict_does_not_self_quarantine_local_node() {
-        clear_legacy_canonical_locks_for_tests();
+        let _guard = block_application_test_guard();
 
         let genesis = Block::new_with_timestamp(
             0,
@@ -7313,7 +7646,7 @@ mod tests {
 
     #[test]
     fn peer_canonical_lock_conflict_at_local_tip_does_not_self_quarantine_local_node() {
-        clear_legacy_canonical_locks_for_tests();
+        let _guard = block_application_test_guard();
 
         let genesis = Block::new_with_timestamp(
             0,
@@ -7365,8 +7698,7 @@ mod tests {
 
     #[test]
     fn pending_peer_canonical_lock_conflict_after_tip_apply_does_not_self_quarantine() {
-        clear_legacy_canonical_locks_for_tests();
-        PENDING_BLOCKS.lock().unwrap().clear();
+        let _guard = block_application_test_guard();
 
         let genesis = Block::new_with_timestamp(
             0,
@@ -7480,6 +7812,9 @@ mod tests {
 
         config.role.compiled_profile.clear();
         config.node.validator_address = "synv1local".to_string();
+        assert!(!local_node_runs_validator_consensus(&config));
+
+        config.role.services = vec!["consensus".to_string()];
         assert!(local_node_runs_validator_consensus(&config));
     }
 
@@ -7496,10 +7831,30 @@ mod tests {
             MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS
         );
         assert_eq!(policy.write_timeout, Duration::from_millis(500));
+        assert_eq!(
+            block_sync_min_serve_interval_secs(&config, Some(&support_peer)),
+            VALIDATOR_SUPPORT_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS
+        );
     }
 
     #[test]
-    fn non_validator_nodes_throttle_support_peer_block_sync_responses() {
+    fn validator_nodes_serve_active_validator_sync_without_slow_recovery_throttle() {
+        configure_canonical_genesis_path_for_tests();
+        let active_validator = "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs";
+        ensure_test_validator_key(active_validator);
+
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+        let active_peer = test_peer_with_validator_address(Some(active_validator));
+
+        assert_eq!(
+            block_sync_min_serve_interval_secs(&config, Some(&active_peer)),
+            BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn non_validator_nodes_serve_large_public_onboarding_block_sync_batches() {
         let mut config = NodeConfig::default();
         config.identity.role = "relayer".to_string();
         let support_peer = test_peer_with_validator_address(Some("synv1support"));
@@ -7508,9 +7863,13 @@ mod tests {
 
         assert_eq!(
             policy.max_blocks,
-            MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS
+            MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS
         );
-        assert_eq!(policy.write_timeout, Duration::from_millis(500));
+        assert_eq!(policy.write_timeout, Duration::from_secs(2));
+        assert_eq!(
+            block_sync_min_serve_interval_secs(&config, Some(&support_peer)),
+            SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS
+        );
     }
 
     #[test]
@@ -7584,7 +7943,11 @@ mod tests {
             background_poll_interval(100, heartbeat, false),
             Duration::from_millis(BACKGROUND_SYNC_POLL_MILLIS)
         );
-        assert_eq!(background_poll_interval(5, heartbeat, false), heartbeat);
+        assert_eq!(
+            background_poll_interval(5, heartbeat, false),
+            Duration::from_millis(BACKGROUND_SYNC_POLL_MILLIS)
+        );
+        assert_eq!(background_poll_interval(0, heartbeat, false), heartbeat);
     }
 
     #[test]
@@ -7747,7 +8110,7 @@ mod tests {
         match receive_message(&mut server).expect("status handling should request blocks") {
             NetworkMessage::GetBlocks { from_height, count } => {
                 assert_eq!(from_height, 0);
-                assert_eq!(count, 9);
+                assert_eq!(count, 13);
             }
             other => panic!("expected GetBlocks request, got {other:?}"),
         }
@@ -8190,7 +8553,7 @@ mod tests {
 
     #[test]
     fn apply_block_batch_rolls_back_to_common_ancestor_before_replaying() {
-        clear_legacy_canonical_locks_for_tests();
+        let _guard = block_application_test_guard();
         let mut chain = BlockChain::new();
         let genesis = Block::new_with_timestamp(
             0,
@@ -8246,6 +8609,7 @@ mod tests {
 
     #[test]
     fn apply_block_batch_ignores_stale_matching_prefix_batches() {
+        let _guard = block_application_test_guard();
         let mut chain = BlockChain::new();
         let genesis = Block::new_with_timestamp(
             0,
@@ -8289,7 +8653,7 @@ mod tests {
 
     #[test]
     fn apply_block_batch_accepts_qc_less_matching_overlap_before_new_blocks() {
-        clear_legacy_canonical_locks_for_tests();
+        let _guard = block_application_test_guard();
         let mut chain = BlockChain::new();
         let genesis = Block::new_with_timestamp(
             0,

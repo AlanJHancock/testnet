@@ -26,7 +26,10 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/data"
 
-for file in chain.json canonical_locks.json dag_state.json validator_registry.json token_state.json; do
+for file in chain.json canonical_locks.json dag_state.json validator_registry.json token_state.json synid_registry.json; do
+  if [[ "$file" == "synid_registry.json" && ! -f "$data_dir/$file" ]]; then
+    continue
+  fi
   test -f "$data_dir/$file"
   cp -p "$data_dir/$file" "$tmp/data/$file"
 done

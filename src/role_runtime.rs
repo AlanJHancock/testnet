@@ -54,6 +54,43 @@ struct LaunchBlock1TransactionEnvelope {
     transaction: Transaction,
 }
 
+#[cfg(unix)]
+fn raise_runtime_nofile_limit(min_soft_limit: u64) {
+    unsafe {
+        let mut limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+            eprintln!("Warning: failed to inspect file descriptor limit");
+            return;
+        }
+
+        if limit.rlim_cur >= min_soft_limit as libc::rlim_t {
+            return;
+        }
+
+        let requested = (min_soft_limit as libc::rlim_t).min(limit.rlim_max);
+        if requested <= limit.rlim_cur {
+            return;
+        }
+
+        let updated = libc::rlimit {
+            rlim_cur: requested,
+            rlim_max: limit.rlim_max,
+        };
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &updated) != 0 {
+            eprintln!(
+                "Warning: failed to raise file descriptor limit from {} to {}",
+                limit.rlim_cur, requested
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn raise_runtime_nofile_limit(_min_soft_limit: u64) {}
+
 fn read_env_file_value(path: &Path, key: &str) -> Option<String> {
     let contents = fs::read_to_string(path).ok()?;
     for line in contents.lines() {
@@ -665,9 +702,9 @@ fn local_validator_is_consensus_authorized(config: &NodeConfig) -> bool {
         return true;
     }
 
-    VALIDATOR_MANAGER
-        .get_validator(&validator_address)
-        .is_some()
+    consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
+        .iter()
+        .any(|validator| validator.address == validator_address)
 }
 
 fn should_start_consensus(config: &NodeConfig, profile: Option<&RoleProfile>) -> bool {
@@ -1801,6 +1838,8 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 }
             };
 
+            raise_runtime_nofile_limit(8192);
+
             let log_level = LogLevel::from_str(&config.logging.log_level).unwrap_or(LogLevel::Info);
             init_logger(
                 log_level,
@@ -1881,33 +1920,56 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             wallet::init_testnet_wallets();
             {
                 let token_manager = TOKEN_MANAGER.clone();
-                if let Err(e) = token_manager.load_state("data/token_state.json") {
-                    info!(
-                        "main",
-                        "No saved token state found (using genesis allocations)",
-                        "error" => e.to_string()
-                    );
-                }
-                let chain_snapshot = {
-                    let chain_guard = blockchain.lock().unwrap();
-                    chain_guard.clone()
-                };
-                crate::dag::rebuild_global_from_chain(&chain_snapshot);
-                let (replayed, replay_failed) =
-                    token_manager.replay_chain_transactions(&chain_snapshot);
-                if replayed > 0 || replay_failed > 0 {
-                    info!(
-                        "main",
-                        "Replayed chain transactions into token state",
-                        "replayed" => replayed,
-                        "failed" => replay_failed
-                    );
-                    if let Err(e) = token_manager.save_state("data/token_state.json") {
-                        warn!(
+                let token_state_loaded = match token_manager.load_state("data/token_state.json") {
+                    Ok(_) => true,
+                    Err(e) => {
+                        info!(
                             "main",
-                            "Failed to persist replayed token state",
+                            "No saved token state found (using genesis allocations)",
                             "error" => e.to_string()
                         );
+                        false
+                    }
+                };
+                let dag_state_loaded = crate::dag::DagState::load_from_default_path().is_some();
+                let chain_snapshot = if token_state_loaded && dag_state_loaded {
+                    None
+                } else {
+                    let chain_guard = blockchain.lock().unwrap();
+                    Some(chain_guard.clone())
+                };
+
+                if dag_state_loaded {
+                    info!(
+                        "main",
+                        "Loaded saved DAG state; skipping full chain DAG rebuild"
+                    );
+                } else if let Some(chain_snapshot) = chain_snapshot.as_ref() {
+                    crate::dag::rebuild_global_from_chain(chain_snapshot);
+                }
+
+                if token_state_loaded {
+                    info!(
+                        "main",
+                        "Loaded saved token state; skipping full chain token replay"
+                    );
+                } else if let Some(chain_snapshot) = chain_snapshot.as_ref() {
+                    let (replayed, replay_failed) =
+                        token_manager.replay_chain_transactions(chain_snapshot);
+                    if replayed > 0 || replay_failed > 0 {
+                        info!(
+                            "main",
+                            "Replayed chain transactions into token state",
+                            "replayed" => replayed,
+                            "failed" => replay_failed
+                        );
+                        if let Err(e) = token_manager.save_state("data/token_state.json") {
+                            warn!(
+                                "main",
+                                "Failed to persist replayed token state",
+                                "error" => e.to_string()
+                            );
+                        }
                     }
                 }
                 if let Err(e) = token_manager.ensure_rewards_pool_funded() {
@@ -3132,6 +3194,33 @@ mod tests {
     fn non_genesis_validator_waits_for_activation_before_consensus() {
         let mut config = NodeConfig::default();
         config.node.validator_address = "synv1candidate".to_string();
+        config.node.strict_validator_allowlist = true;
+        config.node.allowed_validator_addresses = vec!["synv1genesis".to_string()];
+
+        let consensus_enabled =
+            should_start_consensus(&config, Some(NodeRole::Validator.profile()));
+        assert!(!consensus_enabled);
+        assert!(should_watch_for_validator_activation_consensus(
+            &config,
+            Some(NodeRole::Validator.profile()),
+            consensus_enabled,
+        ));
+    }
+
+    #[test]
+    fn registered_non_active_validator_waits_for_activation_before_consensus() {
+        let address = "synv1registeredpendingconsensusgate";
+        let _ = VALIDATOR_MANAGER.register_validator(ValidatorRegistration {
+            address: address.to_string(),
+            public_key: "test-pending-consensus-key".to_string(),
+            name: "pending consensus gate".to_string(),
+            stake_amount: 50_000_000_000_000,
+            submitted_at: now_ts(),
+            registration_tx_hash: "test-pending-consensus-gate".to_string(),
+        });
+
+        let mut config = NodeConfig::default();
+        config.node.validator_address = address.to_string();
         config.node.strict_validator_allowlist = true;
         config.node.allowed_validator_addresses = vec!["synv1genesis".to_string()];
 

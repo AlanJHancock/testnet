@@ -11,9 +11,9 @@ sign_catalog = true
 staging_then_atomic_publish = true
 prune_grace_seconds = 86400
 free_space_safety_margin_bytes = 21474836480
-publish_root = "/Volumes/Synergy_Archive/archive-validator/snapshots"
-catalog_path = "/Volumes/Synergy_Archive/archive-validator/snapshots/catalog.json"
-catalog_signature_path = "/Volumes/Synergy_Archive/archive-validator/snapshots/catalog.json.sig"
+publish_root = "/Users/Shared/Synergy/archive-validator/published-snapshots"
+catalog_path = "/Users/Shared/Synergy/archive-validator/published-snapshots/catalog.json"
+catalog_signature_path = "/Users/Shared/Synergy/archive-validator/published-snapshots/catalog.json.sig"
 
 [snapshots.classes.validator-pruned]
 allowed_roles = ["validator", "onboarding_validator", "quarantined_validator"]

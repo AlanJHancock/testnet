@@ -621,7 +621,7 @@ def command_stress(args: argparse.Namespace) -> int:
 def add_common_tx_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--rpc-url", default=os.environ.get("SYNERGY_RPC_URL", DEFAULT_RPC_URL))
     parser.add_argument("--wallet-cli", default=None)
-    parser.add_argument("--algo", choices=["fndsa", "mldsa", "slhdsa"], default="fndsa")
+    parser.add_argument("--algo", choices=["fndsa"], default="fndsa")
     parser.add_argument("--gas-price", type=int, default=DEFAULT_GAS_PRICE)
     parser.add_argument("--gas-limit", type=int, default=DEFAULT_GAS_LIMIT)
     parser.add_argument("--nonce-mode", choices=["zero", "rpc"], default=os.environ.get("SYNERGY_NONCE_MODE", "zero"))

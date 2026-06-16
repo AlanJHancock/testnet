@@ -229,7 +229,7 @@ fn validate_event_hash(event_hash: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_signature_algorithm(metadata: &serde_json::Value) -> PQCAlgorithm {
+fn parse_signature_algorithm(metadata: &serde_json::Value) -> Result<PQCAlgorithm, String> {
     let algo = metadata
         .get("signature_algorithm")
         .or_else(|| metadata.get("algorithm"))
@@ -239,9 +239,11 @@ fn parse_signature_algorithm(metadata: &serde_json::Value) -> PQCAlgorithm {
         .to_ascii_lowercase();
 
     match algo.as_str() {
-        "mldsa" | "ml-dsa" | "ml_dsa" => PQCAlgorithm::MLDSA,
-        "slhdsa" | "slh-dsa" | "slh_dsa" => PQCAlgorithm::SLHDSA,
-        _ => PQCAlgorithm::FNDSA,
+        "" | "fndsa" | "fn-dsa" | "fn_dsa" | "falcon" | "falcon-1024" => Ok(PQCAlgorithm::FNDSA),
+        _ => Err(format!(
+            "Unsupported relayer signature algorithm: {}; use fndsa",
+            algo
+        )),
     }
 }
 
@@ -258,7 +260,7 @@ fn verify_relayer_signature(
         .decode(encoded_signature.trim())
         .map_err(|_| "Invalid signature encoding (expected base64)".to_string())?;
 
-    let algorithm = parse_signature_algorithm(metadata);
+    let algorithm = parse_signature_algorithm(metadata)?;
     let message = event_hash.as_bytes();
     let manager = PQCManager::new();
     let public_key = PQCPublicKey {

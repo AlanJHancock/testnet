@@ -22,8 +22,6 @@ const MAGIC: [u8; 4] = *b"AEG1";
 pub enum Op {
     /// ML-KEM decapsulation: (ct, sk) -> ss
     MlkemDecapsulate = 1,
-    /// ML-DSA verify (detached): (pk, msg, sig) -> [0|1]
-    MldsaVerifyDetached = 2,
     /// FN-DSA verify (detached): (pk, msg, sig) -> [0|1]
     FndsaVerifyDetached = 3,
 }
@@ -34,9 +32,6 @@ pub enum Alg {
     Mlkem512 = 1,
     Mlkem768 = 2,
     Mlkem1024 = 3,
-    Mldsa44 = 10,
-    Mldsa65 = 11,
-    Mldsa87 = 12,
     Fndsa512 = 20,
     Fndsa1024 = 21,
 }
@@ -94,7 +89,6 @@ pub fn decode_call(payload: &[u8]) -> Result<Call, IntegrationError> {
     }
     let op = match payload[4] {
         1 => Op::MlkemDecapsulate,
-        2 => Op::MldsaVerifyDetached,
         3 => Op::FndsaVerifyDetached,
         _ => return Err(IntegrationError::InvalidPayload("unknown op")),
     };
@@ -102,9 +96,6 @@ pub fn decode_call(payload: &[u8]) -> Result<Call, IntegrationError> {
         1 => Alg::Mlkem512,
         2 => Alg::Mlkem768,
         3 => Alg::Mlkem1024,
-        10 => Alg::Mldsa44,
-        11 => Alg::Mldsa65,
-        12 => Alg::Mldsa87,
         20 => Alg::Fndsa512,
         21 => Alg::Fndsa1024,
         _ => return Err(IntegrationError::InvalidPayload("unknown alg")),
@@ -177,7 +168,6 @@ pub fn decode_response(payload: &[u8]) -> Result<Result<Vec<u8>, (u8, String)>, 
 /// Deterministic dispatcher intended for on-chain style integrations.
 pub fn dispatch_deterministic(payload: &[u8]) -> Result<Vec<u8>, IntegrationError> {
     use crate::fndsa;
-    use crate::mldsa;
     use crate::mlkem;
 
     use pqcrypto_traits::kem::{Ciphertext as _, SecretKey as _, SharedSecret as _};
@@ -231,46 +221,6 @@ pub fn dispatch_deterministic(payload: &[u8]) -> Result<Vec<u8>, IntegrationErro
             ss.as_bytes().to_vec()
         }
 
-        (Op::MldsaVerifyDetached, Alg::Mldsa44) => {
-            if call.args.len() != 3 {
-                return Err(IntegrationError::InvalidPayload(
-                    "mldsa44 verify expects 3 args",
-                ));
-            }
-            let pk = mldsa::mldsa44::PublicKey::from_bytes(&call.args[0])
-                .map_err(|_| IntegrationError::InvalidPayload("invalid mldsa44 public key"))?;
-            let sig = <mldsa::mldsa44::DetachedSignature as pqcrypto_traits::sign::DetachedSignature>::from_bytes(&call.args[2])
-                .map_err(|_| IntegrationError::InvalidPayload("invalid mldsa44 signature"))?;
-            let ok = mldsa::mldsa44::verify_detached_signature(&sig, &call.args[1], &pk).is_ok();
-            vec![ok as u8]
-        }
-        (Op::MldsaVerifyDetached, Alg::Mldsa65) => {
-            if call.args.len() != 3 {
-                return Err(IntegrationError::InvalidPayload(
-                    "mldsa65 verify expects 3 args",
-                ));
-            }
-            let pk = mldsa::mldsa65::PublicKey::from_bytes(&call.args[0])
-                .map_err(|_| IntegrationError::InvalidPayload("invalid mldsa65 public key"))?;
-            let sig = <mldsa::mldsa65::DetachedSignature as pqcrypto_traits::sign::DetachedSignature>::from_bytes(&call.args[2])
-                .map_err(|_| IntegrationError::InvalidPayload("invalid mldsa65 signature"))?;
-            let ok = mldsa::mldsa65::verify_detached_signature(&sig, &call.args[1], &pk).is_ok();
-            vec![ok as u8]
-        }
-        (Op::MldsaVerifyDetached, Alg::Mldsa87) => {
-            if call.args.len() != 3 {
-                return Err(IntegrationError::InvalidPayload(
-                    "mldsa87 verify expects 3 args",
-                ));
-            }
-            let pk = mldsa::mldsa87::PublicKey::from_bytes(&call.args[0])
-                .map_err(|_| IntegrationError::InvalidPayload("invalid mldsa87 public key"))?;
-            let sig = <mldsa::mldsa87::DetachedSignature as pqcrypto_traits::sign::DetachedSignature>::from_bytes(&call.args[2])
-                .map_err(|_| IntegrationError::InvalidPayload("invalid mldsa87 signature"))?;
-            let ok = mldsa::mldsa87::verify_detached_signature(&sig, &call.args[1], &pk).is_ok();
-            vec![ok as u8]
-        }
-
         (Op::FndsaVerifyDetached, Alg::Fndsa512) => {
             if call.args.len() != 3 {
                 return Err(IntegrationError::InvalidPayload(
@@ -316,9 +266,6 @@ pub fn gas_cost_deterministic(payload: &[u8]) -> Result<u64, IntegrationError> {
         (Op::MlkemDecapsulate, Alg::Mlkem512) => 150_000,
         (Op::MlkemDecapsulate, Alg::Mlkem768) => 200_000,
         (Op::MlkemDecapsulate, Alg::Mlkem1024) => 250_000,
-        (Op::MldsaVerifyDetached, Alg::Mldsa44) => 120_000,
-        (Op::MldsaVerifyDetached, Alg::Mldsa65) => 150_000,
-        (Op::MldsaVerifyDetached, Alg::Mldsa87) => 200_000,
         (Op::FndsaVerifyDetached, Alg::Fndsa512) => 90_000,
         (Op::FndsaVerifyDetached, Alg::Fndsa1024) => 140_000,
         _ => return Err(IntegrationError::Unsupported("no gas cost for this op/alg")),

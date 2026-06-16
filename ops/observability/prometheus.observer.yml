@@ -31,6 +31,8 @@ scrape_configs:
         labels: { role: validator, host: val4, instance_label: "Val4" }
       - targets: ["10.69.0.5:6030"]
         labels: { role: validator, host: val5, instance_label: "Val5" }
+      - targets: ["157.173.192.45:6030"]
+        labels: { role: validator, host: val6, instance_label: "Val6" }
 
   - job_name: "synergy-relayers"
     metrics_path: /metrics
@@ -87,6 +89,17 @@ scrape_configs:
     static_configs:
       - targets: ["testnet-core-rpc.synergy-network.io"]
         labels: { role: infra, host: infra-74-208, instance_label: "Explorer+RPC" }
+      - targets: ["157.173.192.45:9100"]
+        labels: { role: validator, host: val6, instance_label: "Val6", scrape_scheme: http, scrape_path: /metrics }
+    relabel_configs:
+      - source_labels: [scrape_scheme]
+        regex: (.+)
+        target_label: __scheme__
+      - source_labels: [scrape_path]
+        regex: (.+)
+        target_label: __metrics_path__
+      - regex: scrape_(scheme|path)
+        action: labeldrop
 
   - job_name: "public-tcp-probes"
     metrics_path: /probe
@@ -128,6 +141,8 @@ scrape_configs:
         labels: { role: validator, host: val4, instance_label: "Val4", probe_label: "qrpc_tcp" }
       - targets: ["10.69.0.5:5640"]
         labels: { role: validator, host: val5, instance_label: "Val5", probe_label: "qrpc_tcp" }
+      - targets: ["157.173.192.45:5640"]
+        labels: { role: validator, host: val6, instance_label: "Val6", probe_label: "qrpc_tcp" }
       - targets: ["10.69.0.201:5640"]
         labels: { role: relayer, host: relayer-1, instance_label: "Relayer-1", probe_label: "qrpc_tcp" }
       - targets: ["10.69.0.202:5640"]

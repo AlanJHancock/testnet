@@ -2,23 +2,31 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::address::generate_cluster_address;
-use crate::block::BlockChain;
+use crate::block::{BlockChain, HOT_CHAIN_RETENTION_BLOCKS_ENV};
 use crate::consensus::chain_durability::recover_chain_and_validate_canonical;
 use crate::consensus::consensus_algorithm::ProofOfSynergy;
 use crate::consensus::consensus_fork;
+use crate::consensus::legacy_canonical_lock::legacy_canonical_commit_record;
 use crate::consensus::synergy_score::SynergyScoreCalculator;
 use crate::crypto::pqc::PQCManager;
 use crate::genesis::canonical_genesis;
 use crate::role_profiles::{resolve_configured_role, AuthorityPlane, RoleProfile};
 use crate::sxcp;
 use crate::sync::{SyncManager, SyncState};
-use crate::synergy_types::CanonicalSerialize;
+use crate::synergy_types::{CanonicalSerialize, Hash, TxId};
+use crate::synq_execution::{
+    execute_synq_transaction, SynQArtifactKey, SynQContractArtifact, SynQDeploymentRecord,
+};
+use crate::synq_receipts::{
+    configured_synq_receipt_index_path, SynQIndexedReceipt, SynQReceiptIndex,
+};
 use crate::token::TOKEN_MANAGER;
 use crate::transaction::Transaction;
 use crate::validator::{
@@ -26,7 +34,7 @@ use crate::validator::{
     INITIAL_VALIDATOR_SYNERGY_SCORE, VALIDATOR_MANAGER,
 };
 use crate::wallet::WALLET_MANAGER;
-use crate::warn;
+use crate::{info, warn};
 // Temporarily disabled for quick compile
 // use crate::aivm::AIVMRuntime;
 // use crate::aivm::runtime::{ContractType, AIVMExecutionContext};
@@ -35,6 +43,24 @@ use lazy_static::lazy_static;
 use serde_json::{json, Value};
 use tungstenite::handshake::server::{Request as WsRequest, Response as WsResponse};
 use tungstenite::{accept_hdr, Error as WsError, Message as WsMessage};
+
+fn compact_hot_chain_state_from_env(chain: &mut BlockChain, context: &str) {
+    if let Some((retain_recent_blocks, removed_blocks)) = chain.compact_from_env() {
+        if removed_blocks > 0 {
+            info!(
+                "rpc",
+                "Compacted hot chain state from retention setting",
+                "context" => context.to_string(),
+                "retention_env" => HOT_CHAIN_RETENTION_BLOCKS_ENV,
+                "retain_recent_blocks" => retain_recent_blocks,
+                "removed_blocks" => removed_blocks as u64,
+                "first_retained_height" => chain.chain.first().map(|block| block.block_index).unwrap_or(0),
+                "tip_height" => chain.last().map(|block| block.block_index).unwrap_or(0),
+                "hot_block_count" => chain.chain.len() as u64
+            );
+        }
+    }
+}
 
 lazy_static! {
     pub static ref TX_POOL: Arc<Mutex<Vec<Transaction>>> = Arc::new(Mutex::new(Vec::new()));
@@ -284,16 +310,79 @@ lazy_static! {
             match BlockChain::load_from_file(chain_path.to_str().unwrap_or("data/chain.json")) {
                 Some(chain) => {
                     let mut chain = chain;
-                    chain
-                        .ensure_expected_genesis_hash(canonical_genesis.hash())
-                        .unwrap_or_else(|error| {
-                            panic!(
+                    if let Err(error) = chain.ensure_expected_genesis_hash(canonical_genesis.hash())
+                    {
+                        let compact_boundary = chain
+                            .chain
+                            .first()
+                            .filter(|block| block.block_index > 0)
+                            .map(|block| {
+                                legacy_canonical_commit_record(block.block_index).and_then(
+                                    |record| match record {
+                                        Some(record)
+                                            if record.block_hash == block.hash
+                                                && record.parent_hash == block.previous_hash =>
+                                        {
+                                            Ok(true)
+                                        }
+                                        Some(record) => Err(format!(
+                                            "compact chain boundary h{} does not match canonical lock: chain_hash={} chain_parent={} lock_hash={} lock_parent={}",
+                                            block.block_index,
+                                            block.hash,
+                                            block.previous_hash,
+                                            record.block_hash,
+                                            record.parent_hash
+                                        )),
+                                        None => Err(format!(
+                                            "compact chain starts at h{} but canonical lock is missing",
+                                            block.block_index
+                                        )),
+                                    },
+                                )
+                            })
+                            .transpose()
+                            .unwrap_or_else(|boundary_error| {
+                                panic!(
+                                    "compact chain boundary preflight failed for {}: {}",
+                                    chain_path.display(),
+                                    boundary_error
+                                )
+                            })
+                            .unwrap_or(false);
+                        if compact_boundary {
+                            info!(
+                                "rpc",
+                                "Accepted compact chain state with canonical lock boundary",
+                                "path" => chain_path.display().to_string(),
+                                "first_height" => chain.chain.first().map(|block| block.block_index).unwrap_or(0),
+                                "first_hash" => chain.chain.first().map(|block| block.hash.clone()).unwrap_or_default(),
+                                "canonical_genesis" => canonical_genesis.hash().to_string()
+                            );
+                        } else {
+                            #[cfg(test)]
+                            {
+                                eprintln!(
+                                    "ignoring incompatible test chain state at {}: {}",
+                                    chain_path.display(),
+                                    error
+                                );
+                                let mut chain = BlockChain::new();
+                                chain.genesis().unwrap_or_else(|error| {
+                                    panic!("failed to bootstrap genesis block: {error}")
+                                });
+                                return Arc::new(Mutex::new(chain));
+                            }
+                            #[cfg(not(test))]
+                            {
+                                panic!(
                                 "existing chain state at {} does not match canonical genesis {}: {}",
                                 chain_path.display(),
                                 canonical_genesis.hash(),
                                 error
                             )
-                        });
+                            }
+                        }
+                    }
                     recover_chain_and_validate_canonical(&mut chain, &chain_path).unwrap_or_else(
                         |error| {
                             panic!(
@@ -303,6 +392,7 @@ lazy_static! {
                             )
                         },
                     );
+                    compact_hot_chain_state_from_env(&mut chain, "startup_existing_chain");
                     chain
                 }
                 None => {
@@ -310,6 +400,7 @@ lazy_static! {
                     chain.genesis().unwrap_or_else(|error| {
                         panic!("failed to bootstrap genesis block: {error}")
                     });
+                    compact_hot_chain_state_from_env(&mut chain, "startup_new_chain");
                     chain.save_to_file(chain_path.to_str().unwrap_or("data/chain.json"));
                     chain
                 }
@@ -637,6 +728,9 @@ fn synthesize_validator(
         status: ValidatorStatus::Inactive,
         version: env!("CARGO_PKG_VERSION").to_string(),
         activation_tx_hash: None,
+        shadow_started_at_height: None,
+        activation_recorded_height: None,
+        activation_effective_height: None,
     }
 }
 
@@ -2133,8 +2227,12 @@ fn handle_json_rpc(
                 // The RPC accepts amounts in SNRG for user-friendliness, but internally stores as nWei
                 use crate::gas::constants::NWEI_PER_SNRG;
                 let amount_nwei = amount.saturating_mul(NWEI_PER_SNRG as u64);
+                let next_nonce = next_account_nonce_value(from, tx_pool, chain);
 
                 if let Ok(mut wallet_manager) = WALLET_MANAGER.lock() {
+                    if let Some(wallet) = wallet_manager.get_wallet_mut(from) {
+                        wallet.nonce = wallet.nonce.max(next_nonce);
+                    }
                     let token_manager = TOKEN_MANAGER.clone();
                     match wallet_manager.send_tokens(
                         from,
@@ -2177,8 +2275,12 @@ fn handle_json_rpc(
                 // Convert SNRG amount to nWei (per SNTS-04: 1 SNRG = 1,000,000,000 nWei)
                 use crate::gas::constants::NWEI_PER_SNRG;
                 let amount_nwei = amount.saturating_mul(NWEI_PER_SNRG as u64);
+                let next_nonce = next_account_nonce_value(staker, tx_pool, chain);
 
                 if let Ok(mut wallet_manager) = WALLET_MANAGER.lock() {
+                    if let Some(wallet) = wallet_manager.get_wallet_mut(staker) {
+                        wallet.nonce = wallet.nonce.max(next_nonce);
+                    }
                     let token_manager = TOKEN_MANAGER.clone();
                     match wallet_manager.stake_tokens(
                         staker,
@@ -2276,8 +2378,12 @@ fn handle_json_rpc(
             ) {
                 use crate::gas::constants::NWEI_PER_SNRG;
                 let amount_nwei = amount.saturating_mul(NWEI_PER_SNRG as u64);
+                let next_nonce = next_account_nonce_value(validator, tx_pool, chain);
 
                 if let Ok(mut wallet_manager) = WALLET_MANAGER.lock() {
+                    if let Some(wallet) = wallet_manager.get_wallet_mut(validator) {
+                        wallet.nonce = wallet.nonce.max(next_nonce);
+                    }
                     match wallet_manager.activate_validator(validator, name, amount_nwei) {
                         Ok(transaction) => {
                             let tx_hash = transaction.hash();
@@ -3027,81 +3133,7 @@ fn handle_json_rpc(
 
         // 1. synergy_getTransactionReceipt
         // Get a transaction receipt with execution details.
-        "synergy_getTransactionReceipt" => {
-            if let Some(tx_hash) = params.get(0).and_then(|v| v.as_str()) {
-                let normalized = tx_hash.strip_prefix("0x").unwrap_or(tx_hash).to_lowercase();
-                let raw_hash_search = if normalized.starts_with("syntxn-") {
-                    normalized.strip_prefix("syntxn-").unwrap_or(&normalized)
-                } else if normalized.starts_with("synxxn-") {
-                    normalized.strip_prefix("synxxn-").unwrap_or(&normalized)
-                } else {
-                    &normalized
-                };
-
-                let matches_tx = |tx: &Transaction| -> bool {
-                    let tx_hash_formatted = tx.hash().to_lowercase();
-                    let tx_hash_raw = tx.raw_hash().to_lowercase();
-                    tx_hash_formatted == normalized
-                        || tx_hash_raw == normalized
-                        || tx_hash_raw == raw_hash_search
-                        || (tx_hash_formatted.starts_with("syntxn-")
-                            && tx_hash_formatted.strip_prefix("syntxn-").unwrap_or("")
-                                == raw_hash_search)
-                        || (tx_hash_formatted.starts_with("synxxn-")
-                            && tx_hash_formatted.strip_prefix("synxxn-").unwrap_or("")
-                                == raw_hash_search)
-                };
-
-                // Search in confirmed transactions
-                let chain = chain.lock().unwrap();
-                for block in &chain.chain {
-                    let mut cumulative_gas: u64 = 0;
-                    for (idx, tx) in block.transactions.iter().enumerate() {
-                        let gas_used = if tx.data.is_some() {
-                            tx.gas_limit.min(tx.estimate_gas())
-                        } else {
-                            crate::gas::constants::GAS_LIMIT_TRANSFER
-                        };
-                        cumulative_gas = cumulative_gas.saturating_add(gas_used);
-
-                        if matches_tx(tx) {
-                            let is_contract_creation =
-                                tx.receiver.is_empty() || tx.receiver == "0x0" || tx.receiver == "";
-                            let contract_address = if is_contract_creation {
-                                // Derive a deterministic contract address
-                                let hash_input = format!("{}{}", tx.sender, tx.nonce);
-                                let addr_hash =
-                                    hex::encode(blake3::hash(hash_input.as_bytes()).as_bytes());
-                                Some(format!("sync1{}", &addr_hash[..38]))
-                            } else {
-                                None
-                            };
-
-                            return json!({
-                                "transactionHash": tx.hash(),
-                                "transactionIndex": idx,
-                                "blockHash": block.hash.clone(),
-                                "blockNumber": block.block_index,
-                                "from": tx.sender.clone(),
-                                "to": if is_contract_creation { Value::Null } else { json!(tx.receiver.clone()) },
-                                "cumulativeGasUsed": cumulative_gas,
-                                "gasUsed": gas_used,
-                                "effectiveGasPrice": tx.gas_price,
-                                "status": "0x1",
-                                "logs": [],
-                                "logsBloom": "0x".to_string() + &"0".repeat(512),
-                                "contractAddress": contract_address
-                            });
-                        }
-                    }
-                }
-
-                // Check pending pool - return null (receipt only exists for mined txs)
-                json!(null)
-            } else {
-                json!({"error": "Missing transaction hash parameter"})
-            }
-        }
+        "synergy_getTransactionReceipt" => transaction_receipt_json(&params, chain),
 
         // 2. synergy_getTransactionCount
         // Get the transaction count (nonce) for an address.
@@ -3434,59 +3466,7 @@ fn handle_json_rpc(
         }
 
         // synergy_getBlockReceipts
-        "synergy_getBlockReceipts" => {
-            let chain = chain.lock().unwrap();
-            let block = if let Some(block_num) = params.get(0).and_then(|v| v.as_u64()) {
-                chain.chain.iter().find(|b| b.block_index == block_num)
-            } else if let Some(block_hash) = params.get(0).and_then(|v| v.as_str()) {
-                chain
-                    .chain
-                    .iter()
-                    .find(|b| b.hash.eq_ignore_ascii_case(block_hash))
-            } else {
-                return json!({"error": "Missing block number or block hash parameter"});
-            };
-
-            if let Some(block) = block {
-                let mut cumulative_gas: u64 = 0;
-                let receipts: Vec<Value> = block.transactions.iter().enumerate().map(|(idx, tx)| {
-                    let gas_used = if tx.data.is_some() {
-                        tx.gas_limit.min(tx.estimate_gas())
-                    } else {
-                        crate::gas::constants::GAS_LIMIT_TRANSFER
-                    };
-                    cumulative_gas = cumulative_gas.saturating_add(gas_used);
-
-                    let is_contract_creation = tx.receiver.is_empty() || tx.receiver == "0x0";
-                    let contract_address = if is_contract_creation {
-                        let hash_input = format!("{}{}", tx.sender, tx.nonce);
-                        let addr_hash = hex::encode(blake3::hash(hash_input.as_bytes()).as_bytes());
-                        Some(format!("sync1{}", &addr_hash[..38]))
-                    } else {
-                        None
-                    };
-
-                    json!({
-                        "transactionHash": tx.hash(),
-                        "transactionIndex": idx,
-                        "blockHash": block.hash.clone(),
-                        "blockNumber": block.block_index,
-                        "from": tx.sender.clone(),
-                        "to": if is_contract_creation { Value::Null } else { json!(tx.receiver.clone()) },
-                        "cumulativeGasUsed": cumulative_gas,
-                        "gasUsed": gas_used,
-                        "effectiveGasPrice": tx.gas_price,
-                        "status": "0x1",
-                        "logs": [],
-                        "logsBloom": "0x".to_string() + &"0".repeat(512),
-                        "contractAddress": contract_address
-                    })
-                }).collect();
-                json!(receipts)
-            } else {
-                json!(null)
-            }
-        }
+        "synergy_getBlockReceipts" => block_receipts_json(&params, chain),
 
         // synergy_getPendingTransactions
         "synergy_getPendingTransactions" => {
@@ -5199,60 +5179,465 @@ fn transaction_status_json(
 }
 
 fn transaction_receipt_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let index_path = configured_synq_receipt_index_path();
+    transaction_receipt_json_with_index_path(params, chain, Some(&index_path))
+}
+
+fn block_receipts_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let index_path = configured_synq_receipt_index_path();
+    block_receipts_json_with_index_path(params, chain, Some(&index_path))
+}
+
+fn transaction_receipt_json_with_index_path(
+    params: &Value,
+    chain: &Arc<Mutex<BlockChain>>,
+    index_path: Option<&Path>,
+) -> Value {
     let Some(tx_hash) = params.get(0).and_then(Value::as_str) else {
         return json!({"error": "Missing transaction hash parameter"});
     };
+    let chain = chain.lock().unwrap();
+
+    let Some((block_index, tx_index)) = find_confirmed_transaction_position(&chain, tx_hash) else {
+        let index = load_synq_receipt_index(index_path);
+        if let Some(indexed) = index.receipt_by_query(tx_hash) {
+            return indexed.receipt.clone();
+        }
+        return json!(null);
+    };
+
+    let synq_receipts = materialize_synq_receipt_index(&chain, Some(block_index), index_path);
+    let Some(block) = chain
+        .chain
+        .iter()
+        .find(|block| block.block_index == block_index)
+    else {
+        return json!(null);
+    };
+
+    let mut cumulative_gas: u64 = 0;
+    for (idx, tx) in block.transactions.iter().enumerate() {
+        let synq = synq_receipts
+            .receipt_for_position(block.block_index, idx)
+            .map(|receipt| &receipt.receipt);
+        let gas_used = receipt_gas_used(tx, synq);
+        cumulative_gas = cumulative_gas.saturating_add(gas_used);
+        if idx == tx_index {
+            if let Some(indexed) = synq_receipts.receipt_by_query(tx_hash) {
+                return indexed.receipt.clone();
+            }
+            return confirmed_transaction_receipt_json(
+                block,
+                idx,
+                tx,
+                cumulative_gas,
+                gas_used,
+                synq,
+            );
+        }
+    }
+    json!(null)
+}
+
+fn block_receipts_json_with_index_path(
+    params: &Value,
+    chain: &Arc<Mutex<BlockChain>>,
+    index_path: Option<&Path>,
+) -> Value {
+    let chain = chain.lock().unwrap();
+    let block = if let Some(block_num) = params.get(0).and_then(|v| v.as_u64()) {
+        chain.chain.iter().find(|b| b.block_index == block_num)
+    } else if let Some(block_hash) = params.get(0).and_then(|v| v.as_str()) {
+        chain
+            .chain
+            .iter()
+            .find(|b| b.hash.eq_ignore_ascii_case(block_hash))
+    } else {
+        return json!({"error": "Missing block number or block hash parameter"});
+    };
+
+    if let Some(block) = block {
+        let synq_receipts =
+            materialize_synq_receipt_index(&chain, Some(block.block_index), index_path);
+        let mut cumulative_gas: u64 = 0;
+        let receipts: Vec<Value> = block
+            .transactions
+            .iter()
+            .enumerate()
+            .map(|(idx, tx)| {
+                let synq = synq_receipts
+                    .receipt_for_position(block.block_index, idx)
+                    .map(|receipt| &receipt.receipt);
+                let gas_used = receipt_gas_used(tx, synq);
+                cumulative_gas = cumulative_gas.saturating_add(gas_used);
+                confirmed_transaction_receipt_json(block, idx, tx, cumulative_gas, gas_used, synq)
+            })
+            .collect();
+        json!(receipts)
+    } else {
+        json!(null)
+    }
+}
+
+fn find_confirmed_transaction_position(chain: &BlockChain, tx_hash: &str) -> Option<(u64, usize)> {
     let normalized = tx_hash.strip_prefix("0x").unwrap_or(tx_hash).to_lowercase();
     let raw_hash_search = normalized
         .strip_prefix("syntxn-")
         .or_else(|| normalized.strip_prefix("synxxn-"))
         .unwrap_or(&normalized);
-    let matches_tx = |tx: &Transaction| -> bool {
-        let tx_hash_formatted = tx.hash().to_lowercase();
-        let tx_hash_raw = tx.raw_hash().to_lowercase();
-        tx_hash_formatted == normalized
-            || tx_hash_raw == normalized
-            || tx_hash_raw == raw_hash_search
-            || tx_hash_formatted
-                .strip_prefix("syntxn-")
-                .map(|hash| hash == raw_hash_search)
-                .unwrap_or(false)
-            || tx_hash_formatted
-                .strip_prefix("synxxn-")
-                .map(|hash| hash == raw_hash_search)
-                .unwrap_or(false)
-    };
-    let chain = chain.lock().unwrap();
     for block in &chain.chain {
-        let mut cumulative_gas: u64 = 0;
         for (idx, tx) in block.transactions.iter().enumerate() {
-            let gas_used = if tx.data.is_some() {
-                tx.gas_limit.min(tx.estimate_gas())
-            } else {
-                crate::gas::constants::GAS_LIMIT_TRANSFER
-            };
-            cumulative_gas = cumulative_gas.saturating_add(gas_used);
-            if matches_tx(tx) {
-                return json!({
-                    "transactionHash": tx.hash(),
-                    "transactionIndex": idx,
-                    "blockHash": block.hash,
-                    "blockNumber": block.block_index,
-                    "from": tx.sender,
-                    "to": tx.receiver,
-                    "cumulativeGasUsed": cumulative_gas,
-                    "gasUsed": gas_used,
-                    "effectiveGasPrice": tx.gas_price,
-                    "feeCharged": gas_used.saturating_mul(tx.gas_price),
-                    "feeCollector": crate::token::FEE_COLLECTOR_ADDRESS,
-                    "status": "0x1",
-                    "logs": [],
-                    "chain": chain_identity_json(),
-                });
+            if transaction_matches_hash_query(tx, &normalized, raw_hash_search) {
+                return Some((block.block_index, idx));
             }
         }
     }
-    json!(null)
+    None
+}
+
+fn transaction_matches_hash_query(
+    tx: &Transaction,
+    normalized: &str,
+    raw_hash_search: &str,
+) -> bool {
+    let tx_hash_formatted = tx.hash().to_lowercase();
+    let tx_hash_raw = tx.raw_hash().to_lowercase();
+    tx_hash_formatted == normalized
+        || tx_hash_raw == normalized
+        || tx_hash_raw == raw_hash_search
+        || tx_hash_formatted
+            .strip_prefix("syntxn-")
+            .map(|hash| hash == raw_hash_search)
+            .unwrap_or(false)
+        || tx_hash_formatted
+            .strip_prefix("synxxn-")
+            .map(|hash| hash == raw_hash_search)
+            .unwrap_or(false)
+}
+
+fn legacy_receipt_gas_used(tx: &Transaction) -> u64 {
+    if tx.data.is_some() {
+        tx.gas_limit.min(tx.estimate_gas())
+    } else {
+        crate::gas::constants::GAS_LIMIT_TRANSFER
+    }
+}
+
+fn receipt_gas_used(tx: &Transaction, synq_receipt: Option<&Value>) -> u64 {
+    synq_receipt
+        .and_then(|receipt| receipt.get("synq_aivm"))
+        .and_then(|aivm| aivm.get("gas_used"))
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| legacy_receipt_gas_used(tx))
+}
+
+fn confirmed_transaction_receipt_json(
+    block: &crate::block::Block,
+    tx_index: usize,
+    tx: &Transaction,
+    cumulative_gas: u64,
+    gas_used: u64,
+    synq_receipt: Option<&Value>,
+) -> Value {
+    let is_contract_creation = tx.receiver.is_empty() || tx.receiver == "0x0";
+    let contract_address = if is_contract_creation {
+        let hash_input = format!("{}{}", tx.sender, tx.nonce);
+        let addr_hash = hex::encode(blake3::hash(hash_input.as_bytes()).as_bytes());
+        Some(format!("sync1{}", &addr_hash[..38]))
+    } else {
+        None
+    };
+    let status = if synq_receipt_failed(synq_receipt) {
+        "0x0"
+    } else {
+        "0x1"
+    };
+    let mut receipt = json!({
+        "transactionHash": tx.hash(),
+        "transactionIndex": tx_index,
+        "blockHash": block.hash.clone(),
+        "blockNumber": block.block_index,
+        "from": tx.sender.clone(),
+        "to": if is_contract_creation { Value::Null } else { json!(tx.receiver.clone()) },
+        "cumulativeGasUsed": cumulative_gas,
+        "gasUsed": gas_used,
+        "effectiveGasPrice": tx.gas_price,
+        "feeCharged": gas_used.saturating_mul(tx.gas_price),
+        "feeCollector": crate::token::FEE_COLLECTOR_ADDRESS,
+        "status": status,
+        "logs": [],
+        "logsBloom": "0x".to_string() + &"0".repeat(512),
+        "contractAddress": contract_address,
+        "chain": chain_identity_json(),
+    });
+    if let Some(synq_receipt) = synq_receipt {
+        if let Some(object) = receipt.as_object_mut() {
+            object.insert(
+                "synq_verification".to_string(),
+                synq_receipt
+                    .get("synq_verification")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            );
+            object.insert(
+                "synq_aivm".to_string(),
+                synq_receipt
+                    .get("synq_aivm")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            );
+            object.insert(
+                "synq_replay".to_string(),
+                synq_receipt
+                    .get("synq_replay")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            );
+            if let Some(hash) = synq_receipt
+                .get("synq_aivm")
+                .and_then(|aivm| aivm.get("receipt_hash"))
+                .cloned()
+            {
+                object.insert("synq_receipt_hash".to_string(), hash);
+            }
+            if let Some(status) = synq_receipt
+                .get("synq_aivm")
+                .and_then(|aivm| aivm.get("status"))
+                .cloned()
+            {
+                object.insert("synq_execution_status".to_string(), status);
+            }
+            for field in ["synq_error_code", "synq_error_message", "synq_replay_error"] {
+                if let Some(value) = synq_receipt.get(field).cloned() {
+                    object.insert(field.to_string(), value);
+                }
+            }
+        }
+    }
+    receipt
+}
+
+fn synq_receipt_failed(synq_receipt: Option<&Value>) -> bool {
+    let Some(receipt) = synq_receipt else {
+        return false;
+    };
+    if receipt.get("synq_error_code").is_some() || receipt.get("synq_replay_error").is_some() {
+        return true;
+    }
+    receipt
+        .get("synq_aivm")
+        .and_then(|aivm| aivm.get("status"))
+        .and_then(Value::as_str)
+        .map(|status| status != "succeeded")
+        .unwrap_or(false)
+}
+
+fn load_synq_receipt_index(index_path: Option<&Path>) -> SynQReceiptIndex {
+    let Some(index_path) = index_path else {
+        return SynQReceiptIndex::new();
+    };
+    SynQReceiptIndex::load_from_path(index_path).unwrap_or_else(|error| {
+        warn!(
+            "rpc",
+            "Unable to load SynQ receipt index; rebuilding from available chain window",
+            "path" => index_path.display().to_string(),
+            "error" => error
+        );
+        SynQReceiptIndex::new()
+    })
+}
+
+fn save_synq_receipt_index(index: &SynQReceiptIndex, index_path: Option<&Path>) {
+    let Some(index_path) = index_path else {
+        return;
+    };
+    if let Err(error) = index.save_to_path_atomic(index_path) {
+        warn!(
+            "rpc",
+            "Unable to persist SynQ receipt index",
+            "path" => index_path.display().to_string(),
+            "error" => error
+        );
+    }
+}
+
+fn materialize_synq_receipt_index(
+    chain: &BlockChain,
+    target_block: Option<u64>,
+    index_path: Option<&Path>,
+) -> SynQReceiptIndex {
+    let mut index = load_synq_receipt_index(index_path);
+    let mut aivm_state = index.checkpoint.aivm_state.clone();
+    let mut artifacts = index.checkpoint.artifact_map();
+    let mut deployments = index.checkpoint.deployments.clone();
+    let latest_materialized = index.checkpoint.latest_materialized_block;
+    let first_materialized_block = index
+        .checkpoint
+        .first_materialized_block
+        .or_else(|| chain.chain.first().map(|block| block.block_index));
+    let first_replayed_block = first_materialized_block;
+    let mut changed = false;
+
+    for block in &chain.chain {
+        if target_block
+            .map(|target| block.block_index > target)
+            .unwrap_or(false)
+        {
+            break;
+        }
+        if latest_materialized
+            .map(|height| block.block_index <= height)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        let mut cumulative_gas: u64 = 0;
+        let mut block_synq_receipts = BTreeMap::<usize, Value>::new();
+        for (idx, tx) in block.transactions.iter().enumerate() {
+            if let Some(synq_receipt) = replay_synq_receipt_for_legacy_transaction(
+                tx,
+                block.block_index,
+                idx,
+                first_replayed_block,
+                &mut aivm_state,
+                &mut artifacts,
+                &mut deployments,
+            ) {
+                block_synq_receipts.insert(idx, synq_receipt);
+            }
+
+            let synq = block_synq_receipts.get(&idx);
+            let gas_used = receipt_gas_used(tx, synq);
+            cumulative_gas = cumulative_gas.saturating_add(gas_used);
+            if let Some(synq) = synq {
+                let receipt = confirmed_transaction_receipt_json(
+                    block,
+                    idx,
+                    tx,
+                    cumulative_gas,
+                    gas_used,
+                    Some(synq),
+                );
+                index.upsert_receipt(SynQIndexedReceipt::new(
+                    tx.hash(),
+                    tx.raw_hash(),
+                    block.hash.clone(),
+                    block.block_index,
+                    idx,
+                    receipt,
+                ));
+            }
+        }
+
+        index.record_checkpoint(
+            block.block_index,
+            first_materialized_block,
+            &aivm_state,
+            &artifacts,
+            &deployments,
+        );
+        changed = true;
+    }
+
+    if changed {
+        save_synq_receipt_index(&index, index_path);
+    }
+    index
+}
+
+fn replay_synq_receipt_for_legacy_transaction(
+    legacy_tx: &Transaction,
+    block_index: u64,
+    tx_index: usize,
+    first_replayed_block: Option<u64>,
+    aivm_state: &mut aivm_core::state::ContractState,
+    artifacts: &mut BTreeMap<SynQArtifactKey, SynQContractArtifact>,
+    deployments: &mut BTreeMap<String, SynQDeploymentRecord>,
+) -> Option<Value> {
+    let data = legacy_tx.data.as_deref()?;
+    if !data.starts_with(crate::aegis_tx_tool::AEGIS_TX_CARRIER_PREFIX) {
+        return None;
+    }
+    let envelope = match crate::aegis_tx_tool::decode_aegis_carrier_data(data) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            return Some(json!({
+                "synq_error_code": "SYNQ-RPC-CARRIER",
+                "synq_error_message": error,
+                "synq_replay": synq_replay_metadata(block_index, tx_index, first_replayed_block),
+            }));
+        }
+    };
+    let typed_tx = envelope.transaction;
+    let verification = match crate::synq_admission::verify_transaction_payload_for_chain_admission(
+        &typed_tx,
+        legacy_tx.timestamp,
+    ) {
+        Ok(Some(summary)) => summary,
+        Ok(None) => return None,
+        Err(error) => {
+            return Some(json!({
+                "synq_error_code": error.code(),
+                "synq_error_message": error.to_string(),
+                "synq_replay": synq_replay_metadata(block_index, tx_index, first_replayed_block),
+            }));
+        }
+    };
+    let tx_id = match replay_tx_id(&typed_tx) {
+        Ok(tx_id) => tx_id,
+        Err(error) => {
+            return Some(json!({
+                "synq_verification": serde_json::to_value(&verification).unwrap_or(Value::Null),
+                "synq_error_code": "SYNQ-RPC-CANON",
+                "synq_error_message": error,
+                "synq_replay": synq_replay_metadata(block_index, tx_index, first_replayed_block),
+            }));
+        }
+    };
+    match execute_synq_transaction(
+        &tx_id,
+        &typed_tx,
+        &verification,
+        aivm_state,
+        artifacts,
+        deployments,
+    ) {
+        Ok(Some(aivm)) => Some(json!({
+            "synq_verification": serde_json::to_value(&verification).unwrap_or(Value::Null),
+            "synq_aivm": serde_json::to_value(&aivm).unwrap_or(Value::Null),
+            "synq_replay": synq_replay_metadata(block_index, tx_index, first_replayed_block),
+        })),
+        Ok(None) => None,
+        Err(error) => Some(json!({
+            "synq_verification": serde_json::to_value(&verification).unwrap_or(Value::Null),
+            "synq_error_code": "SYNQ-RPC-REPLAY",
+            "synq_error_message": error,
+            "synq_replay": synq_replay_metadata(block_index, tx_index, first_replayed_block),
+        })),
+    }
+}
+
+fn replay_tx_id(tx: &crate::synergy_types::Transaction) -> Result<TxId, String> {
+    Ok(TxId::from_hash(Hash::from_domain_bytes(
+        "SYNERGY_EXECUTION_TX_ID_V1",
+        &tx.canonical_bytes()?,
+    )))
+}
+
+fn synq_replay_metadata(
+    block_index: u64,
+    tx_index: usize,
+    first_replayed_block: Option<u64>,
+) -> Value {
+    json!({
+        "source": "committed_aegis_carrier_hot_chain_replay",
+        "deterministic": true,
+        "block_number": block_index,
+        "transaction_index": tx_index,
+        "first_replayed_block": first_replayed_block,
+        "compacted_chain_window": first_replayed_block.map(|height| height > 0).unwrap_or(false),
+    })
 }
 
 fn transaction_fees_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
@@ -5458,21 +5843,22 @@ fn normalize_signature_algorithm(
         "" | "fndsa" | "fn-dsa" | "fn-dsa-512" | "fn-dsa-1024" | "falcon" | "falcon-1024" => {
             Ok("fndsa".to_string())
         }
-        "mldsa" | "ml-dsa" | "ml-dsa-44" | "ml-dsa-65" | "ml-dsa-87" | "dilithium"
-        | "dilithium-65" => Ok("mldsa".to_string()),
         "slhdsa" | "slh-dsa" | "slh-dsa-128s" | "slh-dsa-192s" | "slh-dsa-256s" => {
-            Ok("slhdsa".to_string())
+            Err(RpcError::new(
+                -32602,
+                format!("Unsupported signature algorithm '{}'; use fndsa", value),
+            ))
         }
         "pqc" | "aegis" => Err(RpcError::new(
             -32602,
             format!(
-                "Ambiguous signature algorithm '{}'; use fndsa, mldsa, or slhdsa explicitly",
+                "Ambiguous signature algorithm '{}'; use fndsa explicitly",
                 value
             ),
         )),
         _ => Err(RpcError::new(
             -32602,
-            format!("Unsupported signature algorithm '{}'", value),
+            format!("Unsupported signature algorithm '{}'; use fndsa", value),
         )),
     }
 }
@@ -5702,6 +6088,17 @@ fn current_gas_price_from_chain(chain: &Arc<Mutex<BlockChain>>) -> u64 {
     dynamic_gas_price(&chain)
 }
 
+fn next_account_nonce_value(
+    address: &str,
+    tx_pool: &Arc<Mutex<Vec<Transaction>>>,
+    chain: &Arc<Mutex<BlockChain>>,
+) -> u64 {
+    get_account_nonce(&json!([address]), tx_pool, chain)
+        .ok()
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0)
+}
+
 fn get_account_nonce(
     params: &Value,
     tx_pool: &Arc<Mutex<Vec<Transaction>>>,
@@ -5729,6 +6126,10 @@ fn get_account_nonce(
                 }
             }
         }
+    }
+
+    for nonce in crate::dag::committed_sender_nonces(address) {
+        next_nonce = next_nonce.max(nonce.saturating_add(1));
     }
 
     {
@@ -6355,9 +6756,210 @@ fn block_to_explorer_json(block: &crate::block::Block) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::aegis_tx_tool::{sign_with_new_aegis_transaction_key, AegisTxBuildOptions};
     use crate::block::{Block, BlockChain};
     use crate::consensus::consensus_algorithm::ProofOfSynergy;
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager};
+    use pqsynq::{
+        canonicalize_signing_payload, derive_synq_address, hash_contract_call_body,
+        hash_contract_deploy_body, AlgorithmId, ChainId as PqSynQChainId, ContractCallEnvelope,
+        ContractDeployEnvelope, DigitalSignature, DomainTag, NetworkId as PqSynQNetworkId, Sign,
+        SignaturePurpose, SynQAddress, SynQPublicKey, SynQSignature, SynQSigningPayload,
+    };
+    use sha2::{Digest, Sha256};
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[derive(Clone)]
+    struct RpcCounterSynQFixture {
+        public_key: SynQPublicKey,
+        private_key: Vec<u8>,
+        address: SynQAddress,
+        bytecode: Vec<u8>,
+        abi_json: String,
+        manifest_json: String,
+        bytecode_hash: [u8; 32],
+        manifest_hash: [u8; 32],
+        abi_hash: [u8; 32],
+    }
+
+    impl RpcCounterSynQFixture {
+        fn new() -> Self {
+            let signer = Sign::mldsa65();
+            let (public_key_bytes, private_key) = signer.keygen().expect("ML-DSA-65 keygen");
+            let public_key = SynQPublicKey::new(public_key_bytes);
+            let address = derive_synq_address(
+                &public_key,
+                AlgorithmId::MlDsa65,
+                &PqSynQNetworkId(
+                    crate::synq_admission::SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string(),
+                ),
+            )
+            .expect("derive SynQ address");
+            let root =
+                PathBuf::from("/Volumes/xcode/Synergy-Network-Projects/synq-language/contracts");
+            let bytecode = fs::read(root.join("Counter.compiled.synq")).expect("Counter bytecode");
+            let abi_json = fs::read_to_string(root.join("Counter.abi.json")).expect("Counter ABI");
+            let manifest_json =
+                fs::read_to_string(root.join("Counter.manifest.json")).expect("Counter manifest");
+            let bytecode_hash = sha256_array(&bytecode);
+            let manifest_hash = sha256_array(manifest_json.as_bytes());
+            let abi_hash = sha256_array(abi_json.as_bytes());
+            Self {
+                public_key,
+                private_key,
+                address,
+                bytecode,
+                abi_json,
+                manifest_json,
+                bytecode_hash,
+                manifest_hash,
+                abi_hash,
+            }
+        }
+
+        fn deploy_payload(&self) -> Vec<u8> {
+            let constructor_args_hash = sha256_array(&[]);
+            let payload_hash = hash_contract_deploy_body(
+                &self.bytecode_hash,
+                &self.manifest_hash,
+                &self.abi_hash,
+                self.address.as_bytes(),
+                &constructor_args_hash,
+            );
+            let signing_payload = self.signing_payload(
+                DomainTag::SynqContractDeployV1,
+                SignaturePurpose::ContractDeploy,
+                payload_hash,
+                501,
+            );
+            let signature = self.sign_payload(&signing_payload);
+            let deploy = ContractDeployEnvelope {
+                signing_payload,
+                public_key: self.public_key.clone(),
+                signature: SynQSignature::new(signature),
+                bytecode_hash: self.bytecode_hash,
+                manifest_hash: self.manifest_hash,
+                abi_hash: self.abi_hash,
+                constructor_args_hash,
+            };
+            let pqsynq_bytes = serde_json::to_vec(&deploy).expect("deploy JSON");
+            crate::synq_admission::build_deploy_admission_carrier_from_pqsynq_bytes_with_artifacts(
+                crate::synergy_types::SYNERGY_TESTNET_V2_CHAIN_ID,
+                crate::synergy_types::SYNERGY_TESTNET_V2_NETWORK_ID,
+                &pqsynq_bytes,
+                self.bytecode.clone(),
+                self.abi_json.clone(),
+                self.manifest_json.clone(),
+                crate::synq_admission::test_support::TEST_NOW,
+            )
+            .expect("deploy carrier with artifacts")
+        }
+
+        fn call_payload(&self, method_selector: [u8; 4], nonce: u64) -> Vec<u8> {
+            let encoded_args_hash = sha256_array(&[]);
+            let payload_hash = hash_contract_call_body(
+                self.address.as_bytes(),
+                &method_selector,
+                &encoded_args_hash,
+                self.address.as_bytes(),
+            );
+            let signing_payload = self.signing_payload(
+                DomainTag::SynqContractCallV1,
+                SignaturePurpose::ContractCall,
+                payload_hash,
+                nonce,
+            );
+            let signature = self.sign_payload(&signing_payload);
+            let call = ContractCallEnvelope {
+                signing_payload,
+                public_key: self.public_key.clone(),
+                signature: SynQSignature::new(signature),
+                contract_address: self.address,
+                method_selector,
+                encoded_args_hash,
+            };
+            crate::synq_admission::build_call_admission_carrier_from_pqsynq_bytes(
+                crate::synergy_types::SYNERGY_TESTNET_V2_CHAIN_ID,
+                crate::synergy_types::SYNERGY_TESTNET_V2_NETWORK_ID,
+                &serde_json::to_vec(&call).expect("call JSON"),
+                crate::synq_admission::test_support::TEST_NOW,
+            )
+            .expect("call carrier")
+        }
+
+        fn signing_payload(
+            &self,
+            domain_tag: DomainTag,
+            signature_purpose: SignaturePurpose,
+            payload_hash: [u8; 32],
+            nonce: u64,
+        ) -> SynQSigningPayload {
+            SynQSigningPayload {
+                domain_tag,
+                chain_id: PqSynQChainId(crate::synergy_types::SYNERGY_TESTNET_V2_CHAIN_ID),
+                network_id: PqSynQNetworkId(
+                    crate::synq_admission::SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string(),
+                ),
+                protocol_version: 1,
+                algorithm_id: AlgorithmId::MlDsa65,
+                signature_purpose,
+                nonce,
+                not_before_unix: 0,
+                expiration_unix: 4_102_444_800,
+                signer_address: self.address,
+                payload_hash,
+            }
+        }
+
+        fn sign_payload(&self, payload: &SynQSigningPayload) -> Vec<u8> {
+            let canonical = canonicalize_signing_payload(payload).expect("canonical payload");
+            Sign::mldsa65()
+                .detached_sign(&canonical, &self.private_key)
+                .expect("ML-DSA-65 sign")
+        }
+    }
+
+    fn sha256_array(bytes: &[u8]) -> [u8; 32] {
+        let digest = Sha256::digest(bytes);
+        let mut out = [0_u8; 32];
+        out.copy_from_slice(&digest);
+        out
+    }
+
+    fn aegis_synq_legacy_transaction(payload: Vec<u8>, nonce: u64) -> Transaction {
+        sign_with_new_aegis_transaction_key(AegisTxBuildOptions {
+            nonce,
+            amount_nwei: 1,
+            gas_limit: 150_000,
+            max_fee_nwei: 1_000,
+            write_set_hint: vec![format!("synq-counter-{nonce}")],
+            payload,
+            ..AegisTxBuildOptions::default()
+        })
+        .expect("Aegis transaction should sign")
+        .rpc_transaction
+    }
+
+    fn decode_u256_hex(value: &str) -> u64 {
+        let bytes = hex::decode(value).expect("return data hex");
+        assert_eq!(bytes.len(), 32);
+        u64::from_be_bytes(bytes[24..32].try_into().expect("u64 tail"))
+    }
+
+    fn temp_synq_receipt_index_path(test_name: &str) -> PathBuf {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "synergy-synq-receipts-{test_name}-{}-{suffix}.json",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+        path
+    }
 
     fn admission_valid_but_runtime_invalid_transaction() -> Transaction {
         let mut manager = PQCManager::new();
@@ -6456,6 +7058,29 @@ mod tests {
 
         assert_eq!(error.code, -32602);
         assert!(error.message.contains("Ambiguous signature algorithm"));
+    }
+
+    #[test]
+    fn normalize_transaction_rejects_unsupported_signature_algorithm() {
+        let envelope = json!({
+            "from": "syna1sender",
+            "to": "syna1receiver",
+            "value": 42,
+            "nonce": 7,
+            "gasLimit": 21000,
+            "maxFee": 1000,
+            "signature": "0x01020304",
+            "signerPublicKey": "0x05060708",
+            "signatureAlgorithm": "unsupported-signature",
+            "chainId": "0x1234",
+            "networkId": "synergy-testnet-v2"
+        });
+
+        let error =
+            normalize_rpc_transaction(&envelope, true).expect_err("algorithm is unsupported");
+
+        assert_eq!(error.code, -32602);
+        assert!(error.message.contains("use fndsa"));
     }
 
     #[test]
@@ -6679,6 +7304,218 @@ mod tests {
             identity["genesis_hash"],
             "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789"
         );
+    }
+
+    #[test]
+    fn synq_transaction_receipt_replays_counter_state_from_committed_aegis_carriers() {
+        let fixture = RpcCounterSynQFixture::new();
+        let deploy = aegis_synq_legacy_transaction(fixture.deploy_payload(), 0);
+        let increment =
+            aegis_synq_legacy_transaction(fixture.call_payload([0x58, 0x42, 0xf1, 0xbe], 502), 1);
+        let get =
+            aegis_synq_legacy_transaction(fixture.call_payload([0x75, 0xb7, 0x04, 0x57], 503), 2);
+        let get_hash = get.hash();
+        let mut chain = BlockChain::new();
+        chain.add_block(Block::new_with_timestamp(
+            1,
+            vec![deploy, increment, get],
+            "genesis".to_string(),
+            "validator".to_string(),
+            0,
+            crate::synq_admission::test_support::TEST_NOW,
+        ));
+        let chain = Arc::new(Mutex::new(chain));
+        let index_path = temp_synq_receipt_index_path("counter-replay");
+
+        let receipt =
+            transaction_receipt_json_with_index_path(&json!([get_hash]), &chain, Some(&index_path));
+
+        assert_eq!(receipt["status"], "0x1");
+        assert_eq!(
+            receipt["synq_verification"]["domain"],
+            "SYNQ_CONTRACT_CALL_V1"
+        );
+        assert_eq!(receipt["synq_verification"]["algorithm"], "ML-DSA-65");
+        assert_eq!(receipt["synq_aivm"]["status"], "succeeded");
+        assert_eq!(receipt["synq_aivm"]["operation"], "call");
+        assert_eq!(
+            decode_u256_hex(receipt["synq_aivm"]["return_data_hex"].as_str().unwrap()),
+            1
+        );
+        assert!(receipt["synq_receipt_hash"]
+            .as_str()
+            .map(|hash| !hash.is_empty())
+            .unwrap_or(false));
+        assert_eq!(
+            receipt["synq_replay"]["source"],
+            "committed_aegis_carrier_hot_chain_replay"
+        );
+        let _ = fs::remove_file(index_path);
+    }
+
+    #[test]
+    fn synq_receipt_index_carries_aivm_state_across_compacted_chain_window() {
+        let fixture = RpcCounterSynQFixture::new();
+        let deploy = aegis_synq_legacy_transaction(fixture.deploy_payload(), 0);
+        let deploy_hash = deploy.hash();
+        let increment =
+            aegis_synq_legacy_transaction(fixture.call_payload([0x58, 0x42, 0xf1, 0xbe], 502), 1);
+        let get =
+            aegis_synq_legacy_transaction(fixture.call_payload([0x75, 0xb7, 0x04, 0x57], 503), 2);
+        let get_hash = get.hash();
+        let index_path = temp_synq_receipt_index_path("compacted-continuation");
+
+        let mut deploy_chain = BlockChain::new();
+        deploy_chain.add_block(Block::new_with_timestamp(
+            1,
+            vec![deploy],
+            "genesis".to_string(),
+            "validator".to_string(),
+            0,
+            crate::synq_admission::test_support::TEST_NOW,
+        ));
+        let deploy_chain = Arc::new(Mutex::new(deploy_chain));
+        let deploy_receipt = transaction_receipt_json_with_index_path(
+            &json!([deploy_hash]),
+            &deploy_chain,
+            Some(&index_path),
+        );
+        assert_eq!(deploy_receipt["synq_aivm"]["status"], "succeeded");
+
+        let mut compacted_chain = BlockChain::new();
+        compacted_chain.chain.clear();
+        compacted_chain.add_block(Block::new_with_timestamp(
+            2,
+            vec![increment, get],
+            "block-1-compacted".to_string(),
+            "validator".to_string(),
+            0,
+            crate::synq_admission::test_support::TEST_NOW + 1,
+        ));
+        let compacted_chain = Arc::new(Mutex::new(compacted_chain));
+        let get_receipt = transaction_receipt_json_with_index_path(
+            &json!([get_hash.clone()]),
+            &compacted_chain,
+            Some(&index_path),
+        );
+
+        assert_eq!(get_receipt["status"], "0x1");
+        assert_eq!(get_receipt["synq_aivm"]["status"], "succeeded");
+        assert_eq!(
+            decode_u256_hex(
+                get_receipt["synq_aivm"]["return_data_hex"]
+                    .as_str()
+                    .unwrap()
+            ),
+            1
+        );
+
+        let empty_chain = Arc::new(Mutex::new(BlockChain::new()));
+        let indexed_receipt = transaction_receipt_json_with_index_path(
+            &json!([get_hash]),
+            &empty_chain,
+            Some(&index_path),
+        );
+        assert_eq!(
+            indexed_receipt["synq_receipt_hash"],
+            get_receipt["synq_receipt_hash"]
+        );
+        assert_eq!(
+            decode_u256_hex(
+                indexed_receipt["synq_aivm"]["return_data_hex"]
+                    .as_str()
+                    .unwrap()
+            ),
+            1
+        );
+
+        let index =
+            SynQReceiptIndex::load_from_path(&index_path).expect("persisted SynQ receipt index");
+        assert_eq!(index.checkpoint.latest_materialized_block, Some(2));
+        assert_eq!(
+            index.checkpoint.aivm_state_root,
+            get_receipt["synq_aivm"]["post_state_root"]
+                .as_str()
+                .unwrap()
+        );
+        assert!(index.receipt_by_query(&get_hash).is_some());
+        let _ = fs::remove_file(index_path);
+    }
+
+    #[test]
+    fn synq_block_receipts_include_aivm_status_and_fail_closed_errors() {
+        let carrier = crate::synq_admission::test_support::deploy_carrier(
+            crate::synergy_types::SYNERGY_TESTNET_V2_NETWORK_ID,
+        );
+        let payload = crate::synq_admission::encode_synq_admission_carrier(&carrier)
+            .expect("encode hash-only deploy carrier");
+        let deploy = aegis_synq_legacy_transaction(payload, 7);
+        let mut chain = BlockChain::new();
+        chain.add_block(Block::new_with_timestamp(
+            11,
+            vec![deploy],
+            "genesis".to_string(),
+            "validator".to_string(),
+            0,
+            crate::synq_admission::test_support::TEST_NOW,
+        ));
+        let chain = Arc::new(Mutex::new(chain));
+        let index_path = temp_synq_receipt_index_path("block-receipts");
+        let receipts = block_receipts_json_with_index_path(&json!([11]), &chain, Some(&index_path));
+        let first = receipts
+            .as_array()
+            .and_then(|items| items.first())
+            .expect("block receipt should exist");
+
+        assert_eq!(first["status"], "0x0");
+        assert_eq!(
+            first["synq_verification"]["domain"],
+            "SYNQ_CONTRACT_DEPLOY_V1"
+        );
+        assert_eq!(first["synq_aivm"]["status"], "failed");
+        assert_eq!(first["synq_aivm"]["error_code"], "SYNQ-AIVM-ARTIFACT");
+        let _ = fs::remove_file(index_path);
+    }
+
+    #[test]
+    fn next_account_nonce_accounts_for_committed_and_pending_transactions() {
+        let sender = "syna1nonce-source".to_string();
+        let receiver = "syna1nonce-target".to_string();
+        let committed = Transaction::new(
+            sender.clone(),
+            receiver.clone(),
+            1,
+            7,
+            Vec::new(),
+            1000,
+            21_000,
+            None,
+            "fndsa".to_string(),
+        );
+        let pending = Transaction::new(
+            sender.clone(),
+            receiver,
+            1,
+            8,
+            Vec::new(),
+            1000,
+            21_000,
+            None,
+            "fndsa".to_string(),
+        );
+        let mut chain = BlockChain::new();
+        chain.add_block(Block::new_with_timestamp(
+            1,
+            vec![committed],
+            "genesis".to_string(),
+            "validator".to_string(),
+            0,
+            1,
+        ));
+        let chain = Arc::new(Mutex::new(chain));
+        let tx_pool = Arc::new(Mutex::new(vec![pending]));
+
+        assert_eq!(next_account_nonce_value(&sender, &tx_pool, &chain), 9);
     }
 
     #[test]

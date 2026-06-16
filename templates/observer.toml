@@ -12,9 +12,9 @@ services = []
 [network]
 id = 1264
 name = "synergy-testnet"
-p2p_port = 5628
-rpc_port = 5648
-ws_port = 5668
+p2p_port = 5622
+rpc_port = 5640
+ws_port = 5660
 max_peers = 100
 bootnodes = []
 seed_servers = []
@@ -32,7 +32,7 @@ algorithm = "Proof of Synergy"
 block_time_secs = 2
 epoch_length = 1000
 min_validators = 3
-validator_cluster_size = 5
+validator_cluster_size = 7
 validator_vote_threshold = 4
 max_validators = 100
 status_ready_gate_enabled = true
@@ -63,24 +63,24 @@ max_file_size = 10485760
 max_files = 5
 
 [rpc]
-bind_address = "127.0.0.1:5648"
+bind_address = "127.0.0.1:5640"
 enable_http = true
-http_port = 5648
+http_port = 5640
 enable_ws = true
-ws_port = 5668
+ws_port = 5660
 enable_grpc = true
-grpc_port = 5648
+grpc_port = 5640
 cors_enabled = false
 cors_origins = []
 
 [p2p]
-listen_address = "0.0.0.0:5628"
-public_address = "replace-with-public-host:5628"
+listen_address = "0.0.0.0:5622"
+public_address = "replace-with-public-host:5622"
 node_name = "observer-node-01"
 enable_discovery = false
-discovery_port = 5688
-discovery_listen_address = "0.0.0.0:5688"
-discovery_public_address = "replace-with-public-host:5688"
+discovery_port = 5680
+discovery_listen_address = "0.0.0.0:5680"
+discovery_public_address = "replace-with-public-host:5680"
 heartbeat_interval = 10
 bootstrap_refresh_secs = 3600
 
@@ -94,11 +94,11 @@ pruning_interval = 86400
 bootstrap_only = false
 auto_register_validator = false
 validator_address = ""
-strict_validator_allowlist = true
+strict_validator_allowlist = false
 allowed_validator_addresses = ["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs", "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt", "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re", "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5", "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f"]
 
 [telemetry]
 enabled = true
-metrics_bind = "127.0.0.1:6038"
+metrics_bind = "127.0.0.1:6030"
 structured_logs = true
 log_level = "debug"

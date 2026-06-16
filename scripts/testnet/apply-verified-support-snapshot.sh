@@ -104,6 +104,7 @@ allowed_files=(
   dag_state.json
   validator_registry.json
   token_state.json
+  synid_registry.json
   account_state.json
   state_checkpoint.json
 )

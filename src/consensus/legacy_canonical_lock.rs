@@ -64,6 +64,7 @@ pub fn write_legacy_canonical_lock(block: &Block, qc: &QuorumCertificate) -> Res
             written_at_unix_secs: current_unix_secs(),
         },
     );
+    prune_canonical_locks_for_hot_path(&mut locks);
     persist_legacy_canonical_locks(&locks)
 }
 
@@ -122,6 +123,25 @@ fn persist_legacy_canonical_locks(
     drop(file);
     fs::rename(&tmp_path, &path)
         .map_err(|error| format!("failed to replace canonical lock store: {error}"))
+}
+
+fn prune_canonical_locks_for_hot_path(locks: &mut BTreeMap<u64, LegacyCanonicalCommitRecord>) {
+    let Some(retain) = canonical_lock_retain_entries() else {
+        return;
+    };
+    while locks.len() > retain {
+        let Some(height) = locks.keys().next().copied() else {
+            break;
+        };
+        locks.remove(&height);
+    }
+}
+
+fn canonical_lock_retain_entries() -> Option<usize> {
+    std::env::var("SYNERGY_CANONICAL_LOCK_RETAIN_ENTRIES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
 }
 
 fn legacy_qc_hash(qc: &QuorumCertificate) -> Result<String, String> {

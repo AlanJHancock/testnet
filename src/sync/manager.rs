@@ -5,6 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::block::{Block, BlockChain};
+use crate::genesis::canonical_genesis;
 use crate::p2p::networking::{P2PNetwork, PeerSnapshot};
 use crate::sync::fast_sync;
 use crate::sync::validation;
@@ -12,6 +13,21 @@ use crate::sync::validation;
 const SYNC_RECONCILIATION_LOOKBACK: u64 = 8;
 const SYNC_PROGRESS_OVERLAP: u64 = 2;
 const MAX_SYNC_BATCH_BLOCKS: u64 = 128;
+
+fn resolve_local_genesis_hash(blockchain: &Arc<Mutex<BlockChain>>) -> String {
+    let canonical = canonical_genesis()
+        .map(|genesis| genesis.hash().to_string())
+        .unwrap_or_default();
+    if !canonical.trim().is_empty() {
+        return canonical;
+    }
+
+    blockchain
+        .lock()
+        .ok()
+        .and_then(|chain| chain.get_genesis_hash())
+        .unwrap_or_default()
+}
 
 /// Represents where the sync engine currently is in the lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,12 +250,7 @@ impl SyncManager {
     }
 
     fn select_sync_peer(&self) -> Option<String> {
-        let local_genesis = self
-            .blockchain
-            .lock()
-            .ok()
-            .and_then(|chain| chain.get_genesis_hash())
-            .unwrap_or_default();
+        let local_genesis = resolve_local_genesis_hash(&self.blockchain);
         let mut candidates: Vec<&PeerInfo> = self
             .peers
             .iter()
@@ -257,12 +268,7 @@ impl SyncManager {
             return Err(SyncError::NoPeers);
         }
 
-        let local_genesis = self
-            .blockchain
-            .lock()
-            .ok()
-            .and_then(|chain| chain.get_genesis_hash())
-            .unwrap_or_default();
+        let local_genesis = resolve_local_genesis_hash(&self.blockchain);
 
         Ok(self.eligible_network_height(&local_genesis))
     }
@@ -498,5 +504,44 @@ mod tests {
 
         assert_eq!(manager.select_sync_peer(), Some("relayer".to_string()));
         assert_eq!(manager.eligible_network_height(""), 195_000);
+    }
+
+    #[test]
+    fn sync_peer_selection_uses_canonical_genesis_for_compact_chain() {
+        std::env::set_var(
+            "SYNERGY_GENESIS_FILE",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../config/genesis.json"),
+        );
+        let canonical_hash = canonical_genesis()
+            .expect("canonical genesis should load")
+            .hash()
+            .to_string();
+        assert!(!canonical_hash.is_empty());
+
+        let mut chain = BlockChain::new();
+        let mut retained = Block::new_with_timestamp(
+            261_825,
+            Vec::new(),
+            "retained-parent".to_string(),
+            "validator".to_string(),
+            0,
+            1,
+        );
+        retained.hash = "retained-block-hash".to_string();
+        chain.chain.push(retained);
+
+        let blockchain = Arc::new(Mutex::new(chain));
+        let mut manager = SyncManager::new(blockchain);
+        let mut canonical_peer = peer("canonical", Some("synv1active"), 100, false, false);
+        canonical_peer.genesis_hash = canonical_hash.clone();
+        let mut retained_hash_peer = peer("retained", Some("synv1stale"), 200, false, false);
+        retained_hash_peer.genesis_hash = "retained-block-hash".to_string();
+        manager.peers = vec![retained_hash_peer, canonical_peer];
+
+        assert_eq!(
+            resolve_local_genesis_hash(&manager.blockchain),
+            canonical_hash
+        );
+        assert_eq!(manager.select_sync_peer(), Some("canonical".to_string()));
     }
 }

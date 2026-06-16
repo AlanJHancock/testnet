@@ -96,7 +96,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--amount-snrg", default="1")
     parser.add_argument("--gas-price", type=int, default=DEFAULT_GAS_PRICE)
     parser.add_argument("--gas-limit", type=int, default=DEFAULT_GAS_LIMIT)
-    parser.add_argument("--algo", choices=["fndsa", "mldsa", "slhdsa"], default="fndsa")
+    parser.add_argument("--algo", choices=["fndsa"], default="fndsa")
     parser.add_argument("--wallet-cli", default=None)
     parser.add_argument("--build-cli", action="store_true", help="Build wallet-pqc-cli if it is missing.")
     parser.add_argument("--wait-receipts", action="store_true")

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 pub const CONSENSUS_FORK_MIGRATION_ENV: &str = "SYNERGY_CONSENSUS_FORK_MIGRATION_FILE";
 pub const DEFAULT_CONSENSUS_FORK_MIGRATION_PATH: &str = "config/consensus-fork-migration.json";
 pub const CONSENSUS_FORK_PARSER_MODE_FAIL_CLOSED: &str = "fail_closed";
-pub const LEGACY_CONSENSUS_ALGORITHM_LABEL: &str = "ML-DSA-65";
+pub const LEGACY_CONSENSUS_ALGORITHM_LABEL: &str = "FN-DSA";
 pub const POST_FORK_CONSENSUS_ALGORITHM_LABEL: &str = "FN-DSA";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,8 +48,8 @@ impl ConsensusForkMigration {
             return Err("consensus fork parser_mode must be fail_closed".to_string());
         }
         let old_algorithm = normalize_consensus_key_algorithm(&self.old_consensus_algorithm)?;
-        if old_algorithm != PQCAlgorithm::MLDSA {
-            return Err("old_consensus_algorithm must resolve to ML-DSA".to_string());
+        if old_algorithm != PQCAlgorithm::FNDSA {
+            return Err("old_consensus_algorithm must resolve to FN-DSA".to_string());
         }
         let new_algorithm = normalize_consensus_key_algorithm(&self.new_consensus_algorithm)?;
         if new_algorithm != PQCAlgorithm::FNDSA {
@@ -267,15 +267,13 @@ pub fn active_consensus_fork_status() -> Value {
 
 pub fn normalize_consensus_key_algorithm(label: &str) -> Result<PQCAlgorithm, String> {
     match label.trim().to_ascii_lowercase().as_str() {
-        "mldsa" | "ml-dsa" | "ml-dsa-44" | "ml-dsa-65" | "ml-dsa-87" | "dilithium"
-        | "dilithium-65" => Ok(PQCAlgorithm::MLDSA),
         "fndsa" | "fn-dsa" | "fn-dsa-512" | "fn-dsa-1024" | "falcon" | "falcon-1024" => {
             Ok(PQCAlgorithm::FNDSA)
         }
         "slhdsa" | "slh-dsa" => Ok(PQCAlgorithm::SLHDSA),
         "" => Err("missing consensus key algorithm".to_string()),
         "pqc" | "aegis" => Err(format!(
-            "ambiguous consensus key algorithm '{label}'; use FN-DSA or ML-DSA explicitly"
+            "ambiguous consensus key algorithm '{label}'; use FN-DSA explicitly"
         )),
         other => Err(format!("unsupported consensus key algorithm '{other}'")),
     }
@@ -327,7 +325,10 @@ fn split_algorithm_prefix<'a>(
     }
 
     let Some(label) = declared_algorithm_label else {
-        return Err("missing consensus key algorithm prefix; expected fn-dsa:<base64>, falcon:<base64>, or ml-dsa:<base64>".to_string());
+        return Err(
+            "missing consensus key algorithm prefix; expected fn-dsa:<base64> or falcon:<base64>"
+                .to_string(),
+        );
     };
     Ok((normalize_consensus_key_algorithm(label)?, encoded))
 }
@@ -375,7 +376,7 @@ mod tests {
             parent_height: 204_215,
             parent_hash: "parent".to_string(),
             state_root: "state".to_string(),
-            old_consensus_algorithm: "ML-DSA-65".to_string(),
+            old_consensus_algorithm: "FN-DSA".to_string(),
             new_consensus_algorithm: "FN-DSA".to_string(),
             new_validator_registry: vec![ForkValidatorConsensusKey {
                 validator_address: "synv1test".to_string(),
@@ -401,9 +402,10 @@ mod tests {
     #[test]
     fn fork_migration_rejects_non_fndsa_new_validator_key() {
         let mut migration = migration();
-        migration.new_validator_registry[0].consensus_key_type = "ML-DSA-65".to_string();
+        migration.new_validator_registry[0].consensus_key_type =
+            "unsupported-signature".to_string();
         migration.new_validator_registry[0].consensus_public_key =
-            format!("ml-dsa:{}", encoded_key());
+            format!("unsupported-signature:{}", encoded_key());
 
         let error = migration.validate().unwrap_err();
 

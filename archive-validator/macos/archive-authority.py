@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import functools
 import hashlib
 import http.server
 import json
@@ -32,14 +33,14 @@ GRACE_SECS = 24 * 60 * 60
 CATALOG_DOMAIN = "SYNERGY_ARCHIVE_SNAPSHOT_CATALOG_V1"
 DISTRIBUTION_DOMAIN = "SYNERGY_ARCHIVE_SNAPSHOT_DISTRIBUTION_V1"
 DEFAULT_ROOT = Path("/Users/Shared/Synergy/archive-validator")
-DEFAULT_PUBLISH_ROOT = Path("/Volumes/Synergy_Archive/archive-validator/snapshots")
+DEFAULT_PUBLISH_ROOT = DEFAULT_ROOT / "published-snapshots"
 DEFAULT_RUNTIME = Path("/usr/local/synergy/bin/synergy-archive-validator-node")
 DEFAULT_AEGIS = Path("/usr/local/synergy/bin/aegis-pqvm")
 DEFAULT_FORK_METADATA = DEFAULT_ROOT / "config" / "consensus-fork-migration.json"
 FORK_PARENT_HEIGHT = 204_215
 FORK_HEIGHT = 204_216
 FORK_PARENT_HASH = "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816"
-OLD_CONSENSUS_ALGORITHM = "ML-DSA-65"
+OLD_CONSENSUS_ALGORITHM = "FN-DSA"
 POST_FORK_CONSENSUS_ALGORITHM = "FN-DSA"
 FORK_PARSER_MODE = "fail_closed"
 FNDSA_PUBLIC_KEY_BYTES = 1793
@@ -74,6 +75,13 @@ CLASS_POLICY = {
         "retain": 1,
     },
 }
+
+DEFAULT_WORKER_CLASSES = [
+    "validator-pruned",
+    "support-rpc",
+    "support-relayer",
+    "indexer-replay",
+]
 
 ALLOWED_STATE_FILES = {
     "chain.json",
@@ -400,6 +408,15 @@ def qc_height_hash(value: dict[str, Any]) -> tuple[int | None, str | None]:
     qc = value.get("qc", value)
     height = qc.get("height", qc.get("block_height", qc.get("block_index")))
     block_hash = qc.get("block_hash", value.get("block_hash"))
+    votes = qc.get("votes")
+    if height is None and isinstance(votes, list):
+        vote_heights = [
+            int(vote["block_index"])
+            for vote in votes
+            if isinstance(vote, dict) and vote.get("block_index") is not None
+        ]
+        if vote_heights:
+            height = max(vote_heights)
     return (int(height) if height is not None else None, str(block_hash) if block_hash else None)
 
 
@@ -461,11 +478,21 @@ def source_safety_report(snapshot_root: Path, source_manifest: Path, fixture_mod
 
     snapshot_height = int(manifest.get("snapshot_height", 0))
     h175518_checked = False
+    h175518_canonical_lock_present = False
+    h175518_canonical_lock_pruned = False
     if not fixture_mode and snapshot_height >= 175_518:
-        expected = lock_hashes.get(175_518)
-        if not expected or chain_hashes.get(175_518) != expected:
+        chain_hash = chain_hashes.get(175_518)
+        canonical_hash = lock_hashes.get(175_518)
+        qc_hash = qc_hashes.get(175_518)
+        if chain_hash is None:
             raise RuntimeError("h175518 contamination check failed: canonical lock/chain proof unavailable")
-        if 175_518 in qc_hashes and qc_hashes[175_518] != expected:
+        if canonical_hash is not None:
+            if chain_hash != canonical_hash:
+                raise RuntimeError("h175518 contamination check failed: canonical lock/chain conflict")
+            h175518_canonical_lock_present = True
+        else:
+            h175518_canonical_lock_pruned = True
+        if qc_hash is not None and qc_hash != chain_hash:
             raise RuntimeError("h175518 contamination check failed: committed QC conflict")
         h175518_checked = True
     return {
@@ -475,6 +502,8 @@ def source_safety_report(snapshot_root: Path, source_manifest: Path, fixture_mod
         "same_height_qc_conflict_rejected": True,
         "canonical_qc_conflict_rejected": True,
         "h175518_contamination_rejected": h175518_checked or fixture_mode,
+        "h175518_canonical_lock_present": h175518_canonical_lock_present,
+        "h175518_canonical_lock_pruned": h175518_canonical_lock_pruned,
         "fixture_mode": fixture_mode,
         "keys_configs_genesis_quorum_excluded": True,
     }
@@ -842,7 +871,8 @@ def worker(args: argparse.Namespace) -> None:
             if local_height is None:
                 raise RuntimeError("archive workspace has no canonical lock height")
             catalog = read_catalog(args.publish_root)
-            for snapshot_class in args.snapshot_class:
+            snapshot_classes = args.snapshot_class or DEFAULT_WORKER_CLASSES
+            for snapshot_class in snapshot_classes:
                 latest = max(
                     (
                         int(entry["height"])
@@ -1078,10 +1108,13 @@ class PublishedRangeHandler(http.server.SimpleHTTPRequestHandler):
 
 
 def serve(args: argparse.Namespace) -> None:
-    os.chdir(args.publish_root)
     host, raw_port = args.bind.rsplit(":", 1)
-    with socketserver.ThreadingTCPServer((host, int(raw_port)), PublishedRangeHandler) as server:
-        server.allow_reuse_address = True
+    handler = functools.partial(PublishedRangeHandler, directory=str(args.publish_root))
+
+    class ReusableThreadingTCPServer(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+
+    with ReusableThreadingTCPServer((host, int(raw_port)), handler) as server:
         print(json.dumps({"ok": True, "bind": args.bind, "publish_root": str(args.publish_root)}))
         server.serve_forever()
 
@@ -1159,7 +1192,7 @@ def parser() -> argparse.ArgumentParser:
         "--snapshot-class",
         choices=CLASS_POLICY,
         action="append",
-        default=["validator-pruned", "support-rpc", "support-relayer", "indexer-replay"],
+        default=None,
     )
     worker_command.add_argument("--minimum-compatible-runtime", default="v13.0.58")
     worker_command.add_argument("--mirror-url", action="append", default=[])

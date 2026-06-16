@@ -80,6 +80,7 @@ for file in \
   dag_state.json \
   validator_registry.json \
   token_state.json \
+  synid_registry.json \
   consensus_vote_locks.json \
   validator_quarantine.json \
   validator_quarantine_peer_evidence.json; do
@@ -104,7 +105,11 @@ for file in \
   committed_qcs.jsonl \
   dag_state.json \
   validator_registry.json \
-  token_state.json; do
+  token_state.json \
+  synid_registry.json; do
+  if [[ "$file" == "synid_registry.json" && ! -f "$tmp/data/$file" ]]; then
+    continue
+  fi
   test -f "$tmp/data/$file"
   cp -p "$tmp/data/$file" "$data_dir/$file"
 done
@@ -138,7 +143,9 @@ fi
 
 rm -f "$data_dir/validator_quarantine.json" "$data_dir/validator_quarantine_peer_evidence.json"
 
-cp -p "$runtime" "$binary"
+if [[ "$(readlink -f "$runtime")" != "$(readlink -f "$binary")" ]]; then
+  cp -p "$runtime" "$binary"
+fi
 chmod +x "$binary"
 
 installed_sha="$(sha256sum "$binary" | awk '{print $1}')"

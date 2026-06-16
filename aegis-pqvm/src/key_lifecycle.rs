@@ -15,9 +15,6 @@ pub enum AlgorithmFamily {
     MLKEM512,
     MLKEM768,
     MLKEM1024,
-    MLDSA44,
-    MLDSA65,
-    MLDSA87,
     FNDSA512,
     FNDSA1024,
 }
@@ -28,9 +25,6 @@ impl AlgorithmFamily {
             Self::MLKEM512 => "ML-KEM-512",
             Self::MLKEM768 => "ML-KEM-768",
             Self::MLKEM1024 => "ML-KEM-1024",
-            Self::MLDSA44 => "ML-DSA-44",
-            Self::MLDSA65 => "ML-DSA-65",
-            Self::MLDSA87 => "ML-DSA-87",
             Self::FNDSA512 => "FN-DSA-512",
             Self::FNDSA1024 => "FN-DSA-1024",
         }
@@ -419,7 +413,7 @@ mod tests {
     #[test]
     fn lifecycle_writes_jsonl_audit_log() {
         let mut manager = KeyLifecycleManager::new();
-        let key_id = manager.register_key(AlgorithmFamily::MLDSA44).unwrap();
+        let key_id = manager.register_key(AlgorithmFamily::FNDSA1024).unwrap();
         manager.touch_key(key_id).unwrap();
 
         let out = tempfile::NamedTempFile::new().unwrap();

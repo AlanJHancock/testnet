@@ -264,10 +264,9 @@ fn main() {
     }
 
     if feature_enabled("mldsa") {
-        // ML-DSA implementations (PQClean)
-        let mldsa_configs = [("ml-dsa-44", 44), ("ml-dsa-65", 65), ("ml-dsa-87", 87)];
+        let mldsa_schemes = ["ml-dsa-44", "ml-dsa-65", "ml-dsa-87"];
 
-        for (scheme, _level) in mldsa_configs {
+        for scheme in mldsa_schemes {
             // Always build the clean implementation.
             let clean_dir = pqclean_root.join("crypto_sign").join(scheme).join("clean");
             if clean_dir.exists() {
@@ -279,10 +278,7 @@ fn main() {
                 ];
                 compile_static_lib(&format!("{}_clean", scheme), &include_dirs, &sources);
             } else {
-                eprintln!(
-                    "Warning: PQClean directory not found: {}",
-                    clean_dir.display()
-                );
+                eprintln!("Warning: ML-DSA clean directory not found for {}", scheme);
             }
 
             // Optional optimized implementations.

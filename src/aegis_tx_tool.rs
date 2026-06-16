@@ -533,6 +533,32 @@ mod tests {
     }
 
     #[test]
+    fn real_aegis_transaction_preserves_synq_admission_summary() {
+        let synq_carrier = crate::synq_admission::test_support::deploy_carrier(
+            crate::synergy_types::SYNERGY_TESTNET_V2_NETWORK_ID,
+        );
+        let payload = crate::synq_admission::encode_synq_admission_carrier(&synq_carrier)
+            .expect("encode SynQ carrier");
+        let report = sign_with_new_aegis_transaction_key(AegisTxBuildOptions {
+            payload,
+            gas_limit: 150_000,
+            write_set_hint: vec!["synq-contract-deploy".to_string()],
+            ..AegisTxBuildOptions::default()
+        })
+        .unwrap();
+
+        let summary = report
+            .synq_verification
+            .as_ref()
+            .expect("SynQ verification summary");
+        assert_eq!(summary.domain, "SYNQ_CONTRACT_DEPLOY_V1");
+        assert_eq!(summary.algorithm, "ML-DSA-65");
+        assert_eq!(summary.payload_hash, synq_carrier.payload_hash);
+        assert_eq!(summary.bytecode_hash, synq_carrier.bytecode_hash);
+        validate_legacy_aegis_carrier_transaction(&report.rpc_transaction).unwrap();
+    }
+
+    #[test]
     fn fixture_uses_dependencies_and_no_wallet_cli_path() {
         let report = build_fixture_report().unwrap();
         assert_eq!(report.chain_id, 1264);

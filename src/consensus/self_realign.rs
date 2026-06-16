@@ -1067,8 +1067,11 @@ pub fn verify_signed_snapshot_manifest(
     if manifest.quorum_threshold != policy.required_quorum {
         errors.push("snapshot manifest wrong quorum threshold".to_string());
     }
-    if manifest.active_validator_set.len() != policy.expected_genesis_validator_count {
-        errors.push("snapshot active validator set is not the five genesis validators".to_string());
+    let active_validator_set_meets_genesis_baseline =
+        manifest.active_validator_set.len() >= policy.expected_genesis_validator_count;
+    if !active_validator_set_meets_genesis_baseline {
+        errors
+            .push("snapshot active validator set is below the genesis validator count".to_string());
     }
     if manifest.qc_evidence.vote_count < policy.required_quorum {
         errors.push("snapshot committed QC vote_count below 4".to_string());
@@ -1079,8 +1082,10 @@ pub fn verify_signed_snapshot_manifest(
     if !manifest.qc_evidence.duplicate_signer_check_passed {
         errors.push("snapshot committed QC duplicate signer check failed".to_string());
     }
-    if !manifest.qc_evidence.active_validator_set_is_genesis_5 {
-        errors.push("snapshot QC active validator set is not genesis 5".to_string());
+    if !manifest.qc_evidence.active_validator_set_is_genesis_5
+        && !active_validator_set_meets_genesis_baseline
+    {
+        errors.push("snapshot QC active validator set is below the genesis baseline".to_string());
     }
     if manifest
         .qc_evidence
@@ -1682,7 +1687,10 @@ mod tests {
         root
     }
 
-    fn signed_manifest() -> SignedSnapshotManifest {
+    fn signed_manifest_with(
+        active_validator_set: Vec<String>,
+        qc_evidence: SnapshotQcEvidence,
+    ) -> SignedSnapshotManifest {
         let (mut signer, key_id, public) = signer();
         let manifest = create_snapshot_manifest(SnapshotBuildInput {
             state_dir: state_dir(),
@@ -1694,8 +1702,8 @@ mod tests {
             state_root: None,
             canonical_lock_height: 100,
             canonical_lock_hash: "block-hash".to_string(),
-            qc_evidence: qc_evidence(),
-            active_validator_set: validators(),
+            qc_evidence,
+            active_validator_set,
             source_node_id: "validator-2".to_string(),
             source_role: "GENESIS_VALIDATOR".to_string(),
             runtime_checksum: "runtime-sha256".to_string(),
@@ -1710,6 +1718,10 @@ mod tests {
         })
         .unwrap();
         sign_snapshot_manifest(&mut signer, manifest).unwrap()
+    }
+
+    fn signed_manifest() -> SignedSnapshotManifest {
+        signed_manifest_with(validators(), qc_evidence())
     }
 
     fn verify(signed: &SignedSnapshotManifest) -> SnapshotVerificationReport {
@@ -1736,6 +1748,18 @@ mod tests {
         assert!(report.file_checksums_verified);
         assert_eq!(report.snapshot_class, SNAPSHOT_CLASS_VALIDATOR_PRUNED);
         assert_eq!(report.allowed_restore_roles, vec!["validator".to_string()]);
+    }
+
+    #[test]
+    fn expanded_active_validator_set_snapshot_accepted() {
+        let mut active_validator_set = validators();
+        active_validator_set.push("validator-6".to_string());
+        let mut qc_evidence = qc_evidence();
+        qc_evidence.active_validator_set_is_genesis_5 = false;
+
+        let report = verify(&signed_manifest_with(active_validator_set, qc_evidence));
+
+        assert!(report.success, "{:?}", report.errors);
     }
 
     #[test]

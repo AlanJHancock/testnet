@@ -9,6 +9,8 @@ artifacts.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import copy
 import csv
 import html
@@ -28,6 +30,7 @@ import blake3
 
 CHAIN_ID = 1264
 NETWORK_ID = 1264
+RUNTIME_NETWORK_ID = "synergy-testnet-v2"
 CHAIN_ID_HEX = hex(CHAIN_ID)
 CAIP2 = "synergy:testnet"
 EIP155 = "eip155:1264"
@@ -40,6 +43,20 @@ TOTAL_SUPPLY_NWEI = 12_000_000_000 * NWEI_PER_SNRG
 LEGACY_TOTAL_SUPPLY_NWEI = 51_000_000_000 * NWEI_PER_SNRG
 VALIDATOR_COUNT = 5
 VALIDATOR_SELF_STAKE_NWEI = 50_000 * NWEI_PER_SNRG
+ONBOARDING_SHADOW_PHASE_BLOCKS = 1_000
+ONBOARDING_REQUIRED_PORTS = {
+    "p2p": 5622,
+    "qrpc": 5640,
+    "ws": 5660,
+    "discovery": 5680,
+    "metrics": 6030,
+}
+CONSENSUS_FORK_HEIGHT = 204_216
+CONSENSUS_FORK_PARENT_HEIGHT = 204_215
+CONSENSUS_FORK_PARENT_HASH = "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816"
+POST_FORK_CONSENSUS_ALGORITHM = "FN-DSA"
+POST_FORK_VALIDATOR_KEY_ALGORITHM = "FN-DSA-1024"
+FORK_PARSER_MODE = "fail_closed"
 ZERO_HASH = "0" * 64
 EMPTY_HASH = blake3.blake3(b"").hexdigest()
 GENESIS_MESSAGE = (
@@ -52,6 +69,8 @@ SECRET_KEY_RE = re.compile(
     r"private_key|seed_phrase|mnemonic|phrase|secret|(^|_)sk($|_)|priv",
     re.IGNORECASE,
 )
+NEW_VALIDATOR_ADDRESS_RE = re.compile(r"^synv1[a-z0-9]{36}$")
+AMBIGUOUS_CONSENSUS_KEY_LABELS = {"", "PQC", "AEGIS", "AIGIS", "POST-QUANTUM", "POST_QUANTUM"}
 
 
 def canonical_json(value: Any) -> str:
@@ -177,7 +196,7 @@ def public_validator(path: Path, index: int) -> dict[str, Any]:
         "operator_address": address,
         "reward_address": address,
         "consensus_public_key": consensus.get("public_key", ""),
-        "consensus_key_type": consensus.get("algorithm", "ML-DSA-65"),
+        "consensus_key_type": consensus.get("algorithm", "FN-DSA-1024"),
         "account_public_key": account.get("public_key", payload.get("public_key", "")),
         "identity_public_key": entropy.get("public_key", ""),
         "node_identity_public_key": identity.get("public_key", ""),
@@ -1383,7 +1402,7 @@ def build_genesis_from_public_inputs(public_inputs: dict[str, Any], template_pat
                     "algorithm": validator.get("account_key_type", ""),
                     "public_key": validator.get("account_public_key", ""),
                     "consensus_key": {
-                        "algorithm": validator.get("consensus_key_type", "ML-DSA-65"),
+                        "algorithm": validator.get("consensus_key_type", "FN-DSA-1024"),
                         "public_key": validator.get("consensus_public_key", ""),
                     },
                     "account_key": {
@@ -1438,6 +1457,321 @@ def command_export(args: argparse.Namespace) -> None:
         fail("\n".join(report["errors"]))
     paths = export_genesis_artifacts(genesis, Path(args.out_dir).resolve())
     print(json.dumps(paths, indent=2, sort_keys=True))
+
+
+def add_onboarding_check(
+    checks: list[dict[str, Any]],
+    name: str,
+    ok: bool,
+    detail: str = "",
+    *,
+    expected: Any | None = None,
+    actual: Any | None = None,
+) -> None:
+    check: dict[str, Any] = {"name": name, "ok": ok, "detail": detail}
+    if expected is not None:
+        check["expected"] = expected
+    if actual is not None:
+        check["actual"] = actual
+    checks.append(check)
+
+
+def normalized_consensus_key_type(value: str | None) -> str:
+    return str(value or "").strip().upper().replace("_", "-")
+
+
+def genesis_validator_addresses(genesis: dict[str, Any]) -> set[str]:
+    addresses: set[str] = set()
+    validator_sources = [
+        genesis.get("validators", []),
+        genesis.get("contracts", {}).get("validator_registry", {}).get("init_params", {}).get("validators", []),
+        genesis.get("modules", {}).get("staking", {}).get("validators", []),
+    ]
+    for validators in validator_sources:
+        for validator in validators:
+            for key in ["validator_address", "operator_address", "reward_address", "reward_payout_address"]:
+                address = str(validator.get(key, "")).strip()
+                if address:
+                    addresses.add(address)
+    return addresses
+
+
+def resolve_repo_path(root: Path, value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return root / path
+
+
+def command_onboarding_dry_run(args: argparse.Namespace) -> None:
+    root = Path(args.root).resolve()
+    genesis = read_json(resolve_repo_path(root, args.genesis))
+    identifiers = read_json(resolve_repo_path(root, args.network_identifiers))
+    consensus_fork = read_json(resolve_repo_path(root, args.consensus_fork))
+    validation_report = validate_documents(genesis, identifiers)
+    checks: list[dict[str, Any]] = []
+
+    add_onboarding_check(
+        checks,
+        "dry_run_no_mutation",
+        True,
+        "read-only validator onboarding dry run; no runtime start, snapshot restore, stake submission, or activation submission",
+        expected=False,
+        actual=False,
+    )
+    add_onboarding_check(
+        checks,
+        "canonical_genesis_documents_valid",
+        validation_report["valid"],
+        "; ".join(validation_report["errors"]) if validation_report["errors"] else "genesis and network identifiers validated",
+    )
+    add_onboarding_check(
+        checks,
+        "chain_id",
+        genesis.get("network", {}).get("chain_id") == CHAIN_ID,
+        "canonical Synergy Testnet chain ID",
+        expected=CHAIN_ID,
+        actual=genesis.get("network", {}).get("chain_id"),
+    )
+    add_onboarding_check(
+        checks,
+        "runtime_network_id",
+        args.runtime_network_id == RUNTIME_NETWORK_ID,
+        "runtime network label after checkpointed FN-DSA fork",
+        expected=RUNTIME_NETWORK_ID,
+        actual=args.runtime_network_id,
+    )
+    add_onboarding_check(
+        checks,
+        "genesis_network_id",
+        genesis.get("network", {}).get("network_id") == NETWORK_ID,
+        "immutable genesis numeric network ID",
+        expected=NETWORK_ID,
+        actual=genesis.get("network", {}).get("network_id"),
+    )
+    add_onboarding_check(
+        checks,
+        "network_identifiers_chain_id",
+        identifiers.get("chain_identifiers", {}).get("synergy_native", {}).get("decimal") == CHAIN_ID,
+        "network-identifiers Synergy native chain ID",
+        expected=CHAIN_ID,
+        actual=identifiers.get("chain_identifiers", {}).get("synergy_native", {}).get("decimal"),
+    )
+    expected_genesis_hash = identifiers.get("cryptographic_identity", {}).get("genesis_hash")
+    add_onboarding_check(
+        checks,
+        "genesis_hash",
+        validation_report["genesis_hash"] == expected_genesis_hash,
+        "local genesis hash matches canonical network identifiers",
+        expected=expected_genesis_hash,
+        actual=validation_report["genesis_hash"],
+    )
+    expected_magic = identifiers.get("cryptographic_identity", {}).get("network_magic_bytes", {}).get("value")
+    add_onboarding_check(
+        checks,
+        "network_magic_bytes",
+        validation_report["network_magic_bytes"] == expected_magic,
+        "local network magic matches canonical network identifiers",
+        expected=expected_magic,
+        actual=validation_report["network_magic_bytes"],
+    )
+
+    candidate_address = str(args.validator_address or "").strip()
+    add_onboarding_check(
+        checks,
+        "validator_address_format",
+        bool(NEW_VALIDATOR_ADDRESS_RE.fullmatch(candidate_address)),
+        "new validator address must be a lower-case synv1 address",
+        expected="synv1 + 36 lower-case alphanumeric characters",
+        actual=candidate_address,
+    )
+    existing_addresses = genesis_validator_addresses(genesis)
+    add_onboarding_check(
+        checks,
+        "validator_not_in_genesis",
+        candidate_address not in existing_addresses,
+        "post-genesis validator onboarding must not modify or reuse genesis validator entries",
+        actual=candidate_address,
+    )
+
+    key_type = normalized_consensus_key_type(args.consensus_key_type)
+    key_type_ok = key_type in {"FN-DSA", POST_FORK_VALIDATOR_KEY_ALGORITHM} and key_type not in AMBIGUOUS_CONSENSUS_KEY_LABELS
+    add_onboarding_check(
+        checks,
+        "consensus_key_type_explicit_fndsa",
+        key_type_ok,
+        "new validator consensus key metadata must be explicit FN-DSA",
+        expected=f"{POST_FORK_CONSENSUS_ALGORITHM} or {POST_FORK_VALIDATOR_KEY_ALGORITHM}",
+        actual=args.consensus_key_type,
+    )
+    consensus_public_key = str(args.consensus_public_key or "").strip()
+    public_key_payload = consensus_public_key.removeprefix("fn-dsa:")
+    public_key_prefix_ok = consensus_public_key.startswith("fn-dsa:")
+    try:
+        decoded_public_key = base64.b64decode(public_key_payload, validate=True) if public_key_prefix_ok else b""
+    except binascii.Error:
+        decoded_public_key = b""
+    add_onboarding_check(
+        checks,
+        "consensus_public_key_fndsa_prefix",
+        public_key_prefix_ok and bool(decoded_public_key),
+        "new validator consensus public key must use fn-dsa:<base64>",
+        expected="fn-dsa:<base64>",
+        actual=consensus_public_key[:24] + ("..." if len(consensus_public_key) > 24 else ""),
+    )
+
+    add_onboarding_check(
+        checks,
+        "consensus_fork_height",
+        consensus_fork.get("fork_height") == CONSENSUS_FORK_HEIGHT,
+        "checkpointed consensus fork height",
+        expected=CONSENSUS_FORK_HEIGHT,
+        actual=consensus_fork.get("fork_height"),
+    )
+    add_onboarding_check(
+        checks,
+        "consensus_fork_parent_height",
+        consensus_fork.get("parent_height") == CONSENSUS_FORK_PARENT_HEIGHT,
+        "checkpointed consensus fork parent height",
+        expected=CONSENSUS_FORK_PARENT_HEIGHT,
+        actual=consensus_fork.get("parent_height"),
+    )
+    add_onboarding_check(
+        checks,
+        "consensus_fork_parent_hash",
+        consensus_fork.get("parent_hash") == CONSENSUS_FORK_PARENT_HASH,
+        "checkpointed consensus fork parent hash",
+        expected=CONSENSUS_FORK_PARENT_HASH,
+        actual=consensus_fork.get("parent_hash"),
+    )
+    add_onboarding_check(
+        checks,
+        "post_fork_consensus_algorithm",
+        consensus_fork.get("new_consensus_algorithm") == POST_FORK_CONSENSUS_ALGORITHM,
+        "post-fork consensus signature algorithm",
+        expected=POST_FORK_CONSENSUS_ALGORITHM,
+        actual=consensus_fork.get("new_consensus_algorithm"),
+    )
+    fork_registry_key_types = [
+        normalized_consensus_key_type(entry.get("consensus_key_type"))
+        for entry in consensus_fork.get("new_validator_registry", [])
+    ]
+    add_onboarding_check(
+        checks,
+        "post_fork_validator_registry_key_algorithm",
+        bool(fork_registry_key_types) and all(key_type == POST_FORK_CONSENSUS_ALGORITHM for key_type in fork_registry_key_types),
+        "checkpointed validator registry must be explicit FN-DSA",
+        expected=POST_FORK_CONSENSUS_ALGORITHM,
+        actual=sorted(set(fork_registry_key_types)),
+    )
+    add_onboarding_check(
+        checks,
+        "consensus_fork_parser_mode",
+        consensus_fork.get("parser_mode") == FORK_PARSER_MODE,
+        "fork parser mode must fail closed",
+        expected=FORK_PARSER_MODE,
+        actual=consensus_fork.get("parser_mode"),
+    )
+
+    for port_name, expected_port in ONBOARDING_REQUIRED_PORTS.items():
+        actual_port = getattr(args, f"{port_name}_port")
+        add_onboarding_check(
+            checks,
+            f"{port_name}_port",
+            actual_port == expected_port,
+            "canonical Testnet onboarding port",
+            expected=expected_port,
+            actual=actual_port,
+        )
+
+    height_delta: int | None = None
+    if args.local_height is not None and args.public_head_height is not None:
+        height_delta = int(args.public_head_height) - int(args.local_height)
+    add_onboarding_check(
+        checks,
+        "height_within_2_blocks",
+        height_delta is not None and abs(height_delta) <= 2,
+        "candidate host must be synced near public head before activation",
+        expected="absolute height delta <= 2",
+        actual=height_delta,
+    )
+
+    evidence_flags = [
+        "signing_challenge_verified",
+        "seed_registration_verified",
+        "relayer_peer_visibility_verified",
+        "support_node_replay_preflight_verified",
+        "funding_verified",
+        "bonded_stake_verified",
+        "source_majority_proof_verified",
+        "shadow_duty_gate_verified",
+    ]
+    for flag_name in evidence_flags:
+        add_onboarding_check(
+            checks,
+            flag_name,
+            bool(getattr(args, flag_name)),
+            "required dry-run evidence flag",
+            expected=True,
+            actual=bool(getattr(args, flag_name)),
+        )
+
+    support_node_update_plan = {
+        "required_before_activation": True,
+        "candidate_validator_address": candidate_address,
+        "support_roles": [
+            "bootnode",
+            "seed",
+            "relayer",
+            "rpc_gateway",
+            "indexer_explorer",
+            "archive_validator",
+            "observer",
+            "atlas_api",
+        ],
+        "non_validator_allowlist_policy": {
+            "preferred": "strict_validator_allowlist=false or SYNERGY_STRICT_VALIDATOR_ALLOWLIST=0",
+            "legacy_fallback": "if a non-validator support node remains strict, its allowed validator address list must include the candidate before activation_effective_block N+1",
+        },
+        "runtime_consensus_config": {
+            "validator_vote_threshold": 4,
+            "validator_cluster_size": 7,
+            "max_validators_min": 100,
+        },
+        "checkpoint_fork_registry_policy": {
+            "purpose": "checkpointed fork key registry for validators active at the fork height",
+            "must_not_be_used_as": "the ongoing post-genesis validator admission registry",
+            "post_genesis_key_source": "finalized validator registry/admission state after activation",
+        },
+        "required_service_env": [
+            "SYNERGY_PROJECT_ROOT points at the deployed node root",
+            "SYNERGY_CONFIG_PATH points at the deployed node.toml",
+            "SYNERGY_CONSENSUS_FORK_MIGRATION_FILE points at canonical checkpoint fork metadata",
+            "SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD=4 unless node.toml provides validator_vote_threshold=4",
+        ],
+    }
+
+    ok = validation_report["valid"] and all(check["ok"] for check in checks)
+    result = {
+        "ok": ok,
+        "mutates_state": False,
+        "chain_id": CHAIN_ID,
+        "runtime_network_id": RUNTIME_NETWORK_ID,
+        "shadow_phase_blocks": ONBOARDING_SHADOW_PHASE_BLOCKS,
+        "activation_model": {
+            "shadow_weight": 0,
+            "shadow_votes_counted": False,
+            "activation_recorded_block": "N",
+            "activation_recorded_uses_state_from": "N-1",
+            "activation_effective_block": "N+1",
+        },
+        "support_node_update_plan": support_node_update_plan,
+        "validation_report": validation_report,
+        "checks": checks,
+    }
+    print(json.dumps(result, indent=2, sort_keys=True))
+    if not ok:
+        raise SystemExit(1)
 
 
 def command_preflight(args: argparse.Namespace) -> None:
@@ -1525,6 +1859,31 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--genesis", required=True)
     export.add_argument("--out-dir", default="release-artifacts/testnet")
     export.set_defaults(func=command_export)
+
+    onboarding = sub.add_parser("onboarding-dry-run")
+    onboarding.add_argument("--genesis", required=True)
+    onboarding.add_argument("--network-identifiers", required=True)
+    onboarding.add_argument("--consensus-fork", default="config/consensus-fork-migration.json")
+    onboarding.add_argument("--runtime-network-id", default=RUNTIME_NETWORK_ID)
+    onboarding.add_argument("--validator-address", required=True)
+    onboarding.add_argument("--consensus-key-type", required=True)
+    onboarding.add_argument("--consensus-public-key", required=True)
+    onboarding.add_argument("--local-height", type=int, required=True)
+    onboarding.add_argument("--public-head-height", type=int, required=True)
+    onboarding.add_argument("--p2p-port", type=int, default=ONBOARDING_REQUIRED_PORTS["p2p"])
+    onboarding.add_argument("--qrpc-port", type=int, default=ONBOARDING_REQUIRED_PORTS["qrpc"])
+    onboarding.add_argument("--ws-port", type=int, default=ONBOARDING_REQUIRED_PORTS["ws"])
+    onboarding.add_argument("--discovery-port", type=int, default=ONBOARDING_REQUIRED_PORTS["discovery"])
+    onboarding.add_argument("--metrics-port", type=int, default=ONBOARDING_REQUIRED_PORTS["metrics"])
+    onboarding.add_argument("--signing-challenge-verified", action="store_true")
+    onboarding.add_argument("--seed-registration-verified", action="store_true")
+    onboarding.add_argument("--relayer-peer-visibility-verified", action="store_true")
+    onboarding.add_argument("--support-node-replay-preflight-verified", action="store_true")
+    onboarding.add_argument("--funding-verified", action="store_true")
+    onboarding.add_argument("--bonded-stake-verified", action="store_true")
+    onboarding.add_argument("--source-majority-proof-verified", action="store_true")
+    onboarding.add_argument("--shadow-duty-gate-verified", action="store_true")
+    onboarding.set_defaults(func=command_onboarding_dry_run)
 
     preflight = sub.add_parser("preflight")
     preflight.add_argument("--genesis", required=True)

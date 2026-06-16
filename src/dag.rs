@@ -343,6 +343,20 @@ impl DagState {
         })
     }
 
+    pub fn committed_sender_nonces(&self, sender: &str) -> Vec<u64> {
+        let mut nonces = self
+            .vertices
+            .values()
+            .filter(|vertex| vertex.status == DagVertexStatus::Committed)
+            .flat_map(|vertex| vertex.transactions.iter())
+            .filter(|transaction| transaction.sender.eq_ignore_ascii_case(sender))
+            .map(|transaction| transaction.nonce)
+            .collect::<Vec<_>>();
+        nonces.sort_unstable();
+        nonces.dedup();
+        nonces
+    }
+
     pub fn topology_json(&self, limit: usize) -> Value {
         let vertices = self.visible_vertices(limit, None);
         let visible_hashes = vertices
@@ -530,6 +544,13 @@ pub fn transaction_status_json(tx_id_or_hash: &str) -> Value {
                 "reason": "dag state lock unavailable"
             })
         })
+}
+
+pub fn committed_sender_nonces(sender: &str) -> Vec<u64> {
+    DAG_STATE
+        .lock()
+        .map(|dag| dag.committed_sender_nonces(sender))
+        .unwrap_or_default()
 }
 
 pub fn topology_json(limit: usize) -> Value {

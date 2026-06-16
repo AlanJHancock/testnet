@@ -282,7 +282,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--machine-label", default=socket.gethostname())
     parser.add_argument("--memo-prefix", default="dag-load")
     parser.add_argument("--data-mode", choices=["dag-memo", "empty", "token-transfer"], default="dag-memo")
-    parser.add_argument("--algo", choices=["fndsa", "mldsa", "slhdsa"], default="fndsa")
+    parser.add_argument("--algo", choices=["fndsa"], default="fndsa")
     parser.add_argument("--wallet-cli", default=None)
     parser.add_argument("--build-cli", action="store_true", help="Build wallet-pqc-cli before running if it is missing.")
     parser.add_argument("--skip-balance-check", action="store_true")

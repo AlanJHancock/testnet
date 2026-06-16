@@ -162,7 +162,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--memo", default="load-test")
     p.add_argument("--duration-seconds", type=int, default=10800)
     p.add_argument("--interval-seconds", type=float, default=5.0)
-    p.add_argument("--algo", default="fndsa", choices=["fndsa", "mldsa", "slhdsa"])
+    p.add_argument("--algo", default="fndsa", choices=["fndsa"])
     p.add_argument(
         "--start-nonce",
         type=int,

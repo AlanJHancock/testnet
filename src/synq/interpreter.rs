@@ -1,6 +1,5 @@
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use crate::crypto::pqc::{PQCManager, PQCAlgorithm};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SynQExecutionContext {
@@ -33,19 +32,19 @@ pub enum SecurityLevel {
 
 #[derive(Debug)]
 pub struct SynQInterpreter {
-    pqc_manager: crate::crypto::pqc::PQCManager,
+    _pqc_manager: crate::crypto::pqc::PQCManager,
 }
 
 impl SynQInterpreter {
     pub fn new() -> Self {
         SynQInterpreter {
-            pqc_manager: crate::crypto::pqc::PQCManager::new(),
+            _pqc_manager: crate::crypto::pqc::PQCManager::new(),
         }
     }
 
     pub fn execute_contract(
         &self,
-        contract_code: &str,
+        _contract_code: &str,
         context: SynQExecutionContext,
     ) -> Result<SynQExecutionResult, String> {
         // Parse and execute SynQ contract code
@@ -64,17 +63,25 @@ impl SynQInterpreter {
         if context.pqc_enabled {
             match context.security_level {
                 SecurityLevel::Basic => {
-                    result.pqc_verifications.push("Basic PQC verification passed".to_string());
-                },
+                    result
+                        .pqc_verifications
+                        .push("Basic PQC verification passed".to_string());
+                }
                 SecurityLevel::Enhanced => {
-                    result.pqc_verifications.push("Enhanced PQC verification passed".to_string());
-                },
+                    result
+                        .pqc_verifications
+                        .push("Enhanced PQC verification passed".to_string());
+                }
                 SecurityLevel::Maximum => {
-                    result.pqc_verifications.push("Maximum PQC verification passed".to_string());
-                },
+                    result
+                        .pqc_verifications
+                        .push("Maximum PQC verification passed".to_string());
+                }
                 SecurityLevel::Military => {
-                    result.pqc_verifications.push("Military-grade PQC verification passed".to_string());
-                },
+                    result
+                        .pqc_verifications
+                        .push("Military-grade PQC verification passed".to_string());
+                }
             }
         }
 
@@ -100,18 +107,30 @@ impl SynQInterpreter {
         Ok(warnings)
     }
 
-    pub fn estimate_gas_usage(&self, contract_code: &str, function_name: &str) -> Result<u64, String> {
+    pub fn estimate_gas_usage(
+        &self,
+        contract_code: &str,
+        function_name: &str,
+    ) -> Result<u64, String> {
         // Estimate gas usage for SynQ contract execution
         // In production, this would analyze the AST and calculate precise gas costs
 
         let base_gas = 21000; // Base transaction cost
-        let function_gas = if function_name.contains("transfer") { 2300 } else { 2100 };
-        let pqc_gas = if contract_code.contains("pqc") { 50000 } else { 0 };
+        let function_gas = if function_name.contains("transfer") {
+            2300
+        } else {
+            2100
+        };
+        let pqc_gas = if contract_code.contains("pqc") {
+            50000
+        } else {
+            0
+        };
 
         Ok(base_gas + function_gas + pqc_gas)
     }
 
-    pub fn compile_to_solidity(&self, synq_code: &str) -> Result<String, String> {
+    pub fn compile_to_solidity(&self, _synq_code: &str) -> Result<String, String> {
         // Compile SynQ to Solidity for cross-chain compatibility
         let solidity_template = format!(
             r#"// Auto-generated Solidity contract from SynQ
@@ -126,7 +145,7 @@ contract SynQCompiledContract {{
     address public synergyContract;
 
     constructor() {{
-        pqcAlgorithm = "CRYSTALS-Dilithium";
+        pqcAlgorithm = "FN-DSA";
         synergyContract = address(this);
     }}
 
@@ -143,7 +162,8 @@ contract SynQCompiledContract {{
         return true;
     }}
 }}
-"#, std::time::SystemTime::now()
+"#,
+            std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs()

@@ -283,7 +283,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (label) (synergy_validator_uptime_percent{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
+          "expr": "max by (name, status, validator) (synergy_validator_uptime_percent{job=~\"synergy-validators|synergy-relayers|synergy-rpc-gateways|synergy-explorer|synergy-archive-validators\"})",
           "legendFormat": "{{label}}"
         }
       ],

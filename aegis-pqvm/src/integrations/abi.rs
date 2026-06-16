@@ -247,7 +247,7 @@ fn dispatch_decoded_call(
     use crate::mlkem;
 
     use pqrust_traits::kem::{Ciphertext as _, SecretKey as _, SharedSecret as _};
-    use pqrust_traits::sign::PublicKey as _;
+    use pqrust_traits::sign::{DetachedSignature as _, PublicKey as _};
 
     let out: Vec<u8> = match (call.op, call.alg) {
         (Op::MlkemDecapsulate, _) if !allow_secret_key_ops => {
@@ -309,7 +309,7 @@ fn dispatch_decoded_call(
             }
             let pk = mldsa::mldsa44::PublicKey::from_bytes(&call.args[0])
                 .map_err(|_| IntegrationError::InvalidPayload("invalid mldsa44 public key"))?;
-            let sig = <mldsa::mldsa44::DetachedSignature as pqrust_traits::sign::DetachedSignature>::from_bytes(&call.args[2])
+            let sig = mldsa::mldsa44::DetachedSignature::from_bytes(&call.args[2])
                 .map_err(|_| IntegrationError::InvalidPayload("invalid mldsa44 signature"))?;
             let ok = mldsa::mldsa44::verify_detached_signature(&sig, &call.args[1], &pk).is_ok();
             vec![ok as u8]
@@ -322,7 +322,7 @@ fn dispatch_decoded_call(
             }
             let pk = mldsa::mldsa65::PublicKey::from_bytes(&call.args[0])
                 .map_err(|_| IntegrationError::InvalidPayload("invalid mldsa65 public key"))?;
-            let sig = <mldsa::mldsa65::DetachedSignature as pqrust_traits::sign::DetachedSignature>::from_bytes(&call.args[2])
+            let sig = mldsa::mldsa65::DetachedSignature::from_bytes(&call.args[2])
                 .map_err(|_| IntegrationError::InvalidPayload("invalid mldsa65 signature"))?;
             let ok = mldsa::mldsa65::verify_detached_signature(&sig, &call.args[1], &pk).is_ok();
             vec![ok as u8]
@@ -335,7 +335,7 @@ fn dispatch_decoded_call(
             }
             let pk = mldsa::mldsa87::PublicKey::from_bytes(&call.args[0])
                 .map_err(|_| IntegrationError::InvalidPayload("invalid mldsa87 public key"))?;
-            let sig = <mldsa::mldsa87::DetachedSignature as pqrust_traits::sign::DetachedSignature>::from_bytes(&call.args[2])
+            let sig = mldsa::mldsa87::DetachedSignature::from_bytes(&call.args[2])
                 .map_err(|_| IntegrationError::InvalidPayload("invalid mldsa87 signature"))?;
             let ok = mldsa::mldsa87::verify_detached_signature(&sig, &call.args[1], &pk).is_ok();
             vec![ok as u8]
@@ -405,11 +405,11 @@ pub fn gas_cost_deterministic(payload: &[u8]) -> Result<u64, IntegrationError> {
                 "no deterministic gas cost for mlkem decapsulation",
             ))
         }
+        (Op::FndsaVerifyDetached, Alg::Fndsa512) => 90_000_u64,
+        (Op::FndsaVerifyDetached, Alg::Fndsa1024) => 140_000_u64,
         (Op::MldsaVerifyDetached, Alg::Mldsa44) => 120_000_u64,
         (Op::MldsaVerifyDetached, Alg::Mldsa65) => 150_000_u64,
         (Op::MldsaVerifyDetached, Alg::Mldsa87) => 200_000_u64,
-        (Op::FndsaVerifyDetached, Alg::Fndsa512) => 90_000_u64,
-        (Op::FndsaVerifyDetached, Alg::Fndsa1024) => 140_000_u64,
         _ => return Err(IntegrationError::Unsupported("no gas cost for this op/alg")),
     };
 

@@ -10,9 +10,8 @@ license = "Proprietary"
 doctest = false
 
 [features]
-default = ["mlkem", "mldsa", "fndsa", "security"]
+default = ["mlkem", "fndsa", "security"]
 mlkem = []
-mldsa = []
 fndsa = []
 security = []
 serialization = ["serde", "serde-big-array"]

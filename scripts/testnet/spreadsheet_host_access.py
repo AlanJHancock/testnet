@@ -19,7 +19,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 
-DEFAULT_WORKBOOK = Path("/Users/devpup/Desktop/node machine credentials.xlsx")
+DEFAULT_WORKBOOK = Path("/Users/devpup/Desktop/node-machine-credentials.xlsx")
 
 
 @dataclass(frozen=True)
@@ -42,22 +42,33 @@ def load_hosts(workbook: Path) -> dict[str, HostRow]:
     rows = list(ws.iter_rows(values_only=True))
     headers = [str(value).strip() if value is not None else "" for value in rows[0]]
     hosts: dict[str, HostRow] = {}
+
+    def cell(row: tuple[object, ...], header: str, occurrence: int = 1) -> str:
+        seen = 0
+        for index, candidate in enumerate(headers):
+            if candidate != header:
+                continue
+            seen += 1
+            if seen == occurrence:
+                value = row[index] if index < len(row) else None
+                return str(value or "").strip()
+        return ""
+
     for row_number, row in enumerate(rows[1:], start=2):
-        data = {headers[index]: row[index] for index in range(len(headers))}
-        node = str(data.get("Node") or "").strip()
+        node = cell(row, "Node")
         if not node:
             continue
         host = HostRow(
             row_number=row_number,
             node=node,
-            ssh_command=str(data.get("Access Via SSH with") or "").strip(),
-            ssh_user=str(data.get("SSH User") or "").strip(),
-            public_ip=str(data.get("Public IP") or "").strip(),
-            qrpc_port=str(data.get("qRPC") or "").strip(),
-            ws_port=str(data.get("WS") or "").strip(),
-            metrics_port=str(data.get("Metrics") or "").strip(),
-            password=str(data.get("User Password") or ""),
-            passphrase=str(data.get("SSH Passphrase") or ""),
+            ssh_command=cell(row, "Access Via SSH with", occurrence=1),
+            ssh_user=cell(row, "SSH User") or cell(row, "User"),
+            public_ip=cell(row, "Public IP"),
+            qrpc_port=cell(row, "qRPC"),
+            ws_port=cell(row, "WS"),
+            metrics_port=cell(row, "Metrics"),
+            password=cell(row, "User Password"),
+            passphrase=cell(row, "SSH Passphrase"),
         )
         hosts[node.lower()] = host
         hosts[node.replace(" ", "").replace("-", "").lower()] = host
