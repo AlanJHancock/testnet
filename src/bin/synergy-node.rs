@@ -851,6 +851,9 @@ fn submit_aegis_transaction(
     if !status.is_success() {
         return Err(format!("RPC returned HTTP {status}: {value}"));
     }
+    if let Some(error) = value.get("error") {
+        return Err(format!("RPC returned JSON-RPC error: {error}"));
+    }
     Ok(value)
 }
 

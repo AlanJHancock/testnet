@@ -98,6 +98,19 @@ Replay proof summary:
 }
 ```
 
+Live RPC probe on 2026-06-17:
+
+```json
+{
+  "rpc_url": "https://testnet-core-rpc.synergy-network.io",
+  "diagnose_sync_target": "accepted",
+  "latest_height": 365878,
+  "synq_deploy_submit": "rejected",
+  "error_code": "SYNQ-DISABLED",
+  "error": "SynQ admission requires a release-safe aegis-pqsynq verifier; default launch runtime rejects SynQ carriers fail-closed"
+}
+```
+
 The local CLI smoke also passed for deploy, increment, and get carrier creation using artifact-bearing deploy admission:
 
 ```bash
@@ -148,7 +161,7 @@ get_receipt_hash=9e425dacbb3fbe2958b18e20da29dc9c284183a702959fdd454566d0fe18dd0
 
 ## Remaining Gaps
 
-- The live public TESTNET RPC was not mutated in this proof. `tx submit-aegis --rpc-url ... --synq-deploy-envelope ...` still needs live submission, finalized block inclusion, and Atlas or receipt verification.
+- The live public TESTNET RPC was not mutated in this proof. A live deploy submit reached the RPC on 2026-06-17, but the deployed runtime rejected it fail-closed with `SYNQ-DISABLED`; the public node fleet needs the release-safe `aegis-pqsynq` verifier/AIVM build before finalized SynQ deploy/call receipts can be produced.
 - Synergy source execution now calls the stateful AIVM SynQ runtime for admitted deploy/call payloads, and local RPC receipt methods materialize committed Aegis carrier data into persisted SynQ/AIVM receipt summaries. This still needs live node verification through actual finalized blocks, public RPC, and Atlas/indexer surfaces.
 - The persisted SynQ receipt/AIVM checkpoint index is local-node ready, but it has not yet been rolled out to live TESTNET services or wired into Atlas/indexer backfill and retention policy.
 - Artifact-bearing deploy payloads are large because the deploy carrier contains executable bytecode, ABI, and manifest bytes. Production integration needs an explicit artifact availability and size policy before broad live use.
