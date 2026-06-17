@@ -715,7 +715,64 @@ fn read_latest_block_summary() -> Result<BlockSummary, String> {
         }
         Ok(false)
     })?;
+    let committed_latest = latest_block_from_committed_log()?;
+    if committed_latest
+        .as_ref()
+        .map(|block| {
+            latest
+                .as_ref()
+                .map(|chain_block: &BlockSummary| block.height > chain_block.height)
+                .unwrap_or(true)
+        })
+        .unwrap_or(false)
+    {
+        return Ok(committed_latest.expect("checked as present"));
+    }
     latest.ok_or_else(|| "chain state does not contain any persisted blocks".to_string())
+}
+
+fn latest_block_from_committed_log() -> Result<Option<BlockSummary>, String> {
+    let path = committed_block_log_path();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let file = fs::File::open(&path)
+        .map_err(|error| format!("open committed block log {}: {error}", path.display()))?;
+    let mut latest = None;
+    for (line_number, line) in BufReader::new(file).lines().enumerate() {
+        let line = line.map_err(|error| {
+            format!(
+                "read committed block log {} line {}: {error}",
+                path.display(),
+                line_number + 1
+            )
+        })?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let entry = serde_json::from_str::<CommittedBlockLogEntry>(trimmed).map_err(|error| {
+            format!(
+                "parse committed block log {} line {}: {error}",
+                path.display(),
+                line_number + 1
+            )
+        })?;
+        if entry.height != entry.block.block_index || entry.hash != entry.block.hash {
+            return Err(format!(
+                "committed block log entry at line {} has inconsistent height/hash",
+                line_number + 1
+            ));
+        }
+        if latest
+            .as_ref()
+            .map(|block: &BlockSummary| entry.height > block.height)
+            .unwrap_or(true)
+        {
+            latest = Some(BlockSummary::from(&entry.block));
+        }
+    }
+    Ok(latest)
 }
 
 fn stream_chain_blocks<F>(path: &Path, mut on_block: F) -> Result<(), String>
@@ -4588,6 +4645,68 @@ mod tests {
         assert_eq!(block.height, 4095);
         assert_eq!(block.hash, "hash-4095");
         assert_eq!(block.parent_hash, "hash-4094");
+    }
+
+    #[test]
+    fn read_latest_block_summary_uses_newer_committed_block_log_tip() {
+        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
+            .lock()
+            .expect("diagnostics env lock should succeed");
+        let root = test_runtime_root("committed-log-latest-tip");
+        let chain_blocks: Vec<Value> = (0u64..=10)
+            .map(|height| {
+                json!({
+                    "block_index": height,
+                    "hash": format!("hash-{height}"),
+                    "previous_hash": format!("hash-{}", height.saturating_sub(1)),
+                })
+            })
+            .collect();
+        fs::write(
+            root.join("data/chain.json"),
+            serde_json::to_vec(&chain_blocks).unwrap(),
+        )
+        .unwrap();
+        let committed_log_path = root.join("data/committed_blocks.jsonl");
+        let mut previous_hash = "hash-10".to_string();
+        let mut entries = String::new();
+        for height in 11..=12 {
+            let block = Block {
+                block_index: height,
+                timestamp: 1,
+                transactions: Vec::new(),
+                previous_hash: previous_hash.clone(),
+                validator_id: "validator-1".to_string(),
+                nonce: height,
+                hash: format!("hash-{height}"),
+                transactions_root: String::new(),
+                proposer_public_key: Vec::new(),
+                block_signature: Vec::new(),
+                block_signature_algorithm: "fn-dsa".to_string(),
+            };
+            previous_hash = block.hash.clone();
+            let entry = CommittedBlockLogEntry {
+                height: block.block_index,
+                hash: block.hash.clone(),
+                previous_hash: block.previous_hash.clone(),
+                block,
+            };
+            entries.push_str(&serde_json::to_string(&entry).unwrap());
+            entries.push('\n');
+        }
+        fs::write(&committed_log_path, entries).unwrap();
+
+        let previous_committed_log = std::env::var("SYNERGY_COMMITTED_BLOCK_LOG_FILE").ok();
+        std::env::set_var("SYNERGY_COMMITTED_BLOCK_LOG_FILE", &committed_log_path);
+        let block = with_runtime_root(&root, || read_latest_block_summary().unwrap());
+        match previous_committed_log {
+            Some(value) => std::env::set_var("SYNERGY_COMMITTED_BLOCK_LOG_FILE", value),
+            None => std::env::remove_var("SYNERGY_COMMITTED_BLOCK_LOG_FILE"),
+        }
+
+        assert_eq!(block.height, 12);
+        assert_eq!(block.hash, "hash-12");
+        assert_eq!(block.parent_hash, "hash-11");
     }
 
     #[test]
