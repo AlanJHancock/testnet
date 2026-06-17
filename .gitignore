@@ -28,6 +28,7 @@ tools/control-panel-workspace-files-copies/
 bootstrap-bundles/
 node-control-panel/
 release-artifacts/v*/
+release-artifacts/wallet-pqc-cli-testnet-team*/
 
 # Build artifacts
 *.o

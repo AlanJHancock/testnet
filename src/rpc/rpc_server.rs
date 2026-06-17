@@ -164,13 +164,8 @@ impl RpcRequestContext {
     }
 
     fn effective_client_ip(&self) -> Option<IpAddr> {
-        parse_forwarded_ip(self.forwarded_client_ip_header().or_else(|| {
-            self.headers
-                .get("x-forwarded-for")
-                .map(String::as_str)
-                .or_else(|| self.headers.get("x-real-ip").map(String::as_str))
-        }))
-        .or_else(|| self.peer_addr.map(|addr| addr.ip()))
+        self.trusted_forwarded_client_ip()
+            .or_else(|| self.peer_addr.map(|addr| addr.ip()))
     }
 
     fn forwarded_client_ip_header(&self) -> Option<&str> {
@@ -182,7 +177,18 @@ impl RpcRequestContext {
             .or_else(|| self.headers.get("x-real-ip").map(String::as_str))
     }
 
+    fn trusted_forwarded_client_ip(&self) -> Option<IpAddr> {
+        let peer_ip = self.peer_addr.map(|addr| addr.ip())?;
+        if !trusted_rpc_proxy_peer(peer_ip) {
+            return None;
+        }
+        parse_forwarded_ip(self.forwarded_client_ip_header())
+    }
+
     fn is_public_request(&self) -> bool {
+        if self.trusted_forwarded_client_ip().is_some() {
+            return true;
+        }
         self.effective_client_ip()
             .map(|ip| !ip.is_loopback())
             .unwrap_or(false)
@@ -4360,6 +4366,69 @@ fn parse_forwarded_ip(value: Option<&str>) -> Option<IpAddr> {
     })
 }
 
+fn trusted_rpc_proxy_peer(peer_ip: IpAddr) -> bool {
+    if peer_ip.is_loopback() {
+        return true;
+    }
+
+    std::env::var("SYNERGY_RPC_TRUSTED_PROXIES")
+        .ok()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .any(|entry| trusted_proxy_entry_matches(peer_ip, entry))
+        })
+        .unwrap_or(false)
+}
+
+fn trusted_proxy_entry_matches(peer_ip: IpAddr, entry: &str) -> bool {
+    if entry.eq_ignore_ascii_case("loopback") {
+        return peer_ip.is_loopback();
+    }
+
+    if let Some((network, prefix)) = entry.split_once('/') {
+        let Ok(network_ip) = network.trim().parse::<IpAddr>() else {
+            return false;
+        };
+        let Ok(prefix) = prefix.trim().parse::<u8>() else {
+            return false;
+        };
+        return ip_in_prefix(peer_ip, network_ip, prefix);
+    }
+
+    entry
+        .parse::<IpAddr>()
+        .map(|trusted_ip| trusted_ip == peer_ip)
+        .unwrap_or(false)
+}
+
+fn ip_in_prefix(peer_ip: IpAddr, network_ip: IpAddr, prefix: u8) -> bool {
+    match (peer_ip, network_ip) {
+        (IpAddr::V4(peer), IpAddr::V4(network)) if prefix <= 32 => {
+            let peer = u32::from(peer);
+            let network = u32::from(network);
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            (peer & mask) == (network & mask)
+        }
+        (IpAddr::V6(peer), IpAddr::V6(network)) if prefix <= 128 => {
+            let peer = u128::from(peer);
+            let network = u128::from(network);
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            (peer & mask) == (network & mask)
+        }
+        _ => false,
+    }
+}
+
 fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
     match method {
         "synergy_subscribe"
@@ -7139,7 +7208,7 @@ mod tests {
     }
 
     #[test]
-    fn forwarded_ip_prefers_proxy_header() {
+    fn trusted_proxy_forwarded_ip_prefers_proxy_header() {
         let mut headers = HashMap::new();
         headers.insert(
             "x-forwarded-for".to_string(),
@@ -7164,7 +7233,48 @@ mod tests {
     }
 
     #[test]
-    fn forwarded_ip_accepts_cloudflare_header() {
+    fn untrusted_proxy_header_cannot_spoof_loopback() {
+        let mut headers = HashMap::new();
+        headers.insert("x-forwarded-for".to_string(), "127.0.0.1".to_string());
+
+        let context = RpcRequestContext {
+            transport: RpcTransport::Http,
+            peer_addr: Some("198.51.100.10:5646".parse().unwrap()),
+            headers,
+            role_profile: crate::role_profiles::profile_from_compiled_profile("rpc_gateway_node"),
+        };
+
+        assert_eq!(
+            context
+                .effective_client_ip()
+                .expect("socket peer ip should be used")
+                .to_string(),
+            "198.51.100.10"
+        );
+        assert!(context.is_public_request());
+        let error = enforce_rpc_exposure_policy("synergy_resetSxcpState", &context)
+            .expect_err("spoofed forwarded loopback must not unlock operator methods");
+        assert_eq!(error.code, -32003);
+    }
+
+    #[test]
+    fn trusted_proxy_entries_support_exact_and_cidr_matches() {
+        assert!(trusted_proxy_entry_matches(
+            "203.0.113.8".parse().unwrap(),
+            "203.0.113.8"
+        ));
+        assert!(trusted_proxy_entry_matches(
+            "203.0.113.8".parse().unwrap(),
+            "203.0.113.0/24"
+        ));
+        assert!(!trusted_proxy_entry_matches(
+            "198.51.100.8".parse().unwrap(),
+            "203.0.113.0/24"
+        ));
+    }
+
+    #[test]
+    fn trusted_proxy_forwarded_ip_accepts_cloudflare_header() {
         let mut headers = HashMap::new();
         headers.insert("cf-connecting-ip".to_string(), "198.51.100.44".to_string());
         headers.insert(

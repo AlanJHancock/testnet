@@ -26,8 +26,10 @@ use crate::validator::{
     VALIDATOR_MANAGER,
 };
 use crate::{debug, error, info, warn};
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use hickory_resolver::Resolver;
+use hickory_resolver::config::ResolverConfig;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::proto::rr::RData;
+use hickory_resolver::{Resolver, TokioResolver};
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -44,6 +46,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
 
 #[cfg(test)]
 thread_local! {
@@ -220,6 +223,11 @@ struct PeerEntryGuard {
     peer_address: String,
     connected_peers: PeersArc,
     peer_state_cache: PeerStateCacheArc,
+}
+
+struct BootstrapDnsResolver {
+    resolver: TokioResolver,
+    runtime: TokioRuntime,
 }
 
 impl PeerEntryGuard {
@@ -1812,14 +1820,28 @@ fn resolve_dns_bootstrap_targets(record_names: &[String]) -> Vec<String> {
     ordered
 }
 
-fn build_dns_resolver() -> Result<Resolver, String> {
-    Resolver::from_system_conf()
-        .or_else(|_| Resolver::new(ResolverConfig::default(), ResolverOpts::default()))
-        .map_err(|error| error.to_string())
+fn build_dns_resolver() -> Result<BootstrapDnsResolver, String> {
+    let runtime = TokioRuntimeBuilder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+
+    let resolver = TokioResolver::builder_tokio()
+        .and_then(|builder| builder.build())
+        .or_else(|_| {
+            Resolver::builder_with_config(
+                ResolverConfig::default(),
+                TokioRuntimeProvider::default(),
+            )
+            .build()
+        })
+        .map_err(|error| error.to_string())?;
+
+    Ok(BootstrapDnsResolver { resolver, runtime })
 }
 
 fn collect_dnsaddr_record_targets(
-    resolver: &Resolver,
+    resolver: &BootstrapDnsResolver,
     record_name: &str,
     depth: usize,
     visited: &mut HashSet<String>,
@@ -1835,10 +1857,17 @@ fn collect_dnsaddr_record_targets(
         return;
     }
 
-    match resolver.txt_lookup(canonical.as_str()) {
+    match resolver
+        .runtime
+        .block_on(resolver.resolver.txt_lookup(canonical.clone()))
+    {
         Ok(records) => {
-            for record in records.iter() {
-                for txt in record.txt_data() {
+            for record in records.answers() {
+                let RData::TXT(txt_record) = &record.data else {
+                    continue;
+                };
+
+                for txt in txt_record.txt_data.iter() {
                     let Ok(value) = std::str::from_utf8(txt) else {
                         continue;
                     };
@@ -1858,7 +1887,7 @@ fn collect_dnsaddr_record_targets(
 }
 
 fn collect_dnsaddr_txt_target(
-    resolver: &Resolver,
+    resolver: &BootstrapDnsResolver,
     value: &str,
     depth: usize,
     visited: &mut HashSet<String>,
