@@ -32,9 +32,9 @@ libc = "0.2"
 
 # Post-Quantum Cryptography
 aegis-pqvm = { path = "../aegis-pqvm", default-features = false, features = ["mlkem", "mldsa", "fndsa", "security"] }
-pqsynq = { package = "aegis-pqsynq", path = "../../synq-language/aegis-pqsynq/pqsynq", default-features = false, features = ["std", "mldsa"] }
+pqsynq = { package = "aegis-pqsynq", path = "../synq-language/aegis-pqsynq/pqsynq", default-features = false, features = ["std", "mldsa"] }
 pqcrypto-traits = { workspace = true }
-pqrust-traits = { path = "../../synq-language/pqrust/pqrust-traits" }
+pqrust-traits = { path = "../synq-language/pqrust/pqrust-traits" }
 pqcrypto-falcon = "0.3"
 pqcrypto-hqc = "0.2.2"
 pqcrypto-mlkem = { workspace = true }
@@ -45,7 +45,7 @@ aes-gcm = "0.10"
 
 # WebAssembly VM
 wasmtime = { workspace = true }
-aivm-core = { path = "/Volumes/xcode/Synergy-Network-Projects/synergy-aivm-git-checkout/runtime/aivm-core" }
+aivm-core = { path = "../synergy-aivm/runtime/aivm-core" }
 
 # Signal handling
 ctrlc = "3.4"

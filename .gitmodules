@@ -1,0 +1,6 @@
+[submodule "synergy-aivm"]
+	path = synergy-aivm
+	url = https://github.com/synergy-network-hq/synergy-aivm.git
+[submodule "synq-language"]
+	path = synq-language
+	url = https://github.com/synergy-network-hq/synq-language.git

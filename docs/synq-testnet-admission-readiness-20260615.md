@@ -19,8 +19,9 @@ Scope: local Testnet-Beta source proof for carrying SynQ deploy/call authorizati
 - `src/execution.rs` carries admitted SynQ verification summaries into transaction receipts, invokes the SynQ/AIVM bridge, includes SynQ artifact/deployment state in the state root, and fails closed without balance transfer when AIVM rejects or reverts a SynQ payload.
 - `src/rpc/rpc_server.rs` now attaches SynQ verification and Synergy-AIVM receipt summaries to `synergy_getTransactionReceipt`, `synergy_getReceipt`, and `synergy_getBlockReceipts` by materializing committed Aegis carrier payloads through the SynQ/AIVM lane into the persisted index. Replay uses the committed carrier transaction timestamp for pqsynq verification so historical receipts do not become invalid when a signing envelope later expires.
 - `aegis-pqvm` exposes ML-DSA detached verification routes needed by the pqsynq-backed path and uses a non-recursive process RNG shim for pqrust compatibility.
-- `/Volumes/xcode/Synergy-Network-Projects/synergy-aivm/runtime/aivm-core/src/state.rs` serializes deterministic AIVM contract state as ordered entries so Synergy nodes can persist and reload SynQ execution checkpoints without JSON map-key ambiguity.
-- `/Volumes/xcode/Synergy-Network-Projects/synergy-aivm/runtime/aivm-core/src/synq_runtime.rs` adds a stateful SynQ Counter runtime path for deploy, increment, and get using checked-in SynQ bytecode, ABI, and manifest artifacts.
+- `synergy-aivm/runtime/aivm-core/src/state.rs` serializes deterministic AIVM contract state as ordered entries so Synergy nodes can persist and reload SynQ execution checkpoints without JSON map-key ambiguity.
+- `synergy-aivm/runtime/aivm-core/src/synq_runtime.rs` adds a stateful SynQ Counter runtime path for deploy, increment, and get using checked-in SynQ bytecode, ABI, and manifest artifacts.
+- The testnet source tree now vendors `synq-language` and `synergy-aivm` as release submodules so local and GitHub release builds use the same SynQ compiler, `aegis-pqsynq`, pqrust, and AIVM sources without absolute workstation paths.
 - The AIVM Counter path validates manifest/ABI/bytecode hashes, enforces chain `1264` and ML-DSA-65 policy through the existing artifact validator, meters ordinary gas plus admission PQ-Gas, commits successful state overlays, rolls back failed calls, and emits deterministic stateful receipt hashes.
 - Synergy-layer tests now prove deploy -> increment -> get through `execute_block`, replay the same signed carrier bytes from fresh state, and assert matching deterministic state roots and receipt hashes.
 - RPC-layer tests now prove committed Aegis carrier data can be queried back as deterministic SynQ/AIVM receipts for Counter deploy -> increment -> get, that persisted receipt lookup works after the hot-chain window no longer contains the transaction, that AIVM state/artifacts/deployments carry forward across a compacted window, and that hash-only deploys fail closed with a structured `SYNQ-AIVM-ARTIFACT` receipt.
@@ -36,14 +37,14 @@ cargo check -p synergy-testnet --bin synergy-node
 cargo test -p synergy-testnet --lib synq_admission::tests -- --nocapture
 cargo test -p synergy-testnet --lib execution::tests -- --nocapture
 cargo test -p synergy-testnet --lib aegis_tx_tool::tests -- --nocapture
-cargo test --manifest-path /Volumes/xcode/Synergy-Network-Projects/synq-language/aegis-pqsynq/pqsynq/Cargo.toml --test synq_verifier_tests --locked
+cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synq-language/aegis-pqsynq/pqsynq/Cargo.toml --test synq_verifier_tests --locked
 cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/aegis-pqvm/Cargo.toml --test integrations_dispatch --test vm_validation --test security_smoke --locked
-cargo test --manifest-path /Volumes/xcode/Synergy-Network-Projects/synq-language/Cargo.toml -p compiler --test artifact_test --locked
-cargo test --manifest-path /Volumes/xcode/Synergy-Network-Projects/synq-language/Cargo.toml -p cli --test integration_test --locked
-cargo fmt --manifest-path /Volumes/xcode/Synergy-Network-Projects/synergy-aivm/runtime/aivm-core/Cargo.toml --all --check
-cargo test --manifest-path /Volumes/xcode/Synergy-Network-Projects/synergy-aivm/runtime/aivm-core/Cargo.toml --locked --lib synq_runtime::tests -- --nocapture
-cargo test --manifest-path /Volumes/xcode/Synergy-Network-Projects/synergy-aivm/runtime/aivm-core/Cargo.toml --locked --all-targets -- --nocapture
-cargo run --manifest-path /Volumes/xcode/Synergy-Network-Projects/synergy-aivm/runtime/aivm-core/Cargo.toml --locked --example counter_state_demo
+cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synq-language/Cargo.toml -p compiler --test artifact_test --locked
+cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synq-language/Cargo.toml -p cli --test integration_test --locked
+cargo fmt --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synergy-aivm/runtime/aivm-core/Cargo.toml --all --check
+cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synergy-aivm/runtime/aivm-core/Cargo.toml --locked --lib synq_runtime::tests -- --nocapture
+cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synergy-aivm/runtime/aivm-core/Cargo.toml --locked --all-targets -- --nocapture
+cargo run --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synergy-aivm/runtime/aivm-core/Cargo.toml --locked --example counter_state_demo
 ```
 
 The focused 2026-06-16 Synergy checks passed:
@@ -56,17 +57,17 @@ cargo test -p synergy-testnet --lib execution::tests -- --nocapture
 cargo check -p synergy-testnet --bin synergy-node
 cargo test -p synergy-testnet --lib synq_admission::tests -- --nocapture
 cargo test -p synergy-testnet --lib aegis_tx_tool::tests -- --nocapture
-cargo fmt --manifest-path /Volumes/xcode/Synergy-Network-Projects/synergy-aivm/runtime/aivm-core/Cargo.toml --all --check
-cargo test --manifest-path /Volumes/xcode/Synergy-Network-Projects/synergy-aivm/runtime/aivm-core/Cargo.toml --locked --all-targets -- --nocapture
+cargo fmt --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synergy-aivm/runtime/aivm-core/Cargo.toml --all --check
+cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synergy-aivm/runtime/aivm-core/Cargo.toml --locked --all-targets -- --nocapture
 ```
 
-The focused 2026-06-17 git-backed checks passed:
+The focused 2026-06-17 git-backed checks passed. Current portable release builds use the in-repo submodule paths under `/Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta`:
 
 ```bash
-CARGO_TARGET_DIR=/Volumes/xcode/cargo-targets/synq-language-git cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synq-language/compiler/Cargo.toml -- --nocapture
-CARGO_TARGET_DIR=/Volumes/xcode/cargo-targets/synq-language-git cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synq-language/cli/Cargo.toml -- --nocapture
-CARGO_TARGET_DIR=/Volumes/xcode/cargo-targets/synq-language-git cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synq-language/vm/Cargo.toml -- --nocapture
-CARGO_TARGET_DIR=/Volumes/xcode/cargo-targets/synq-language-git cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synq-language/aegis-pqsynq/pqsynq/Cargo.toml --tests -- --nocapture
+CARGO_TARGET_DIR=/Volumes/xcode/cargo-targets/synq-language-git cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synq-language/compiler/Cargo.toml -- --nocapture
+CARGO_TARGET_DIR=/Volumes/xcode/cargo-targets/synq-language-git cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synq-language/cli/Cargo.toml -- --nocapture
+CARGO_TARGET_DIR=/Volumes/xcode/cargo-targets/synq-language-git cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synq-language/vm/Cargo.toml -- --nocapture
+CARGO_TARGET_DIR=/Volumes/xcode/cargo-targets/synq-language-git cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synq-language/aegis-pqsynq/pqsynq/Cargo.toml --tests -- --nocapture
 CARGO_TARGET_DIR=/Volumes/xcode/cargo-targets/synergy-testnet-beta cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/src/Cargo.toml synq -- --nocapture
 CARGO_TARGET_DIR=/Volumes/xcode/cargo-targets/synergy-testnet-beta cargo test --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/src/Cargo.toml aegis_transaction_sequence_links_dependencies_in_shared_mempool -- --nocapture
 ```
@@ -114,12 +115,12 @@ Live RPC probe on 2026-06-17:
 The local CLI smoke also passed for deploy, increment, and get carrier creation using artifact-bearing deploy admission:
 
 ```bash
-cargo run -q --manifest-path /Volumes/xcode/Synergy-Network-Projects/synq-language/Cargo.toml -p cli -- init /tmp/synq-network-ready.4xDMxH/counter
-cargo run -q --manifest-path /Volumes/xcode/Synergy-Network-Projects/synq-language/Cargo.toml -p cli -- build /tmp/synq-network-ready.4xDMxH/counter/contracts/Counter.synq
-cargo run -q --manifest-path /Volumes/xcode/Synergy-Network-Projects/synq-language/Cargo.toml -p cli -- keygen --out-dir /tmp/synq-network-ready.4xDMxH/counter/keys
-cargo run -q --manifest-path /Volumes/xcode/Synergy-Network-Projects/synq-language/Cargo.toml -p cli -- sign-deploy --bytecode Counter.compiled.synq --manifest Counter.manifest.json --abi Counter.abi.json --private-key synq-testnet-mldsa65.private.json --output Counter.deploy.json --nonce 77
-cargo run -q --manifest-path /Volumes/xcode/Synergy-Network-Projects/synq-language/Cargo.toml -p cli -- sign-call --contract Counter --method increment --private-key synq-testnet-mldsa65.private.json --output Counter.increment.json --nonce 78
-cargo run -q --manifest-path /Volumes/xcode/Synergy-Network-Projects/synq-language/Cargo.toml -p cli -- sign-call --contract Counter --method get --private-key synq-testnet-mldsa65.private.json --output Counter.get.json --nonce 79
+cargo run -q --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synq-language/Cargo.toml -p cli -- init /tmp/synq-network-ready.4xDMxH/counter
+cargo run -q --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synq-language/Cargo.toml -p cli -- build /tmp/synq-network-ready.4xDMxH/counter/contracts/Counter.synq
+cargo run -q --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synq-language/Cargo.toml -p cli -- keygen --out-dir /tmp/synq-network-ready.4xDMxH/counter/keys
+cargo run -q --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synq-language/Cargo.toml -p cli -- sign-deploy --bytecode Counter.compiled.synq --manifest Counter.manifest.json --abi Counter.abi.json --private-key synq-testnet-mldsa65.private.json --output Counter.deploy.json --nonce 77
+cargo run -q --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synq-language/Cargo.toml -p cli -- sign-call --contract Counter --method increment --private-key synq-testnet-mldsa65.private.json --output Counter.increment.json --nonce 78
+cargo run -q --manifest-path /Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/synq-language/Cargo.toml -p cli -- sign-call --contract Counter --method get --private-key synq-testnet-mldsa65.private.json --output Counter.get.json --nonce 79
 cargo run -q -p synergy-testnet --bin synergy-node -- tx create-aegis --chain-id 1264 --network-id synergy-testnet-v2 --synq-deploy-envelope Counter.deploy.json --synq-bytecode Counter.compiled.synq --synq-manifest Counter.manifest.json --synq-abi Counter.abi.json --include-signed-transaction
 cargo run -q -p synergy-testnet --bin synergy-node -- tx create-aegis --chain-id 1264 --network-id synergy-testnet-v2 --synq-call-envelope Counter.increment.json --include-signed-transaction
 cargo run -q -p synergy-testnet --bin synergy-node -- tx create-aegis --chain-id 1264 --network-id synergy-testnet-v2 --synq-call-envelope Counter.get.json --include-signed-transaction
