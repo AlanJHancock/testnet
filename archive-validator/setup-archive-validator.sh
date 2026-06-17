@@ -71,12 +71,16 @@ if ! id -u "${INSTALL_USER}" >/dev/null 2>&1; then
   useradd --system --home-dir "${ARCHIVE_DATA_DIR}" --shell /usr/sbin/nologin --gid "${INSTALL_GROUP}" "${INSTALL_USER}"
 fi
 
-install -d -m 0750 "${ARCHIVE_DATA_DIR}/"{config,keys,data,logs,tmp,backups,run,snapshots}
+install -d -m 0750 "${ARCHIVE_DATA_DIR}/"{config,keys,data,logs,tmp,backups,run,snapshots,evidence,published-snapshots}
 install -d -m 0750 "${ARCHIVE_DATA_DIR}/data/"{blocks,qcs,state,epochs,validators,evidence,indexes}
+install -d -m 0750 "${ARCHIVE_DATA_DIR}/workspace/config"
 install -m 0640 "${GENESIS_FILE}" "${ARCHIVE_DATA_DIR}/config/genesis.json"
 install -m 0640 ./config/archive-validator.testnet.toml "${ARCHIVE_DATA_DIR}/config/archive-validator.toml"
 install -m 0640 ./config/snapshot-policy.testnet.toml "${ARCHIVE_DATA_DIR}/config/snapshot-policy.toml"
 install -m 0640 ./config/archive-api.testnet.toml "${ARCHIVE_DATA_DIR}/config/archive-api.toml"
+install -m 0640 ./config/archive-validator.testnet.toml "${ARCHIVE_DATA_DIR}/workspace/config/node.toml"
+rm -rf "${ARCHIVE_DATA_DIR}/workspace/data"
+ln -s ../data "${ARCHIVE_DATA_DIR}/workspace/data"
 chown -R "${INSTALL_USER}:${INSTALL_GROUP}" "${ARCHIVE_DATA_DIR}"
 
 ./scripts/verify-aegis-pqvm.sh

@@ -281,6 +281,26 @@ for plist in "${LAUNCHD_ROOT}"/io.synergynetwork.archive-*.plist; do
     assert_stat "${plist}" "root:wheel 644"
   fi
 done
+python3 - "${LAUNCHD_ROOT}/io.synergynetwork.archive-snapshot-worker.plist" <<'PY'
+import plistlib
+import sys
+
+path = sys.argv[1]
+with open(path, "rb") as fh:
+    plist = plistlib.load(fh)
+args = plist.get("ProgramArguments") or []
+if "worker" not in args:
+    raise SystemExit(f"{path} must run the class-aware synergy-archive worker command")
+if "--snapshot-class" in args:
+    raise SystemExit(
+        f"{path} must omit --snapshot-class so unattended worker mode publishes all configured snapshot classes"
+    )
+required = {"--workspace", "--majority-proof-marker", "--publish-root", "--runtime", "--aegis"}
+missing = sorted(required.difference(args))
+if missing:
+    raise SystemExit(f"{path} is missing required worker arguments: {missing}")
+print("archive_snapshot_worker_all_classes_default_ok=true")
+PY
 if [[ "${SKIP_LAUNCHD_CHECK}" != "true" ]]; then
   for label in \
     io.synergynetwork.archive-validator \

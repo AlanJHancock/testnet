@@ -37,6 +37,9 @@ release-artifacts/wallet-pqc-cli-testnet-team*/
 *.dylib
 *.dll
 *.exe
+__pycache__/
+**/__pycache__/
+*.py[cod]
 archive-validator/dist/
 archive-validator/synergy-archive-validator-testnet-v2*.zip
 

@@ -20,9 +20,17 @@ STORAGE_ROOT="${STORAGE_VOLUME}/archive-validator"
 install -d -m 0755 /usr/local/synergy/bin
 install -d -m 0755 "${STORAGE_ROOT}/config"
 install -d -m 0750 "${STORAGE_ROOT}/data"
+install -d -m 0750 "${STORAGE_ROOT}/workspace/config"
 install -d -m 0750 "${STORAGE_ROOT}/snapshots"
+install -d -m 0750 "${STORAGE_ROOT}/published-snapshots"
+install -d -m 0750 "${STORAGE_ROOT}/evidence"
 install -d -m 0750 "${STORAGE_ROOT}/tmp"
 install -d -m 0755 "${STORAGE_ROOT}/logs"
+if [[ -f "${STORAGE_ROOT}/config/archive-validator.toml" ]]; then
+  cp "${STORAGE_ROOT}/config/archive-validator.toml" "${STORAGE_ROOT}/workspace/config/node.toml"
+fi
+rm -rf "${STORAGE_ROOT}/workspace/data"
+ln -s ../data "${STORAGE_ROOT}/workspace/data"
 
 for plist in \
   io.synergynetwork.archive-validator.plist \
