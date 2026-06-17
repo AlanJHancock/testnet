@@ -105,6 +105,50 @@ pub fn sign_with_new_aegis_transaction_key(
     report_for_transaction(&verifier, tx, key_id)
 }
 
+pub fn sign_aegis_transaction_sequence_with_new_key(
+    options: Vec<AegisTxBuildOptions>,
+    link_explicit_dependencies: bool,
+) -> Result<Vec<AegisSignedTxReport>, String> {
+    if options.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let signer_uma_id = options
+        .first()
+        .map(|options| options.signer_uma_id.clone())
+        .unwrap_or_else(|| AegisTxBuildOptions::default().signer_uma_id);
+    let epoch = Epoch(options.first().map(|options| options.epoch).unwrap_or(0));
+    let mut signer = AegisPqvmSigner::initialize_required().map_err(|error| error.to_string())?;
+    let key_id = signer
+        .generate_and_register_key(
+            &signer_uma_id,
+            vec![AegisPqKeyRole::Transaction],
+            epoch.clone(),
+        )
+        .map_err(|error| error.to_string())?;
+    let verifier = signer.verifier();
+    let mut mempool = DagMempool::new(&verifier, epoch, Height(0));
+    let mut previous_tx_id: Option<TxId> = None;
+    let mut reports = Vec::new();
+
+    for mut options in options {
+        options.signer_uma_id = signer_uma_id.clone();
+        if link_explicit_dependencies {
+            if let Some(tx_id) = previous_tx_id.as_ref() {
+                options.explicit_dependencies.push(tx_id.0.clone());
+            }
+        }
+        apply_generated_address_defaults(&signer, &key_id, &mut options)?;
+        let tx = sign_with_existing_aegis_transaction_key(&mut signer, &key_id, options)?;
+        let report =
+            report_for_transaction_in_mempool(&verifier, &mut mempool, tx, key_id.clone())?;
+        previous_tx_id = Some(report.tx_id.clone());
+        reports.push(report);
+    }
+
+    Ok(reports)
+}
+
 pub fn build_fixture_report() -> Result<AegisDagFixtureReport, String> {
     let signer_uma_id = "aegis-dag-fixture-sender".to_string();
     let mut signer = AegisPqvmSigner::initialize_required().map_err(|error| error.to_string())?;
@@ -556,6 +600,40 @@ mod tests {
         assert_eq!(summary.payload_hash, synq_carrier.payload_hash);
         assert_eq!(summary.bytecode_hash, synq_carrier.bytecode_hash);
         validate_legacy_aegis_carrier_transaction(&report.rpc_transaction).unwrap();
+    }
+
+    #[test]
+    fn aegis_transaction_sequence_links_dependencies_in_shared_mempool() {
+        let reports = sign_aegis_transaction_sequence_with_new_key(
+            vec![
+                AegisTxBuildOptions {
+                    nonce: 0,
+                    payload: b"deploy".to_vec(),
+                    write_set_hint: vec!["synq-counter".to_string()],
+                    ..AegisTxBuildOptions::default()
+                },
+                AegisTxBuildOptions {
+                    nonce: 1,
+                    payload: b"increment".to_vec(),
+                    write_set_hint: vec!["synq-counter".to_string()],
+                    ..AegisTxBuildOptions::default()
+                },
+            ],
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(reports.len(), 2);
+        assert!(reports[0].admission_result.ready);
+        assert!(reports[1].admission_result.ready);
+        assert_eq!(
+            reports[1].transaction.explicit_dependencies[0].tx_id,
+            reports[0].tx_id
+        );
+        assert_eq!(
+            reports[1].signature_verification_result,
+            "verified_through_aegis_pqvm"
+        );
     }
 
     #[test]

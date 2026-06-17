@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
 use std::fs;
 use synergy_testnet::aegis_tx_tool::{
-    build_fixture_report, sign_with_new_aegis_transaction_key, AegisTxBuildOptions,
+    build_fixture_report, sign_aegis_transaction_sequence_with_new_key,
+    sign_with_new_aegis_transaction_key, AegisSignedTxReport, AegisTxBuildOptions,
 };
 use synergy_testnet::gas::GasSchedule;
 use synergy_testnet::synergy_types::{ChainId, Hash, NetworkId};
@@ -18,6 +20,7 @@ fn run() -> Result<(), String> {
     match command {
         "tx" => run_tx_command(&args)?,
         "dag" => run_dag_command(&args)?,
+        "synq" => run_synq_command(&args)?,
         "recovery" => run_recovery_command(&args)?,
         "diagnose-sync-target" => {
             require_testnet_args(&args)?;
@@ -226,6 +229,7 @@ fn run() -> Result<(), String> {
             println!("  synergy-node tx create-aegis --chain-id 1264 --network-id synergy-testnet-v2 [tx options]");
             println!("  synergy-node tx sign-aegis --chain-id 1264 --network-id synergy-testnet-v2 [tx options]");
             println!("  synergy-node tx submit-aegis --chain-id 1264 --network-id synergy-testnet-v2 [tx options]");
+            println!("  synergy-node synq replay-flow --chain-id 1264 --network-id synergy-testnet-v2 --synq-deploy-envelope <ContractDeployEnvelope.json> --synq-bytecode <Counter.compiled.synq> --synq-manifest <Counter.manifest.json> --synq-abi <Counter.abi.json> [--synq-call-envelope <ContractCallEnvelope.json> ...]");
             println!("  synergy-node dag submit-test-fixture --real-aegis-pqvm --chain-id 1264 --network-id synergy-testnet-v2");
             println!(
                 "  synergy-node recovery status --chain-id 1264 --network-id synergy-testnet-v2"
@@ -557,6 +561,210 @@ fn run_dag_command(args: &[String]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct SynqReplayStep {
+    label: String,
+    report: AegisSignedTxReport,
+}
+
+#[derive(Debug, Clone)]
+struct SynqReplayRun {
+    steps: Vec<serde_json::Value>,
+    receipt_hashes: Vec<String>,
+    post_state_roots: Vec<String>,
+    statuses: Vec<String>,
+    final_state_root: String,
+}
+
+fn run_synq_command(args: &[String]) -> Result<(), String> {
+    let subcommand = args.get(1).map(String::as_str).unwrap_or("help");
+    match subcommand {
+        "replay-flow" => {
+            require_testnet_args(args)?;
+            print_json(synq_replay_flow_report(args)?)?;
+        }
+        _ => {
+            println!("Commands:");
+            println!("  synergy-node synq replay-flow --chain-id 1264 --network-id synergy-testnet-v2 --synq-deploy-envelope <ContractDeployEnvelope.json> --synq-bytecode <Counter.compiled.synq> --synq-manifest <Counter.manifest.json> --synq-abi <Counter.abi.json> [--synq-call-envelope <ContractCallEnvelope.json> ...] [--base-nonce <n>]");
+        }
+    }
+    Ok(())
+}
+
+fn synq_replay_flow_report(args: &[String]) -> Result<serde_json::Value, String> {
+    let base_nonce = optional_u64_arg(args, "--base-nonce")?.unwrap_or(0);
+    let mut labels = Vec::new();
+    let mut options = Vec::new();
+    let schedule = GasSchedule::default();
+
+    let deploy_payload = synq_deploy_payload_from_args(args)?;
+    let deploy_write_hint = synq_write_hint("deploy", &deploy_payload);
+    labels.push("deploy".to_string());
+    options.push(AegisTxBuildOptions {
+        nonce: base_nonce,
+        payload: deploy_payload,
+        gas_limit: schedule.synq_contract_deploy_base_gas,
+        write_set_hint: vec![deploy_write_hint],
+        ..AegisTxBuildOptions::default()
+    });
+
+    for (index, path) in arg_values(args, "--synq-call-envelope")
+        .into_iter()
+        .enumerate()
+    {
+        let payload = synq_call_payload_from_path(&path)?;
+        let write_hint = synq_write_hint("call", &payload);
+        labels.push(format!("call:{}", path));
+        options.push(AegisTxBuildOptions {
+            nonce: base_nonce + index as u64 + 1,
+            payload,
+            gas_limit: schedule.synq_contract_call_base_gas,
+            write_set_hint: vec![write_hint],
+            ..AegisTxBuildOptions::default()
+        });
+    }
+
+    let reports = sign_aegis_transaction_sequence_with_new_key(options, true)?;
+    let steps = labels
+        .into_iter()
+        .zip(reports)
+        .map(|(label, report)| SynqReplayStep { label, report })
+        .collect::<Vec<_>>();
+    let first = execute_synq_replay_once(&steps)?;
+    let second = execute_synq_replay_once(&steps)?;
+    let receipt_hashes_match = first.receipt_hashes == second.receipt_hashes;
+    let post_state_roots_match = first.post_state_roots == second.post_state_roots;
+    let final_state_root_match = first.final_state_root == second.final_state_root;
+    let replay_matches = receipt_hashes_match && post_state_roots_match && final_state_root_match;
+
+    Ok(serde_json::json!({
+        "command": "synq replay-flow",
+        "chain_id": 1264,
+        "network_id": "synergy-testnet-v2",
+        "normalized_synq_network_id": "synergy-testnet",
+        "aegis_pqsynq_path": "synergy_testnet::synq_admission",
+        "aegis_pqvm_path": "synergy_testnet::crypto::aegis_pqvm::AegisPqvmSigner",
+        "aivm_path": "synergy_testnet::synq_execution -> aivm_core::synq_runtime",
+        "executor": "synq-bytecode-v1 through current QuantumVM-backed AIVM runtime",
+        "steps": first.steps,
+        "receipt_hashes": first.receipt_hashes,
+        "post_state_roots": first.post_state_roots,
+        "final_state_root": first.final_state_root,
+        "all_receipts_succeeded": first.statuses.iter().all(|status| status == "succeeded"),
+        "replay": {
+            "enabled": true,
+            "matches": replay_matches,
+            "receipt_hashes_match": receipt_hashes_match,
+            "post_state_roots_match": post_state_roots_match,
+            "final_state_root_match": final_state_root_match,
+            "receipt_hashes": second.receipt_hashes,
+            "post_state_roots": second.post_state_roots,
+            "final_state_root": second.final_state_root,
+        }
+    }))
+}
+
+fn execute_synq_replay_once(steps: &[SynqReplayStep]) -> Result<SynqReplayRun, String> {
+    let mut aivm_state = aivm_core::state::ContractState::default();
+    let mut artifacts = BTreeMap::new();
+    let mut deployments = BTreeMap::new();
+    let mut step_values = Vec::new();
+    let mut receipt_hashes = Vec::new();
+    let mut post_state_roots = Vec::new();
+    let mut statuses = Vec::new();
+
+    for step in steps {
+        let verification =
+            step.report.synq_verification.as_ref().ok_or_else(|| {
+                format!("{} did not carry a SynQ verification summary", step.label)
+            })?;
+        let receipt = synergy_testnet::synq_execution::execute_synq_transaction(
+            &step.report.tx_id,
+            &step.report.transaction,
+            verification,
+            &mut aivm_state,
+            &mut artifacts,
+            &mut deployments,
+        )?
+        .ok_or_else(|| format!("{} did not execute as a SynQ transaction", step.label))?;
+        let receipt_json = serde_json::to_value(&receipt)
+            .map_err(|error| format!("serialize SynQ AIVM receipt: {error}"))?;
+        receipt_hashes.push(receipt.receipt_hash.clone());
+        post_state_roots.push(receipt.post_state_root.clone());
+        statuses.push(receipt.status.clone());
+        step_values.push(serde_json::json!({
+            "label": step.label,
+            "tx_id": step.report.tx_id.0,
+            "dag_node_id": step.report.dag_node_id.0,
+            "admission_ready": step.report.admission_result.ready,
+            "missing_dependencies": step.report.admission_result.missing_dependencies,
+            "explicit_dependencies": step.report.transaction.explicit_dependencies.iter().map(|dependency| dependency.tx_id.0.clone()).collect::<Vec<_>>(),
+            "outer_signature_verification": step.report.signature_verification_result,
+            "synq_contract_address": synq_contract_address_from_payload(&step.report.transaction.payload),
+            "synq_verification": verification,
+            "aivm_receipt": receipt_json,
+        }));
+    }
+
+    Ok(SynqReplayRun {
+        steps: step_values,
+        receipt_hashes,
+        post_state_roots,
+        statuses,
+        final_state_root: hex::encode(aivm_state.state_root()),
+    })
+}
+
+fn synq_deploy_payload_from_args(args: &[String]) -> Result<Vec<u8>, String> {
+    let deploy_path = arg_value(args, "--synq-deploy-envelope")
+        .ok_or_else(|| "synq replay-flow requires --synq-deploy-envelope <path>".to_string())?;
+    let bytecode_path = arg_value(args, "--synq-bytecode")
+        .ok_or_else(|| "synq replay-flow requires --synq-bytecode <path>".to_string())?;
+    let manifest_path = arg_value(args, "--synq-manifest")
+        .ok_or_else(|| "synq replay-flow requires --synq-manifest <path>".to_string())?;
+    let abi_path = arg_value(args, "--synq-abi")
+        .ok_or_else(|| "synq replay-flow requires --synq-abi <path>".to_string())?;
+    let pqsynq_bytes =
+        fs::read(&deploy_path).map_err(|error| format!("failed to read {deploy_path}: {error}"))?;
+    let bytecode = fs::read(&bytecode_path)
+        .map_err(|error| format!("failed to read {bytecode_path}: {error}"))?;
+    let manifest_json = fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("failed to read {manifest_path}: {error}"))?;
+    let abi_json = fs::read_to_string(&abi_path)
+        .map_err(|error| format!("failed to read {abi_path}: {error}"))?;
+    synergy_testnet::synq_admission::build_deploy_admission_carrier_from_pqsynq_bytes_with_artifacts(
+        ChainId::synergy_testnet_v2().0,
+        &NetworkId::synergy_testnet_v2().0,
+        &pqsynq_bytes,
+        bytecode,
+        abi_json,
+        manifest_json,
+        current_timestamp(),
+    )
+    .map_err(|error| {
+        format!(
+            "SynQ executable deploy admission carrier rejected [{}]: {error}",
+            error.code()
+        )
+    })
+}
+
+fn synq_call_payload_from_path(path: &str) -> Result<Vec<u8>, String> {
+    let pqsynq_bytes = fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?;
+    synergy_testnet::synq_admission::build_call_admission_carrier_from_pqsynq_bytes(
+        ChainId::synergy_testnet_v2().0,
+        &NetworkId::synergy_testnet_v2().0,
+        &pqsynq_bytes,
+        current_timestamp(),
+    )
+    .map_err(|error| {
+        format!(
+            "SynQ call admission carrier rejected [{}]: {error}",
+            error.code()
+        )
+    })
 }
 
 fn signed_tx_summary(
