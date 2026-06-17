@@ -6829,6 +6829,7 @@ mod tests {
     use crate::block::{Block, BlockChain};
     use crate::consensus::consensus_algorithm::ProofOfSynergy;
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager};
+    use crate::synq_execution::derive_synq_contract_address_from_deploy;
     use pqsynq::{
         canonicalize_signing_payload, derive_synq_address, hash_contract_call_body,
         hash_contract_deploy_body, AlgorithmId, ChainId as PqSynQChainId, ContractCallEnvelope,
@@ -6887,7 +6888,7 @@ mod tests {
             }
         }
 
-        fn deploy_payload(&self) -> Vec<u8> {
+        fn deploy_envelope(&self) -> ContractDeployEnvelope {
             let constructor_args_hash = sha256_array(&[]);
             let payload_hash = hash_contract_deploy_body(
                 &self.bytecode_hash,
@@ -6903,7 +6904,7 @@ mod tests {
                 501,
             );
             let signature = self.sign_payload(&signing_payload);
-            let deploy = ContractDeployEnvelope {
+            ContractDeployEnvelope {
                 signing_payload,
                 public_key: self.public_key.clone(),
                 signature: SynQSignature::new(signature),
@@ -6911,7 +6912,16 @@ mod tests {
                 manifest_hash: self.manifest_hash,
                 abi_hash: self.abi_hash,
                 constructor_args_hash,
-            };
+            }
+        }
+
+        fn contract_address(&self) -> SynQAddress {
+            derive_synq_contract_address_from_deploy(&self.deploy_envelope())
+                .expect("derive SynQ contract address")
+        }
+
+        fn deploy_payload(&self) -> Vec<u8> {
+            let deploy = self.deploy_envelope();
             let pqsynq_bytes = serde_json::to_vec(&deploy).expect("deploy JSON");
             crate::synq_admission::build_deploy_admission_carrier_from_pqsynq_bytes_with_artifacts(
                 crate::synergy_types::SYNERGY_TESTNET_V2_CHAIN_ID,
@@ -6925,10 +6935,15 @@ mod tests {
             .expect("deploy carrier with artifacts")
         }
 
-        fn call_payload(&self, method_selector: [u8; 4], nonce: u64) -> Vec<u8> {
+        fn call_payload(
+            &self,
+            contract_address: SynQAddress,
+            method_selector: [u8; 4],
+            nonce: u64,
+        ) -> Vec<u8> {
             let encoded_args_hash = sha256_array(&[]);
             let payload_hash = hash_contract_call_body(
-                self.address.as_bytes(),
+                contract_address.as_bytes(),
                 &method_selector,
                 &encoded_args_hash,
                 self.address.as_bytes(),
@@ -6944,7 +6959,7 @@ mod tests {
                 signing_payload,
                 public_key: self.public_key.clone(),
                 signature: SynQSignature::new(signature),
-                contract_address: self.address,
+                contract_address,
                 method_selector,
                 encoded_args_hash,
             };
@@ -7420,10 +7435,16 @@ mod tests {
     fn synq_transaction_receipt_replays_counter_state_from_committed_aegis_carriers() {
         let fixture = RpcCounterSynQFixture::new();
         let deploy = aegis_synq_legacy_transaction(fixture.deploy_payload(), 0);
-        let increment =
-            aegis_synq_legacy_transaction(fixture.call_payload([0x58, 0x42, 0xf1, 0xbe], 502), 1);
-        let get =
-            aegis_synq_legacy_transaction(fixture.call_payload([0x75, 0xb7, 0x04, 0x57], 503), 2);
+        let contract_address = fixture.contract_address();
+        let contract_address_text = contract_address.to_testnet_debug_string();
+        let increment = aegis_synq_legacy_transaction(
+            fixture.call_payload(contract_address, [0x58, 0x42, 0xf1, 0xbe], 502),
+            1,
+        );
+        let get = aegis_synq_legacy_transaction(
+            fixture.call_payload(contract_address, [0x75, 0xb7, 0x04, 0x57], 503),
+            2,
+        );
         let get_hash = get.hash();
         let mut chain = BlockChain::new();
         chain.add_block(Block::new_with_timestamp(
@@ -7449,6 +7470,10 @@ mod tests {
         assert_eq!(receipt["synq_aivm"]["status"], "succeeded");
         assert_eq!(receipt["synq_aivm"]["operation"], "call");
         assert_eq!(
+            receipt["synq_aivm"]["contract_address"],
+            contract_address_text
+        );
+        assert_eq!(
             decode_u256_hex(receipt["synq_aivm"]["return_data_hex"].as_str().unwrap()),
             1
         );
@@ -7468,10 +7493,16 @@ mod tests {
         let fixture = RpcCounterSynQFixture::new();
         let deploy = aegis_synq_legacy_transaction(fixture.deploy_payload(), 0);
         let deploy_hash = deploy.hash();
-        let increment =
-            aegis_synq_legacy_transaction(fixture.call_payload([0x58, 0x42, 0xf1, 0xbe], 502), 1);
-        let get =
-            aegis_synq_legacy_transaction(fixture.call_payload([0x75, 0xb7, 0x04, 0x57], 503), 2);
+        let contract_address = fixture.contract_address();
+        let contract_address_text = contract_address.to_testnet_debug_string();
+        let increment = aegis_synq_legacy_transaction(
+            fixture.call_payload(contract_address, [0x58, 0x42, 0xf1, 0xbe], 502),
+            1,
+        );
+        let get = aegis_synq_legacy_transaction(
+            fixture.call_payload(contract_address, [0x75, 0xb7, 0x04, 0x57], 503),
+            2,
+        );
         let get_hash = get.hash();
         let index_path = temp_synq_receipt_index_path("compacted-continuation");
 
@@ -7511,6 +7542,10 @@ mod tests {
 
         assert_eq!(get_receipt["status"], "0x1");
         assert_eq!(get_receipt["synq_aivm"]["status"], "succeeded");
+        assert_eq!(
+            get_receipt["synq_aivm"]["contract_address"],
+            contract_address_text
+        );
         assert_eq!(
             decode_u256_hex(
                 get_receipt["synq_aivm"]["return_data_hex"]

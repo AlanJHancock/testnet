@@ -343,6 +343,7 @@ mod tests {
     use crate::synergy_types::{
         AegisPqKeyId, AegisPqSignature, ChainId, Epoch, Height, NetworkId, UmaId,
     };
+    use crate::synq_execution::derive_synq_contract_address_from_deploy;
     use pqsynq::{
         canonicalize_signing_payload, derive_synq_address, hash_contract_call_body,
         hash_contract_deploy_body, AlgorithmId, ChainId as PqSynQChainId, ContractCallEnvelope,
@@ -486,7 +487,7 @@ mod tests {
             }
         }
 
-        fn deploy_payload(&self, include_artifacts: bool) -> Vec<u8> {
+        fn deploy_envelope(&self) -> ContractDeployEnvelope {
             let constructor_args_hash = sha256_array(&[]);
             let payload_hash = hash_contract_deploy_body(
                 &self.bytecode_hash,
@@ -502,7 +503,7 @@ mod tests {
                 101,
             );
             let signature = self.sign_payload(&signing_payload);
-            let deploy = ContractDeployEnvelope {
+            ContractDeployEnvelope {
                 signing_payload,
                 public_key: self.public_key.clone(),
                 signature: SynQSignature::new(signature),
@@ -510,7 +511,16 @@ mod tests {
                 manifest_hash: self.manifest_hash,
                 abi_hash: self.abi_hash,
                 constructor_args_hash,
-            };
+            }
+        }
+
+        fn contract_address(&self) -> SynQAddress {
+            derive_synq_contract_address_from_deploy(&self.deploy_envelope())
+                .expect("derive SynQ contract address")
+        }
+
+        fn deploy_payload(&self, include_artifacts: bool) -> Vec<u8> {
+            let deploy = self.deploy_envelope();
             let pqsynq_bytes = serde_json::to_vec(&deploy).expect("deploy JSON");
             if include_artifacts {
                 crate::synq_admission::build_deploy_admission_carrier_from_pqsynq_bytes_with_artifacts(
@@ -534,10 +544,15 @@ mod tests {
             }
         }
 
-        fn call_payload(&self, method_selector: [u8; 4], nonce: u64) -> Vec<u8> {
+        fn call_payload(
+            &self,
+            contract_address: SynQAddress,
+            method_selector: [u8; 4],
+            nonce: u64,
+        ) -> Vec<u8> {
             let encoded_args_hash = sha256_array(&[]);
             let payload_hash = hash_contract_call_body(
-                self.address.as_bytes(),
+                contract_address.as_bytes(),
                 &method_selector,
                 &encoded_args_hash,
                 self.address.as_bytes(),
@@ -553,7 +568,7 @@ mod tests {
                 signing_payload,
                 public_key: self.public_key.clone(),
                 signature: SynQSignature::new(signature),
-                contract_address: self.address,
+                contract_address,
                 method_selector,
                 encoded_args_hash,
             };
@@ -609,6 +624,7 @@ mod tests {
         deploy_payload: Vec<u8>,
         increment_payload: Vec<u8>,
         get_payload: Vec<u8>,
+        expected_contract_address: &str,
     ) -> (Hash, String, String, String, u64) {
         let mut state = ExecutionState::new()
             .with_balance("alice", 1_000_000)
@@ -619,12 +635,12 @@ mod tests {
         let deploy_result = execute_block(&block(vec![deploy]), &state).expect("deploy executes");
         let deploy_receipt = deploy_result.receipts.first().expect("deploy receipt");
         assert_eq!(deploy_receipt.status, ReceiptStatus::Success);
-        let deploy_hash = deploy_receipt
+        let deploy_aivm = deploy_receipt
             .synq_aivm
             .as_ref()
-            .expect("deploy AIVM receipt")
-            .receipt_hash
-            .clone();
+            .expect("deploy AIVM receipt");
+        assert_eq!(deploy_aivm.contract_address, expected_contract_address);
+        let deploy_hash = deploy_aivm.receipt_hash.clone();
 
         let mut state = deploy_result.state;
         let increment = synq_tx(increment_payload, 1, 30_000, "synq-counter");
@@ -780,16 +796,35 @@ mod tests {
     fn synq_counter_deploy_increment_get_execute_through_aivm_and_replay() {
         let fixture = CounterSynQFixture::new();
         let deploy_payload = fixture.deploy_payload(true);
-        let increment_payload =
-            fixture.call_payload(aivm_core::synq_runtime::COUNTER_INCREMENT_SELECTOR, 102);
-        let get_payload = fixture.call_payload(aivm_core::synq_runtime::COUNTER_GET_SELECTOR, 103);
+        let contract_address = fixture.contract_address();
+        let contract_address_text = contract_address.to_testnet_debug_string();
+        assert_ne!(
+            contract_address_text,
+            fixture.address.to_testnet_debug_string()
+        );
+        let increment_payload = fixture.call_payload(
+            contract_address,
+            aivm_core::synq_runtime::COUNTER_INCREMENT_SELECTOR,
+            102,
+        );
+        let get_payload = fixture.call_payload(
+            contract_address,
+            aivm_core::synq_runtime::COUNTER_GET_SELECTOR,
+            103,
+        );
 
         let first = run_counter_flow(
             deploy_payload.clone(),
             increment_payload.clone(),
             get_payload.clone(),
+            &contract_address_text,
         );
-        let replay = run_counter_flow(deploy_payload, increment_payload, get_payload);
+        let replay = run_counter_flow(
+            deploy_payload,
+            increment_payload,
+            get_payload,
+            &contract_address_text,
+        );
 
         assert_eq!(first, replay);
         assert_eq!(first.4, 1);
@@ -821,6 +856,7 @@ mod tests {
     fn synq_bad_call_selector_rolls_back_aivm_state() {
         let fixture = CounterSynQFixture::new();
         let deploy = synq_tx(fixture.deploy_payload(true), 0, 150_000, "synq-counter");
+        let contract_address = fixture.contract_address();
         let mut state = ExecutionState::new()
             .with_balance("alice", 1_000_000)
             .with_balance("carol", 0);
@@ -834,7 +870,7 @@ mod tests {
         let mut state = deploy_result.state;
         let state_root_before = compute_state_root_after(&state).expect("state root");
         let bad_call = synq_tx(
-            fixture.call_payload([0, 0, 0, 0], 104),
+            fixture.call_payload(contract_address, [0, 0, 0, 0], 104),
             1,
             30_000,
             "synq-counter",

@@ -563,6 +563,7 @@ fn signed_tx_summary(
     command: &str,
     report: &synergy_testnet::aegis_tx_tool::AegisSignedTxReport,
 ) -> serde_json::Value {
+    let synq_contract_address = synq_contract_address_from_payload(&report.transaction.payload);
     serde_json::json!({
         "command": command,
         "aegis_pqvm_path": "synergy_testnet::crypto::aegis_pqvm::AegisPqvmSigner",
@@ -582,7 +583,28 @@ fn signed_tx_summary(
         "key_lifecycle_record": report.lifecycle_record,
         "rpc_transaction": report.rpc_transaction,
         "synq_verification": report.synq_verification,
+        "synq_contract_address": synq_contract_address,
     })
+}
+
+fn synq_contract_address_from_payload(payload: &[u8]) -> Option<String> {
+    let envelope = synergy_testnet::synq_admission::decode_synq_admission_carrier(payload)
+        .ok()
+        .flatten()?;
+    match envelope.kind {
+        synergy_testnet::synq_admission::SynQAdmissionKind::Deploy => {
+            let deploy =
+                synergy_testnet::synq_execution::deploy_envelope_from_carrier(&envelope).ok()?;
+            synergy_testnet::synq_execution::derive_synq_contract_address_from_deploy(&deploy)
+                .ok()
+                .map(|address| address.to_testnet_debug_string())
+        }
+        synergy_testnet::synq_admission::SynQAdmissionKind::Call => {
+            let call: pqsynq::ContractCallEnvelope =
+                serde_json::from_slice(&envelope.encoded_pqsynq_envelope).ok()?;
+            Some(call.contract_address.to_testnet_debug_string())
+        }
+    }
 }
 
 fn print_json(value: serde_json::Value) -> Result<(), String> {

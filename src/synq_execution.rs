@@ -13,10 +13,17 @@ use aivm_core::synq_runtime::{
     call_synq_contract, deploy_synq_contract, synq_execution_request, SynQRuntimeOperation,
     SynQRuntimeReceipt,
 };
-use pqsynq::{ContractCallEnvelope, ContractDeployEnvelope};
+use pqsynq::{
+    ContractCallEnvelope, ContractDeployEnvelope, DomainTag, SignaturePurpose, SynQAddress,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+
+pub const SYNQ_CONTRACT_ADDRESS_DERIVATION_DOMAIN: &str = "SYNERGY_SYNQ_CONTRACT_ADDRESS_V1";
+const SYNQ_CONTRACT_ADDRESS_VERSION: u8 = 1;
+const SYNQ_CONTRACT_ADDRESS_CLASS: u16 = 0xC001;
+const SYNQ_ADDRESS_LEN: usize = 41;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SynQArtifactKey {
@@ -142,7 +149,9 @@ fn execute_deploy(
     artifacts: &mut BTreeMap<SynQArtifactKey, SynQContractArtifact>,
     deployments: &mut BTreeMap<String, SynQDeploymentRecord>,
 ) -> Result<SynQAivmReceiptSummary, String> {
-    let contract_address = verification.signer.clone();
+    let deploy = deploy_envelope_from_carrier(envelope)?;
+    let contract_address =
+        derive_synq_contract_address_from_deploy(&deploy)?.to_testnet_debug_string();
     let artifact = match artifact_from_envelope(envelope) {
         Ok(artifact) => artifact,
         Err(message) => {
@@ -188,6 +197,73 @@ fn execute_deploy(
         );
     }
     Ok(summary)
+}
+
+pub fn derive_synq_contract_address_from_deploy(
+    deploy: &ContractDeployEnvelope,
+) -> Result<SynQAddress, String> {
+    if deploy.signing_payload.domain_tag != DomainTag::SynqContractDeployV1
+        || deploy.signing_payload.signature_purpose != SignaturePurpose::ContractDeploy
+    {
+        return Err(
+            "SynQ contract address derivation requires a deploy signing payload".to_string(),
+        );
+    }
+    let network_id = deploy
+        .signing_payload
+        .network_id
+        .numeric_id()
+        .map_err(|error| format!("SynQ contract address network derivation failed: {error}"))?;
+    let chain_id = deploy.signing_payload.chain_id.0;
+    if chain_id > u16::MAX as u64 {
+        return Err(format!(
+            "SynQ contract address derivation requires u16 chain id, found {chain_id}"
+        ));
+    }
+
+    let mut material = Vec::new();
+    push_u64(&mut material, chain_id);
+    push_string(&mut material, deploy.signing_payload.network_id.as_str());
+    push_u16(&mut material, deploy.signing_payload.protocol_version);
+    push_u16(&mut material, deploy.signing_payload.algorithm_id.code());
+    push_u64(&mut material, deploy.signing_payload.nonce);
+    push_bytes(
+        &mut material,
+        deploy.signing_payload.signer_address.as_bytes(),
+    );
+    push_bytes(&mut material, &deploy.signing_payload.payload_hash);
+    push_bytes(&mut material, &deploy.bytecode_hash);
+    push_bytes(&mut material, &deploy.manifest_hash);
+    push_bytes(&mut material, &deploy.abi_hash);
+    push_bytes(&mut material, &deploy.constructor_args_hash);
+
+    let digest = Hash::from_domain_bytes(SYNQ_CONTRACT_ADDRESS_DERIVATION_DOMAIN, &material);
+    let mut bytes = [0_u8; SYNQ_ADDRESS_LEN];
+    bytes[0] = SYNQ_CONTRACT_ADDRESS_VERSION;
+    bytes[1..3].copy_from_slice(&network_id.to_be_bytes());
+    bytes[3..5].copy_from_slice(&SYNQ_CONTRACT_ADDRESS_CLASS.to_be_bytes());
+    bytes[5..37].copy_from_slice(&digest.0);
+    let checksum = Sha256::digest(&bytes[..37]);
+    bytes[37..41].copy_from_slice(&checksum[..4]);
+
+    Ok(SynQAddress::from_bytes(bytes))
+}
+
+fn push_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn push_u64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn push_string(out: &mut Vec<u8>, value: &str) {
+    push_bytes(out, value.as_bytes());
+}
+
+fn push_bytes(out: &mut Vec<u8>, value: &[u8]) {
+    out.extend_from_slice(&(value.len() as u64).to_be_bytes());
+    out.extend_from_slice(value);
 }
 
 fn execute_call(

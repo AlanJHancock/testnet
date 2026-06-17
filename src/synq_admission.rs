@@ -12,6 +12,9 @@ use pqsynq::{
 pub const SYNQ_ADMISSION_CARRIER_PREFIX: &[u8] = b"synq-admission-v1:";
 pub const SYNQ_ADMISSION_VERSION: u16 = 1;
 pub const SYNQ_CANONICAL_TESTNET_NETWORK_ID: &str = "synergy-testnet";
+pub const MAX_SYNQ_DEPLOY_BYTECODE_BYTES: usize = 256 * 1024;
+pub const MAX_SYNQ_DEPLOY_ABI_JSON_BYTES: usize = 64 * 1024;
+pub const MAX_SYNQ_DEPLOY_MANIFEST_JSON_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedSynQNetwork {
@@ -399,6 +402,7 @@ pub fn verify_synq_deploy_for_chain_admission(
                 .to_string(),
         });
     }
+    validate_attached_deploy_artifacts(envelope)?;
 
     Ok(summary_from_payload(
         envelope,
@@ -459,6 +463,13 @@ fn attach_deploy_artifacts(
     manifest_json: String,
 ) -> Result<(), SynQAdmissionError> {
     ensure_kind(envelope, SynQAdmissionKind::Deploy)?;
+    ensure_artifact_size("bytecode", bytecode.len(), MAX_SYNQ_DEPLOY_BYTECODE_BYTES)?;
+    ensure_artifact_size("abi_json", abi_json.len(), MAX_SYNQ_DEPLOY_ABI_JSON_BYTES)?;
+    ensure_artifact_size(
+        "manifest_json",
+        manifest_json.len(),
+        MAX_SYNQ_DEPLOY_MANIFEST_JSON_BYTES,
+    )?;
     let bytecode_hash = sha256_array(&bytecode);
     let abi_hash = sha256_array(abi_json.as_bytes());
     let manifest_hash = sha256_array(manifest_json.as_bytes());
@@ -477,6 +488,77 @@ fn attach_deploy_artifacts(
     envelope.abi_json = Some(abi_json);
     envelope.manifest_json = Some(manifest_json);
     Ok(())
+}
+
+fn ensure_artifact_size(
+    field: &'static str,
+    actual: usize,
+    max: usize,
+) -> Result<(), SynQAdmissionError> {
+    if actual <= max {
+        Ok(())
+    } else {
+        Err(SynQAdmissionError::InvalidCarrier {
+            code: "SYNQ-ARTIFACT-SIZE",
+            message: format!(
+                "SynQ deploy {field} is {actual} bytes, exceeding testnet limit {max}"
+            ),
+        })
+    }
+}
+
+fn validate_attached_deploy_artifacts(
+    envelope: &SynQAdmissionEnvelope,
+) -> Result<(), SynQAdmissionError> {
+    let any_artifact = envelope.bytecode.is_some()
+        || envelope.abi_json.is_some()
+        || envelope.manifest_json.is_some();
+    if !any_artifact {
+        return Ok(());
+    }
+
+    let bytecode = envelope
+        .bytecode
+        .as_ref()
+        .ok_or_else(artifact_availability_error)?;
+    let abi_json = envelope
+        .abi_json
+        .as_ref()
+        .ok_or_else(artifact_availability_error)?;
+    let manifest_json = envelope
+        .manifest_json
+        .as_ref()
+        .ok_or_else(artifact_availability_error)?;
+
+    ensure_artifact_size("bytecode", bytecode.len(), MAX_SYNQ_DEPLOY_BYTECODE_BYTES)?;
+    ensure_artifact_size("abi_json", abi_json.len(), MAX_SYNQ_DEPLOY_ABI_JSON_BYTES)?;
+    ensure_artifact_size(
+        "manifest_json",
+        manifest_json.len(),
+        MAX_SYNQ_DEPLOY_MANIFEST_JSON_BYTES,
+    )?;
+
+    if envelope.bytecode_hash != Some(sha256_array(bytecode))
+        || envelope.abi_hash != Some(sha256_array(abi_json.as_bytes()))
+        || envelope.manifest_hash != Some(sha256_array(manifest_json.as_bytes()))
+    {
+        return Err(SynQAdmissionError::InvalidCarrier {
+            code: "AEGIS-CANON",
+            message:
+                "SynQ deploy artifact bytes do not match the verified aegis-pqsynq hash envelope"
+                    .to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+fn artifact_availability_error() -> SynQAdmissionError {
+    SynQAdmissionError::InvalidCarrier {
+        code: "SYNQ-ARTIFACT-AVAILABILITY",
+        message: "SynQ deploy artifact availability requires bytecode, ABI, and manifest together"
+            .to_string(),
+    }
 }
 
 fn sha256_array(bytes: &[u8]) -> [u8; 32] {
@@ -822,6 +904,28 @@ mod tests {
         let error = verify_synq_deploy_for_chain_admission(&carrier, TEST_NOW)
             .expect_err("invalid signature rejected");
         assert_eq!(error.code(), "AEGIS-SIG");
+    }
+
+    #[test]
+    fn partial_deploy_artifacts_reject_at_admission() {
+        let mut carrier = deploy_carrier(SYNERGY_TESTNET_V2_NETWORK_ID);
+        carrier.bytecode = Some(Vec::new());
+
+        let error = verify_synq_deploy_for_chain_admission(&carrier, TEST_NOW)
+            .expect_err("partial artifacts must fail");
+        assert_eq!(error.code(), "SYNQ-ARTIFACT-AVAILABILITY");
+    }
+
+    #[test]
+    fn oversized_deploy_artifacts_reject_at_admission() {
+        let mut carrier = deploy_carrier(SYNERGY_TESTNET_V2_NETWORK_ID);
+        carrier.bytecode = Some(vec![0; MAX_SYNQ_DEPLOY_BYTECODE_BYTES + 1]);
+        carrier.abi_json = Some(String::new());
+        carrier.manifest_json = Some(String::new());
+
+        let error = verify_synq_deploy_for_chain_admission(&carrier, TEST_NOW)
+            .expect_err("oversized artifacts must fail");
+        assert_eq!(error.code(), "SYNQ-ARTIFACT-SIZE");
     }
 
     #[test]
