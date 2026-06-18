@@ -1,0 +1,39 @@
+{
+  "version": "main",
+  "binaries": {
+    "macos-arm64": {
+      "synergy-testnet": {
+        "url": "synergy-testnet-macos-arm64",
+        "sha256": "499e59392a2538e9a821a17163417f5a53d00838dc088a83899df6422d48fdfa"
+      },
+      "generate-node-keys": {
+        "url": "generate-node-keys-macos-arm64",
+        "sha256": "9e38f64c5c140bbefa131991bde2b86924b7d44538947ce7624048dfb1d87d6d"
+      },
+      "synergy-address-engine": {
+        "url": "synergy-address-engine-macos-arm64",
+        "sha256": "fceb69ebd7f5fb60721c36972f17129b9a87b8de68c3d61c3f308ecdee6005f8"
+      },
+      "wallet-pqc-cli": {
+        "url": "wallet-pqc-cli-macos-arm64",
+        "sha256": "c9cb72c4a2516e23a6c36d319755d5b5c0684ee3957d59d11adadc5efd18648e"
+      },
+      "synergy-rpc-gateway-node": {
+        "url": "synergy-rpc-gateway-node-macos-arm64",
+        "sha256": "29c66b02364c659bbd051758361132f990883102bcebcbd57ae9dd5b5750f821"
+      },
+      "synergy-archive": {
+        "url": "synergy-archive-macos-arm64",
+        "sha256": "3bd3398bb0293f80e8b4ba250e20269127bcd1a8765428654190bb725732d3b9"
+      },
+      "synergy-node": {
+        "url": "synergy-node-macos-arm64",
+        "sha256": "10181a4ba349ec365336e3e27904c256ab3a32a14b36336ad89d938e5014fa12"
+      },
+      "synergy-indexer-and-explorer-node": {
+        "url": "synergy-indexer-and-explorer-node-macos-arm64",
+        "sha256": "52b51a06136fd9cc72a2d226aabfa9f33fd544eb75521b318da47a97281c1db9"
+      }
+    }
+  }
+}

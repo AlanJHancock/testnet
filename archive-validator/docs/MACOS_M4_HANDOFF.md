@@ -143,8 +143,14 @@ sudo /usr/local/synergy/bin/synergy-archive record-majority-proof \
   --output "/Users/Shared/Synergy/archive-validator/evidence/source-majority-branch-proven.json"
 ```
 
-The worker then publishes verified classes at their configured cadence. For an
-operator-triggered snapshot:
+The unattended worker must run without `--snapshot-class`. In that default mode
+it walks every configured snapshot class and publishes eligible
+`validator-pruned`, `support-rpc`, `support-relayer`, `indexer-replay`,
+`indexer-full`, `archive-full`, and `archive-bootstrap` artifacts at their
+configured cadences. A class-specific `--snapshot-class` is only for bounded
+manual repair runs.
+
+For an operator-triggered snapshot:
 
 ```bash
 sudo /usr/local/synergy/bin/synergy-archive create-snapshot \

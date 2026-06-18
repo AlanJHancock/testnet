@@ -1,0 +1,39 @@
+{
+  "version": "main",
+  "binaries": {
+    "linux-amd64": {
+      "synergy-testnet": {
+        "url": "synergy-testnet-linux-amd64",
+        "sha256": "e7a6273e37fb023cb561400f0dac217bdf62319d603c9e3b4f79768aa8d5cf48"
+      },
+      "generate-node-keys": {
+        "url": "generate-node-keys-linux-amd64",
+        "sha256": "dca94e70187744e99668efc6852f9bdde0bc63a99d86a3a1a07153f296ae5a2e"
+      },
+      "synergy-address-engine": {
+        "url": "synergy-address-engine-linux-amd64",
+        "sha256": "d098ff766d224e74b4bf6f6fb52b6fa2770da0ea99ea39d782cb85ec2c5fe7a2"
+      },
+      "wallet-pqc-cli": {
+        "url": "wallet-pqc-cli-linux-amd64",
+        "sha256": "3f64332803efb0ee2e1eded54a1c51fe745d5ed6259668b172818bd6fcd1be25"
+      },
+      "synergy-rpc-gateway-node": {
+        "url": "synergy-rpc-gateway-node-linux-amd64",
+        "sha256": "c8dd6f23424388c28b3481ca7ce2656a525906c12b8a8ea6221541f1eaeea7e9"
+      },
+      "synergy-archive": {
+        "url": "synergy-archive-linux-amd64",
+        "sha256": "445f059a46642fe40a71f841255a49c0dcf85f0812906c2d2a72e38737a5e738"
+      },
+      "synergy-node": {
+        "url": "synergy-node-linux-amd64",
+        "sha256": "8ef03152a6dfbdb0f0c63721a28efe3f7fe2bb8ec0f6850d807b3fcabac91ff1"
+      },
+      "synergy-indexer-and-explorer-node": {
+        "url": "synergy-indexer-and-explorer-node-linux-amd64",
+        "sha256": "f9d963a6db5437a699dea208062fa20b6efe616e98881f9c2b2e9f414d090e8e"
+      }
+    }
+  }
+}

@@ -12,13 +12,17 @@ set -euo pipefail
 # Defaults can be overridden without editing this file:
 #   SYNERGY_RPC_ENDPOINT     default: https://testnet-core-rpc.synergy-network.io
 #   SYNERGY_FAUCET_KEYFILE   default: /Users/devpup/Desktop/synergy-testnet-data-files/testnet-keyfiles/faucet.dec.json
+#   SYNERGY_FAUCET_PUBKEYFILE default: <keyfile basename>.pub.json
 #   SYNERGY_SOURCE_KEYFILE   optional alias used by wallet-specific wrappers
+#   SYNERGY_SOURCE_PUBKEYFILE optional alias used by wallet-specific wrappers
 #   SYNERGY_SOURCE_LABEL     default: Faucet
 #   SYNERGY_WALLET_CLI       default: <repo>/target/debug/wallet-pqc-cli
 #   SYNERGY_BUILD_WALLET_CLI default: 1 (build wallet-pqc-cli if missing)
 #   SYNERGY_SIGN_ALGO        default: fndsa
 #   SYNERGY_GAS_PRICE        default: 1000   (nWei per gas)
 #   SYNERGY_GAS_LIMIT        default: 21000
+#   SYNERGY_CHAIN_ID         optional override; otherwise read from RPC
+#   SYNERGY_NETWORK_ID       optional override; otherwise read from RPC
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -26,6 +30,13 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RPC_ENDPOINT="${SYNERGY_RPC_ENDPOINT:-https://testnet-core-rpc.synergy-network.io}"
 DEFAULT_KEYFILE="/Users/devpup/Desktop/synergy-testnet-data-files/testnet-keyfiles/faucet.dec.json"
 KEYFILE="${SYNERGY_SOURCE_KEYFILE:-${SYNERGY_FAUCET_KEYFILE:-$DEFAULT_KEYFILE}}"
+DEFAULT_PUBKEYFILE=""
+if [[ "$KEYFILE" == *.dec.json ]]; then
+  DEFAULT_PUBKEYFILE="${KEYFILE%.dec.json}.pub.json"
+elif [[ "$KEYFILE" == *.json ]]; then
+  DEFAULT_PUBKEYFILE="${KEYFILE%.json}.pub.json"
+fi
+PUBKEYFILE="${SYNERGY_SOURCE_PUBKEYFILE:-${SYNERGY_FAUCET_PUBKEYFILE:-$DEFAULT_PUBKEYFILE}}"
 SOURCE_LABEL="${SYNERGY_SOURCE_LABEL:-Faucet}"
 DEFAULT_WALLET_CLI="$REPO_ROOT/target/debug/wallet-pqc-cli"
 if [[ ! -x "$DEFAULT_WALLET_CLI" ]] && command -v wallet-pqc-cli >/dev/null 2>&1; then
@@ -65,12 +76,25 @@ fi
 
 FAUCET_ADDRESS="$(jq -r '.address // empty' "$KEYFILE")"
 FAUCET_PK_B64="$(jq -r '.private_key // empty' "$KEYFILE")"
+FAUCET_PUBLIC_KEY_B64="$(jq -r '.public_key // empty' "$KEYFILE")"
 if [[ -z "$FAUCET_ADDRESS" ]]; then
   echo "Could not read .address from $KEYFILE" >&2
   exit 1
 fi
 if [[ -z "$FAUCET_PK_B64" ]]; then
   echo "Could not read .private_key from $KEYFILE" >&2
+  exit 1
+fi
+if [[ -z "$FAUCET_PUBLIC_KEY_B64" && -n "$PUBKEYFILE" && -f "$PUBKEYFILE" ]]; then
+  PUBKEY_ADDRESS="$(jq -r '.address // empty' "$PUBKEYFILE")"
+  if [[ -n "$PUBKEY_ADDRESS" && "$PUBKEY_ADDRESS" != "$FAUCET_ADDRESS" ]]; then
+    echo "$SOURCE_LABEL public-key file address does not match source address: $PUBKEYFILE" >&2
+    exit 1
+  fi
+  FAUCET_PUBLIC_KEY_B64="$(jq -r '.public_key // empty' "$PUBKEYFILE")"
+fi
+if [[ -z "$FAUCET_PUBLIC_KEY_B64" ]]; then
+  echo "Could not read $SOURCE_LABEL public key from $KEYFILE or $PUBKEYFILE" >&2
   exit 1
 fi
 
@@ -80,6 +104,23 @@ import base64, sys
 sys.stdout.write(base64.b64decode(sys.argv[1]).hex())
 PY
 )"
+SIGNER_PUBLIC_KEY_JSON="$(python3 - "$FAUCET_PUBLIC_KEY_B64" <<'PY'
+import base64, binascii, json, sys
+
+value = sys.argv[1].strip()
+if value.lower().startswith("fn-dsa:"):
+    value = value.split(":", 1)[1]
+try:
+    data = base64.b64decode(value, validate=True)
+except binascii.Error:
+    normalized = value[2:] if value.lower().startswith("0x") else value
+    data = bytes.fromhex(normalized)
+sys.stdout.write(json.dumps(list(data)))
+PY
+)" || {
+  echo "Could not decode $SOURCE_LABEL public key." >&2
+  exit 1
+}
 
 rpc() {
   local method="$1" params_json="${2:-[]}" payload response
@@ -129,6 +170,45 @@ echo
 echo "Checking chain and source balance..."
 BLOCK_RESPONSE="$(rpc synergy_blockNumber '[]')"
 CURRENT_BLOCK="$(jq -r '.result // empty' <<<"$BLOCK_RESPONSE")"
+CHAIN_RESPONSE="$(rpc synergy_chainId '[]')"
+CHAIN_ID="$(
+  jq -r '
+    .result as $result
+    | if ($result | type) == "object" then
+        ($result.chain_id // $result.chainId // $result.chain_id_hex // $result.chainIdHex // empty)
+      else
+        ($result // empty)
+      end
+  ' <<<"$CHAIN_RESPONSE"
+)"
+NETWORK_ID="$(
+  jq -r '
+    .result as $result
+    | if ($result | type) == "object" then
+        ($result.network_id // $result.networkId // empty)
+      else
+        empty
+      end
+  ' <<<"$CHAIN_RESPONSE"
+)"
+CHAIN_ID="${SYNERGY_CHAIN_ID:-$CHAIN_ID}"
+NETWORK_ID="${SYNERGY_NETWORK_ID:-$NETWORK_ID}"
+CHAIN_ID="$(
+  python3 - "$CHAIN_ID" <<'PY'
+import sys
+value = sys.argv[1].strip()
+if not value:
+    raise SystemExit(1)
+print(int(value, 16) if value.lower().startswith("0x") else int(value, 10))
+PY
+)" || {
+  echo "Could not determine Synergy chain id from RPC; set SYNERGY_CHAIN_ID." >&2
+  exit 1
+}
+if [[ -z "$NETWORK_ID" || "$NETWORK_ID" == "null" ]]; then
+  echo "Could not determine Synergy network id from RPC; set SYNERGY_NETWORK_ID." >&2
+  exit 1
+fi
 
 FAUCET_BAL_PARAMS="$(jq -cn --arg a "$FAUCET_ADDRESS" --arg t "$TOKEN_SYMBOL" '[$a,$t]')"
 BALANCE_RESPONSE="$(rpc synergy_getTokenBalance "$FAUCET_BAL_PARAMS")"
@@ -136,6 +216,8 @@ FAUCET_BALANCE_NWEI="$(jq -r '.result // "0"' <<<"$BALANCE_RESPONSE")"
 FAUCET_BALANCE_SNRG="$(format_nwei_as_snrg "$FAUCET_BALANCE_NWEI")"
 
 echo "Current block:  $CURRENT_BLOCK"
+echo "Chain id:       $CHAIN_ID"
+echo "Network id:     $NETWORK_ID"
 echo "Source balance: $FAUCET_BALANCE_SNRG $TOKEN_SYMBOL"
 echo
 
@@ -208,6 +290,8 @@ fi
 DATA_FIELD=""
 
 UNSIGNED_TX="$(jq -cn \
+  --argjson chain_id "$CHAIN_ID" \
+  --arg network_id "$NETWORK_ID" \
   --arg sender "$FAUCET_ADDRESS" \
   --arg receiver "$RECIPIENT" \
   --argjson amount "$REQUESTED_NWEI" \
@@ -215,14 +299,18 @@ UNSIGNED_TX="$(jq -cn \
   --argjson timestamp "$TIMESTAMP" \
   --argjson gas_price "$GAS_PRICE" \
   --argjson gas_limit "$GAS_LIMIT" \
+  --argjson signer_public_key "$SIGNER_PUBLIC_KEY_JSON" \
   --arg data "$DATA_FIELD" \
   --arg algo "$SIGN_ALGO" \
   '{
+    chain_id:$chain_id,
+    network_id:$network_id,
     sender:$sender,
     receiver:$receiver,
     amount:$amount,
     nonce:$nonce,
     signature:[],
+    signer_public_key:$signer_public_key,
     timestamp:$timestamp,
     gas_price:$gas_price,
     gas_limit:$gas_limit,
@@ -239,6 +327,7 @@ SIGNED_OUT="$("$WALLET_CLI" sign-tx \
 
 # Drop the in-memory copy of the key as soon as signing is done.
 unset FAUCET_PK_HEX FAUCET_PK_B64
+unset FAUCET_PUBLIC_KEY_B64
 
 SIGNED_TX="$(jq -c '.transaction // empty' <<<"$SIGNED_OUT")"
 if [[ -z "$SIGNED_TX" ]]; then

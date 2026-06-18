@@ -39,6 +39,7 @@ const SNAPSHOT_MANIFEST_VERSION: u32 = 1;
 const SNAPSHOT_STATE_ROOT_DOMAIN: &[u8] = b"SYNERGY_SNAPSHOT_STATE_ROOT_V1";
 const SNAPSHOT_ALLOWED_FILES: &[&str] = &[
     "chain.json",
+    "committed_blocks.jsonl",
     "canonical_locks.json",
     "committed_qcs.json",
     "committed_qcs.jsonl",

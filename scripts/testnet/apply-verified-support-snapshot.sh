@@ -63,13 +63,15 @@ import json
 import sys
 from pathlib import Path
 
-manifest = json.loads(Path(sys.argv[1]).read_text())
+payload = json.loads(Path(sys.argv[1]).read_text())
+manifest = payload.get("manifest", payload)
 snapshot_root = Path(sys.argv[2])
 snapshot_class = sys.argv[3]
 target_role = sys.argv[4]
 if manifest.get("snapshot_class") != snapshot_class:
     raise SystemExit("distribution snapshot class mismatch")
-if target_role not in (manifest.get("allowed_restore_roles") or []):
+allowed_roles = manifest.get("allowed_restore_roles") or manifest.get("allowed_roles") or []
+if target_role not in allowed_roles:
     raise SystemExit("target role not allowed by distribution manifest")
 if manifest.get("chain_id") != 1264:
     raise SystemExit("wrong chain_id")
@@ -77,22 +79,49 @@ if manifest.get("network_id") != "synergy-testnet-v2":
     raise SystemExit("wrong network_id")
 if manifest.get("genesis_hash") != "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789":
     raise SystemExit("wrong genesis_hash")
-if (manifest.get("qc_vote_count") or 0) < 4:
+qc_vote_count = manifest.get("qc_vote_count")
+if qc_vote_count is None:
+    qc_vote_count = (manifest.get("qc_evidence") or {}).get("vote_count")
+if (qc_vote_count or 0) < 4:
     raise SystemExit("QC vote count below quorum")
-for name in ["chain.json", "canonical_locks.json", "committed_qcs.jsonl", "validator_registry.json", "token_state.json"]:
+snapshot_height = manifest.get("snapshot_height", manifest.get("height"))
+snapshot_block_hash = manifest.get("snapshot_block_hash", manifest.get("hash"))
+if snapshot_height is None or not snapshot_block_hash:
+    raise SystemExit("snapshot height/hash missing")
+for name in ["chain.json", "canonical_locks.json", "committed_blocks.jsonl", "committed_qcs.jsonl", "validator_registry.json", "token_state.json"]:
     if not (snapshot_root / name).exists():
         raise SystemExit(f"snapshot missing required state file: {name}")
 print(json.dumps({
     "support_snapshot_manifest_accepted": True,
     "snapshot_class": snapshot_class,
     "target_role": target_role,
-    "snapshot_height": manifest.get("snapshot_height"),
-    "snapshot_block_hash": manifest.get("snapshot_block_hash"),
+    "snapshot_height": int(snapshot_height),
+    "snapshot_block_hash": snapshot_block_hash,
 }, sort_keys=True))
 PY
 
-snapshot_height="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["snapshot_height"])' "$distribution_manifest")"
-snapshot_block_hash="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["snapshot_block_hash"])' "$distribution_manifest")"
+snapshot_height="$(python3 - "$distribution_manifest" <<'PY'
+import json
+import sys
+payload = json.load(open(sys.argv[1]))
+manifest = payload.get("manifest", payload)
+height = manifest.get("snapshot_height", manifest.get("height"))
+if height is None:
+    raise SystemExit("snapshot height missing")
+print(height)
+PY
+)"
+snapshot_block_hash="$(python3 - "$distribution_manifest" <<'PY'
+import json
+import sys
+payload = json.load(open(sys.argv[1]))
+manifest = payload.get("manifest", payload)
+block_hash = manifest.get("snapshot_block_hash", manifest.get("hash"))
+if not block_hash:
+    raise SystemExit("snapshot block hash missing")
+print(block_hash)
+PY
+)"
 
 allowed_files=(
   chain.json
@@ -123,21 +152,21 @@ for file in "${allowed_files[@]}"; do
   esac
   sha256sum "$source" >> "$evidence_path/source/source-sha256.txt"
   if [[ -f "$target" ]]; then
-    cp -p "$target" "$evidence_path/target-before/$file"
     cp -p "$target" "$rollback_path/$file"
     sha256sum "$target" >> "$evidence_path/target-before/target-sha256.txt"
   fi
   tmp="$target.tmp-support-snapshot-$$"
   if [[ "$file" == "chain.json" ]]; then
-    python3 - "$source" "$tmp" "$snapshot_height" "$snapshot_block_hash" <<'PY'
+    python3 - "$source" "$snapshot_root/committed_blocks.jsonl" "$tmp" "$snapshot_height" "$snapshot_block_hash" <<'PY'
 import json
+import os
 import sys
 
-source_path, target_path, snapshot_height_raw, snapshot_hash = sys.argv[1:5]
+source_path, committed_blocks_path, target_path, snapshot_height_raw, snapshot_hash = sys.argv[1:6]
 snapshot_height = int(snapshot_height_raw)
 
 
-def iter_objects(path):
+def iter_chain_objects(path):
     with open(path, "r", encoding="utf-8") as handle:
         depth = 0
         in_string = False
@@ -182,20 +211,30 @@ def iter_objects(path):
             raise SystemExit("chain.json ended while reading a block object")
 
 
+def block_height(block):
+    height = block.get("block_index")
+    if height is None:
+        height = block.get("height")
+    if height is None:
+        raise ValueError("block is missing block_index/height")
+    return int(height)
+
+
+def block_hash(block):
+    return block.get("hash") or block.get("block_hash")
+
+
 kept = 0
 last_height = None
 last_hash = None
-with open(target_path, "w", encoding="utf-8") as output:
+filled_from_committed_blocks = False
+candidate_path = f"{target_path}.candidate"
+with open(candidate_path, "w", encoding="utf-8") as output:
     output.write("[")
     first = True
-    for raw in iter_objects(source_path):
+    for raw in iter_chain_objects(source_path):
         block = json.loads(raw)
-        height = block.get("block_index")
-        if height is None:
-            height = block.get("height")
-        if height is None:
-            raise SystemExit("chain.json block is missing block_index/height")
-        height = int(height)
+        height = block_height(block)
         if height > snapshot_height:
             break
         if not first:
@@ -204,7 +243,42 @@ with open(target_path, "w", encoding="utf-8") as output:
         first = False
         kept += 1
         last_height = height
-        last_hash = block.get("hash") or block.get("block_hash")
+        last_hash = block_hash(block)
+
+    if last_height != snapshot_height and os.path.exists(committed_blocks_path):
+        with open(committed_blocks_path, "r", encoding="utf-8") as committed:
+            for line in committed:
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                height = int(record.get("height"))
+                if last_height is not None and height <= last_height:
+                    continue
+                if height > snapshot_height:
+                    break
+                expected_next = 0 if last_height is None else last_height + 1
+                if height != expected_next:
+                    raise SystemExit(
+                        f"committed_blocks.jsonl height gap: got {height}, expected {expected_next}"
+                    )
+                block = record.get("block")
+                if not isinstance(block, dict):
+                    raise SystemExit("committed_blocks.jsonl record is missing block object")
+                block.setdefault("hash", record.get("hash"))
+                if block_height(block) != height:
+                    raise SystemExit(
+                        f"committed block height mismatch: wrapper {height}, block {block_height(block)}"
+                    )
+                if not block_hash(block):
+                    raise SystemExit("committed block is missing hash")
+                if not first:
+                    output.write(",")
+                json.dump(block, output, separators=(",", ":"))
+                first = False
+                kept += 1
+                last_height = height
+                last_hash = block_hash(block)
+                filled_from_committed_blocks = True
     output.write("]")
 
 if kept == 0:
@@ -217,10 +291,12 @@ if last_hash != snapshot_hash:
     raise SystemExit(
         f"bounded chain.json hash {last_hash} does not match snapshot hash {snapshot_hash}"
     )
+os.replace(candidate_path, target_path)
 print(
     json.dumps(
         {
             "bounded_chain_json": True,
+            "filled_from_committed_blocks": filled_from_committed_blocks,
             "kept_blocks": kept,
             "last_height": last_height,
             "last_hash": last_hash,

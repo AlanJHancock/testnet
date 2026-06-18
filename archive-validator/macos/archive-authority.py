@@ -44,7 +44,7 @@ OLD_CONSENSUS_ALGORITHM = "FN-DSA"
 POST_FORK_CONSENSUS_ALGORITHM = "FN-DSA"
 FORK_PARSER_MODE = "fail_closed"
 FNDSA_PUBLIC_KEY_BYTES = 1793
-FORK_VALIDATOR_COUNT = 5
+FORK_VALIDATOR_COUNT = 6
 
 CLASS_POLICY = {
     "validator-pruned": {
@@ -76,15 +76,11 @@ CLASS_POLICY = {
     },
 }
 
-DEFAULT_WORKER_CLASSES = [
-    "validator-pruned",
-    "support-rpc",
-    "support-relayer",
-    "indexer-replay",
-]
+DEFAULT_WORKER_CLASSES = list(CLASS_POLICY)
 
 ALLOWED_STATE_FILES = {
     "chain.json",
+    "committed_blocks.jsonl",
     "canonical_locks.json",
     "committed_qcs.json",
     "committed_qcs.jsonl",
