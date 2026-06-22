@@ -41,6 +41,8 @@ use crate::{info, warn};
 use serde::Deserialize;
 use serde_json::json;
 
+const OFFLINE_SNAPSHOT_COMMAND_STACK_BYTES: usize = 64 * 1024 * 1024;
+
 struct RoleProcessGuard {
     child: Mutex<Child>,
 }
@@ -198,6 +200,39 @@ fn optional_u64_arg(args: &[String], name: &str) -> Result<Option<u64>, String> 
                 .map_err(|error| format!("invalid {name}: {error}"))
         })
         .transpose()
+}
+
+fn offline_snapshot_command_uses_large_stack(command: &str) -> bool {
+    matches!(
+        command,
+        "create-snapshot"
+            | "verify-snapshot"
+            | "list-snapshots"
+            | "snapshot-catalog"
+            | "self-heal-from-snapshot"
+            | "quarantine-stopped-validator"
+            | "sync-from-canonical-peer"
+            | "start-shadow-observe"
+            | "shadow-status"
+            | "rejoin-eligibility"
+            | "request-rejoin"
+    )
+}
+
+fn run_offline_snapshot_command_isolated(args: &[String], command: &str) -> Result<bool, String> {
+    if !offline_snapshot_command_uses_large_stack(command) {
+        return run_offline_snapshot_command(args, command);
+    }
+
+    let args = args.to_vec();
+    let command = command.to_string();
+    thread::Builder::new()
+        .name(format!("offline-snapshot-{command}"))
+        .stack_size(OFFLINE_SNAPSHOT_COMMAND_STACK_BYTES)
+        .spawn(move || run_offline_snapshot_command(&args, &command))
+        .map_err(|error| format!("failed to start offline snapshot worker thread: {error}"))?
+        .join()
+        .map_err(|_| "offline snapshot worker thread panicked".to_string())?
 }
 
 fn require_testnet_v2_operator_args(args: &[String]) -> Result<(), String> {
@@ -1745,7 +1780,7 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
     }
 
     let subcommand = &args[1];
-    match run_offline_snapshot_command(&args, subcommand) {
+    match run_offline_snapshot_command_isolated(&args, subcommand) {
         Ok(true) => return,
         Ok(false) => {}
         Err(error) => {
@@ -2909,6 +2944,31 @@ mod tests {
             format!("--genesis-hash={EXPECTED_GENESIS_HASH}"),
         ];
         require_testnet_v2_operator_args(&args).expect("equals form should be accepted");
+    }
+
+    #[test]
+    fn offline_snapshot_commands_run_on_explicit_large_stack() {
+        for command in [
+            "create-snapshot",
+            "verify-snapshot",
+            "list-snapshots",
+            "snapshot-catalog",
+            "self-heal-from-snapshot",
+            "quarantine-stopped-validator",
+            "sync-from-canonical-peer",
+            "start-shadow-observe",
+            "shadow-status",
+            "rejoin-eligibility",
+            "request-rejoin",
+        ] {
+            assert!(
+                offline_snapshot_command_uses_large_stack(command),
+                "{command} must use the large-stack offline worker"
+            );
+        }
+
+        assert!(!offline_snapshot_command_uses_large_stack("start"));
+        assert!(!offline_snapshot_command_uses_large_stack("sync"));
     }
 
     #[test]
