@@ -19,8 +19,8 @@ max_peers = 100
 bootnodes = []
 seed_servers = []
 bootstrap_dns_records = []
-additional_dial_targets = ["relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622"]
-persistent_peers = ["relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622"]
+additional_dial_targets = ["relay1.synergy-network.io:5622", "relay2.synergy-network.io:5622"]
+persistent_peers = ["relay1.synergy-network.io:5622", "relay2.synergy-network.io:5622"]
 
 [blockchain]
 block_time = 2
@@ -32,11 +32,11 @@ algorithm = "Proof of Synergy"
 block_time_secs = 2
 epoch_length = 1000
 min_validators = 3
-validator_cluster_size = 7
+validator_cluster_size = 6
 validator_vote_threshold = 4
-max_validators = 100
+max_validators = 6
 status_ready_gate_enabled = true
-status_ready_min_validators = 3
+status_ready_min_validators = 4
 status_ready_genesis_grace_secs = 0
 allow_genesis_status_bypass = false
 mesh_settle_secs = 15
@@ -90,12 +90,16 @@ path = "data/chain"
 enable_pruning = true
 pruning_interval = 86400
 
+[snapshots]
+enabled = false
+interval_blocks = 10000
+
 [node]
 bootstrap_only = false
 auto_register_validator = false
 validator_address = ""
 strict_validator_allowlist = false
-allowed_validator_addresses = ["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs", "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt", "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re", "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5", "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f"]
+allowed_validator_addresses = ["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs", "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt", "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re", "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5", "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f", "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx"]
 
 [telemetry]
 enabled = true

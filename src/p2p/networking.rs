@@ -1478,7 +1478,7 @@ fn canonical_validator_public_address(
 ) -> Option<String> {
     let announced_host = announced_public_address
         .and_then(dial_target_host)
-        .filter(|host| host.ends_with(".synergynode.xyz"));
+        .filter(|host| host.ends_with(".synergy-network.io"));
     if let Some(host) = announced_host {
         return Some(format!("{host}:{VALIDATOR_P2P_PORT}"));
     }
@@ -1549,7 +1549,7 @@ fn self_dial_aliases(config: &NodeConfig) -> HashSet<String> {
 
     if let Some(slot) = local_validator_slot(config) {
         aliases.insert(format!(
-            "genesisval{slot}.synergynode.xyz:{}",
+            "genesisval{slot}.synergy-network.io:{}",
             config.network.p2p_port
         ));
     }
@@ -5247,7 +5247,7 @@ fn is_assigned_synergy_dial_address(value: &str) -> bool {
         .trim_start_matches('[')
         .trim_end_matches(']')
         .to_ascii_lowercase();
-    !host.is_empty() && host.ends_with(".synergynode.xyz")
+    !host.is_empty() && host.ends_with(".synergy-network.io")
 }
 
 fn verify_network_block(block: &Block) -> Result<(), String> {
@@ -6183,7 +6183,7 @@ mod tests {
         PeerConnection {
             address: "peer-a".to_string(),
             direction: ConnectionDirection::Incoming,
-            public_address: Some("peer-a.synergynode.xyz:5622".to_string()),
+            public_address: Some("peer-a.synergy-network.io:5622".to_string()),
             validator_address: validator_address.map(str::to_string),
             connected_at: 0,
             last_seen: 0,
@@ -6831,36 +6831,36 @@ mod tests {
     #[test]
     fn collect_known_peer_addresses_includes_assigned_synergy_targets() {
         let mut config = NodeConfig::default();
-        config.p2p.public_address = "genesisval1.synergynode.xyz:5622".to_string();
+        config.p2p.public_address = "genesisval1.synergy-network.io:5622".to_string();
         config.network.additional_dial_targets =
-            vec!["genesisval2.synergynode.xyz:5622".to_string()];
+            vec!["genesisval2.synergy-network.io:5622".to_string()];
         let connected_peers = Arc::new(Mutex::new(HashMap::new()));
         let discovered_targets: DialTargetsArc = Arc::new(Mutex::new(vec![
-            "genesisval3.synergynode.xyz:5622".to_string(),
+            "genesisval3.synergy-network.io:5622".to_string(),
         ]));
 
         let addresses =
             collect_known_peer_addresses(&connected_peers, &discovered_targets, &config);
 
-        assert!(addresses.contains(&"genesisval1.synergynode.xyz:5622".to_string()));
-        assert!(addresses.contains(&"genesisval2.synergynode.xyz:5622".to_string()));
-        assert!(addresses.contains(&"genesisval3.synergynode.xyz:5622".to_string()));
+        assert!(addresses.contains(&"genesisval1.synergy-network.io:5622".to_string()));
+        assert!(addresses.contains(&"genesisval2.synergy-network.io:5622".to_string()));
+        assert!(addresses.contains(&"genesisval3.synergy-network.io:5622".to_string()));
     }
 
     #[test]
     fn resolve_bootstrap_dial_targets_includes_persistent_peers() {
         let mut config = NodeConfig::default();
         config.node.validator_address = "synv1validator1".to_string();
-        config.p2p.public_address = "genesisval1.synergynode.xyz:5622".to_string();
+        config.p2p.public_address = "genesisval1.synergy-network.io:5622".to_string();
         config.p2p.listen_address = "0.0.0.0:5622".to_string();
         config.network.persistent_peers = vec![
-            "genesisval2.synergynode.xyz:5622".to_string(),
+            "genesisval2.synergy-network.io:5622".to_string(),
             "62.146.182.208:5622".to_string(),
         ];
 
         let targets = resolve_bootstrap_dial_targets(&config);
 
-        assert!(targets.contains(&"genesisval2.synergynode.xyz:5622".to_string()));
+        assert!(targets.contains(&"genesisval2.synergy-network.io:5622".to_string()));
         assert!(targets.contains(&"62.146.182.208:5622".to_string()));
     }
 
@@ -6899,14 +6899,14 @@ mod tests {
         config.p2p.listen_address = "0.0.0.0:5622".to_string();
         config.node.validator_address = "synv1validator1".to_string();
         config.network.additional_dial_targets = vec![
-            "genesisval1.synergynode.xyz:5622".to_string(),
-            "genesisval5.synergynode.xyz:5622".to_string(),
+            "genesisval1.synergy-network.io:5622".to_string(),
+            "genesisval5.synergy-network.io:5622".to_string(),
         ];
 
         let targets = resolve_bootstrap_dial_targets(&config);
 
-        assert!(!targets.contains(&"genesisval1.synergynode.xyz:5622".to_string()));
-        assert!(targets.contains(&"genesisval5.synergynode.xyz:5622".to_string()));
+        assert!(!targets.contains(&"genesisval1.synergy-network.io:5622".to_string()));
+        assert!(targets.contains(&"genesisval5.synergy-network.io:5622".to_string()));
 
         let _ = fs::remove_dir_all(&temp);
     }
@@ -6946,7 +6946,7 @@ mod tests {
             PeerConnection {
                 address: "62.146.182.209:5622".to_string(),
                 direction: ConnectionDirection::Outgoing,
-                public_address: Some("genesisval3.synergynode.xyz:5622".to_string()),
+                public_address: Some("genesisval3.synergy-network.io:5622".to_string()),
                 validator_address: Some("synv1outgoing".to_string()),
                 connected_at: 0,
                 last_seen: 0,
@@ -6975,7 +6975,7 @@ mod tests {
 
         assert!(!addresses.contains(&"62.146.182.209:54792".to_string()));
         assert!(!addresses.contains(&"62.146.182.209:5622".to_string()));
-        assert!(addresses.contains(&"genesisval3.synergynode.xyz:5622".to_string()));
+        assert!(addresses.contains(&"genesisval3.synergy-network.io:5622".to_string()));
     }
 
     #[test]
@@ -7006,7 +7006,7 @@ mod tests {
         let identified = PeerConnection {
             address: "62.146.182.208:5622".to_string(),
             direction: ConnectionDirection::Incoming,
-            public_address: Some("genesisval2.synergynode.xyz:5622".to_string()),
+            public_address: Some("genesisval2.synergy-network.io:5622".to_string()),
             validator_address: Some("synv1peer-a".to_string()),
             connected_at: 0,
             last_seen: 0,
@@ -7039,7 +7039,7 @@ mod tests {
             PeerConnection {
                 address: "62.146.182.208:5620".to_string(),
                 direction: ConnectionDirection::Incoming,
-                public_address: Some("bootnode2.synergynode.xyz:5620".to_string()),
+                public_address: Some("bootnode2.synergy-network.io:5620".to_string()),
                 validator_address: None,
                 connected_at: 0,
                 last_seen: 0,
@@ -7065,7 +7065,7 @@ mod tests {
             PeerConnection {
                 address: "62.146.182.208:5622".to_string(),
                 direction: ConnectionDirection::Incoming,
-                public_address: Some("genesisval2.synergynode.xyz:5622".to_string()),
+                public_address: Some("genesisval2.synergy-network.io:5622".to_string()),
                 validator_address: Some("synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt".to_string()),
                 connected_at: 0,
                 last_seen: 0,
@@ -7988,7 +7988,7 @@ mod tests {
             PeerConnection {
                 address: "peer-a".to_string(),
                 direction: ConnectionDirection::Incoming,
-                public_address: Some("genesisval2.synergynode.xyz:5622".to_string()),
+                public_address: Some("genesisval2.synergy-network.io:5622".to_string()),
                 validator_address: Some("synv1peer-a".to_string()),
                 connected_at: 0,
                 last_seen: 0,
@@ -8076,7 +8076,7 @@ mod tests {
             PeerConnection {
                 address: "peer-a".to_string(),
                 direction: ConnectionDirection::Outgoing,
-                public_address: Some("genesisval2.synergynode.xyz:5622".to_string()),
+                public_address: Some("genesisval2.synergy-network.io:5622".to_string()),
                 validator_address: Some("synv1peer-a".to_string()),
                 connected_at: 100,
                 last_seen: 100,

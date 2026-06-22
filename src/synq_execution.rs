@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 pub const SYNQ_CONTRACT_ADDRESS_DERIVATION_DOMAIN: &str = "SYNERGY_SYNQ_CONTRACT_ADDRESS_V1";
+pub const SYNERGY_CUSTOM_CONTRACT_ADDRESS_PREFIX: &str = "sync";
 const SYNQ_CONTRACT_ADDRESS_VERSION: u8 = 1;
 const SYNQ_CONTRACT_ADDRESS_CLASS: u16 = 0xC001;
 const SYNQ_ADDRESS_LEN: usize = 41;
@@ -37,6 +38,8 @@ pub struct SynQContractArtifact {
     pub bytecode: Vec<u8>,
     pub abi_json: String,
     pub manifest_json: String,
+    #[serde(default)]
+    pub metadata_json: Option<String>,
 }
 
 impl SynQContractArtifact {
@@ -45,7 +48,13 @@ impl SynQContractArtifact {
             bytecode,
             abi_json,
             manifest_json,
+            metadata_json: None,
         }
+    }
+
+    pub fn with_metadata_json(mut self, metadata_json: Option<String>) -> Self {
+        self.metadata_json = metadata_json;
+        self
     }
 
     pub fn key(&self) -> SynQArtifactKey {
@@ -62,10 +71,27 @@ impl SynQContractArtifact {
             bytes: self.bytecode.clone(),
             abi_json: Some(self.abi_json.clone()),
             manifest_json: Some(self.manifest_json.clone()),
+            metadata_json: self.metadata_json.clone(),
             compiler_version: None,
             source_hash: None,
         }
     }
+
+    fn manifest_contract_name(&self) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(&self.manifest_json)
+            .ok()
+            .and_then(|manifest| {
+                manifest
+                    .get("contract_name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SynQExecutionContext {
+    pub runtime_block_height: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +137,26 @@ pub fn execute_synq_transaction(
     artifacts: &mut BTreeMap<SynQArtifactKey, SynQContractArtifact>,
     deployments: &mut BTreeMap<String, SynQDeploymentRecord>,
 ) -> Result<Option<SynQAivmReceiptSummary>, String> {
+    execute_synq_transaction_at(
+        tx_id,
+        tx,
+        verification,
+        aivm_state,
+        artifacts,
+        deployments,
+        SynQExecutionContext::default(),
+    )
+}
+
+pub fn execute_synq_transaction_at(
+    tx_id: &TxId,
+    tx: &Transaction,
+    verification: &SynQVerificationSummary,
+    aivm_state: &mut ContractState,
+    artifacts: &mut BTreeMap<SynQArtifactKey, SynQContractArtifact>,
+    deployments: &mut BTreeMap<String, SynQDeploymentRecord>,
+    execution_context: SynQExecutionContext,
+) -> Result<Option<SynQAivmReceiptSummary>, String> {
     let Some(envelope) = decode_synq_admission_carrier(&tx.payload)
         .map_err(|error| format!("SynQ carrier decode failed [{}]: {error}", error.code()))?
     else {
@@ -126,6 +172,7 @@ pub fn execute_synq_transaction(
             aivm_state,
             artifacts,
             deployments,
+            execution_context,
         )
         .map(Some),
         SynQAdmissionKind::Call => execute_call(
@@ -135,6 +182,7 @@ pub fn execute_synq_transaction(
             aivm_state,
             artifacts,
             deployments,
+            execution_context,
         )
         .map(Some),
     }
@@ -148,10 +196,10 @@ fn execute_deploy(
     aivm_state: &mut ContractState,
     artifacts: &mut BTreeMap<SynQArtifactKey, SynQContractArtifact>,
     deployments: &mut BTreeMap<String, SynQDeploymentRecord>,
+    execution_context: SynQExecutionContext,
 ) -> Result<SynQAivmReceiptSummary, String> {
     let deploy = deploy_envelope_from_carrier(envelope)?;
-    let contract_address =
-        derive_synq_contract_address_from_deploy(&deploy)?.to_testnet_debug_string();
+    let contract_address = derive_synergy_contract_address_from_deploy(&deploy)?;
     let artifact = match artifact_from_envelope(envelope) {
         Ok(artifact) => artifact,
         Err(message) => {
@@ -178,7 +226,7 @@ fn execute_deploy(
     let request = synq_execution_request(
         contract_address.clone(),
         artifact.to_aivm_artifact(),
-        aivm_context(tx, verification, &contract_address)?,
+        aivm_context(tx, verification, &contract_address, execution_context)?,
         Vec::new(),
     );
     let receipt = deploy_synq_contract(&request, aivm_state);
@@ -249,6 +297,20 @@ pub fn derive_synq_contract_address_from_deploy(
     Ok(SynQAddress::from_bytes(bytes))
 }
 
+pub fn derive_synergy_contract_address_from_deploy(
+    deploy: &ContractDeployEnvelope,
+) -> Result<String, String> {
+    let synq_address = derive_synq_contract_address_from_deploy(deploy)?;
+    Ok(synergy_contract_address_from_pqsynq_address(&synq_address))
+}
+
+pub fn synergy_contract_address_from_pqsynq_address(address: &SynQAddress) -> String {
+    crate::address::generate_generic_address(
+        SYNERGY_CUSTOM_CONTRACT_ADDRESS_PREFIX,
+        &hex::encode(address.as_bytes()),
+    )
+}
+
 fn push_u16(out: &mut Vec<u8>, value: u16) {
     out.extend_from_slice(&value.to_be_bytes());
 }
@@ -273,10 +335,11 @@ fn execute_call(
     aivm_state: &mut ContractState,
     artifacts: &BTreeMap<SynQArtifactKey, SynQContractArtifact>,
     deployments: &BTreeMap<String, SynQDeploymentRecord>,
+    execution_context: SynQExecutionContext,
 ) -> Result<SynQAivmReceiptSummary, String> {
     let call: ContractCallEnvelope = serde_json::from_slice(&envelope.encoded_pqsynq_envelope)
         .map_err(|error| format!("SynQ call envelope decode failed after admission: {error}"))?;
-    let contract_address = call.contract_address.to_testnet_debug_string();
+    let contract_address = synergy_contract_address_from_pqsynq_address(&call.contract_address);
     let Some(deployment) = deployments.get(&contract_address) else {
         return Ok(pre_aivm_failed_summary(
             SynQRuntimeOperation::Call,
@@ -296,11 +359,16 @@ fn execute_call(
         ));
     };
 
+    let mut calldata = call.method_selector.to_vec();
+    if let Some(encoded_args) = envelope.encoded_args.as_deref() {
+        calldata.extend_from_slice(encoded_args);
+    }
+
     let request = synq_execution_request(
         contract_address.clone(),
         artifact.to_aivm_artifact(),
-        aivm_context(tx, verification, &contract_address)?,
-        call.method_selector.to_vec(),
+        aivm_context(tx, verification, &contract_address, execution_context)?,
+        calldata,
     );
     let receipt = call_synq_contract(&request, aivm_state);
     Ok(summary_from_aivm_receipt(&contract_address, &receipt))
@@ -321,7 +389,8 @@ fn artifact_from_envelope(
         .manifest_json
         .clone()
         .ok_or_else(|| "SynQ deploy carrier is missing manifest JSON".to_string())?;
-    let artifact = SynQContractArtifact::new(bytecode, abi_json, manifest_json);
+    let artifact = SynQContractArtifact::new(bytecode, abi_json, manifest_json)
+        .with_metadata_json(envelope.sts9_verification_json.clone());
     let actual = artifact.key();
     if envelope.bytecode_hash != Some(actual.bytecode_hash)
         || envelope.manifest_hash != Some(actual.manifest_hash)
@@ -339,11 +408,14 @@ fn validate_artifact_hashes(
     artifact: &SynQContractArtifact,
     key: &SynQArtifactKey,
 ) -> Result<(), String> {
+    let contract_id = artifact
+        .manifest_contract_name()
+        .unwrap_or_else(|| "Counter".to_string());
     let request = ExecutionRequest {
-        contract_id: "Counter".to_string(),
+        contract_id: contract_id.clone(),
         artifact: artifact.to_aivm_artifact(),
         calldata: Vec::new(),
-        context: ExecutionContext::testnet_1264_for_contract("Counter", 150_000),
+        context: ExecutionContext::testnet_1264_for_contract(&contract_id, 150_000),
     };
     aivm_core::execution::validate_synq_artifact(&request)
         .map_err(|error| format!("AIVM artifact validation failed: {error}"))?;
@@ -355,17 +427,19 @@ fn validate_artifact_hashes(
 
 fn aivm_context(
     tx: &Transaction,
-    verification: &SynQVerificationSummary,
+    _verification: &SynQVerificationSummary,
     contract_address: &str,
+    execution_context: SynQExecutionContext,
 ) -> Result<ExecutionContext, String> {
     Ok(ExecutionContext {
         admission_pq_gas_used: GasSchedule::default().pqc_signature_verify_gas,
+        runtime_block_height: execution_context.runtime_block_height,
         chain_id: tx.chain_id.0,
         network_id: tx.network_id.0.clone(),
         block_height: 0,
         block_timestamp_unix: 0,
         tx_hash: tx.canonical_tx_bytes_hash()?.0,
-        caller: verification.signer.as_bytes().to_vec(),
+        caller: tx.sender_uma_or_account.as_bytes().to_vec(),
         contract_address: contract_address.as_bytes().to_vec(),
         gas_limit: tx.gas_limit,
         pq_gas_limit: 300_000,

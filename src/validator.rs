@@ -11,7 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const VERBOSE_VALIDATOR_LOGS: bool = false;
 pub const INITIAL_VALIDATOR_SYNERGY_SCORE: f64 = 100.0;
 pub const TESTNET_VALIDATOR_CLUSTER_SIZE: usize = 7;
-pub const TESTNET_FIRST_CLUSTER_SPLIT_THRESHOLD: usize = 6;
+pub const TESTNET_MIN_VALIDATOR_CLUSTER_SIZE: usize = 5;
+pub const TESTNET_FIRST_CLUSTER_SPLIT_THRESHOLD: usize = TESTNET_MIN_VALIDATOR_CLUSTER_SIZE * 2;
 pub const MISSED_VOTE_JAIL_THRESHOLD: u64 = 3;
 pub const MISSED_VOTE_SLASH_THRESHOLD: u64 = 6;
 pub const VALIDATOR_SHADOW_PHASE_BLOCKS: u64 = 1_000;
@@ -1000,7 +1001,7 @@ fn configured_consensus_order(active_validators: &[Validator]) -> (Option<Vec<St
     let config = crate::config::load_node_config(None).ok();
     let max_validators = config
         .as_ref()
-        .map(|config| config.consensus.max_validators.max(1))
+        .map(|config| config.consensus.max_validators.max(active_validators.len()))
         .unwrap_or(usize::MAX);
     let active_addresses = active_validators
         .iter()
@@ -1258,6 +1259,29 @@ mod tests {
         registry
     }
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     fn funded_test_address(required_nwei: u64) -> String {
         crate::genesis::canonical_genesis()
             .ok()
@@ -1400,7 +1424,30 @@ mod tests {
     }
 
     #[test]
-    fn reorganize_clusters_balances_six_validators_into_two_clusters() {
+    fn consensus_membership_does_not_truncate_active_validators_with_stale_max_config() {
+        let active = active_registry(6)
+            .validators
+            .into_values()
+            .collect::<Vec<_>>();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("synergy-validator-max-test-{unique}"));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("node.toml");
+        let mut config = crate::config::NodeConfig::default();
+        config.consensus.max_validators = 3;
+        std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+        let _config_path = EnvVarGuard::set("SYNERGY_CONFIG_PATH", &config_path.to_string_lossy());
+
+        let membership = consensus_membership_validators(active);
+
+        assert_eq!(membership.len(), 6);
+    }
+
+    #[test]
+    fn reorganize_clusters_keeps_six_validators_in_one_cluster() {
         let registry = active_registry(6);
         let mut cluster_sizes: Vec<usize> = registry
             .clusters
@@ -1409,8 +1456,8 @@ mod tests {
             .collect();
         cluster_sizes.sort_unstable();
 
-        assert_eq!(registry.clusters.len(), 2);
-        assert_eq!(cluster_sizes, vec![3, 3]);
+        assert_eq!(registry.clusters.len(), 1);
+        assert_eq!(cluster_sizes, vec![6]);
     }
 
     #[test]

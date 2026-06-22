@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="${SYNERGY_ARCHIVE_ROOT:-/Users/Shared/Synergy/archive-validator}"
-PUBLISH_ROOT="${SYNERGY_SNAPSHOT_PUBLISH_ROOT:-${ROOT}/published-snapshots}"
+PUBLISH_ROOT="${SYNERGY_SNAPSHOT_PUBLISH_ROOT:-${ROOT}/snapshots}"
 RUNTIME="${SYNERGY_ARCHIVE_RUNTIME:-/usr/local/synergy/bin/synergy-archive-validator-node}"
 AEGIS="${SYNERGY_AEGIS_CLI:-/usr/local/synergy/bin/aegis-pqvm}"
 WORKSPACE="${SYNERGY_ARCHIVE_WORKSPACE:-${ROOT}/workspace}"

@@ -21,6 +21,7 @@ pub const STS9_HORIZON_CONTRACT_NAME: &str = "STS9HorizonToken";
 pub const STS9_HORIZON_DEPLOYER_WALLET: &str = "synw1jmtpyjw62nxgattrcjc2tx2hezwj6rka5war";
 pub const STS9_HORIZON_SUPPLY_BASE_UNITS: &str = "1000000000000000000";
 const SYNQ_CONTRACT_ADDRESS_DERIVATION_DOMAIN: &str = "SYNERGY_SYNQ_CONTRACT_ADDRESS_V1";
+const SYNERGY_CUSTOM_CONTRACT_ADDRESS_PREFIX: &str = "sync";
 const SYNQ_CONTRACT_ADDRESS_VERSION: u8 = 1;
 const SYNQ_CONTRACT_ADDRESS_CLASS: u16 = 0xC001;
 const SYNQ_ADDRESS_LEN: usize = 41;
@@ -757,8 +758,9 @@ fn validate_sts9_horizon_verification(
         &envelope.encoded_pqsynq_envelope,
         "decode SynQ deploy envelope for STS-9 verification",
     )?;
-    let contract_address =
-        derive_synq_contract_address_from_deploy_for_admission(&deploy)?.to_testnet_debug_string();
+    let contract_address = synergy_contract_address_from_pqsynq_address(
+        &derive_synq_contract_address_from_deploy_for_admission(&deploy)?,
+    );
     let signer = deploy
         .signing_payload
         .signer_address
@@ -1245,6 +1247,13 @@ fn derive_synq_contract_address_from_deploy_for_admission(
     bytes[37..41].copy_from_slice(&checksum[..4]);
 
     Ok(SynQAddress::from_bytes(bytes))
+}
+
+fn synergy_contract_address_from_pqsynq_address(address: &SynQAddress) -> String {
+    crate::address::generate_generic_address(
+        SYNERGY_CUSTOM_CONTRACT_ADDRESS_PREFIX,
+        &hex::encode(address.as_bytes()),
+    )
 }
 
 fn push_u16(out: &mut Vec<u8>, value: u16) {

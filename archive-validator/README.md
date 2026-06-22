@@ -4,9 +4,9 @@ This package installs a non-consensus Archive Validator Node for Synergy Testnet
 
 Protocol role: `ARCHIVE_OBSERVER`
 
-The archive node verifies finalized chain data, stores full archival data, creates role-specific signed snapshots, chunks zstd archives at 512 MiB, retains verified snapshots by class, and serves verified snapshots to new validators, self-healing validators, relayers, RPC nodes, and indexers. It never votes, never proposes, never aggregates QCs, and never counts toward quorum.
+The archive node verifies finalized chain data, stores full archival data, creates role-specific signed snapshots, chunks zstd archives at 512 MiB, retains two verified snapshots by class, and serves verified snapshots to new validators, self-healing validators, relayers, observers, RPC nodes, and indexers. It never votes, never proposes, never aggregates QCs, and never counts toward quorum.
 
-Required snapshot classes: `validator-pruned`, `support-relayer`, `support-rpc`, `indexer-replay`, `indexer-full`, `archive-full`, and `archive-bootstrap`.
+Default scheduled snapshot classes: `validator-pruned`, `support-relayer`, `support-observer`, `indexer-replay`, `support-rpc`, and `archive-full`. `archive-full` is created every 15,000 finalized blocks; all other default classes are created every 5,000 finalized blocks.
 
 Linux install:
 

@@ -95,7 +95,7 @@ pub struct ConsensusConfig {
 }
 
 fn default_min_validators() -> usize {
-    3
+    4
 }
 
 fn default_validator_vote_threshold() -> usize {
@@ -103,7 +103,7 @@ fn default_validator_vote_threshold() -> usize {
 }
 
 fn default_max_validators() -> usize {
-    100
+    6
 }
 
 fn default_status_ready_gate_enabled() -> bool {
@@ -300,7 +300,7 @@ impl Default for NodeConfig {
                 block_time_secs: 2,
                 epoch_length: 1000,
                 min_validators: default_min_validators(),
-                validator_cluster_size: 7,
+                validator_cluster_size: 6,
                 validator_vote_threshold: default_validator_vote_threshold(),
                 max_validators: default_max_validators(),
                 status_ready_gate_enabled: default_status_ready_gate_enabled(),
@@ -1259,10 +1259,10 @@ label = "Validator Node 01"
 chain_name = "synergy-testnet"
 chain_id = 1264
 p2p_listen = "0.0.0.0:5622"
-bootnodes = ["bootnode1.synergynode.xyz:5620"]
-seed_servers = ["http://seed1.synergynode.xyz:5621"]
-bootstrap_dns_records = ["_dnsaddr.bootstrap.synergynode.xyz"]
-persistent_peers = ["genesisval2.synergynode.xyz:5622"]
+bootnodes = ["bootnode1.synergy-network.io:5620"]
+seed_servers = ["http://seed1.synergy-network.io:5621"]
+bootstrap_dns_records = ["_dnsaddr.bootstrap.synergy-network.io"]
+persistent_peers = ["genesisval2.synergy-network.io:5622"]
 additional_dial_targets = ["24.181.87.76:5622"]
 max_peers = 128
 
@@ -1287,19 +1287,19 @@ log_level = "debug"
         assert_eq!(config.p2p.listen_address, "0.0.0.0:5622");
         assert_eq!(
             config.network.bootnodes,
-            vec!["bootnode1.synergynode.xyz:5620".to_string()]
+            vec!["bootnode1.synergy-network.io:5620".to_string()]
         );
         assert_eq!(
             config.network.seed_servers,
-            vec!["http://seed1.synergynode.xyz:5621".to_string()]
+            vec!["http://seed1.synergy-network.io:5621".to_string()]
         );
         assert_eq!(
             config.network.bootstrap_dns_records,
-            vec!["_dnsaddr.bootstrap.synergynode.xyz".to_string()]
+            vec!["_dnsaddr.bootstrap.synergy-network.io".to_string()]
         );
         assert_eq!(
             config.network.persistent_peers,
-            vec!["genesisval2.synergynode.xyz:5622".to_string()]
+            vec!["genesisval2.synergy-network.io:5622".to_string()]
         );
         assert_eq!(
             config.network.additional_dial_targets,
@@ -1385,7 +1385,7 @@ name = "synergy-testnet"
 p2p_port = 5622
 rpc_port = 5640
 ws_port = 5660
-bootnodes = ["bootnode1.synergynode.xyz:5620"]
+bootnodes = ["bootnode1.synergy-network.io:5620"]
 
 [blockchain]
 block_time = 5
@@ -1396,9 +1396,9 @@ chain_id = 1264
 algorithm = "Proof of Synergy"
 block_time_secs = 5
 epoch_length = 1000
-validator_cluster_size = 7
+validator_cluster_size = 6
 validator_vote_threshold = 4
-max_validators = 100
+max_validators = 6
 synergy_score_decay_rate = 0.05
 vrf_enabled = true
 vrf_seed_epoch_interval = 1000
@@ -1448,10 +1448,10 @@ pruning_interval = 86400
             &peers_path,
             r#"
 [global]
-bootnodes = ["bootnode2.synergynode.xyz:5620"]
-seed_servers = ["http://seed2.synergynode.xyz:5621"]
-bootstrap_dns_records = ["_dnsaddr.bootstrap.synergynode.xyz"]
-persistent_peers = ["genesisval2.synergynode.xyz:5622"]
+bootnodes = ["bootnode2.synergy-network.io:5620"]
+seed_servers = ["http://seed2.synergy-network.io:5621"]
+bootstrap_dns_records = ["_dnsaddr.bootstrap.synergy-network.io"]
+persistent_peers = ["genesisval2.synergy-network.io:5622"]
 additional_dial_targets = ["62.146.182.208:39638"]
 "#,
         )
@@ -1465,22 +1465,22 @@ additional_dial_targets = ["62.146.182.208:39638"]
         assert!(config
             .network
             .bootnodes
-            .contains(&"bootnode1.synergynode.xyz:5620".to_string()));
+            .contains(&"bootnode1.synergy-network.io:5620".to_string()));
         assert!(config
             .network
             .bootnodes
-            .contains(&"bootnode2.synergynode.xyz:5620".to_string()));
+            .contains(&"bootnode2.synergy-network.io:5620".to_string()));
         assert_eq!(
             config.network.seed_servers,
-            vec!["http://seed2.synergynode.xyz:5621".to_string()]
+            vec!["http://seed2.synergy-network.io:5621".to_string()]
         );
         assert_eq!(
             config.network.bootstrap_dns_records,
-            vec!["_dnsaddr.bootstrap.synergynode.xyz".to_string()]
+            vec!["_dnsaddr.bootstrap.synergy-network.io".to_string()]
         );
         assert_eq!(
             config.network.persistent_peers,
-            vec!["genesisval2.synergynode.xyz:5622".to_string()]
+            vec!["genesisval2.synergy-network.io:5622".to_string()]
         );
         assert_eq!(
             config.network.additional_dial_targets,
@@ -1505,11 +1505,11 @@ label = "Genesis Validator 3 Node"
 chain_name = "synergy-testnet"
 chain_id = 1264
 p2p_port = 5622
-public_host = "genesisval3.synergynode.xyz"
+public_host = "genesisval3.synergy-network.io"
 
 [p2p]
 listen_address = "0.0.0.0:5622"
-public_address = "genesisval3.synergynode.xyz:5622"
+public_address = "genesisval3.synergy-network.io:5622"
 "#;
 
         let config = parse_node_config_content(content, None).expect("config should parse");
@@ -1517,7 +1517,7 @@ public_address = "genesisval3.synergynode.xyz:5622"
         assert_eq!(config.network.p2p_port, 5622);
         assert_eq!(
             config.p2p.public_address,
-            "genesisval3.synergynode.xyz:5622".to_string()
+            "genesisval3.synergy-network.io:5622".to_string()
         );
     }
 
@@ -1528,7 +1528,7 @@ public_address = "genesisval3.synergynode.xyz:5622"
 chain_name = "synergy-testnet"
 chain_id = 1264
 p2p_port = 5622
-public_host = "genesisval1.synergynode.xyz"
+public_host = "genesisval1.synergy-network.io"
 
 [p2p]
 listen_address = "0.0.0.0:5622"
@@ -1538,11 +1538,11 @@ listen_address = "0.0.0.0:5622"
 
         assert_eq!(
             config.p2p.public_address,
-            "genesisval1.synergynode.xyz:5622".to_string()
+            "genesisval1.synergy-network.io:5622".to_string()
         );
         assert_eq!(
             config.p2p.discovery_public_address,
-            "genesisval1.synergynode.xyz:5680".to_string()
+            "genesisval1.synergy-network.io:5680".to_string()
         );
     }
 
@@ -1553,17 +1553,17 @@ listen_address = "0.0.0.0:5622"
 chain_name = "synergy-testnet"
 chain_id = 1264
 p2p_port = 5622
-public_host = "genesisval1.synergynode.xyz"
+public_host = "genesisval1.synergy-network.io"
 
 [p2p]
 listen_address = "0.0.0.0:5622"
-external_addr = "genesisval1.synergynode.xyz:5622"
+external_addr = "genesisval1.synergy-network.io:5622"
 enable_discovery = true
 discovery_port = 5680
 
 [discovery]
 listen_addr = "0.0.0.0:5680"
-external_addr = "genesisval1.synergynode.xyz:5680"
+external_addr = "genesisval1.synergy-network.io:5680"
 "#;
 
         let config = parse_node_config_content(content, None).expect("config should parse");
@@ -1571,12 +1571,12 @@ external_addr = "genesisval1.synergynode.xyz:5680"
         assert_eq!(config.p2p.listen_address, "0.0.0.0:5622");
         assert_eq!(
             config.p2p.public_address,
-            "genesisval1.synergynode.xyz:5622"
+            "genesisval1.synergy-network.io:5622"
         );
         assert_eq!(config.p2p.discovery_listen_address, "0.0.0.0:5680");
         assert_eq!(
             config.p2p.discovery_public_address,
-            "genesisval1.synergynode.xyz:5680"
+            "genesisval1.synergy-network.io:5680"
         );
     }
 
@@ -1602,13 +1602,13 @@ state_sync_before_join = true
         let _p2p_listen = EnvVarGuard::set("SYNERGY_P2P_LISTEN_ADDRESS", "0.0.0.0:5622");
         let _p2p_external = EnvVarGuard::set(
             "SYNERGY_P2P_EXTERNAL_ADDRESS",
-            "genesisval1.synergynode.xyz:5622",
+            "genesisval1.synergy-network.io:5622",
         );
         let _discovery_listen =
             EnvVarGuard::set("SYNERGY_DISCOVERY_LISTEN_ADDRESS", "0.0.0.0:5680");
         let _discovery_external = EnvVarGuard::set(
             "SYNERGY_DISCOVERY_EXTERNAL_ADDRESS",
-            "genesisval1.synergynode.xyz:5680",
+            "genesisval1.synergy-network.io:5680",
         );
 
         let config = apply_env_overrides(NodeConfig::default()).expect("env overrides should load");
@@ -1616,12 +1616,12 @@ state_sync_before_join = true
         assert_eq!(config.p2p.listen_address, "0.0.0.0:5622");
         assert_eq!(
             config.p2p.public_address,
-            "genesisval1.synergynode.xyz:5622"
+            "genesisval1.synergy-network.io:5622"
         );
         assert_eq!(config.p2p.discovery_listen_address, "0.0.0.0:5680");
         assert_eq!(
             config.p2p.discovery_public_address,
-            "genesisval1.synergynode.xyz:5680"
+            "genesisval1.synergy-network.io:5680"
         );
     }
 
@@ -1630,7 +1630,7 @@ state_sync_before_join = true
         let _lock = ENV_MUTEX.lock().expect("env mutex should lock");
         let _persistent_peers = EnvVarGuard::set(
             "SYNERGY_PERSISTENT_PEERS",
-            "genesisval2.synergynode.xyz:5622,62.146.182.208:5622",
+            "genesisval2.synergy-network.io:5622,62.146.182.208:5622",
         );
         let _status_gate = EnvVarGuard::set("SYNERGY_CONSENSUS_STATUS_READY_GATE_ENABLED", "false");
         let _status_min = EnvVarGuard::set("SYNERGY_CONSENSUS_STATUS_READY_MIN_VALIDATORS", "3");
@@ -1647,7 +1647,7 @@ state_sync_before_join = true
         assert_eq!(
             config.network.persistent_peers,
             vec![
-                "genesisval2.synergynode.xyz:5622".to_string(),
+                "genesisval2.synergy-network.io:5622".to_string(),
                 "62.146.182.208:5622".to_string()
             ]
         );
@@ -1710,9 +1710,9 @@ chain_id = 1264
 algorithm = "Proof of Synergy"
 block_time_secs = 5
 epoch_length = 1000
-validator_cluster_size = 7
+validator_cluster_size = 6
 validator_vote_threshold = 4
-max_validators = 100
+max_validators = 6
 synergy_score_decay_rate = 0.05
 vrf_enabled = true
 vrf_seed_epoch_interval = 1000

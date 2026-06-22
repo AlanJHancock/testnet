@@ -2,8 +2,8 @@ use crate::crypto::aegis_pqvm::{SYNERGY_RECEIPT_ROOT_V1, SYNERGY_STATE_ROOT_V1};
 use crate::synergy_types::{Block, CanonicalSerialize, Hash, Transaction, TxId};
 use crate::synq_admission::SynQVerificationSummary;
 use crate::synq_execution::{
-    execute_synq_transaction, SynQAivmReceiptSummary, SynQArtifactKey, SynQContractArtifact,
-    SynQDeploymentRecord,
+    execute_synq_transaction_at, SynQAivmReceiptSummary, SynQArtifactKey, SynQContractArtifact,
+    SynQDeploymentRecord, SynQExecutionContext,
 };
 use aivm_core::state::ContractState;
 use std::collections::{BTreeMap, BTreeSet};
@@ -97,9 +97,16 @@ pub fn execute_block(block: &Block, state: &ExecutionState) -> Result<ExecutionR
     let batches = split_into_parallel_batches(&graph);
     let mut working_state = state.clone();
     let mut receipts = Vec::new();
+    let synq_context = SynQExecutionContext {
+        runtime_block_height: block.header.height.0,
+    };
     for batch in batches {
-        let mut batch_receipts =
-            execute_batch_parallel(&batch, &block.transactions, &mut working_state)?;
+        let mut batch_receipts = execute_batch_parallel(
+            &batch,
+            &block.transactions,
+            &mut working_state,
+            synq_context,
+        )?;
         receipts.append(&mut batch_receipts);
     }
     receipts = merge_results_in_canonical_order(receipts);
@@ -148,6 +155,7 @@ pub fn execute_batch_parallel(
     batch: &[TxId],
     transactions: &[Transaction],
     state: &mut ExecutionState,
+    synq_context: SynQExecutionContext,
 ) -> Result<Vec<TransactionReceipt>, String> {
     let by_id = transactions
         .iter()
@@ -158,7 +166,7 @@ pub fn execute_batch_parallel(
         let tx = by_id
             .get(tx_id)
             .ok_or_else(|| format!("transaction {} missing from batch input", tx_id.0))?;
-        receipts.push(execute_transaction(tx_id.clone(), tx, state)?);
+        receipts.push(execute_transaction(tx_id.clone(), tx, state, synq_context)?);
     }
     Ok(receipts)
 }
@@ -211,6 +219,7 @@ fn execute_transaction(
     id: TxId,
     tx: &Transaction,
     state: &mut ExecutionState,
+    synq_context: SynQExecutionContext,
 ) -> Result<TransactionReceipt, String> {
     let canonical_hash = tx.canonical_tx_bytes_hash()?;
     match state.verified_authorizations.get(&id) {
@@ -237,13 +246,14 @@ fn execute_transaction(
     let synq_error = state.synq_errors.get(&id).cloned();
     let receipt = if sender_balance >= total_debit {
         let synq_aivm = if let Some(summary) = synq_verification.as_ref() {
-            execute_synq_transaction(
+            execute_synq_transaction_at(
                 &id,
                 tx,
                 summary,
                 &mut state.synq_aivm_state,
                 &mut state.synq_artifacts,
                 &mut state.synq_contracts,
+                synq_context,
             )?
         } else {
             None
@@ -343,7 +353,9 @@ mod tests {
     use crate::synergy_types::{
         AegisPqKeyId, AegisPqSignature, ChainId, Epoch, Height, NetworkId, UmaId,
     };
-    use crate::synq_execution::derive_synq_contract_address_from_deploy;
+    use crate::synq_execution::{
+        derive_synq_contract_address_from_deploy, synergy_contract_address_from_pqsynq_address,
+    };
     use pqsynq::{
         canonicalize_signing_payload, derive_synq_address, hash_contract_call_body,
         hash_contract_deploy_body, AlgorithmId, ChainId as PqSynQChainId, ContractCallEnvelope,
@@ -797,7 +809,7 @@ mod tests {
         let fixture = CounterSynQFixture::new();
         let deploy_payload = fixture.deploy_payload(true);
         let contract_address = fixture.contract_address();
-        let contract_address_text = contract_address.to_testnet_debug_string();
+        let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address);
         assert_ne!(
             contract_address_text,
             fixture.address.to_testnet_debug_string()

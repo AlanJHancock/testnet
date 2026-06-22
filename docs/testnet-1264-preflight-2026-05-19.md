@@ -93,7 +93,7 @@ Public RPC:
 - URL: `https://testnet-core-rpc.synergy-network.io`
 - height/hash: `1817` / `fb6462d6105d0b51f9424313ea619f0385fe90be36c33a58d0c5fc497333a211`
 - peers: 2
-- peers are only `relay1.synergynode.xyz:5622` and `relay2.synergynode.xyz:5622`
+- peers are only `relay1.synergy-network.io:5622` and `relay2.synergy-network.io:5622`
 - direct SSH to the RPC/Explorer host failed with the supplied credential path, so DB and process checks remain pending
 
 Atlas API:

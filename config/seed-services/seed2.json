@@ -7,29 +7,29 @@
   "state_file": "/var/lib/synergy-seed/seed2-peers.json",
   "bootnodes": [
     {
-      "hostname": "bootnode1.synergynode.xyz",
+      "hostname": "bootnode1.synergy-network.io",
       "port": 5620,
       "reachable": true
     },
     {
-      "hostname": "bootnode2.synergynode.xyz",
+      "hostname": "bootnode2.synergy-network.io",
       "port": 5620,
       "reachable": true
     },
     {
-      "hostname": "bootnode3.synergynode.xyz",
+      "hostname": "bootnode3.synergy-network.io",
       "port": 5620,
       "reachable": true
     }
   ],
   "static_peers": [
-    "bootnode1.synergynode.xyz:5620",
-    "bootnode2.synergynode.xyz:5620",
-    "bootnode3.synergynode.xyz:5620"
+    "bootnode1.synergy-network.io:5620",
+    "bootnode2.synergy-network.io:5620",
+    "bootnode3.synergy-network.io:5620"
   ],
   "dnsaddr_bootstrap": [
-    "dnsaddr=/dns4/bootnode1.synergynode.xyz/tcp/5620",
-    "dnsaddr=/dns4/bootnode2.synergynode.xyz/tcp/5620",
-    "dnsaddr=/dns4/bootnode3.synergynode.xyz/tcp/5620"
+    "dnsaddr=/dns4/bootnode1.synergy-network.io/tcp/5620",
+    "dnsaddr=/dns4/bootnode2.synergy-network.io/tcp/5620",
+    "dnsaddr=/dns4/bootnode3.synergy-network.io/tcp/5620"
   ]
 }

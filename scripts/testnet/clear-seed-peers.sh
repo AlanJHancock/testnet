@@ -3,9 +3,9 @@ set -euo pipefail
 
 TOKEN="${SEED_ADMIN_TOKEN:-${BOOTSTRAP_SEED_ADMIN_TOKEN:-}}"
 SEEDS=(
-  "${SEED1_URL:-http://seed1.synergyvps.xyz:5621/peers}"
-  "${SEED2_URL:-http://seed2.synergyvps.xyz:5621/peers}"
-  "${SEED3_URL:-http://seed3.synergyvps.xyz:5621/peers}"
+  "${SEED1_URL:-http://seed1.synergy-network.io:5621/peers}"
+  "${SEED2_URL:-http://seed2.synergy-network.io:5621/peers}"
+  "${SEED3_URL:-http://seed3.synergy-network.io:5621/peers}"
 )
 
 if ! command -v curl >/dev/null 2>&1; then

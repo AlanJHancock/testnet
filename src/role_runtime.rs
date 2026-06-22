@@ -440,6 +440,10 @@ fn run_offline_snapshot_command(args: &[String], command: &str) -> Result<bool, 
                     "--cluster-marks-pending-reactivation",
                 ),
                 operator_approved_reactivation: arg_flag(args, "--operator-approved-reactivation"),
+                operator_approved_emergency_leader_stall_recovery: arg_flag(
+                    args,
+                    "--operator-approved-emergency-leader-stall-recovery",
+                ),
             };
             let report = crate::consensus::diagnostics::request_rejoin_with_options(options)?;
             print_json_value(report);
@@ -944,14 +948,14 @@ fn print_usage(binary_name: &str, expected_profile: Option<&RoleProfile>) {
     eprintln!("    --source-workspace <PATH>  Source workspace for offline create/list/verify");
     eprintln!("    --source-node-majority-branch-proven");
     eprintln!("    --source-role GENESIS_VALIDATOR");
-    eprintln!("    --snapshot-class validator-pruned|support-relayer|support-rpc|indexer-replay|indexer-full|archive-full|archive-bootstrap");
+    eprintln!("    --snapshot-class validator-pruned|support-relayer|support-rpc|support-observer|indexer-replay|indexer-full|archive-full|archive-bootstrap");
     eprintln!("    --allowed-role <role> [--allowed-role <role> ...]");
     eprintln!("    --target-role <role>");
     eprintln!("    --manifest <PATH> [--snapshot-root <DIR>]");
     eprintln!("    --target-stopped --operator-approved-containment --quorum-majority-height <H> --quorum-majority-hash <HASH>");
     eprintln!("    --canonical-height <H> --canonical-hash <HASH> --source-qc-aegis-pqc-verified --parent-continuity-verified --state-root-matches --source-peer-not-quarantined");
     eprintln!("    --required-blocks <N>");
-    eprintln!("    --common-height <H> --common-hash <HASH> --exact-common-height-match --latest-finalized-qc-aegis-pqc-verified --state-root-matches --rejoin-at-finalized-safe-boundary --cluster-marks-pending-reactivation --operator-approved-reactivation");
+    eprintln!("    --common-height <H> --common-hash <HASH> --exact-common-height-match --latest-finalized-qc-aegis-pqc-verified --state-root-matches --rejoin-at-finalized-safe-boundary --cluster-marks-pending-reactivation --operator-approved-reactivation [--operator-approved-emergency-leader-stall-recovery]");
     eprintln!();
     eprintln!("START OPTIONS:");
     eprintln!("    --node-type <TYPE>    Specify the node type (uses templates/<TYPE>.toml)");

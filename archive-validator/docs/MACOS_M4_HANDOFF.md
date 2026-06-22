@@ -9,8 +9,8 @@ The default non-VPN topology uses Relayer1 and Relayer2 as persistent peers:
 - `195.26.241.95:5622`
 - `94.72.117.108:5622`
 
-The package does not use obsolete `*.synergyvps.xyz` bootnode or seed DNS
-defaults, and it does not configure direct private validator addresses.
+The package does not use obsolete legacy bootnode or seed DNS defaults, and it
+does not configure direct private validator addresses.
 
 ## Install
 
@@ -144,11 +144,12 @@ sudo /usr/local/synergy/bin/synergy-archive record-majority-proof \
 ```
 
 The unattended worker must run without `--snapshot-class`. In that default mode
-it walks every configured snapshot class and publishes eligible
-`validator-pruned`, `support-rpc`, `support-relayer`, `indexer-replay`,
-`indexer-full`, `archive-full`, and `archive-bootstrap` artifacts at their
-configured cadences. A class-specific `--snapshot-class` is only for bounded
-manual repair runs.
+it walks only the currently used role classes and publishes eligible
+`validator-pruned`, `support-relayer`, `support-observer`, `indexer-replay`,
+`support-rpc`, and `archive-full` artifacts at their configured cadences.
+`archive-full` is created every 15,000 finalized blocks; all other default
+classes are created every 5,000 finalized blocks. A class-specific
+`--snapshot-class` is only for bounded manual repair runs.
 
 For an operator-triggered snapshot:
 

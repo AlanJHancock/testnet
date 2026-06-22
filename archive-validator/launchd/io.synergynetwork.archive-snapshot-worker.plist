@@ -12,7 +12,7 @@
     <string>--root</string>
     <string>/Volumes/Synergy_Archive/archive-validator</string>
     <string>--publish-root</string>
-    <string>/Volumes/Synergy_Archive/archive-validator/published-snapshots</string>
+    <string>/Volumes/Synergy_Archive/archive-validator/snapshots</string>
     <string>--runtime</string>
     <string>/usr/local/synergy/bin/synergy-archive-validator-node</string>
     <string>--aegis</string>

@@ -203,6 +203,10 @@ fn run() -> Result<(), String> {
                     "--cluster-marks-pending-reactivation",
                 ),
                 operator_approved_reactivation: arg_flag(&args, "--operator-approved-reactivation"),
+                operator_approved_emergency_leader_stall_recovery: arg_flag(
+                    &args,
+                    "--operator-approved-emergency-leader-stall-recovery",
+                ),
             };
             match synergy_testnet::consensus::diagnostics::request_rejoin_with_options(options) {
                 Ok(report) => print_json(report)?,
@@ -253,7 +257,7 @@ fn run() -> Result<(), String> {
             println!("  synergy-node recover-transient-vote-locks --chain-id 1264 --network-id synergy-testnet-v2 [--finalized-height <height>] [--min-age-secs <seconds>]");
             println!("  synergy-node self-heal --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node sync-from-canonical-peer --chain-id 1264 --network-id synergy-testnet-v2 --canonical-height <height> --canonical-hash <hash> --source-qc-aegis-pqc-verified --parent-continuity-verified --state-root-matches --source-peer-not-quarantined [--source-peer <id>]");
-            println!("  synergy-node create-snapshot --chain-id 1264 --network-id synergy-testnet-v2 --source-node-majority-branch-proven [--source-role GENESIS_VALIDATOR] [--snapshot-class validator-pruned|support-relayer|support-rpc|indexer-replay|indexer-full|archive-full|archive-bootstrap] [--allowed-role <role> ...] [--conflict-height-hash <hash>]");
+            println!("  synergy-node create-snapshot --chain-id 1264 --network-id synergy-testnet-v2 --source-node-majority-branch-proven [--source-role GENESIS_VALIDATOR] [--snapshot-class validator-pruned|support-relayer|support-rpc|support-observer|indexer-replay|indexer-full|archive-full|archive-bootstrap] [--allowed-role <role> ...] [--conflict-height-hash <hash>]");
             println!(
                 "  synergy-node list-snapshots --chain-id 1264 --network-id synergy-testnet-v2"
             );
@@ -268,7 +272,7 @@ fn run() -> Result<(), String> {
                 "  synergy-node rejoin-eligibility --chain-id 1264 --network-id synergy-testnet-v2"
             );
             println!(
-                "  synergy-node request-rejoin --chain-id 1264 --network-id synergy-testnet-v2 --common-height <height> --common-hash <hash> --exact-common-height-match --latest-finalized-qc-aegis-pqc-verified --state-root-matches --rejoin-at-finalized-safe-boundary --cluster-marks-pending-reactivation --operator-approved-reactivation"
+                "  synergy-node request-rejoin --chain-id 1264 --network-id synergy-testnet-v2 --common-height <height> --common-hash <hash> --exact-common-height-match --latest-finalized-qc-aegis-pqc-verified --state-root-matches --rejoin-at-finalized-safe-boundary --cluster-marks-pending-reactivation --operator-approved-reactivation [--operator-approved-emergency-leader-stall-recovery]"
             );
             println!("  synergy-node sync-from-archive --archive-url <url> --chain-id 1264 --network-id synergy-testnet-v2 --expected-genesis-hash <hash>");
             println!("  synergy-node self-heal-from-archive --archive-url <url> --divergence-height <height> --chain-id 1264 --network-id synergy-testnet-v2 --expected-genesis-hash <hash>");
@@ -680,13 +684,17 @@ fn execute_synq_replay_once(steps: &[SynqReplayStep]) -> Result<SynqReplayRun, S
             step.report.synq_verification.as_ref().ok_or_else(|| {
                 format!("{} did not carry a SynQ verification summary", step.label)
             })?;
-        let receipt = synergy_testnet::synq_execution::execute_synq_transaction(
+        let receipt = synergy_testnet::synq_execution::execute_synq_transaction_at(
             &step.report.tx_id,
             &step.report.transaction,
             verification,
             &mut aivm_state,
             &mut artifacts,
             &mut deployments,
+            synergy_testnet::synq_execution::SynQExecutionContext {
+                runtime_block_height:
+                    aivm_core::synq_runtime::GENERIC_SYNQ_RUNTIME_ACTIVATION_HEIGHT,
+            },
         )?
         .ok_or_else(|| format!("{} did not execute as a SynQ transaction", step.label))?;
         let receipt_json = serde_json::to_value(&receipt)
@@ -803,14 +811,17 @@ fn synq_contract_address_from_payload(payload: &[u8]) -> Option<String> {
         synergy_testnet::synq_admission::SynQAdmissionKind::Deploy => {
             let deploy =
                 synergy_testnet::synq_execution::deploy_envelope_from_carrier(&envelope).ok()?;
-            synergy_testnet::synq_execution::derive_synq_contract_address_from_deploy(&deploy)
+            synergy_testnet::synq_execution::derive_synergy_contract_address_from_deploy(&deploy)
                 .ok()
-                .map(|address| address.to_testnet_debug_string())
         }
         synergy_testnet::synq_admission::SynQAdmissionKind::Call => {
             let call: pqsynq::ContractCallEnvelope =
                 serde_json::from_slice(&envelope.encoded_pqsynq_envelope).ok()?;
-            Some(call.contract_address.to_testnet_debug_string())
+            Some(
+                synergy_testnet::synq_execution::synergy_contract_address_from_pqsynq_address(
+                    &call.contract_address,
+                ),
+            )
         }
     }
 }

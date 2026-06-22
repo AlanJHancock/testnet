@@ -72,7 +72,7 @@ fn print_usage() {
     println!("  init-archive-identity --output <identity.json> --uma-id <id>");
     println!("  sign-json --identity <identity.json> --domain <domain> --input <json> --output <sig.json>");
     println!("  verify-json --domain <domain> --input <json> --signature <sig.json> [--expected-signer-sha256 <sha256>]");
-    println!("  test-only-create-snapshot-fixture --output <directory> --snapshot-class <validator-pruned|support-relayer|support-rpc|indexer-replay|indexer-full|archive-full|archive-bootstrap>");
+    println!("  test-only-create-snapshot-fixture --output <directory> --snapshot-class <validator-pruned|support-relayer|support-rpc|support-observer|indexer-replay|indexer-full|archive-full|archive-bootstrap>");
 }
 
 fn smoke_test() {

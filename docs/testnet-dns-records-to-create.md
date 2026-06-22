@@ -5,7 +5,7 @@ This file is the frozen DNS baseline for `synergy-testnet`.
 It reflects:
 
 - the canonical Testnet hostnames referenced by the live repo
-- the current DNS inventory for `synergy-network.io` and `synergynode.xyz`
+- the current DNS inventory for `synergy-network.io` and `synergy-network.io`
 - the frozen bootstrap topology of exactly 3 bootnodes and 3 seed services
 
 ## Summary
@@ -16,14 +16,14 @@ The required Testnet records should now be treated as the frozen keep set. Remai
 
 The required 3-host bootstrap set is:
 
-- `bootnode1.synergynode.xyz`
-- `bootnode2.synergynode.xyz`
-- `bootnode3.synergynode.xyz`
-- `seed1.synergynode.xyz`
-- `seed2.synergynode.xyz`
-- `seed3.synergynode.xyz`
-- `_dnsaddr.bootstrap.synergynode.xyz` TXT records for bootnodes 1-3
-- `_synergy-seed._tcp.synergynode.xyz` SRV records for seeds 1-3
+- `bootnode1.synergy-network.io`
+- `bootnode2.synergy-network.io`
+- `bootnode3.synergy-network.io`
+- `seed1.synergy-network.io`
+- `seed2.synergy-network.io`
+- `seed3.synergy-network.io`
+- `_dnsaddr.bootstrap.synergy-network.io` TXT records for bootnodes 1-3
+- `_synergy-seed._tcp.synergy-network.io` SRV records for seeds 1-3
 
 The required Testnet surface on `synergy-network.io` is also part of the frozen keep set.
 
@@ -58,21 +58,21 @@ No compatibility aliases are part of the frozen Testnet keep set.
 
 These records remain the approved bootstrap discovery surface:
 
-- `bootnode1.synergynode.xyz` -> `170.64.187.206`
-- `bootnode2.synergynode.xyz` -> `146.190.210.121`
-- `bootnode3.synergynode.xyz` -> `157.245.226.240`
-- `seed1.synergynode.xyz` -> `170.64.187.206`
-- `seed2.synergynode.xyz` -> `146.190.210.121`
-- `seed3.synergynode.xyz` -> `157.245.226.240`
-- `_dnsaddr.bootstrap.synergynode.xyz` TXT records pointing at `tcp/5620`
-- `_synergy-seed._tcp.synergynode.xyz` SRV records pointing at `5621`
+- `bootnode1.synergy-network.io` -> `170.64.187.206`
+- `bootnode2.synergy-network.io` -> `146.190.210.121`
+- `bootnode3.synergy-network.io` -> `157.245.226.240`
+- `seed1.synergy-network.io` -> `170.64.187.206`
+- `seed2.synergy-network.io` -> `146.190.210.121`
+- `seed3.synergy-network.io` -> `157.245.226.240`
+- `_dnsaddr.bootstrap.synergy-network.io` TXT records pointing at `tcp/5620`
+- `_synergy-seed._tcp.synergy-network.io` SRV records pointing at `5621`
 
 ## Remaining DNS Work
 
 DNS work is now limited to:
 
 - verifying every keep-set record resolves exactly as frozen
-- correcting `seed1.synergynode.xyz` and `seed2.synergynode.xyz` if they still resolve to legacy RPC/validator hosts instead of the seed-service hosts above
+- correcting `seed1.synergy-network.io` and `seed2.synergy-network.io` if they still resolve to legacy RPC/validator hosts instead of the seed-service hosts above
 - keeping retired and removed names out of certificates, docs, configs, and launch procedures
 - verifying the services behind these names are actually deployed and healthy
 

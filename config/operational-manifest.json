@@ -14,19 +14,19 @@
     "bootnodes": [
       {
         "label": "bootnode1",
-        "host": "bootnode1.synergynode.xyz",
+        "host": "bootnode1.synergy-network.io",
         "ip_address": "170.64.187.206",
         "port": 5620
       },
       {
         "label": "bootnode2",
-        "host": "bootnode2.synergynode.xyz",
+        "host": "bootnode2.synergy-network.io",
         "ip_address": "146.190.210.121",
         "port": 5620
       },
       {
         "label": "bootnode3",
-        "host": "bootnode3.synergynode.xyz",
+        "host": "bootnode3.synergy-network.io",
         "ip_address": "157.245.226.240",
         "port": 5620
       }
@@ -34,19 +34,19 @@
     "seed_servers": [
       {
         "label": "seed1",
-        "host": "seed1.synergynode.xyz",
+        "host": "seed1.synergy-network.io",
         "ip_address": "170.64.187.206",
         "port": 5621
       },
       {
         "label": "seed2",
-        "host": "seed2.synergynode.xyz",
+        "host": "seed2.synergy-network.io",
         "ip_address": "146.190.210.121",
         "port": 5621
       },
       {
         "label": "seed3",
-        "host": "seed3.synergynode.xyz",
+        "host": "seed3.synergy-network.io",
         "ip_address": "157.245.226.240",
         "port": 5621
       }
@@ -54,7 +54,7 @@
     "sentries": [
       {
         "label": "sentry1",
-        "public_host": "relay1.synergynode.xyz",
+        "public_host": "relay1.synergy-network.io",
         "private_host": "10.69.0.20",
         "public_ip": "195.26.241.95",
         "port": 5622,
@@ -62,7 +62,7 @@
       },
       {
         "label": "sentry2",
-        "public_host": "relay2.synergynode.xyz",
+        "public_host": "relay2.synergy-network.io",
         "private_host": "10.69.0.202",
         "public_ip": "94.72.117.108",
         "port": 5622,
@@ -90,7 +90,7 @@
       ]
     },
     "dns": {
-      "bootstrap_txt": "_dnsaddr.bootstrap.synergynode.xyz"
+      "bootstrap_txt": "_dnsaddr.bootstrap.synergy-network.io"
     }
   },
   "ports": {
@@ -187,6 +187,15 @@
       "private_ip": "10.69.0.5",
       "public_ip": "194.163.183.166",
       "public_key_file": "config/genesis-validators/node-05.identity.json"
+    },
+    {
+      "slot": 6,
+      "label": "GenVal-06",
+      "address": "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx",
+      "private_host": "10.69.0.6",
+      "private_ip": "10.69.0.6",
+      "public_ip": "157.173.192.45",
+      "activated_via_onboarding": true
     }
   ],
   "allocations": {

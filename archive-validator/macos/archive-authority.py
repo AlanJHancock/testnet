@@ -29,11 +29,11 @@ CHAIN_ID = 1264
 NETWORK_ID = "synergy-testnet-v2"
 GENESIS_HASH = "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789"
 CHUNK_SIZE = 512 * 1024 * 1024
-GRACE_SECS = 24 * 60 * 60
+GRACE_SECS = 0
 CATALOG_DOMAIN = "SYNERGY_ARCHIVE_SNAPSHOT_CATALOG_V1"
 DISTRIBUTION_DOMAIN = "SYNERGY_ARCHIVE_SNAPSHOT_DISTRIBUTION_V1"
 DEFAULT_ROOT = Path("/Users/Shared/Synergy/archive-validator")
-DEFAULT_PUBLISH_ROOT = DEFAULT_ROOT / "published-snapshots"
+DEFAULT_PUBLISH_ROOT = Path("/Volumes/Synergy_Archive/archive-validator/snapshots")
 DEFAULT_RUNTIME = Path("/usr/local/synergy/bin/synergy-archive-validator-node")
 DEFAULT_AEGIS = Path("/usr/local/synergy/bin/aegis-pqvm")
 DEFAULT_FORK_METADATA = DEFAULT_ROOT / "config" / "consensus-fork-migration.json"
@@ -45,38 +45,61 @@ POST_FORK_CONSENSUS_ALGORITHM = "FN-DSA"
 FORK_PARSER_MODE = "fail_closed"
 FNDSA_PUBLIC_KEY_BYTES = 1793
 FORK_VALIDATOR_COUNT = 6
+SNAPSHOT_CADENCE_BLOCKS = 5_000
+ARCHIVE_SNAPSHOT_CADENCE_BLOCKS = 15_000
+SNAPSHOT_RETAIN_PER_CLASS = 2
 
 CLASS_POLICY = {
     "validator-pruned": {
         "roles": ["validator", "onboarding_validator", "quarantined_validator"],
-        "cadence": 5_000,
-        "retain": 3,
+        "cadence": SNAPSHOT_CADENCE_BLOCKS,
+        "retain": SNAPSHOT_RETAIN_PER_CLASS,
     },
-    "support-rpc": {"roles": ["rpc", "rpc_gateway"], "cadence": 5_000, "retain": 2},
-    "support-relayer": {"roles": ["relayer"], "cadence": 10_000, "retain": 2},
+    "support-rpc": {
+        "roles": ["rpc", "rpc_gateway"],
+        "cadence": SNAPSHOT_CADENCE_BLOCKS,
+        "retain": SNAPSHOT_RETAIN_PER_CLASS,
+    },
+    "support-observer": {
+        "roles": ["observer"],
+        "cadence": SNAPSHOT_CADENCE_BLOCKS,
+        "retain": SNAPSHOT_RETAIN_PER_CLASS,
+    },
+    "support-relayer": {
+        "roles": ["relayer"],
+        "cadence": SNAPSHOT_CADENCE_BLOCKS,
+        "retain": SNAPSHOT_RETAIN_PER_CLASS,
+    },
     "indexer-replay": {
         "roles": ["indexer", "explorer", "atlas_indexer", "explorer_indexer"],
-        "cadence": 10_000,
-        "retain": 2,
+        "cadence": SNAPSHOT_CADENCE_BLOCKS,
+        "retain": SNAPSHOT_RETAIN_PER_CLASS,
     },
     "indexer-full": {
         "roles": ["indexer", "explorer", "atlas_indexer", "explorer_indexer"],
-        "cadence": 25_000,
-        "retain": 1,
+        "cadence": SNAPSHOT_CADENCE_BLOCKS,
+        "retain": SNAPSHOT_RETAIN_PER_CLASS,
     },
     "archive-full": {
         "roles": ["archive", "archive_validator", "snapshot_authority"],
-        "cadence": 50_000,
-        "retain": 1,
+        "cadence": ARCHIVE_SNAPSHOT_CADENCE_BLOCKS,
+        "retain": SNAPSHOT_RETAIN_PER_CLASS,
     },
     "archive-bootstrap": {
         "roles": ["archive", "archive_validator", "snapshot_authority"],
-        "cadence": 50_000,
-        "retain": 1,
+        "cadence": SNAPSHOT_CADENCE_BLOCKS,
+        "retain": SNAPSHOT_RETAIN_PER_CLASS,
     },
 }
 
-DEFAULT_WORKER_CLASSES = list(CLASS_POLICY)
+DEFAULT_WORKER_CLASSES = [
+    "validator-pruned",
+    "support-relayer",
+    "support-observer",
+    "indexer-replay",
+    "support-rpc",
+    "archive-full",
+]
 
 ALLOWED_STATE_FILES = {
     "chain.json",
@@ -630,9 +653,62 @@ def update_catalog(
         or existing.get("snapshot_class") != entry["snapshot_class"]
     ]
     snapshots.append(entry)
+    catalog["snapshots"] = snapshots
+    enforce_latest_two_snapshot_retention(catalog)
+    snapshots = catalog["snapshots"]
     snapshots.sort(key=lambda value: (value["snapshot_class"], int(value["height"])))
     catalog["snapshots"] = snapshots
     write_signed_catalog(aegis, root, publish_root, catalog)
+
+
+def enforce_latest_two_snapshot_retention(catalog: dict[str, Any]) -> None:
+    snapshots = list(catalog.get("snapshots", []))
+    remove_keys: set[tuple[str, str]] = set()
+    events: list[dict[str, Any]] = []
+    timestamp = now()
+    for snapshot_class, policy in CLASS_POLICY.items():
+        class_entries = [
+            item
+            for item in snapshots
+            if item.get("snapshot_class") == snapshot_class
+            and item.get("status") != "deleted"
+        ]
+        class_entries.sort(
+            key=lambda value: (int(value.get("height", 0)), str(value.get("snapshot_id", ""))),
+            reverse=True,
+        )
+        protected = class_entries[: int(policy["retain"])]
+        protected_ids = {item.get("snapshot_id") for item in protected}
+        superseded_by = protected[0].get("snapshot_id") if protected else None
+        for stale in class_entries[int(policy["retain"]):]:
+            snapshot_id = str(stale.get("snapshot_id", ""))
+            local_path = stale.get("local_path")
+            if local_path:
+                shutil.rmtree(Path(local_path), ignore_errors=True)
+            remove_keys.add((snapshot_class, snapshot_id))
+            events.append(
+                {
+                    "snapshot_id": snapshot_id,
+                    "snapshot_class": snapshot_class,
+                    "height": stale.get("height"),
+                    "deleted_at": timestamp,
+                    "superseded_by": superseded_by,
+                    "reason": "latest-two-per-class-retention",
+                }
+            )
+        for kept in protected:
+            if kept.get("snapshot_id") in protected_ids:
+                kept["status"] = "published"
+                kept["retained_until"] = None
+                kept["superseded_by"] = None
+    if remove_keys:
+        catalog["snapshots"] = [
+            item
+            for item in snapshots
+            if (item.get("snapshot_class"), str(item.get("snapshot_id", ""))) not in remove_keys
+        ]
+    if events:
+        catalog["retention_events"] = (catalog.get("retention_events", []) + events)[-100:]
 
 
 def package_publish(args: argparse.Namespace, report: dict[str, Any]) -> dict[str, Any]:
@@ -827,7 +903,26 @@ def create_snapshot(args: argparse.Namespace) -> dict[str, Any]:
     report = json.loads(run(command, env=runtime_env(args.workspace, args.source_node)))
     if report.get("success") is not True:
         raise RuntimeError(f"runtime create-snapshot failed closed: {report}")
-    return package_publish(args, report)
+    source_snapshot_root = Path(str(report.get("snapshot_path", "")))
+    try:
+        return package_publish(args, report)
+    finally:
+        cleanup_generated_source_snapshot(args.workspace, source_snapshot_root)
+
+
+def cleanup_generated_source_snapshot(workspace: Path, snapshot_root: Path) -> None:
+    if not snapshot_root:
+        return
+    try:
+        expected_parent = (workspace / "data" / "snapshots").resolve()
+        resolved_snapshot = snapshot_root.resolve()
+    except OSError:
+        return
+    if resolved_snapshot.parent != expected_parent:
+        return
+    if not resolved_snapshot.name.startswith("snapshot-"):
+        return
+    shutil.rmtree(resolved_snapshot, ignore_errors=True)
 
 
 def publish_existing_snapshot(args: argparse.Namespace) -> dict[str, Any]:
@@ -1019,31 +1114,61 @@ def prune(args: argparse.Namespace) -> dict[str, Any]:
     catalog = read_catalog(args.publish_root)
     actions: list[dict[str, Any]] = []
     timestamp = now()
+    remove_keys: set[tuple[str, str]] = set()
     for snapshot_class, policy in CLASS_POLICY.items():
         entries = [
             item
             for item in catalog["snapshots"]
-            if item["snapshot_class"] == snapshot_class and item["status"] in {"published", "retired"}
+            if item["snapshot_class"] == snapshot_class and item["status"] != "deleted"
         ]
-        entries.sort(key=lambda value: int(value["height"]), reverse=True)
+        entries.sort(
+            key=lambda value: (int(value.get("height", 0)), str(value.get("snapshot_id", ""))),
+            reverse=True,
+        )
         protected = entries[: int(policy["retain"])]
         protected_ids = {item["snapshot_id"] for item in protected}
+        superseded_by = protected[0]["snapshot_id"] if protected else None
         for entry in entries:
-            if entry["snapshot_id"] in protected_ids or entry.get("pinned"):
+            if entry["snapshot_id"] in protected_ids:
                 continue
-            if entry["status"] == "published":
-                actions.append({"snapshot_id": entry["snapshot_id"], "action": "retire"})
-                if args.apply:
-                    entry["status"] = "retired"
-                    entry["retired_at"] = timestamp
-                    entry["superseded_by"] = protected[0]["snapshot_id"] if protected else None
-            elif timestamp - int(entry.get("retired_at", timestamp)) >= GRACE_SECS:
-                actions.append({"snapshot_id": entry["snapshot_id"], "action": "delete"})
-                if args.apply:
-                    shutil.rmtree(Path(entry["local_path"]), ignore_errors=True)
-                    entry["status"] = "deleted"
-                    entry["deleted_at"] = timestamp
+            snapshot_id = str(entry["snapshot_id"])
+            actions.append(
+                {
+                    "snapshot_id": snapshot_id,
+                    "snapshot_class": snapshot_class,
+                    "height": entry.get("height"),
+                    "action": "delete",
+                    "superseded_by": superseded_by,
+                    "pinned_ignored_for_hard_cap": bool(entry.get("pinned")),
+                }
+            )
+            if args.apply:
+                local_path = entry.get("local_path")
+                if local_path:
+                    shutil.rmtree(Path(local_path), ignore_errors=True)
+                remove_keys.add((snapshot_class, snapshot_id))
     if args.apply:
+        if remove_keys:
+            catalog["snapshots"] = [
+                item
+                for item in catalog["snapshots"]
+                if (item.get("snapshot_class"), str(item.get("snapshot_id", ""))) not in remove_keys
+            ]
+            catalog["retention_events"] = (
+                catalog.get("retention_events", [])
+                + [
+                    {
+                        "snapshot_id": action["snapshot_id"],
+                        "snapshot_class": action["snapshot_class"],
+                        "height": action.get("height"),
+                        "deleted_at": timestamp,
+                        "superseded_by": action.get("superseded_by"),
+                        "reason": "latest-two-per-class-retention",
+                    }
+                    for action in actions
+                    if (action["snapshot_class"], action["snapshot_id"]) in remove_keys
+                ]
+            )[-100:]
         write_signed_catalog(args.aegis, args.root, args.publish_root, catalog)
     return {"ok": True, "apply": args.apply, "actions": actions}
 

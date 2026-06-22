@@ -156,8 +156,8 @@ if manifest.get("bootstrap", {}).get("routing", {}).get("bootnodes") != ["sentry
     errors.append("operational manifest bootnode routing must pin to sentry1")
 if manifest.get("bootstrap", {}).get("routing", {}).get("seed_servers") != ["sentry2"]:
     errors.append("operational manifest seed server routing must pin to sentry2")
-if len(manifest.get("validators", [])) != 5:
-    errors.append("operational manifest must contain exactly 5 validators")
+if len(manifest.get("validators", [])) < 5:
+    errors.append("operational manifest must contain at least the 5 genesis validators")
 if manifest.get("ports") != expected_ports:
     errors.append("operational manifest ports must match the frozen public testnet port model")
 
@@ -179,6 +179,28 @@ if errors:
 PY
 
 failures=0
+read -r EXPECTED_VALIDATOR_COUNT EXPECTED_VALIDATOR_CLUSTER_SIZE EXPECTED_VALIDATOR_QUORUM < <(
+  python3 - "$MANIFEST_FILE" <<'PY'
+import json
+import sys
+
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+validator_count = len(manifest.get("validators", []))
+min_cluster = 5
+target_cluster = 7
+if validator_count == 0:
+    cluster_count = 0
+elif validator_count < min_cluster * 2:
+    cluster_count = 1
+else:
+    cluster_count = max(2, (validator_count + target_cluster - 1) // target_cluster)
+    while cluster_count > 1 and validator_count // cluster_count < min_cluster:
+        cluster_count -= 1
+cluster_size = 0 if cluster_count == 0 else (validator_count + cluster_count - 1) // cluster_count
+quorum = (validator_count * 2 + 2) // 3
+print(validator_count, cluster_size, quorum)
+PY
+)
 
 for bundle in bootnode1 bootnode2 bootnode3; do
   node_config="$BUNDLE_DIR/$bundle/config/node.toml"
@@ -200,12 +222,16 @@ for bundle in bootnode1 bootnode2 bootnode3; do
     echo "[$bundle] p2p_port must be 5620" >&2
     failures=$((failures + 1))
   fi
-  if ! rg -q '^validator_cluster_size = 7$' "$node_config"; then
-    echo "[$bundle] validator_cluster_size must be 7" >&2
+  if ! rg -q "^validator_cluster_size = ${EXPECTED_VALIDATOR_CLUSTER_SIZE}$" "$node_config"; then
+    echo "[$bundle] validator_cluster_size must be ${EXPECTED_VALIDATOR_CLUSTER_SIZE}" >&2
     failures=$((failures + 1))
   fi
-  if ! rg -q '^max_validators = 100$' "$node_config"; then
-    echo "[$bundle] max_validators must be 100" >&2
+  if ! rg -q "^validator_vote_threshold = ${EXPECTED_VALIDATOR_QUORUM}$" "$node_config"; then
+    echo "[$bundle] validator_vote_threshold must be ${EXPECTED_VALIDATOR_QUORUM}" >&2
+    failures=$((failures + 1))
+  fi
+  if ! rg -q "^max_validators = ${EXPECTED_VALIDATOR_COUNT}$" "$node_config"; then
+    echo "[$bundle] max_validators must be ${EXPECTED_VALIDATOR_COUNT}" >&2
     failures=$((failures + 1))
   fi
   if rg -q '38638|48638|58638|18080|5730|5830|5930' "$node_config"; then

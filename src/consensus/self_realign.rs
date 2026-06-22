@@ -30,6 +30,7 @@ pub const DEFAULT_SHADOW_OBSERVATION_BLOCKS: u64 = 500;
 pub const SNAPSHOT_CLASS_VALIDATOR_PRUNED: &str = "validator-pruned";
 pub const SNAPSHOT_CLASS_SUPPORT_RELAYER: &str = "support-relayer";
 pub const SNAPSHOT_CLASS_SUPPORT_RPC: &str = "support-rpc";
+pub const SNAPSHOT_CLASS_SUPPORT_OBSERVER: &str = "support-observer";
 pub const SNAPSHOT_CLASS_INDEXER_FULL: &str = "indexer-full";
 pub const SNAPSHOT_CLASS_INDEXER_REPLAY: &str = "indexer-replay";
 pub const SNAPSHOT_CLASS_ARCHIVE_FULL: &str = "archive-full";
@@ -55,10 +56,12 @@ pub fn launch_snapshot_allowed_files() -> &'static [&'static str] {
 }
 
 pub fn normalize_snapshot_class(value: &str) -> Option<&'static str> {
-    match value.trim().to_ascii_lowercase().as_str() {
+    let normalized = value.trim().to_ascii_lowercase().replace('_', "-");
+    match normalized.as_str() {
         SNAPSHOT_CLASS_VALIDATOR_PRUNED => Some(SNAPSHOT_CLASS_VALIDATOR_PRUNED),
         SNAPSHOT_CLASS_SUPPORT_RELAYER => Some(SNAPSHOT_CLASS_SUPPORT_RELAYER),
         SNAPSHOT_CLASS_SUPPORT_RPC => Some(SNAPSHOT_CLASS_SUPPORT_RPC),
+        SNAPSHOT_CLASS_SUPPORT_OBSERVER | "observer" => Some(SNAPSHOT_CLASS_SUPPORT_OBSERVER),
         SNAPSHOT_CLASS_INDEXER_FULL => Some(SNAPSHOT_CLASS_INDEXER_FULL),
         SNAPSHOT_CLASS_INDEXER_REPLAY => Some(SNAPSHOT_CLASS_INDEXER_REPLAY),
         SNAPSHOT_CLASS_ARCHIVE_FULL => Some(SNAPSHOT_CLASS_ARCHIVE_FULL),
@@ -78,12 +81,14 @@ pub fn default_allowed_restore_roles() -> Vec<String> {
 }
 
 pub fn default_allowed_restore_roles_for_class(snapshot_class: &str) -> Option<Vec<String>> {
-    let roles = match normalize_snapshot_class(snapshot_class)? {
+    let snapshot_class = normalize_snapshot_class(snapshot_class)?;
+    let roles = match snapshot_class {
         SNAPSHOT_CLASS_VALIDATOR_PRUNED => {
             vec!["validator", "onboarding_validator", "quarantined_validator"]
         }
         SNAPSHOT_CLASS_SUPPORT_RELAYER => vec!["relayer"],
         SNAPSHOT_CLASS_SUPPORT_RPC => vec!["rpc", "rpc_gateway"],
+        SNAPSHOT_CLASS_SUPPORT_OBSERVER => vec!["observer"],
         SNAPSHOT_CLASS_INDEXER_FULL | SNAPSHOT_CLASS_INDEXER_REPLAY => {
             vec!["indexer", "explorer", "atlas_indexer", "explorer_indexer"]
         }
@@ -94,6 +99,17 @@ pub fn default_allowed_restore_roles_for_class(snapshot_class: &str) -> Option<V
         _ => return None,
     };
     Some(roles.into_iter().map(str::to_string).collect())
+}
+
+pub fn snapshot_class_uses_compact_history(snapshot_class: &str) -> bool {
+    match normalize_snapshot_class(snapshot_class) {
+        Some(SNAPSHOT_CLASS_ARCHIVE_FULL)
+        | Some(SNAPSHOT_CLASS_ARCHIVE_BOOTSTRAP)
+        | Some(SNAPSHOT_CLASS_INDEXER_FULL)
+        | Some(SNAPSHOT_CLASS_INDEXER_REPLAY) => false,
+        Some(_) => true,
+        None => false,
+    }
 }
 
 pub fn normalize_snapshot_role(role: &str) -> String {
@@ -1749,6 +1765,80 @@ mod tests {
         assert!(report.file_checksums_verified);
         assert_eq!(report.snapshot_class, SNAPSHOT_CLASS_VALIDATOR_PRUNED);
         assert_eq!(report.allowed_restore_roles, vec!["validator".to_string()]);
+    }
+
+    #[test]
+    fn current_role_snapshot_classes_are_supported() {
+        assert!(snapshot_class_allows_role(
+            SNAPSHOT_CLASS_VALIDATOR_PRUNED,
+            "validator"
+        ));
+        assert!(snapshot_class_allows_role(
+            SNAPSHOT_CLASS_SUPPORT_RELAYER,
+            "relayer"
+        ));
+        assert!(snapshot_class_allows_role(
+            SNAPSHOT_CLASS_SUPPORT_OBSERVER,
+            "observer"
+        ));
+        assert!(snapshot_class_allows_role(
+            SNAPSHOT_CLASS_INDEXER_REPLAY,
+            "explorer_indexer"
+        ));
+        assert!(snapshot_class_allows_role(
+            SNAPSHOT_CLASS_SUPPORT_RPC,
+            "rpc_gateway"
+        ));
+        assert!(snapshot_class_allows_role(
+            SNAPSHOT_CLASS_ARCHIVE_FULL,
+            "archive_validator"
+        ));
+    }
+
+    #[test]
+    fn unsupported_future_role_snapshot_classes_are_rejected() {
+        assert_eq!(normalize_snapshot_class("committee"), None);
+        assert_eq!(normalize_snapshot_class("oracle"), None);
+        assert_eq!(normalize_snapshot_class("compute"), None);
+        assert!(!snapshot_class_allows_role("committee", "committee"));
+    }
+
+    #[test]
+    fn support_observer_snapshot_class_accepts_only_observer() {
+        assert_eq!(
+            normalize_snapshot_class("observer"),
+            Some(SNAPSHOT_CLASS_SUPPORT_OBSERVER)
+        );
+        assert!(snapshot_class_allows_role(
+            SNAPSHOT_CLASS_SUPPORT_OBSERVER,
+            "observer"
+        ));
+        assert!(!snapshot_class_allows_role(
+            SNAPSHOT_CLASS_SUPPORT_OBSERVER,
+            "validator"
+        ));
+    }
+
+    #[test]
+    fn current_compact_snapshot_classes_are_role_specific_support_only() {
+        assert!(snapshot_class_uses_compact_history(
+            SNAPSHOT_CLASS_VALIDATOR_PRUNED
+        ));
+        assert!(snapshot_class_uses_compact_history(
+            SNAPSHOT_CLASS_SUPPORT_RELAYER
+        ));
+        assert!(snapshot_class_uses_compact_history(
+            SNAPSHOT_CLASS_SUPPORT_OBSERVER
+        ));
+        assert!(snapshot_class_uses_compact_history(
+            SNAPSHOT_CLASS_SUPPORT_RPC
+        ));
+        assert!(!snapshot_class_uses_compact_history(
+            SNAPSHOT_CLASS_INDEXER_REPLAY
+        ));
+        assert!(!snapshot_class_uses_compact_history(
+            SNAPSHOT_CLASS_ARCHIVE_FULL
+        ));
     }
 
     #[test]

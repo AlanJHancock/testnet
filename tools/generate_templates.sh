@@ -2,14 +2,14 @@
 set -euo pipefail
 
 TEMPLATES_DIR="templates"
-BOOTNODE_TARGETS='["snr://bootstrap@bootnode1.synergyvps.xyz:5620", "snr://bootstrap@bootnode2.synergyvps.xyz:5620", "snr://bootstrap@bootnode3.synergyvps.xyz:5620"]'
-SEED_SERVER_TARGETS='["http://seed1.synergyvps.xyz:5621", "http://seed2.synergyvps.xyz:5621", "http://seed3.synergyvps.xyz:5621"]'
-BOOTSTRAP_DNS_RECORDS='["_dnsaddr.bootstrap.synergyvps.xyz"]'
-SENTRY1_TARGETS='["relay1.synergynode.xyz:5622"]'
-SENTRY2_TARGETS='["relay2.synergynode.xyz:5622"]'
-SENTRY_EDGE_TARGETS='["relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622"]'
-VALIDATOR_MESH_TARGETS='["10.69.0.1:5622", "10.69.0.2:5622", "10.69.0.3:5622", "10.69.0.4:5622", "10.69.0.5:5622"]'
-ALLOWED_VALIDATOR_ADDRESSES='["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs", "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt", "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re", "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5", "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f"]'
+BOOTNODE_TARGETS='["snr://bootstrap@bootnode1.synergy-network.io:5620", "snr://bootstrap@bootnode2.synergy-network.io:5620", "snr://bootstrap@bootnode3.synergy-network.io:5620"]'
+SEED_SERVER_TARGETS='["http://seed1.synergy-network.io:5621", "http://seed2.synergy-network.io:5621", "http://seed3.synergy-network.io:5621"]'
+BOOTSTRAP_DNS_RECORDS='["_dnsaddr.bootstrap.synergy-network.io"]'
+SENTRY1_TARGETS='["relay1.synergy-network.io:5622"]'
+SENTRY2_TARGETS='["relay2.synergy-network.io:5622"]'
+SENTRY_EDGE_TARGETS='["relay1.synergy-network.io:5622", "relay2.synergy-network.io:5622"]'
+VALIDATOR_MESH_TARGETS='["10.69.0.1:5622", "10.69.0.2:5622", "10.69.0.3:5622", "10.69.0.4:5622", "10.69.0.5:5622", "10.69.0.6:5622"]'
+ALLOWED_VALIDATOR_ADDRESSES='["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs", "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt", "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re", "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5", "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f", "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx"]'
 
 generate_template() {
     local node_type=$1
@@ -37,8 +37,14 @@ generate_template() {
     local cors_origins="[]"
     local metrics_bind="127.0.0.1:${metrics_port}"
     local strict_allowlist="false"
+    local snapshots_enabled="false"
+    local snapshot_interval_blocks="10000"
     if [[ "$compiled_profile" == "validator_node" ]]; then
         strict_allowlist="true"
+    fi
+    if [[ "$role_id" == "archive_validator" ]]; then
+        snapshots_enabled="true"
+        snapshot_interval_blocks="5000"
     fi
 
     case "$bootstrap_mode" in
@@ -115,11 +121,11 @@ algorithm = "Proof of Synergy"
 block_time_secs = 2
 epoch_length = 1000
 min_validators = 3
-validator_cluster_size = 7
+validator_cluster_size = 6
 validator_vote_threshold = 4
-max_validators = 100
+max_validators = 6
 status_ready_gate_enabled = true
-status_ready_min_validators = 3
+status_ready_min_validators = 4
 status_ready_genesis_grace_secs = 0
 allow_genesis_status_bypass = false
 mesh_settle_secs = 15
@@ -172,6 +178,10 @@ database = "rocksdb"
 path = "data/chain"
 enable_pruning = $enable_pruning
 pruning_interval = 86400
+
+[snapshots]
+enabled = $snapshots_enabled
+interval_blocks = $snapshot_interval_blocks
 
 [node]
 bootstrap_only = false

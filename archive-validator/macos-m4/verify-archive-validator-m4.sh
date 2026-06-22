@@ -293,13 +293,13 @@ if "worker" not in args:
     raise SystemExit(f"{path} must run the class-aware synergy-archive worker command")
 if "--snapshot-class" in args:
     raise SystemExit(
-        f"{path} must omit --snapshot-class so unattended worker mode publishes all configured snapshot classes"
+        f"{path} must omit --snapshot-class so unattended worker mode publishes the current scheduled snapshot classes"
     )
 required = {"--workspace", "--majority-proof-marker", "--publish-root", "--runtime", "--aegis"}
 missing = sorted(required.difference(args))
 if missing:
     raise SystemExit(f"{path} is missing required worker arguments: {missing}")
-print("archive_snapshot_worker_all_classes_default_ok=true")
+print("archive_snapshot_worker_current_classes_default_ok=true")
 PY
 if [[ "${SKIP_LAUNCHD_CHECK}" != "true" ]]; then
   for label in \

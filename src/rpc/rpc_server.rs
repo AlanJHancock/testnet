@@ -22,7 +22,8 @@ use crate::sxcp;
 use crate::sync::{SyncManager, SyncState};
 use crate::synergy_types::{CanonicalSerialize, Hash, TxId};
 use crate::synq_execution::{
-    execute_synq_transaction, SynQArtifactKey, SynQContractArtifact, SynQDeploymentRecord,
+    execute_synq_transaction_at, SynQArtifactKey, SynQContractArtifact, SynQDeploymentRecord,
+    SynQExecutionContext,
 };
 use crate::synq_receipts::{
     configured_synq_receipt_index_path, SynQIndexedReceipt, SynQReceiptIndex,
@@ -1604,6 +1605,12 @@ fn handle_json_rpc(
                     &params,
                     "operator_approved_reactivation",
                     7,
+                )
+                .unwrap_or(false),
+                operator_approved_emergency_leader_stall_recovery: rpc_bool_param(
+                    &params,
+                    "operator_approved_emergency_leader_stall_recovery",
+                    8,
                 )
                 .unwrap_or(false),
             };
@@ -5664,13 +5671,16 @@ fn replay_synq_receipt_for_legacy_transaction(
             }));
         }
     };
-    match execute_synq_transaction(
+    match execute_synq_transaction_at(
         &tx_id,
         &typed_tx,
         &verification,
         aivm_state,
         artifacts,
         deployments,
+        SynQExecutionContext {
+            runtime_block_height: block_index,
+        },
     ) {
         Ok(Some(aivm)) => Some(json!({
             "synq_verification": serde_json::to_value(&verification).unwrap_or(Value::Null),
@@ -6829,7 +6839,9 @@ mod tests {
     use crate::block::{Block, BlockChain};
     use crate::consensus::consensus_algorithm::ProofOfSynergy;
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager};
-    use crate::synq_execution::derive_synq_contract_address_from_deploy;
+    use crate::synq_execution::{
+        derive_synq_contract_address_from_deploy, synergy_contract_address_from_pqsynq_address,
+    };
     use pqsynq::{
         canonicalize_signing_payload, derive_synq_address, hash_contract_call_body,
         hash_contract_deploy_body, AlgorithmId, ChainId as PqSynQChainId, ContractCallEnvelope,
@@ -7436,7 +7448,7 @@ mod tests {
         let fixture = RpcCounterSynQFixture::new();
         let deploy = aegis_synq_legacy_transaction(fixture.deploy_payload(), 0);
         let contract_address = fixture.contract_address();
-        let contract_address_text = contract_address.to_testnet_debug_string();
+        let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address);
         let increment = aegis_synq_legacy_transaction(
             fixture.call_payload(contract_address, [0x58, 0x42, 0xf1, 0xbe], 502),
             1,
@@ -7494,7 +7506,7 @@ mod tests {
         let deploy = aegis_synq_legacy_transaction(fixture.deploy_payload(), 0);
         let deploy_hash = deploy.hash();
         let contract_address = fixture.contract_address();
-        let contract_address_text = contract_address.to_testnet_debug_string();
+        let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address);
         let increment = aegis_synq_legacy_transaction(
             fixture.call_payload(contract_address, [0x58, 0x42, 0xf1, 0xbe], 502),
             1,

@@ -10,8 +10,8 @@ use crate::consensus::validator_keys::{
 };
 use crate::crypto::pqc::{PQCCiphertext, PQCManager, PQCPrivateKey, PQCPublicKey, PQCSignature};
 use crate::validator::{
-    consensus_membership_validators, Validator, ValidatorManager, ValidatorPerformanceUpdate,
-    TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
+    consensus_membership_validators, target_validator_cluster_count, Validator, ValidatorManager,
+    ValidatorPerformanceUpdate, TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
 };
 use crate::{debug, warn};
 use serde::{Deserialize, Serialize};
@@ -203,8 +203,6 @@ pub struct DualQuorumConsensus {
 }
 
 impl DualQuorumConsensus {
-    const MIN_CONFIGURED_LAUNCH_QC_VOTES: usize = 4;
-
     pub fn new(
         validator_manager: Arc<ValidatorManager>,
         pqc_manager: Arc<Mutex<PQCManager>>,
@@ -1235,14 +1233,6 @@ impl DualQuorumConsensus {
             ));
         }
 
-        if self.configured_launch_quorum_mode(total_validators) {
-            let qc =
-                self.create_quorum_certificate(block_hash, epoch_number, round_number, votes)?;
-            self.quorum_certificates
-                .insert(block_hash.to_string(), qc.clone());
-            return Ok(qc);
-        }
-
         // Check validation quorum against the total live validator weight for the round.
         let total_live_weight = self.total_validator_weight(&active_validators);
         let validation_ratio = if total_live_weight > 0.0 {
@@ -1302,11 +1292,6 @@ impl DualQuorumConsensus {
         Self::required_votes_from_config(total_validators, Some(self.validator_vote_threshold)).0
     }
 
-    fn configured_launch_quorum_mode(&self, total_validators: usize) -> bool {
-        let bft_required = ((total_validators * 2) / 3) + 1;
-        self.required_validator_votes(total_validators) < bft_required
-    }
-
     fn has_commit_quorum(&self, live_validators: &[Validator], votes: &[Vote]) -> bool {
         if live_validators.is_empty() {
             return false;
@@ -1315,10 +1300,6 @@ impl DualQuorumConsensus {
         let required_validator_votes = self.required_validator_votes(live_validators.len());
         if votes.len() < required_validator_votes {
             return false;
-        }
-
-        if self.configured_launch_quorum_mode(live_validators.len()) {
-            return true;
         }
 
         let total_live_weight = self.total_validator_weight(live_validators);
@@ -1330,7 +1311,7 @@ impl DualQuorumConsensus {
         let required_validation_ratio = self
             .validation_quorum_threshold
             .max(TWO_THIRDS_QUORUM_THRESHOLD);
-        (cumulative_weight / total_live_weight) > required_validation_ratio
+        cumulative_weight + 0.000_001 >= total_live_weight * required_validation_ratio
     }
 
     fn record_missed_vote_timeouts(&self, live_validators: &[Validator], votes: &[Vote]) {
@@ -1661,11 +1642,11 @@ impl DualQuorumConsensus {
             signed_weight += (validator.synergy_score / 100.0).max(0.0);
         }
 
-        let (required_votes, configured_launch_quorum) =
+        let (required_votes, configured_quorum) =
             Self::required_qc_validator_votes(active_validators.len());
         if seen.len() < required_votes {
-            let quorum_label = if configured_launch_quorum {
-                "configured launch quorum"
+            let quorum_label = if configured_quorum {
+                "configured quorum"
             } else {
                 "BFT quorum"
             };
@@ -1676,21 +1657,15 @@ impl DualQuorumConsensus {
             ));
         }
 
-        if configured_launch_quorum {
-            if signed_weight <= 0.0 {
-                return Err("QC signed weight is zero".to_string());
-            }
-        } else {
-            let total_weight = active_validators
-                .iter()
-                .map(|validator| (validator.synergy_score / 100.0).max(0.0))
-                .sum::<f64>();
-            if total_weight <= 0.0 {
-                return Err("active validator set has zero voting weight".to_string());
-            }
-            if (signed_weight / total_weight) <= TWO_THIRDS_QUORUM_THRESHOLD {
-                return Err("QC signed weight is not strictly greater than two thirds".to_string());
-            }
+        let total_weight = active_validators
+            .iter()
+            .map(|validator| (validator.synergy_score / 100.0).max(0.0))
+            .sum::<f64>();
+        if total_weight <= 0.0 {
+            return Err("active validator set has zero voting weight".to_string());
+        }
+        if signed_weight + 0.000_001 < total_weight * TWO_THIRDS_QUORUM_THRESHOLD {
+            return Err("QC signed weight is below two thirds".to_string());
         }
 
         Ok(())
@@ -1713,18 +1688,13 @@ impl DualQuorumConsensus {
         total_validators: usize,
         configured: Option<usize>,
     ) -> (usize, bool) {
-        let bft_required = ((total_validators * 2) / 3) + 1;
+        let bft_required = (total_validators * 2).div_ceil(3);
         let Some(configured) = configured else {
             return (bft_required.max(1), false);
         };
 
         let configured = configured.max(1);
-        let required =
-            if configured >= bft_required || configured >= Self::MIN_CONFIGURED_LAUNCH_QC_VOTES {
-                configured
-            } else {
-                bft_required.max(1)
-            };
+        let required = configured.max(bft_required.max(1));
         (required, required != bft_required)
     }
 
@@ -2855,11 +2825,10 @@ mod tests {
         let previous = env::var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD").ok();
         env::set_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD", "3");
 
-        let (required, configured_launch_quorum) =
-            DualQuorumConsensus::required_qc_validator_votes(5);
+        let (required, configured_quorum) = DualQuorumConsensus::required_qc_validator_votes(5);
 
         assert_eq!(required, 4);
-        assert!(!configured_launch_quorum);
+        assert!(!configured_quorum);
 
         match previous {
             Some(value) => env::set_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD", value),
@@ -2868,16 +2837,32 @@ mod tests {
     }
 
     #[test]
-    fn qc_verification_uses_configured_launch_quorum_for_expanded_validator_set() {
+    fn qc_verification_accepts_dynamic_four_of_six_quorum() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
         let previous = env::var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD").ok();
         env::set_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD", "4");
 
-        let (required, configured_launch_quorum) =
-            DualQuorumConsensus::required_qc_validator_votes(6);
+        let (required, configured_quorum) = DualQuorumConsensus::required_qc_validator_votes(6);
 
         assert_eq!(required, 4);
-        assert!(configured_launch_quorum);
+        assert!(!configured_quorum);
+
+        match previous {
+            Some(value) => env::set_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD", value),
+            None => env::remove_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD"),
+        }
+    }
+
+    #[test]
+    fn qc_verification_allows_configured_quorum_above_bft() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        let previous = env::var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD").ok();
+        env::set_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD", "6");
+
+        let (required, configured_quorum) = DualQuorumConsensus::required_qc_validator_votes(6);
+
+        assert_eq!(required, 6);
+        assert!(configured_quorum);
 
         match previous {
             Some(value) => env::set_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD", value),
@@ -3937,7 +3922,7 @@ mod tests {
     }
 
     #[test]
-    fn four_of_six_equal_weight_votes_satisfy_configured_launch_quorum() {
+    fn four_of_six_equal_weight_votes_satisfy_dynamic_quorum() {
         let validator_manager = approved_validator_manager(&[
             "validator1",
             "validator2",
@@ -3982,10 +3967,9 @@ mod tests {
             consensus.required_validator_votes(active_validators.len()),
             4
         );
-        assert!(consensus.configured_launch_quorum_mode(active_validators.len()));
         assert!(
             consensus.has_commit_quorum(&active_validators, &votes),
-            "configured Testnet launch quorum accepts 4 collected votes across six active validators"
+            "4 collected votes across six active validators should satisfy ceil(2/3) quorum"
         );
 
         let five_votes = [
@@ -4015,7 +3999,7 @@ mod tests {
         .collect::<Vec<_>>();
         assert!(
             consensus.has_commit_quorum(&active_validators, &five_votes),
-            "5 of 6 equal-weight votes is strictly greater than two thirds"
+            "5 of 6 equal-weight votes should also satisfy ceil(2/3) quorum"
         );
     }
 
@@ -4066,7 +4050,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_launch_quorum_does_not_override_bft_for_five_validators() {
+    fn configured_quorum_does_not_override_bft_for_five_validators() {
         let validator_manager = approved_validator_manager(&[
             "validator1",
             "validator2",
@@ -4112,7 +4096,7 @@ mod tests {
         );
         assert!(
             !consensus.has_commit_quorum(&active_validators, &votes),
-            "configured launch quorum must not allow 3 collected votes across five active validators"
+            "configured quorum must not allow 3 collected votes across five active validators"
         );
     }
 
@@ -4400,9 +4384,12 @@ impl ValidatorRotation {
         let active_validators = self.validator_manager.get_active_validators();
         let epoch_randomness = self.get_current_epoch_randomness();
 
-        // Calculate number of clusters
-        let num_clusters =
-            (active_validators.len() as f64 / self.target_cluster_size as f64).ceil() as usize;
+        // Use the canonical cluster policy so a new cluster is not created
+        // until it can contain at least five validators.
+        let num_clusters = target_validator_cluster_count(active_validators.len());
+        if num_clusters == 0 {
+            return;
+        }
 
         // Assign validators to clusters using deterministic randomness
         for validator in &active_validators {

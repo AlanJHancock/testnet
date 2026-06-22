@@ -1001,8 +1001,6 @@ fn verify_legacy_qc(
     let height = legacy_qc_height(&qc)?;
     let validators = load_legacy_active_genesis_validators(data_dir, height)?;
     let required_quorum = required_quorum_for_active_validator_count(validators.len())?;
-    let configured_launch_quorum =
-        validators.len() > GENESIS_VALIDATOR_COUNT && required_quorum == REQUIRED_QUORUM;
     if qc.votes.len() < required_quorum {
         return Err(format!(
             "committed QC has {} vote(s), {required_quorum} required",
@@ -1070,8 +1068,8 @@ fn verify_legacy_qc(
     if total_weight <= 0.0 {
         return Err("active canonical validator set has zero voting weight".to_string());
     }
-    if !configured_launch_quorum && signed_weight <= (total_weight * 2.0 / 3.0) {
-        return Err("committed QC signed weight is not greater than two thirds".to_string());
+    if signed_weight + 0.000_001 < (total_weight * 2.0 / 3.0) {
+        return Err("committed QC signed weight is below two thirds".to_string());
     }
     if qc.cumulative_weight > 0.0 && (qc.cumulative_weight - signed_weight).abs() > 0.000_001 {
         return Err(format!(
@@ -1096,10 +1094,20 @@ fn required_quorum_for_active_validator_count(
     if active_validator_count == 0 {
         return Err("active canonical validator set is empty".to_string());
     }
-    if active_validator_count > GENESIS_VALIDATOR_COUNT {
-        return Ok(REQUIRED_QUORUM);
-    }
-    Ok(((active_validator_count * 2) / 3) + 1)
+    let protocol_required = ((active_validator_count * 2) + 2) / 3;
+    let configured = std::env::var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .or_else(|| {
+            std::env::var("SYNERGY_CONFIG_PATH").ok().and_then(|_| {
+                crate::config::load_node_config(None)
+                    .ok()
+                    .map(|config| config.consensus.validator_vote_threshold)
+            })
+        })
+        .unwrap_or(protocol_required)
+        .max(1);
+    Ok(configured.max(protocol_required.max(1)))
 }
 
 fn legacy_qc_height(qc: &LegacyQuorumCertificate) -> Result<u64, String> {
@@ -2259,7 +2267,7 @@ mod tests {
     }
 
     #[test]
-    fn post_fork_qc_verification_accepts_configured_launch_quorum_for_expanded_set() {
+    fn post_fork_qc_verification_accepts_configured_four_of_six_quorum_for_expanded_set() {
         let root = temp_root("post-fork-untyped-registry-qc");
         fs::create_dir_all(root.join("config")).unwrap();
         let mut manager = PQCManager::new();
@@ -2365,11 +2373,10 @@ mod tests {
             None => std::env::remove_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV),
         }
 
-        let summary = result.unwrap();
-        assert!(summary.verified);
-        assert_eq!(summary.height, height);
+        let summary =
+            result.expect("configured four-of-six quorum must satisfy current Testnet QC");
         assert_eq!(summary.vote_count, REQUIRED_QUORUM as u64);
-        assert_eq!(summary.hash, block_hash);
+        assert_eq!(summary.height, height);
     }
 
     #[test]

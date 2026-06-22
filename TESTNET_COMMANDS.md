@@ -25,17 +25,17 @@ https://testnet-atlas-api.synergy-network.io
 ## Bootnodes
 
 ```text
-snr://bootstrap@bootnode1.synergynode.xyz:5620
-snr://bootstrap@bootnode2.synergynode.xyz:5620
-snr://bootstrap@bootnode3.synergynode.xyz:5620
+snr://bootstrap@bootnode1.synergy-network.io:5620
+snr://bootstrap@bootnode2.synergy-network.io:5620
+snr://bootstrap@bootnode3.synergy-network.io:5620
 ```
 
 ## Seed Servers
 
 ```text
-http://seed1.synergynode.xyz:5621
-http://seed2.synergynode.xyz:5621
-http://seed3.synergynode.xyz:5621
+http://seed1.synergy-network.io:5621
+http://seed2.synergy-network.io:5621
+http://seed3.synergy-network.io:5621
 ```
 
 ## Process Status
@@ -108,15 +108,15 @@ echo "Local: $LOCAL | Public: $PUBLIC | Diff: $((PUBLIC - LOCAL))"
 ## Seed Service Checks
 
 ```bash
-curl -s http://seed1.synergynode.xyz:5621/healthz
-curl -s http://seed2.synergynode.xyz:5621/healthz
-curl -s http://seed3.synergynode.xyz:5621/healthz
+curl -s http://seed1.synergy-network.io:5621/healthz
+curl -s http://seed2.synergy-network.io:5621/healthz
+curl -s http://seed3.synergy-network.io:5621/healthz
 
-curl -s http://seed1.synergynode.xyz:5621/peers
-curl -s http://seed1.synergynode.xyz:5621/peer-list.json
-curl -s http://seed1.synergynode.xyz:5621/dns/bootstrap.txt
+curl -s http://seed1.synergy-network.io:5621/peers
+curl -s http://seed1.synergy-network.io:5621/peer-list.json
+curl -s http://seed1.synergy-network.io:5621/dns/bootstrap.txt
 
-curl -s -X POST http://seed1.synergynode.xyz:5621/peers/register \
+curl -s -X POST http://seed1.synergy-network.io:5621/peers/register \
   -H 'Content-Type: application/json' \
   -d '{"endpoint":"<your_public_ip>:5622","node_id":"<your_node_id>"}'
 ```
@@ -124,15 +124,15 @@ curl -s -X POST http://seed1.synergynode.xyz:5621/peers/register \
 ## Bootnode Connectivity
 
 ```bash
-nc -zv bootnode1.synergynode.xyz 5620
-nc -zv bootnode2.synergynode.xyz 5620
-nc -zv bootnode3.synergynode.xyz 5620
+nc -zv bootnode1.synergy-network.io 5620
+nc -zv bootnode2.synergy-network.io 5620
+nc -zv bootnode3.synergy-network.io 5620
 
 for host in bootnode1 bootnode2 bootnode3; do
-  nc -zv "${host}.synergynode.xyz" 5620 2>&1
+  nc -zv "${host}.synergy-network.io" 5620 2>&1
 done
 
-timeout 5 bash -c 'echo >/dev/tcp/bootnode1.synergynode.xyz/5620' && echo "open" || echo "closed"
+timeout 5 bash -c 'echo >/dev/tcp/bootnode1.synergy-network.io/5620' && echo "open" || echo "closed"
 ```
 
 ## External Accessibility
@@ -176,8 +176,8 @@ tail -f ~/.synergy/testnet/node-01/data/logs/validator.log
 curl -s http://127.0.0.1:5621/healthz
 curl -s -X DELETE http://127.0.0.1:5621/peers
 
-curl -s http://seed1.synergynode.xyz:5621/peers | python3 -m json.tool
-curl -s http://seed1.synergynode.xyz:5621/peer-list.json | python3 -m json.tool
+curl -s http://seed1.synergy-network.io:5621/peers | python3 -m json.tool
+curl -s http://seed1.synergy-network.io:5621/peer-list.json | python3 -m json.tool
 ```
 
 ## Quick Smoke Check
@@ -187,7 +187,7 @@ echo "=== Process ===" && pgrep -la synergy-testnet || echo "NOT RUNNING"
 echo "=== P2P ===" && lsof -iTCP:5622 -sTCP:LISTEN || echo "NOT LISTENING"
 echo "=== RPC ===" && lsof -iTCP:5640 -sTCP:LISTEN || echo "NOT LISTENING"
 echo "=== Metrics ===" && lsof -iTCP:6030 -sTCP:LISTEN || echo "NOT LISTENING"
-echo "=== Seed Health ===" && curl -s http://seed1.synergynode.xyz:5621/healthz
+echo "=== Seed Health ===" && curl -s http://seed1.synergy-network.io:5621/healthz
 echo "=== Latest Block ===" && curl -s -X POST http://127.0.0.1:5640 \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"synergy_getLatestBlock","params":[],"id":1}'

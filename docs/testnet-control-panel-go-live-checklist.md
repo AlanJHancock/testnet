@@ -9,7 +9,7 @@ Create the missing `testnet-*` records from:
 - `docs/testnet-dns-records-to-create.md`
 - `docs/testnet-dns-final.csv`
 
-The 3 bootnodes and 3 seed services on `synergynode.xyz` are already sufficient.
+The 3 bootnodes and 3 seed services on `synergy-network.io` are already sufficient.
 
 ## 2. Issue TLS Certificates For The New Hostnames — DONE (scripts updated)
 
@@ -72,9 +72,9 @@ Relevant files:
 
 The control panel provisioning flow now best-effort registers nodes against:
 
-- `http://seed1.synergynode.xyz:5621/peers/register`
-- `http://seed2.synergynode.xyz:5621/peers/register`
-- `http://seed3.synergynode.xyz:5621/peers/register`
+- `http://seed1.synergy-network.io:5621/peers/register`
+- `http://seed2.synergy-network.io:5621/peers/register`
+- `http://seed3.synergy-network.io:5621/peers/register`
 
 So the seed services must be running the current bundle that exposes `/peers/register`.
 

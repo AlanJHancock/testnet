@@ -668,7 +668,7 @@
   - `synergy-testnet`: commit `657f459`, tag `v9.0.15`
 - Control Panel update prepared:
   - bumped Synergy Node Control Panel to `9.0.15`
-  - non-genesis public-IP validator setup now keeps bootnodes, seed services, and dnsaddr bootstrap enabled while also pinning `relay1.synergynode.xyz:5622` and `relay2.synergynode.xyz:5622` as persistent upstreams
+  - non-genesis public-IP validator setup now keeps bootnodes, seed services, and dnsaddr bootstrap enabled while also pinning `relay1.synergy-network.io:5622` and `relay2.synergy-network.io:5622` as persistent upstreams
   - existing genesis validator setup still uses the private WireGuard validator mesh
   - setup refresh logic now preserves public validator relayer upstreams when rebuilding `peers.toml`
   - verified with:

@@ -188,7 +188,7 @@ pub fn fault_tolerance_f(cluster_size: usize) -> usize {
 }
 
 pub fn quorum_threshold(cluster_size: usize) -> usize {
-    (2 * cluster_size) / 3 + 1
+    (2 * cluster_size).div_ceil(3)
 }
 
 pub fn cluster_count_for_active_validators(
@@ -888,7 +888,7 @@ mod tests {
         assert_eq!(fault_tolerance_f(5), 1);
         assert_eq!(quorum_threshold(5), 4);
         assert_eq!(fault_tolerance_f(12), 3);
-        assert_eq!(quorum_threshold(12), 9);
+        assert_eq!(quorum_threshold(12), 8);
     }
 
     #[test]

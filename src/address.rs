@@ -175,7 +175,7 @@ pub fn address_kind(address: &str) -> AddressKind {
         AddressKind::Validator
     } else if address.starts_with("synw") || address.starts_with("synu") {
         AddressKind::Wallet
-    } else if address.starts_with("synq") {
+    } else if address.starts_with("synq") || address.starts_with("sync") {
         AddressKind::Contract
     } else if address.starts_with("synb") {
         AddressKind::BurnAddress
@@ -192,7 +192,7 @@ pub fn registry_entry_for_prefix(prefix: &str) -> Option<AddressRegistryEntry> {
         "syngrp1" => AddressKind::ValidatorCluster,
         "synw" | "synu" => AddressKind::Wallet,
         "synv1" | "synv2" | "synv3" | "synv4" | "synv5" => AddressKind::Validator,
-        "synq" => AddressKind::Contract,
+        "synq" | "sync" => AddressKind::Contract,
         "synb" => AddressKind::BurnAddress,
         _ => return None,
     };
@@ -390,13 +390,15 @@ mod tests {
 
     #[test]
     fn generic_address_is_41_chars() {
-        let addr = generate_generic_address("synq", ZERO_KEY_HEX);
+        let addr = generate_generic_address("sync", ZERO_KEY_HEX);
         assert_eq!(
             addr.len(),
             TARGET_ADDRESS_LEN,
             "generic address must be 41 chars: {}",
             addr
         );
+        assert!(addr.starts_with("sync1"));
+        assert_eq!(address_kind(&addr), AddressKind::Contract);
     }
 
     #[test]
@@ -420,6 +422,7 @@ mod tests {
             generate_class_based_address(ZERO_KEY_BYTES, 2),
             generate_cluster_address("seed", 3),
             generate_generic_address("synq", ZERO_KEY_HEX),
+            generate_generic_address("sync", ZERO_KEY_HEX),
         ];
         for addr in &addresses {
             assert!(is_valid_address(addr), "expected valid address: {}", addr);

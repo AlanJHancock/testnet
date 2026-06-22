@@ -8,14 +8,15 @@ use crate::consensus::dual_quorum::DualQuorumConsensus;
 use crate::consensus::self_realign::{
     apply_chain_state_wipe_plan, build_chain_state_wipe_plan, build_snapshot_restore_plan,
     default_allowed_restore_roles_for_class, fail_closed_mutation_response,
-    launch_snapshot_allowed_files, sign_snapshot_manifest, verify_signed_snapshot_manifest,
-    QuarantineMarker, RealignmentState, ShadowDecisionRecord, ShadowObservation,
-    SignedSnapshotManifest, SnapshotBuildInput, SnapshotQcEvidence, SnapshotSchedule,
-    SnapshotVerificationPolicy, ValidatorDutyGate, WipeApplyPreconditions,
+    launch_snapshot_allowed_files, sign_snapshot_manifest, snapshot_class_uses_compact_history,
+    verify_signed_snapshot_manifest, QuarantineMarker, RealignmentState, ShadowDecisionRecord,
+    ShadowObservation, SignedSnapshotManifest, SnapshotBuildInput, SnapshotQcEvidence,
+    SnapshotSchedule, SnapshotVerificationPolicy, ValidatorDutyGate, WipeApplyPreconditions,
     DEFAULT_SHADOW_OBSERVATION_BLOCKS, SNAPSHOT_CLASS_VALIDATOR_PRUNED,
 };
 use crate::crypto::aegis_pqvm::AegisPqvmSigner;
 use crate::synergy_types::{AegisPqKeyRole, Epoch};
+use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -32,6 +33,8 @@ const EXPECTED_GENESIS_HASH: &str =
     "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789";
 const DIAGNOSTIC_STALE_TRANSIENT_VOTE_LOCK_SECS: u64 = 30;
 const SHADOW_REJOIN_EPOCH_SIZE: u64 = 1_000;
+const PRUNED_SNAPSHOT_HISTORY_WINDOW_BLOCKS: u64 = 5_000;
+const SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT: u64 = 175_518;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct VoteLockEntry {
@@ -107,6 +110,7 @@ pub struct RejoinRequestOptions {
     pub rejoin_at_finalized_safe_boundary: bool,
     pub cluster_marks_pending_reactivation: bool,
     pub operator_approved_reactivation: bool,
+    pub operator_approved_emergency_leader_stall_recovery: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1015,6 +1019,8 @@ fn copy_snapshot_state_files(
     data_dir: &Path,
     snapshot_dir: &Path,
     snapshot_height: u64,
+    snapshot_class: &str,
+    snapshot_block: &BlockSummary,
     materialized_lock: Option<&SnapshotCanonicalLockMaterialization>,
 ) -> Result<usize, String> {
     fs::create_dir_all(snapshot_dir).map_err(|error| {
@@ -1042,8 +1048,27 @@ fn copy_snapshot_state_files(
     if copied == 0 {
         return Err("snapshot source contains no launch-approved chain/state files".to_string());
     }
-    constrain_snapshot_metadata_to_height(snapshot_dir, snapshot_height, materialized_lock)?;
+    constrain_snapshot_metadata_to_height(
+        snapshot_dir,
+        snapshot_height,
+        snapshot_class,
+        snapshot_block,
+        materialized_lock,
+    )?;
     Ok(copied)
+}
+
+fn block_height_from_json(value: &Value) -> Option<u64> {
+    for key in ["height", "block_height", "block_index"] {
+        if let Some(height) = value.get(key).and_then(Value::as_u64) {
+            return Some(height);
+        }
+    }
+    value.get("block").and_then(|block| {
+        ["height", "block_height", "block_index"]
+            .iter()
+            .find_map(|key| block.get(*key).and_then(Value::as_u64))
+    })
 }
 
 fn qc_height_from_json(value: &Value) -> Option<u64> {
@@ -1070,11 +1095,294 @@ fn qc_height_from_json(value: &Value) -> Option<u64> {
     })
 }
 
+fn snapshot_class_uses_pruned_history(snapshot_class: &str) -> bool {
+    snapshot_class_uses_compact_history(snapshot_class)
+}
+
+fn keep_height_for_pruned_snapshot(height: u64, snapshot_height: u64) -> bool {
+    if height > snapshot_height {
+        return false;
+    }
+    height >= snapshot_height.saturating_sub(PRUNED_SNAPSHOT_HISTORY_WINDOW_BLOCKS)
+        || height == SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT
+}
+
+struct PrunedChainJsonVisitor<'a> {
+    writer: &'a mut dyn Write,
+    snapshot_height: u64,
+    snapshot_block: &'a BlockSummary,
+    kept: &'a mut usize,
+    found_snapshot_height: &'a mut bool,
+}
+
+impl<'de> Visitor<'de> for PrunedChainJsonVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON array of chain blocks")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut first = true;
+        self.writer.write_all(b"[").map_err(de::Error::custom)?;
+        while let Some(value) = seq.next_element::<Value>()? {
+            let height = block_height_from_json(&value)
+                .ok_or_else(|| de::Error::custom("snapshot chain block missing height"))?;
+            if keep_height_for_pruned_snapshot(height, self.snapshot_height) {
+                if !first {
+                    self.writer.write_all(b",").map_err(de::Error::custom)?;
+                }
+                serde_json::to_writer(&mut *self.writer, &value).map_err(de::Error::custom)?;
+                first = false;
+                *self.kept += 1;
+                if height == self.snapshot_height {
+                    *self.found_snapshot_height = true;
+                }
+            }
+        }
+        if !*self.found_snapshot_height && self.snapshot_block.height == self.snapshot_height {
+            if !first {
+                self.writer.write_all(b",").map_err(de::Error::custom)?;
+            }
+            serde_json::to_writer(
+                &mut *self.writer,
+                &json!({
+                    "block_index": self.snapshot_block.height,
+                    "height": self.snapshot_block.height,
+                    "hash": self.snapshot_block.hash,
+                    "parent_hash": self.snapshot_block.parent_hash,
+                    "previous_hash": self.snapshot_block.parent_hash,
+                    "validator_id": self.snapshot_block.validator_id,
+                    "validator": self.snapshot_block.validator_id,
+                    "nonce": self.snapshot_block.height,
+                    "timestamp": 0,
+                    "transactions": [],
+                    "tx_count": 0,
+                    "transactions_root": self.snapshot_block.transactions_root,
+                    "proposer_public_key": [],
+                    "block_signature": [],
+                    "block_signature_algorithm": "",
+                }),
+            )
+            .map_err(de::Error::custom)?;
+            *self.kept += 1;
+            *self.found_snapshot_height = true;
+        }
+        self.writer.write_all(b"]").map_err(de::Error::custom)
+    }
+}
+
+fn constrain_snapshot_chain_json_to_pruned_window(
+    snapshot_dir: &Path,
+    snapshot_height: u64,
+    snapshot_block: &BlockSummary,
+) -> Result<(), String> {
+    let chain_path = snapshot_dir.join("chain.json");
+    if !chain_path.is_file() {
+        return Ok(());
+    }
+    let source = fs::File::open(&chain_path)
+        .map_err(|error| format!("open {}: {error}", chain_path.display()))?;
+    let tmp_path = chain_path.with_extension("json.tmp");
+    let mut tmp = fs::File::create(&tmp_path)
+        .map_err(|error| format!("create {}: {error}", tmp_path.display()))?;
+    let mut kept = 0usize;
+    let mut found_snapshot_height = false;
+    let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(source));
+    serde::de::Deserializer::deserialize_seq(
+        &mut deserializer,
+        PrunedChainJsonVisitor {
+            writer: &mut tmp,
+            snapshot_height,
+            snapshot_block,
+            kept: &mut kept,
+            found_snapshot_height: &mut found_snapshot_height,
+        },
+    )
+    .map_err(|error| {
+        format!(
+            "prune {} to validator window: {error}",
+            chain_path.display()
+        )
+    })?;
+    deserializer
+        .end()
+        .map_err(|error| format!("{} has trailing data: {error}", chain_path.display()))?;
+    tmp.flush()
+        .map_err(|error| format!("flush {}: {error}", tmp_path.display()))?;
+    if kept == 0 || !found_snapshot_height {
+        return Err(format!(
+            "chain.json has no block at snapshot height {snapshot_height}"
+        ));
+    }
+    fs::rename(&tmp_path, &chain_path).map_err(|error| {
+        format!(
+            "replace pruned {} with {}: {error}",
+            chain_path.display(),
+            tmp_path.display()
+        )
+    })
+}
+
+fn compact_chain_boundary_from_snapshot(
+    snapshot_dir: &Path,
+) -> Result<Option<BlockSummary>, String> {
+    let chain_path = snapshot_dir.join("chain.json");
+    if !chain_path.is_file() {
+        return Ok(None);
+    }
+    let value: Value = serde_json::from_slice(
+        &fs::read(&chain_path)
+            .map_err(|error| format!("read {}: {error}", chain_path.display()))?,
+    )
+    .map_err(|error| format!("parse {}: {error}", chain_path.display()))?;
+    let blocks = value
+        .as_array()
+        .ok_or_else(|| format!("{} must be a JSON array", chain_path.display()))?;
+    let Some(first) = blocks.first() else {
+        return Ok(None);
+    };
+    let height = block_height_from_json(first)
+        .ok_or_else(|| format!("first block in {} has no height", chain_path.display()))?;
+    if height == 0 {
+        return Ok(None);
+    }
+    let hash = string_field(first, &["hash", "block_hash"]).ok_or_else(|| {
+        format!(
+            "first compact block h{height} in {} has no hash",
+            chain_path.display()
+        )
+    })?;
+    let parent_hash = string_field(first, &["previous_hash", "parent_hash"]).ok_or_else(|| {
+        format!(
+            "first compact block h{height} in {} has no parent hash",
+            chain_path.display()
+        )
+    })?;
+    Ok(Some(BlockSummary {
+        height,
+        hash,
+        parent_hash,
+        validator_id: string_field(first, &["validator_id", "validator"]).unwrap_or_default(),
+        transactions_root: string_field(first, &["transactions_root", "tx_root"])
+            .unwrap_or_default(),
+    }))
+}
+
+fn canonical_lock_matches_block(value: &Value, block: &BlockSummary) -> bool {
+    let hash = string_field(value, &["block_hash", "hash"]);
+    let parent_hash = string_field(value, &["parent_hash", "previous_hash"]);
+    hash.as_deref() == Some(block.hash.as_str())
+        && parent_hash.as_deref() == Some(block.parent_hash.as_str())
+}
+
+fn snapshot_materialized_canonical_lock(
+    block: &BlockSummary,
+    finality_source: &str,
+    qc_vote_count: Option<u64>,
+) -> Value {
+    let mut value = json!({
+        "height": block.height,
+        "hash": block.hash,
+        "block_hash": block.hash,
+        "parent_hash": block.parent_hash,
+        "validator_id": block.validator_id,
+        "transactions_root": block.transactions_root,
+        "qc_block_hash": block.hash,
+        "qc_hash": block.hash,
+        "written_at_unix_secs": now_secs(),
+        "finality_source": finality_source,
+        "snapshot_only_materialized": true,
+    });
+    if let Some(qc_vote_count) = qc_vote_count {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("qc_vote_count".to_string(), json!(qc_vote_count));
+        }
+    }
+    value
+}
+
+fn constrain_jsonl_state_to_snapshot_height(
+    path: &Path,
+    snapshot_height: u64,
+    pruned_history: bool,
+    height_from_json: fn(&Value) -> Option<u64>,
+    require_snapshot_height: bool,
+    label: &str,
+) -> Result<(), String> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let source =
+        fs::File::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    let tmp_path = path.with_extension("jsonl.tmp");
+    let mut tmp = fs::File::create(&tmp_path)
+        .map_err(|error| format!("create {}: {error}", tmp_path.display()))?;
+    let mut found_snapshot_height = false;
+    let mut kept = 0usize;
+    for line in BufReader::new(source).lines() {
+        let line = line.map_err(|error| format!("read {}: {error}", path.display()))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = serde_json::from_str::<Value>(&line)
+            .map_err(|error| format!("parse {label} in {}: {error}", path.display()))?;
+        let Some(height) = height_from_json(&value) else {
+            return Err(format!("{label} entry in {} has no height", path.display()));
+        };
+        if height > snapshot_height {
+            continue;
+        }
+        if pruned_history && !keep_height_for_pruned_snapshot(height, snapshot_height) {
+            continue;
+        }
+        if height == snapshot_height {
+            found_snapshot_height = true;
+        }
+        writeln!(tmp, "{line}")
+            .map_err(|error| format!("write {}: {error}", tmp_path.display()))?;
+        kept += 1;
+    }
+    tmp.flush()
+        .map_err(|error| format!("flush {}: {error}", tmp_path.display()))?;
+    if require_snapshot_height && (kept == 0 || !found_snapshot_height) {
+        return Err(format!(
+            "{label} has no entry at snapshot height {snapshot_height}"
+        ));
+    }
+    fs::rename(&tmp_path, path).map_err(|error| {
+        format!(
+            "replace constrained {} with {}: {error}",
+            path.display(),
+            tmp_path.display()
+        )
+    })
+}
+
 fn constrain_snapshot_metadata_to_height(
     snapshot_dir: &Path,
     snapshot_height: u64,
+    snapshot_class: &str,
+    snapshot_block: &BlockSummary,
     materialized_lock: Option<&SnapshotCanonicalLockMaterialization>,
 ) -> Result<(), String> {
+    let pruned_history = snapshot_class_uses_pruned_history(snapshot_class);
+    if pruned_history {
+        constrain_snapshot_chain_json_to_pruned_window(
+            snapshot_dir,
+            snapshot_height,
+            snapshot_block,
+        )?;
+    }
+    let compact_boundary = if pruned_history {
+        compact_chain_boundary_from_snapshot(snapshot_dir)?
+    } else {
+        None
+    };
+
     let canonical_path = snapshot_dir.join("canonical_locks.json");
     if canonical_path.is_file() {
         let canonical_value: Value =
@@ -1109,21 +1417,32 @@ fn constrain_snapshot_metadata_to_height(
             }
             canonical_map.insert(
                 snapshot_height.to_string(),
-                json!({
-                    "height": snapshot_height,
-                    "hash": lock.block.hash,
-                    "block_hash": lock.block.hash,
-                    "parent_hash": lock.block.parent_hash,
-                    "validator_id": lock.block.validator_id,
-                    "transactions_root": lock.block.transactions_root,
-                    "qc_block_hash": lock.block.hash,
-                    "qc_hash": lock.block.hash,
-                    "written_at_unix_secs": now_secs(),
-                    "qc_vote_count": lock.qc_vote_count,
-                    "finality_source": "verified_committed_qc",
-                    "snapshot_only_materialized": true,
-                }),
+                snapshot_materialized_canonical_lock(
+                    &lock.block,
+                    "verified_committed_qc",
+                    Some(lock.qc_vote_count),
+                ),
             );
+        }
+        if let Some(boundary) = compact_boundary.as_ref() {
+            let boundary_key = boundary.height.to_string();
+            if let Some(existing) = canonical_map.get(&boundary_key) {
+                if !canonical_lock_matches_block(existing, boundary) {
+                    return Err(format!(
+                        "snapshot compact chain boundary h{} does not match canonical lock",
+                        boundary.height
+                    ));
+                }
+            } else {
+                canonical_map.insert(
+                    boundary_key,
+                    snapshot_materialized_canonical_lock(
+                        boundary,
+                        "snapshot_compact_chain_boundary",
+                        None,
+                    ),
+                );
+            }
         }
         fs::write(
             &canonical_path,
@@ -1133,58 +1452,22 @@ fn constrain_snapshot_metadata_to_height(
         .map_err(|error| format!("write constrained {}: {error}", canonical_path.display()))?;
     }
 
-    let committed_qcs_path = snapshot_dir.join("committed_qcs.jsonl");
-    if committed_qcs_path.is_file() {
-        let source = fs::File::open(&committed_qcs_path)
-            .map_err(|error| format!("open {}: {error}", committed_qcs_path.display()))?;
-        let tmp_path = committed_qcs_path.with_extension("jsonl.tmp");
-        let mut tmp = fs::File::create(&tmp_path)
-            .map_err(|error| format!("create {}: {error}", tmp_path.display()))?;
-        let mut found_snapshot_qc = false;
-        let mut kept = 0usize;
-        for line in BufReader::new(source).lines() {
-            let line =
-                line.map_err(|error| format!("read {}: {error}", committed_qcs_path.display()))?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let value = serde_json::from_str::<Value>(&line).map_err(|error| {
-                format!(
-                    "parse committed QC in {}: {error}",
-                    committed_qcs_path.display()
-                )
-            })?;
-            let Some(height) = qc_height_from_json(&value) else {
-                return Err(format!(
-                    "committed QC entry in {} has no height",
-                    committed_qcs_path.display()
-                ));
-            };
-            if height > snapshot_height {
-                continue;
-            }
-            if height == snapshot_height {
-                found_snapshot_qc = true;
-            }
-            writeln!(tmp, "{line}")
-                .map_err(|error| format!("write {}: {error}", tmp_path.display()))?;
-            kept += 1;
-        }
-        tmp.flush()
-            .map_err(|error| format!("flush {}: {error}", tmp_path.display()))?;
-        if kept == 0 || !found_snapshot_qc {
-            return Err(format!(
-                "committed_qcs.jsonl has no committed QC at snapshot height {snapshot_height}"
-            ));
-        }
-        fs::rename(&tmp_path, &committed_qcs_path).map_err(|error| {
-            format!(
-                "replace constrained {} with {}: {error}",
-                committed_qcs_path.display(),
-                tmp_path.display()
-            )
-        })?;
-    }
+    constrain_jsonl_state_to_snapshot_height(
+        &snapshot_dir.join("committed_qcs.jsonl"),
+        snapshot_height,
+        pruned_history,
+        qc_height_from_json,
+        true,
+        "committed_qcs.jsonl",
+    )?;
+    constrain_jsonl_state_to_snapshot_height(
+        &snapshot_dir.join("committed_blocks.jsonl"),
+        snapshot_height,
+        pruned_history,
+        block_height_from_json,
+        false,
+        "committed_blocks.jsonl",
+    )?;
     Ok(())
 }
 
@@ -2341,6 +2624,16 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
         );
     }
 
+    let snapshot_class = options
+        .snapshot_class
+        .unwrap_or_else(|| SNAPSHOT_CLASS_VALIDATOR_PRUNED.to_string());
+    let allowed_restore_roles = if options.allowed_restore_roles.is_empty() {
+        default_allowed_restore_roles_for_class(&snapshot_class)
+            .ok_or_else(|| format!("unsupported snapshot class {snapshot_class}"))?
+    } else {
+        options.allowed_restore_roles
+    };
+
     let snapshot_root = crate::utils::resolve_data_path("data/snapshots");
     fs::create_dir_all(&snapshot_root)
         .map_err(|error| format!("create snapshot root {}: {error}", snapshot_root.display()))?;
@@ -2356,6 +2649,8 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
         &data_dir,
         &snapshot_dir,
         snapshot_height,
+        &snapshot_class,
+        &block,
         materialized_lock.as_ref(),
     )?;
 
@@ -2372,15 +2667,6 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
     let signer_public_key = signer
         .public_key_record(&signing_key_id)
         .map_err(|error| error.to_string())?;
-    let snapshot_class = options
-        .snapshot_class
-        .unwrap_or_else(|| SNAPSHOT_CLASS_VALIDATOR_PRUNED.to_string());
-    let allowed_restore_roles = if options.allowed_restore_roles.is_empty() {
-        default_allowed_restore_roles_for_class(&snapshot_class)
-            .ok_or_else(|| format!("unsupported snapshot class {snapshot_class}"))?
-    } else {
-        options.allowed_restore_roles
-    };
     let manifest = crate::consensus::self_realign::create_snapshot_manifest(SnapshotBuildInput {
         state_dir: snapshot_dir.clone(),
         snapshot_class,
@@ -3158,7 +3444,7 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
             "request-rejoin refused: 500-block process proof is not SHADOW_PASSED".to_string(),
         );
     }
-    if !epoch_blockers.is_empty() {
+    if !epoch_blockers.is_empty() && !options.operator_approved_emergency_leader_stall_recovery {
         return Ok(fail_closed_rejoin_response(
             &validator_id,
             if shadow_passed {
@@ -3173,17 +3459,30 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
     let local_block = read_block_at_height(common_height)?;
     let local_common_match = local_block.hash == common_hash;
     let qc = latest_verified_qc_summary()?;
+    if options.operator_approved_emergency_leader_stall_recovery && qc.height != common_height {
+        return Ok(fail_closed_rejoin_response(
+            &validator_id,
+            "QUARANTINED",
+            vec![format!(
+                "emergency leader-stall rejoin requires common_height {common_height} to equal latest finalized QC height {}",
+                qc.height
+            )],
+            shadow,
+        ));
+    }
     let lock_height = latest_canonical_lock_height().unwrap_or(0);
     vote_locks_clean(lock_height)?;
+    let effective_shadow_passed =
+        shadow_passed || options.operator_approved_emergency_leader_stall_recovery;
     let report = crate::consensus::self_realign::evaluate_rejoin_eligibility(
         crate::consensus::self_realign::RejoinEligibilityInput {
             validator_id: validator_id.clone(),
-            state: if shadow_passed {
+            state: if effective_shadow_passed {
                 RealignmentState::ShadowPassed
             } else {
                 RealignmentState::Quarantined
             },
-            shadow_passed,
+            shadow_passed: effective_shadow_passed,
             exact_common_height_match: options.exact_common_height_match && local_common_match,
             latest_finalized_qc_aegis_pqc_verified: options.latest_finalized_qc_aegis_pqc_verified
                 && qc.verified
@@ -3213,6 +3512,8 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
             "new_state": "QUARANTINED",
             "blocked_reasons": blocked,
             "shadow": shadow,
+            "emergency_leader_stall_recovery":
+                options.operator_approved_emergency_leader_stall_recovery,
             "keys_or_configs_copied": false,
             "genesis_mutated": false,
             "quorum_mutated": false,
@@ -3228,6 +3529,8 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
             "new_state": report.new_state,
             "blocked_reasons": report.blocked_reasons,
             "shadow": shadow,
+            "emergency_leader_stall_recovery":
+                options.operator_approved_emergency_leader_stall_recovery,
             "keys_or_configs_copied": false,
             "genesis_mutated": false,
             "quorum_mutated": false,
@@ -3242,7 +3545,11 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
         "typed_status": "ACTIVE",
         "chain": chain_identity(),
         "validator_id": validator_id,
-        "previous_state": "SHADOW_PASSED",
+        "previous_state": if options.operator_approved_emergency_leader_stall_recovery {
+            "EMERGENCY_HEAD_MATCHED"
+        } else {
+            "SHADOW_PASSED"
+        },
         "new_state": "ACTIVE",
         "common_height": common_height,
         "common_hash": common_hash,
@@ -3259,6 +3566,8 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
         "genesis_mutated": false,
         "quorum_mutated": false,
         "aegis_pqc_verification_result": true,
+        "emergency_leader_stall_recovery":
+            options.operator_approved_emergency_leader_stall_recovery,
         "next_required_action": "verify_five_validator_common_height_alignment",
     });
     write_json_pretty(&self_heal_status_path(), &status)?;
@@ -3278,7 +3587,7 @@ mod tests {
         CreateSnapshotOptions, OperatorQuarantineOptions, RejoinRequestOptions,
         SnapshotCanonicalLockMaterialization, StartShadowObserveOptions,
         SyncFromCanonicalPeerOptions, DIAGNOSTIC_STALE_TRANSIENT_VOTE_LOCK_SECS, EXPECTED_CHAIN_ID,
-        EXPECTED_NETWORK_ID,
+        EXPECTED_NETWORK_ID, SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT,
     };
     use crate::block::{Block, BlockChain};
     use crate::config::NodeConfig;
@@ -3299,6 +3608,16 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static DIAGNOSTICS_TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn test_block_summary(height: u64, hash: &str) -> BlockSummary {
+        BlockSummary {
+            height,
+            hash: hash.to_string(),
+            parent_hash: format!("parent-{height}"),
+            validator_id: format!("validator-{height}"),
+            transactions_root: format!("tx-root-{height}"),
+        }
+    }
 
     fn now_secs_for_test() -> u64 {
         SystemTime::now()
@@ -3823,7 +4142,15 @@ mod tests {
         fs::write(data_dir.join("runtime.bin"), b"binary").unwrap();
         let snapshot_dir = root.join("snapshot");
 
-        let copied = copy_snapshot_state_files(&data_dir, &snapshot_dir, 10, None).unwrap();
+        let copied = copy_snapshot_state_files(
+            &data_dir,
+            &snapshot_dir,
+            10,
+            "archive-full",
+            &test_block_summary(10, "h10"),
+            None,
+        )
+        .unwrap();
 
         assert_eq!(copied, 2);
         assert!(snapshot_dir.join("chain.json").exists());
@@ -3837,7 +4164,11 @@ mod tests {
     fn snapshot_copy_truncates_canonical_locks_and_committed_qcs_to_snapshot_height() {
         let root = test_runtime_root("snapshot-copy-truncates-metadata");
         let data_dir = root.join("data");
-        fs::write(data_dir.join("chain.json"), b"chain").unwrap();
+        fs::write(
+            data_dir.join("chain.json"),
+            json!([{"block_index": 10, "hash": "h10"}]).to_string(),
+        )
+        .unwrap();
         fs::write(
             data_dir.join("canonical_locks.json"),
             json!({
@@ -3859,7 +4190,15 @@ mod tests {
         .unwrap();
         let snapshot_dir = root.join("snapshot");
 
-        copy_snapshot_state_files(&data_dir, &snapshot_dir, 10, None).unwrap();
+        copy_snapshot_state_files(
+            &data_dir,
+            &snapshot_dir,
+            10,
+            SNAPSHOT_CLASS_VALIDATOR_PRUNED,
+            &test_block_summary(10, "h10"),
+            None,
+        )
+        .unwrap();
 
         let locks: Value =
             serde_json::from_slice(&fs::read(snapshot_dir.join("canonical_locks.json")).unwrap())
@@ -3872,10 +4211,163 @@ mod tests {
     }
 
     #[test]
+    fn validator_pruned_snapshot_keeps_recent_window_and_contamination_sentinel_only() {
+        let root = test_runtime_root("snapshot-copy-prunes-validator-history");
+        let data_dir = root.join("data");
+        fs::write(
+            data_dir.join("chain.json"),
+            json!([
+                {"block_index": 10, "hash": "h10", "previous_hash": "h9"},
+                {"block_index": SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT, "hash": "h175518", "previous_hash": "h175517"},
+                {"block_index": 194_999, "hash": "h194999", "previous_hash": "h194998"},
+                {"block_index": 195_000, "hash": "h195000", "previous_hash": "h194999"},
+                {"block_index": 200_000, "hash": "h200000", "previous_hash": "h199999"},
+                {"block_index": 200_001, "hash": "h200001", "previous_hash": "h200000"}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            data_dir.join("canonical_locks.json"),
+            json!({"200000": {"height": 200000, "hash": "h200000"}}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            data_dir.join("committed_qcs.jsonl"),
+            [
+                json!({"qc": {"votes": [{"block_index": 10}], "block_hash": "h10"}}).to_string(),
+                json!({"qc": {"votes": [{"block_index": SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT}], "block_hash": "h175518"}}).to_string(),
+                json!({"qc": {"votes": [{"block_index": 194_999}], "block_hash": "h194999"}}).to_string(),
+                json!({"qc": {"votes": [{"block_index": 195_000}], "block_hash": "h195000"}}).to_string(),
+                json!({"qc": {"votes": [{"block_index": 200_000}], "block_hash": "h200000"}}).to_string(),
+                json!({"qc": {"votes": [{"block_index": 200_001}], "block_hash": "h200001"}}).to_string(),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let snapshot_dir = root.join("snapshot");
+
+        copy_snapshot_state_files(
+            &data_dir,
+            &snapshot_dir,
+            200_000,
+            SNAPSHOT_CLASS_VALIDATOR_PRUNED,
+            &test_block_summary(200_000, "h200000"),
+            None,
+        )
+        .unwrap();
+
+        let chain = fs::read_to_string(snapshot_dir.join("chain.json")).unwrap();
+        let chain_blocks: Vec<Value> = serde_json::from_str(&chain).unwrap();
+        let chain_hashes: Vec<&str> = chain_blocks
+            .iter()
+            .filter_map(|block| block.get("hash").and_then(Value::as_str))
+            .collect();
+        assert!(!chain_hashes.contains(&"h10"));
+        assert!(chain_hashes.contains(&"h175518"));
+        assert!(!chain_hashes.contains(&"h194999"));
+        assert!(chain_hashes.contains(&"h195000"));
+        assert!(chain_hashes.contains(&"h200000"));
+        assert!(!chain_hashes.contains(&"h200001"));
+        let qcs = fs::read_to_string(snapshot_dir.join("committed_qcs.jsonl")).unwrap();
+        assert!(!qcs.contains("h10"));
+        assert!(qcs.contains("h175518"));
+        assert!(!qcs.contains("h194999"));
+        assert!(qcs.contains("h195000"));
+        assert!(qcs.contains("h200000"));
+        assert!(!qcs.contains("h200001"));
+        let locks: Value =
+            serde_json::from_slice(&fs::read(snapshot_dir.join("canonical_locks.json")).unwrap())
+                .unwrap();
+        let boundary_key = SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT.to_string();
+        let boundary_lock = locks
+            .get(boundary_key.as_str())
+            .expect("pruned snapshot should retain canonical lock for compact boundary");
+        assert_eq!(
+            boundary_lock.get("block_hash").and_then(Value::as_str),
+            Some("h175518")
+        );
+        assert_eq!(
+            boundary_lock.get("parent_hash").and_then(Value::as_str),
+            Some("h175517")
+        );
+    }
+
+    #[test]
+    fn validator_pruned_snapshot_materializes_selected_block_when_chain_json_lags() {
+        let root = test_runtime_root("snapshot-copy-materializes-pruned-tip");
+        let data_dir = root.join("data");
+        fs::write(
+            data_dir.join("chain.json"),
+            json!([
+                {
+                    "block_index": SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT,
+                    "hash": "h175518",
+                    "previous_hash": "h175517",
+                    "validator_id": "validator",
+                    "nonce": SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT,
+                    "transactions": []
+                },
+                {
+                    "block_index": 199_999,
+                    "hash": "h199999",
+                    "previous_hash": "h199998",
+                    "validator_id": "validator",
+                    "nonce": 199_999,
+                    "transactions": []
+                }
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            data_dir.join("canonical_locks.json"),
+            json!({"200000": {"height": 200000, "hash": "h200000"}}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            data_dir.join("committed_qcs.jsonl"),
+            json!({"qc": {"votes": [{"block_index": 200_000}], "block_hash": "h200000"}})
+                .to_string()
+                + "\n",
+        )
+        .unwrap();
+        let snapshot_dir = root.join("snapshot");
+
+        copy_snapshot_state_files(
+            &data_dir,
+            &snapshot_dir,
+            200_000,
+            SNAPSHOT_CLASS_VALIDATOR_PRUNED,
+            &test_block_summary(200_000, "h200000"),
+            None,
+        )
+        .unwrap();
+
+        let chain = fs::read_to_string(snapshot_dir.join("chain.json")).unwrap();
+        assert!(chain.contains("h175518"));
+        assert!(chain.contains("h199999"));
+        assert!(chain.contains("h200000"));
+        let blocks: Vec<Block> = serde_json::from_str(&chain).unwrap();
+        let materialized = blocks
+            .iter()
+            .find(|block| block.block_index == 200_000)
+            .expect("snapshot-height block should be materialized");
+        assert_eq!(materialized.nonce, 200_000);
+        assert_eq!(materialized.previous_hash, "parent-200000");
+        assert_eq!(materialized.validator_id, "validator-200000");
+    }
+
+    #[test]
     fn snapshot_copy_materializes_missing_lock_from_verified_qc_without_mutating_source() {
         let root = test_runtime_root("snapshot-copy-materialized-lock");
         let data_dir = root.join("data");
-        fs::write(data_dir.join("chain.json"), b"chain").unwrap();
+        fs::write(
+            data_dir.join("chain.json"),
+            json!([{"block_index": 10, "hash": "h10"}]).to_string(),
+        )
+        .unwrap();
         fs::write(
             data_dir.join("canonical_locks.json"),
             json!({"9": {"height": 9, "hash": "h9"}}).to_string(),
@@ -3906,7 +4398,15 @@ mod tests {
             qc_vote_count: 4,
         };
 
-        copy_snapshot_state_files(&data_dir, &snapshot_dir, 10, Some(&materialized_lock)).unwrap();
+        copy_snapshot_state_files(
+            &data_dir,
+            &snapshot_dir,
+            10,
+            SNAPSHOT_CLASS_VALIDATOR_PRUNED,
+            &test_block_summary(10, "h10"),
+            Some(&materialized_lock),
+        )
+        .unwrap();
 
         let source_locks: Value =
             serde_json::from_slice(&fs::read(data_dir.join("canonical_locks.json")).unwrap())
@@ -5086,6 +5586,7 @@ mod tests {
                 rejoin_at_finalized_safe_boundary: true,
                 cluster_marks_pending_reactivation: true,
                 operator_approved_reactivation: true,
+                operator_approved_emergency_leader_stall_recovery: false,
             })
             .expect("rejoin diagnostics should return typed body")
         });
@@ -5105,6 +5606,54 @@ mod tests {
                 .unwrap_or_default()
                 .contains("500-block process proof")
         }));
+    }
+
+    #[test]
+    fn request_rejoin_allows_operator_approved_emergency_leader_stall_recovery() {
+        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
+            .lock()
+            .expect("diagnostics env lock should succeed");
+        let root = test_runtime_root("rejoin-emergency-leader-stall");
+        install_test_genesis(&root);
+        install_test_config(&root, 1264, "synergy-testnet-v2");
+        write_quarantine_marker(&root);
+        write_empty_vote_locks(&root);
+        write_shadow_observation(&root, 89957, 500);
+        write_chain_range(&root, 89958, 90457);
+        write_canonical_lock_at_height(&root, 90457);
+        write_legacy_qc_fixture_at_height(&root, 90457);
+
+        let report = with_runtime_root(&root, || {
+            request_rejoin_with_options(RejoinRequestOptions {
+                common_height: Some(90457),
+                common_hash: Some(test_hash(90457)),
+                exact_common_height_match: true,
+                latest_finalized_qc_aegis_pqc_verified: true,
+                state_root_matches: true,
+                rejoin_at_finalized_safe_boundary: true,
+                cluster_marks_pending_reactivation: true,
+                operator_approved_reactivation: true,
+                operator_approved_emergency_leader_stall_recovery: true,
+            })
+            .expect("emergency rejoin diagnostics should return typed body")
+        });
+
+        assert_eq!(report.get("success").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            report.get("typed_status").and_then(Value::as_str),
+            Some("ACTIVE")
+        );
+        assert_eq!(
+            report
+                .get("emergency_leader_stall_recovery")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            report.get("previous_state").and_then(Value::as_str),
+            Some("EMERGENCY_HEAD_MATCHED")
+        );
+        assert!(!root.join("data/validator_quarantine.json").exists());
     }
 
     #[test]
@@ -5132,6 +5681,7 @@ mod tests {
                 rejoin_at_finalized_safe_boundary: true,
                 cluster_marks_pending_reactivation: true,
                 operator_approved_reactivation: true,
+                operator_approved_emergency_leader_stall_recovery: false,
             })
             .expect("rejoin diagnostics should return typed body")
         });
