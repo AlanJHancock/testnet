@@ -2,11 +2,11 @@ use crate::block::Block;
 use crate::consensus::dual_quorum::QuorumCertificate;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Cursor, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LegacyCanonicalCommitRecord {
@@ -129,11 +129,63 @@ fn prune_canonical_locks_for_hot_path(locks: &mut BTreeMap<u64, LegacyCanonicalC
     let Some(retain) = canonical_lock_retain_entries() else {
         return;
     };
+    let protected_height = compact_chain_boundary_height();
+    prune_canonical_locks_for_hot_path_with_protected_height(locks, retain, protected_height);
+}
+
+fn prune_canonical_locks_for_hot_path_with_protected_height(
+    locks: &mut BTreeMap<u64, LegacyCanonicalCommitRecord>,
+    retain: usize,
+    protected_height: Option<u64>,
+) {
     while locks.len() > retain {
-        let Some(height) = locks.keys().next().copied() else {
+        let Some(height) = locks
+            .keys()
+            .copied()
+            .find(|height| Some(*height) != protected_height)
+        else {
             break;
         };
         locks.remove(&height);
+    }
+}
+
+fn compact_chain_boundary_height() -> Option<u64> {
+    let path = crate::utils::resolve_data_path("data/chain.json");
+    compact_chain_boundary_height_from_path(&path)
+}
+
+fn compact_chain_boundary_height_from_path(path: &Path) -> Option<u64> {
+    let file = File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    if next_non_whitespace_byte(&mut reader)? != b'[' {
+        return None;
+    }
+    let first_value_start = next_non_whitespace_byte(&mut reader)?;
+    if first_value_start == b']' {
+        return None;
+    }
+    let first_value_reader = Cursor::new(vec![first_value_start]).chain(reader);
+    let block = serde_json::Deserializer::from_reader(first_value_reader)
+        .into_iter::<Block>()
+        .next()?
+        .ok()?;
+    (block.block_index > 0).then_some(block.block_index)
+}
+
+fn next_non_whitespace_byte<R: BufRead>(reader: &mut R) -> Option<u8> {
+    loop {
+        let buf = reader.fill_buf().ok()?;
+        if buf.is_empty() {
+            return None;
+        }
+        if let Some(index) = buf.iter().position(|byte| !byte.is_ascii_whitespace()) {
+            let byte = buf[index];
+            reader.consume(index + 1);
+            return Some(byte);
+        }
+        let len = buf.len();
+        reader.consume(len);
     }
 }
 
@@ -228,6 +280,19 @@ mod tests {
         }
     }
 
+    fn canonical_record(height: u64) -> LegacyCanonicalCommitRecord {
+        LegacyCanonicalCommitRecord {
+            height,
+            block_hash: format!("block-{height}"),
+            parent_hash: format!("parent-{height}"),
+            validator_id: "validator".to_string(),
+            transactions_root: "root".to_string(),
+            qc_block_hash: format!("block-{height}"),
+            qc_hash: format!("qc-{height}"),
+            written_at_unix_secs: height,
+        }
+    }
+
     #[test]
     fn canonical_lock_rejects_conflicting_same_height_block() {
         clear_legacy_canonical_locks_for_tests();
@@ -239,5 +304,37 @@ mod tests {
         assert!(verify_legacy_canonical_lock(&block_b)
             .unwrap_err()
             .contains("already binds block"));
+    }
+
+    #[test]
+    fn canonical_lock_prune_preserves_compact_chain_boundary_height() {
+        let mut locks = BTreeMap::new();
+        locks.insert(175_518, canonical_record(175_518));
+        locks.insert(200_001, canonical_record(200_001));
+        locks.insert(200_002, canonical_record(200_002));
+
+        prune_canonical_locks_for_hot_path_with_protected_height(&mut locks, 2, Some(175_518));
+
+        assert!(locks.contains_key(&175_518));
+        assert!(!locks.contains_key(&200_001));
+        assert!(locks.contains_key(&200_002));
+    }
+
+    #[test]
+    fn compact_chain_boundary_height_reads_first_pruned_block() {
+        let path = std::env::temp_dir().join(format!(
+            "synergy-test-chain-boundary-{}-{}.json",
+            std::process::id(),
+            current_unix_secs()
+        ));
+        fs::write(
+            &path,
+            serde_json::to_vec(&vec![block(42, "a"), block(43, "b")]).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(compact_chain_boundary_height_from_path(&path), Some(42));
+
+        let _ = fs::remove_file(path);
     }
 }

@@ -3556,10 +3556,9 @@ fn handle_get_blocks_message(
     let (blocks, quorum_certificates) = {
         let chain = blockchain.lock().unwrap();
         let blocks = select_block_sync_response_blocks(&chain, from_height, response_count);
-        let quorum_certificates = blocks
-            .iter()
-            .filter_map(|block| DualQuorumConsensus::committed_qc_for_block_hash(&block.hash))
-            .collect::<Vec<_>>();
+        let quorum_certificates = DualQuorumConsensus::committed_qcs_for_block_hashes(
+            blocks.iter().map(|block| block.hash.as_str()),
+        );
         (blocks, quorum_certificates)
     };
     let response = NetworkMessage::Blocks {
@@ -4826,12 +4825,10 @@ fn handle_messages(
                                         .cloned()
                                 })
                                 .collect::<Vec<_>>();
-                            let quorum_certificates = blocks
-                                .iter()
-                                .filter_map(|block| {
-                                    DualQuorumConsensus::committed_qc_for_block_hash(&block.hash)
-                                })
-                                .collect::<Vec<_>>();
+                            let quorum_certificates =
+                                DualQuorumConsensus::committed_qcs_for_block_hashes(
+                                    blocks.iter().map(|block| block.hash.as_str()),
+                                );
                             (blocks, quorum_certificates)
                         };
                         let response = NetworkMessage::BlockBodies {

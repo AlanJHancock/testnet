@@ -712,6 +712,92 @@ impl DualQuorumConsensus {
             .and_then(|store| store.get(block_hash).cloned())
     }
 
+    pub fn committed_qcs_for_block_hashes<I, S>(block_hashes: I) -> Vec<QuorumCertificate>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut missing = block_hashes
+            .into_iter()
+            .map(|hash| hash.as_ref().trim().to_string())
+            .filter(|hash| !hash.is_empty())
+            .collect::<HashSet<_>>();
+        if missing.is_empty() {
+            return Vec::new();
+        }
+
+        Self::ensure_committed_qc_store_loaded();
+        let mut found = Vec::new();
+        if let Ok(store) = COMMITTED_QC_STORE.lock() {
+            let hot_matches = missing
+                .iter()
+                .filter_map(|hash| store.get(hash).cloned())
+                .collect::<Vec<_>>();
+            for qc in hot_matches {
+                missing.remove(&qc.block_hash);
+                found.push(qc);
+            }
+        }
+        if missing.is_empty() {
+            return found;
+        }
+
+        match Self::committed_qcs_from_log_for_block_hashes(&missing) {
+            Ok(mut historical) => {
+                found.append(&mut historical);
+            }
+            Err(error) => {
+                warn!(
+                    "consensus",
+                    "Failed to load historical committed quorum certificates",
+                    "error" => error
+                );
+            }
+        }
+        found
+    }
+
+    fn committed_qcs_from_log_for_block_hashes(
+        block_hashes: &HashSet<String>,
+    ) -> Result<Vec<QuorumCertificate>, String> {
+        if block_hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let log_path = Self::committed_qc_log_path();
+        let file = fs::File::open(&log_path)
+            .map_err(|err| format!("failed to open committed QC log {:?}: {err}", log_path))?;
+        let mut remaining = block_hashes.clone();
+        let mut found = Vec::new();
+        for (line_number, line) in BufReader::new(file).lines().enumerate() {
+            let line = line.map_err(|err| {
+                format!(
+                    "failed to read committed QC log {:?} line {}: {err}",
+                    log_path,
+                    line_number + 1
+                )
+            })?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let entry = serde_json::from_str::<CommittedQcLogEntry>(trimmed).map_err(|err| {
+                format!(
+                    "failed to parse committed QC log {:?} line {}: {err}",
+                    log_path,
+                    line_number + 1
+                )
+            })?;
+            if remaining.remove(&entry.block_hash) {
+                found.push(entry.qc);
+                if remaining.is_empty() {
+                    break;
+                }
+            }
+        }
+        Ok(found)
+    }
+
     fn ensure_committed_qc_store_loaded() {
         COMMITTED_QC_STORE_INIT.call_once(|| match Self::load_committed_qc_store_from_disk() {
             Ok(loaded) => {
@@ -2933,6 +3019,41 @@ mod tests {
         assert!(loaded.contains_key("block-6"));
         assert!(loaded.contains_key("block-7"));
         assert!(loaded.contains_key("block-8"));
+
+        match previous {
+            Some(value) => env::set_var(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV, value),
+            None => env::remove_var(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV),
+        }
+    }
+
+    #[test]
+    fn committed_qc_batch_lookup_reads_historical_log_entries_outside_hot_retention() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let previous = env::var(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV).ok();
+        env::set_var(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV, "3");
+
+        for height in 1..=8 {
+            DualQuorumConsensus::append_committed_qc_to_log(&test_qc_at_height(
+                &format!("block-{height}"),
+                height,
+            ))
+            .unwrap();
+        }
+
+        let qcs = DualQuorumConsensus::committed_qcs_for_block_hashes([
+            "block-2",
+            "block-8",
+            "missing-block",
+        ]);
+        let hashes = qcs
+            .iter()
+            .map(|qc| qc.block_hash.as_str())
+            .collect::<HashSet<_>>();
+
+        assert_eq!(hashes.len(), 2);
+        assert!(hashes.contains("block-2"));
+        assert!(hashes.contains("block-8"));
 
         match previous {
             Some(value) => env::set_var(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV, value),
