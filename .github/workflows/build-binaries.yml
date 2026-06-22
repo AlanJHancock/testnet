@@ -85,8 +85,7 @@ jobs:
 
           git config --global url."git@github.com-synq-language:synergy-network-hq/synq-language.git".insteadOf "https://github.com/synergy-network-hq/synq-language.git"
           git config --global url."git@github.com-synergy-aivm:synergy-network-hq/synergy-aivm.git".insteadOf "https://github.com/synergy-network-hq/synergy-aivm.git"
-          git config --global url."git@github.com-aegis-pqsynq:synergy-network-hq/aegis-pqsynq.git".insteadOf "https://github.com/synergy-network-hq/aegis-pqsynq"
-          git config --global url."git@github.com-aegis-pqsynq:synergy-network-hq/aegis-pqsynq.git".insteadOf "https://github.com/synergy-network-hq/aegis-pqsynq.git"
+          git config --global url."git@github.com-aegis-pqsynq:synergy-network-hq/aegis-pqsynq".insteadOf "https://github.com/synergy-network-hq/aegis-pqsynq"
           git submodule sync --recursive
           git submodule update --init --recursive
 
