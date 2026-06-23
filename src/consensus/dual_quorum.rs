@@ -307,10 +307,10 @@ impl DualQuorumConsensus {
         round_number: u64,
         transient_vote_recovery_min_age_secs: u64,
     ) -> Result<Vec<Vote>, String> {
-        let active_validators = self.collect_live_validators();
+        let active_validators = self.collect_active_validators();
         if active_validators.len() < self.minimum_validator_count {
             return Err(format!(
-                "Insufficient live validators: {} active on the network, {} required",
+                "Insufficient active validators: {} active in consensus membership, {} required",
                 active_validators.len(),
                 self.minimum_validator_count
             ));
@@ -1302,7 +1302,7 @@ impl DualQuorumConsensus {
     ) -> Result<QuorumCertificate, String> {
         let cumulative_weight = self.calculate_cumulative_vote_weight(votes);
         let validator_count = votes.len();
-        let active_validators = self.collect_live_validators();
+        let active_validators = self.collect_active_validators();
         let total_validators = active_validators.len();
 
         if total_validators < self.minimum_validator_count {
@@ -1329,15 +1329,10 @@ impl DualQuorumConsensus {
         };
         let required_validation_ratio =
             self.validation_quorum_threshold.max(VALIDATOR_QUORUM_RATIO);
-        let validation_quorum_met = validation_ratio > required_validation_ratio;
+        let validation_quorum_met = validation_ratio + 0.000_001 >= required_validation_ratio;
 
-        // Check cooperation quorum using a BFT-style supermajority count.
-        let cooperation_ratio = validator_count as f64 / total_validators as f64;
-        let required_cooperation_ratio = self
-            .cooperation_quorum_threshold
-            .max(VALIDATOR_QUORUM_RATIO);
-        let cooperation_quorum_met = cooperation_ratio > required_cooperation_ratio
-            && validator_count >= required_validator_votes;
+        // Check cooperation quorum using the same dynamic integer threshold.
+        let cooperation_quorum_met = validator_count >= required_validator_votes;
 
         if validation_quorum_met && cooperation_quorum_met {
             // Create quorum certificate
@@ -1517,7 +1512,7 @@ impl DualQuorumConsensus {
     }
 
     fn create_participant_bitmap(&self, votes: &[Vote]) -> Vec<u8> {
-        let active_validators = self.collect_live_validators();
+        let active_validators = self.collect_active_validators();
         let mut bitmap = vec![0u8; (active_validators.len() + 7) / 8];
 
         for (i, validator) in active_validators.iter().enumerate() {
@@ -1535,34 +1530,8 @@ impl DualQuorumConsensus {
         bitmap
     }
 
-    fn collect_live_validators(&self) -> Vec<Validator> {
-        let active_validators =
-            consensus_membership_validators(self.validator_manager.get_active_validators());
-        let active_by_address = active_validators
-            .into_iter()
-            .map(|validator| (validator.address.clone(), validator))
-            .collect::<HashMap<_, _>>();
-
-        let mut live_addresses = BTreeSet::new();
-
-        if let Some(local_validator_address) = self.resolve_local_validator_address_for_round() {
-            if active_by_address.contains_key(&local_validator_address) {
-                live_addresses.insert(local_validator_address);
-            }
-        }
-
-        if let Some(network) = crate::p2p::get_p2p_network() {
-            for validator_address in network.get_status_ready_validator_addresses() {
-                if active_by_address.contains_key(&validator_address) {
-                    live_addresses.insert(validator_address);
-                }
-            }
-        }
-
-        live_addresses
-            .into_iter()
-            .filter_map(|address| active_by_address.get(&address).cloned())
-            .collect()
+    fn collect_active_validators(&self) -> Vec<Validator> {
+        consensus_membership_validators(self.validator_manager.get_active_validators())
     }
 
     fn resolve_local_validator_address() -> Option<String> {
@@ -2847,6 +2816,30 @@ mod tests {
         manager
     }
 
+    fn equal_weight_validator_manager(count: usize) -> Arc<ValidatorManager> {
+        let manager = Arc::new(ValidatorManager::new());
+        let mut registry = manager
+            .registry
+            .lock()
+            .expect("test validator registry should lock");
+        registry.validators.clear();
+        registry.pending_registrations.clear();
+        for index in 1..=count {
+            let address = format!("validator{index:03}");
+            let mut validator = Validator::new(
+                address.clone(),
+                format!("test-public-key-{index}"),
+                format!("Validator {index}"),
+                1_000,
+            );
+            validator.status = ValidatorStatus::Active;
+            validator.synergy_score = 100.0;
+            registry.validators.insert(address, validator);
+        }
+        drop(registry);
+        manager
+    }
+
     fn test_qc(block_hash: &str) -> QuorumCertificate {
         QuorumCertificate {
             block_hash: block_hash.to_string(),
@@ -4049,6 +4042,52 @@ mod tests {
         assert!(
             consensus.has_commit_quorum(&active_validators, &five_votes),
             "5 of 6 equal-weight votes should satisfy 67% quorum"
+        );
+    }
+
+    #[test]
+    fn exact_sixty_seven_percent_equal_weight_votes_commit() {
+        let validator_manager = equal_weight_validator_manager(100);
+        let pqc_manager = Arc::new(Mutex::new(PQCManager::new()));
+        let consensus = DualQuorumConsensus::new(
+            Arc::clone(&validator_manager),
+            Arc::clone(&pqc_manager),
+            false,
+            1,
+            0,
+            2,
+            6,
+        );
+        let active_validators =
+            consensus_membership_validators(validator_manager.get_active_validators());
+        let votes = active_validators
+            .iter()
+            .take(67)
+            .map(|validator| Vote {
+                validator_address: validator.address.clone(),
+                block_hash: "block-hash".to_string(),
+                block_index: 42,
+                epoch_number: 1,
+                round_number: 1,
+                signature: PQCSignature {
+                    algorithm: PQCAlgorithm::FNDSA,
+                    signature_data: Vec::new(),
+                    message_hash: Vec::new(),
+                    public_key_id: String::new(),
+                    created_at: 0,
+                },
+                signer_public_key: Vec::new(),
+                timestamp: 0,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            consensus.required_validator_votes(active_validators.len()),
+            67
+        );
+        assert!(
+            consensus.has_commit_quorum(&active_validators, &votes),
+            "exactly 67 of 100 equal-weight votes must satisfy dynamic 67% quorum"
         );
     }
 

@@ -367,6 +367,7 @@ fn test_only_create_snapshot_fixture(args: &[String]) {
             signer_set: qc_signers.clone(),
             aegis_pqc_verified: true,
             duplicate_signer_check_passed: true,
+            active_validator_count: active_validator_set.len(),
             active_validator_set_is_genesis_5: true,
             relayers_rpc_support_counted_toward_quorum: false,
         },

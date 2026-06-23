@@ -236,7 +236,14 @@ for path in sys.argv[1:]:
         "parser_mode": value.get("parser_mode") == "fail_closed",
     }
     registry = value.get("new_validator_registry") or []
-    checks["validator_count"] = len(registry) == 5
+    declared_validator_count = value.get("validator_count")
+    validator_addresses = [item.get("validator_address") for item in registry]
+    checks["validator_count"] = (
+        len(registry) >= 1
+        and (declared_validator_count in (None, len(registry)))
+        and len(set(validator_addresses)) == len(registry)
+        and all(validator_addresses)
+    )
     checks["all_validator_keys_fndsa"] = all(
         item.get("consensus_key_type") == "FN-DSA"
         and len(base64.b64decode(item.get("consensus_public_key", ""), validate=True)) == 1793

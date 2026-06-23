@@ -192,7 +192,7 @@ fn test_dual_quorum_enforces_minimum_validator_count() {
     assert!(result
         .err()
         .unwrap_or_default()
-        .contains("Insufficient live validators"));
+        .contains("Insufficient active validators"));
 }
 
 #[test]

@@ -317,7 +317,7 @@ impl ValidatorRegistry {
             pending_registrations: HashMap::new(),
             jailed_validators: HashSet::new(),
             min_stake_amount: 0, // Lowered for testnet (production: 1000)
-            max_validators: 100,
+            max_validators: 0,
             cluster_size: TESTNET_VALIDATOR_CLUSTER_SIZE,
             epoch_length: 30000,
             current_epoch: 0,

@@ -351,7 +351,7 @@ pub fn build_plan(input: BuildPlanInput) -> RecoveryPlan {
 
     let proof = load_recovery_proof(&source_dir);
     let qc_summary = match proof {
-        Ok(proof) => verify_recovery_proof(&proof),
+        Ok(proof) => verify_recovery_proof(&proof, &source_dir),
         Err(sidecar_error) => {
             match verify_legacy_committed_qc(&source_dir, input.conflict_height) {
                 Ok(summary) => summary,
@@ -1470,7 +1470,7 @@ fn canonical_genesis_consensus_keys() -> Result<BTreeSet<Vec<u8>>, String> {
     }
 }
 
-fn verify_recovery_proof(proof: &RecoveryProof) -> QcProofSummary {
+fn verify_recovery_proof(proof: &RecoveryProof, source_dir: &Path) -> QcProofSummary {
     let mut failure = Vec::new();
     let active_validator_count = proof
         .validator_set
@@ -1502,7 +1502,11 @@ fn verify_recovery_proof(proof: &RecoveryProof) -> QcProofSummary {
             Vec::new()
         }
     };
-    if let Err(error) = validate_validator_set_against_canonical_genesis(&proof.validator_set) {
+    if let Err(error) = validate_validator_set_against_active_registry(
+        &proof.validator_set,
+        proof.qc.height.0,
+        source_dir,
+    ) {
         failure.push(error);
     }
     let verified = if failure.is_empty() {
@@ -1533,44 +1537,48 @@ fn verify_recovery_proof(proof: &RecoveryProof) -> QcProofSummary {
 }
 
 #[cfg(not(test))]
-fn validate_validator_set_against_canonical_genesis(
+fn validate_validator_set_against_active_registry(
     validator_set: &ValidatorSet,
+    consensus_height: u64,
+    data_dir: &Path,
 ) -> Result<(), String> {
-    let genesis = canonical_genesis()?;
-    if validator_set.validators.len() != GENESIS_VALIDATOR_COUNT {
+    let active = load_legacy_active_genesis_validators(data_dir, consensus_height)?;
+    let active_records = validator_set
+        .validators
+        .iter()
+        .filter(|validator| validator.status == ValidatorStatus::Active)
+        .collect::<Vec<_>>();
+    if active_records.len() != active.len() {
         return Err(format!(
-            "validator set has {} validators, expected canonical {GENESIS_VALIDATOR_COUNT}",
-            validator_set.validators.len()
+            "validator set has {} active validator(s), expected {} active validator(s) for QC height {consensus_height}",
+            active_records.len(),
+            active.len()
         ));
     }
-    for validator in &validator_set.validators {
-        if validator.status != ValidatorStatus::Active {
+    let mut seen = BTreeSet::new();
+    for validator in active_records {
+        if !seen.insert(validator.validator_id.0.clone()) {
             return Err(format!(
-                "validator {} is not ACTIVE in recovery proof",
+                "validator set contains duplicate active validator {}",
                 validator.validator_id.0
             ));
         }
-        let Some(genesis_validator) = genesis
-            .validators()
-            .iter()
-            .find(|entry| entry.validator_id == validator.validator_id.0)
-        else {
+        let Some(expected_validator) = active.get(&validator.validator_id.0) else {
             return Err(format!(
-                "validator {} is not a canonical genesis validator",
+                "validator {} is not active in the source validator registry at QC height {consensus_height}",
                 validator.validator_id.0
             ));
         };
-        let expected_key = general_purpose::STANDARD
-            .decode(genesis_validator.consensus_public_key.trim())
-            .map_err(|error| {
-                format!(
-                    "canonical genesis consensus public key for {} is invalid: {error}",
-                    genesis_validator.validator_id
-                )
-            })?;
-        if validator.consensus_public_key.key_bytes != expected_key {
+        let algorithm = parse_algorithm(&validator.consensus_public_key.algorithm)?;
+        if algorithm != expected_validator.public_key.algorithm {
             return Err(format!(
-                "validator {} consensus public key does not match canonical genesis",
+                "validator {} consensus public key algorithm does not match active registry",
+                validator.validator_id.0
+            ));
+        }
+        if validator.consensus_public_key.key_bytes != expected_validator.public_key.key_data {
+            return Err(format!(
+                "validator {} consensus public key does not match active registry",
                 validator.validator_id.0
             ));
         }
@@ -1579,8 +1587,10 @@ fn validate_validator_set_against_canonical_genesis(
 }
 
 #[cfg(test)]
-fn validate_validator_set_against_canonical_genesis(
+fn validate_validator_set_against_active_registry(
     validator_set: &ValidatorSet,
+    _consensus_height: u64,
+    _data_dir: &Path,
 ) -> Result<(), String> {
     if validator_set.validators.len() != GENESIS_VALIDATOR_COUNT {
         return Err(format!(

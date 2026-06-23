@@ -2,8 +2,8 @@ use super::cartel_detection::{CartelDetectionEngine, VoteRecord};
 use super::chain_durability::append_committed_block_body;
 use super::dao_governance::{DAOGovernance, GovernanceProposal, ProposalStatus};
 use super::dual_quorum::{
-    DualQuorumConsensus, EntropyBeacon, QuorumCertificate, ValidatorRotation, Vote,
-    MIN_LAUNCH_VOTE_TIMEOUT_SECS,
+    required_validator_quorum, DualQuorumConsensus, EntropyBeacon, QuorumCertificate,
+    ValidatorRotation, Vote, MIN_LAUNCH_VOTE_TIMEOUT_SECS,
 };
 use super::legacy_canonical_lock::{verify_legacy_canonical_lock, write_legacy_canonical_lock};
 use super::synergy_score::SynergyScoreCalculator;
@@ -539,10 +539,10 @@ impl ProofOfSynergy {
         let pqc_manager = Arc::clone(&self.pqc_manager);
         let block_time_secs = self.block_time.max(1);
         let epoch_length = self.epoch_length.max(1);
-        let min_validators = self.min_validators.max(1);
+        let configured_min_validators = self.min_validators.max(1);
         let status_ready_gate_enabled = self.status_ready_gate_enabled;
-        let status_ready_required_validators = if self.status_ready_min_validators == 0 {
-            min_validators
+        let configured_status_ready_min_validators = if self.status_ready_min_validators == 0 {
+            configured_min_validators
         } else {
             self.status_ready_min_validators.max(1)
         };
@@ -682,17 +682,23 @@ impl ProofOfSynergy {
                             consensus_active_count,
                             live_active_validators.len()
                         );
+                        let dynamic_quorum_validators =
+                            required_validator_quorum(consensus_active_count).max(1);
+                        let required_live_validators =
+                            dynamic_quorum_validators.max(configured_min_validators);
+                        let status_ready_required_validators = dynamic_quorum_validators
+                            .max(configured_status_ready_min_validators);
 
-                        if live_active_validators.len() < min_validators {
+                        if live_active_validators.len() < required_live_validators {
                             mesh_ready_since = None;
                             status_sync_grace_since = None;
                             genesis_status_gate_bypassed = false;
                             println!(
-                                "⏳ Insufficient live validators for block production: {} live, {} consensus-active, {} registry-active, {} required.",
+                                "⏳ Insufficient live validators for block production: {} live, {} consensus-active, {} registry-active, {} required by dynamic quorum.",
                                 live_active_validators.len(),
                                 consensus_active_count,
                                 registry_active_count,
-                                min_validators
+                                required_live_validators
                             );
                             drop(chain_guard);
                             drop(pool);
@@ -791,7 +797,7 @@ impl ProofOfSynergy {
                                     final_height,
                                     mesh_was_ready,
                                     live_active_validator_count,
-                                    min_validators,
+                                    required_live_validators,
                                     status_ready_validators,
                                     status_ready_required_validators,
                                 );
@@ -807,7 +813,9 @@ impl ProofOfSynergy {
                                         "reset_pacing_anchor_to_now": readiness_decision.reset_pacing_anchor_to_now,
                                         "reason": readiness_decision.reason,
                                         "live_active_validators": live_active_validator_count as u64,
-                                        "min_validators": min_validators as u64,
+                                        "configured_min_validators": configured_min_validators as u64,
+                                        "dynamic_quorum_validators": dynamic_quorum_validators as u64,
+                                        "required_live_validators": required_live_validators as u64,
                                         "status_ready_validators": status_ready_validators as u64,
                                         "status_ready_required_validators": status_ready_required_validators as u64,
                                         "required_sync_support": required_sync_support as u64,
@@ -1848,7 +1856,7 @@ impl ProofOfSynergy {
         final_height: Option<u64>,
         mesh_was_ready: bool,
         live_active_validators: usize,
-        min_validators: usize,
+        required_live_validators: usize,
         status_ready_validators: usize,
         status_ready_required_validators: usize,
     ) -> CatchupReadinessDecision {
@@ -1873,7 +1881,7 @@ impl ProofOfSynergy {
             return CatchupReadinessDecision::reset("catchup_did_not_reach_verified_head");
         }
 
-        if live_active_validators < min_validators {
+        if live_active_validators < required_live_validators {
             return CatchupReadinessDecision::reset("insufficient_live_validators");
         }
 
@@ -3499,6 +3507,7 @@ impl ProofOfSynergy {
 mod tests {
     use super::*;
     use crate::block::{Block, BlockChain};
+    use crate::consensus::dual_quorum::required_validator_quorum;
     use crate::consensus::validator_keys::{
         consensus_algorithm_label, register_test_validator_signing_key,
     };
@@ -4560,10 +4569,11 @@ mod tests {
 
     #[test]
     fn insufficient_votes_do_not_trigger_transient_proposal_recovery() {
+        let required_quorum = required_validator_quorum(6);
         assert!(
-            !ProofOfSynergy::consensus_failure_needs_transient_lock_recovery(
-                "Insufficient validator votes: 2 votes, 4 required for quorum"
-            )
+            !ProofOfSynergy::consensus_failure_needs_transient_lock_recovery(&format!(
+                "Insufficient validator votes: 2 votes, {required_quorum} required for quorum"
+            ))
         );
         assert!(
             ProofOfSynergy::consensus_failure_needs_transient_lock_recovery(

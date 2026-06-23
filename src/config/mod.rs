@@ -103,7 +103,7 @@ fn default_validator_vote_threshold() -> usize {
 }
 
 fn default_max_validators() -> usize {
-    6
+    0
 }
 
 fn default_status_ready_gate_enabled() -> bool {
@@ -1398,7 +1398,7 @@ block_time_secs = 5
 epoch_length = 1000
 validator_cluster_size = 6
 validator_vote_threshold = 0
-max_validators = 6
+max_validators = 0
 synergy_score_decay_rate = 0.05
 vrf_enabled = true
 vrf_seed_epoch_interval = 1000
@@ -1712,7 +1712,7 @@ block_time_secs = 5
 epoch_length = 1000
 validator_cluster_size = 6
 validator_vote_threshold = 0
-max_validators = 6
+max_validators = 0
 synergy_score_decay_rate = 0.05
 vrf_enabled = true
 vrf_seed_epoch_interval = 1000

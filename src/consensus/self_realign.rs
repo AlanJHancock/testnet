@@ -234,6 +234,9 @@ pub struct SnapshotQcEvidence {
     pub signer_set: Vec<String>,
     pub aegis_pqc_verified: bool,
     pub duplicate_signer_check_passed: bool,
+    #[serde(default)]
+    pub active_validator_count: usize,
+    #[serde(default)]
     pub active_validator_set_is_genesis_5: bool,
     pub relayers_rpc_support_counted_toward_quorum: bool,
 }
@@ -338,8 +341,8 @@ impl Default for SnapshotVerificationPolicy {
             expected_genesis_hash: EXPECTED_GENESIS_HASH.to_string(),
             expected_snapshot_class: None,
             target_role: None,
-            required_quorum: required_snapshot_quorum_for_validator_count(GENESIS_VALIDATOR_COUNT),
-            expected_genesis_validator_count: GENESIS_VALIDATOR_COUNT,
+            required_quorum: 0,
+            expected_genesis_validator_count: 0,
             current_finalized_height: None,
             max_snapshot_lag_blocks: Some(DEFAULT_SNAPSHOT_INTERVAL_BLOCKS * 2),
             require_manifest_signature: true,
@@ -363,6 +366,7 @@ pub struct SnapshotVerificationReport {
     pub committed_qc_signers: Vec<String>,
     pub source_qc_aegis_pqc_verified: bool,
     pub duplicate_signer_check_passed: bool,
+    pub active_validator_count: usize,
     pub active_validator_set_is_genesis_5: bool,
     pub relayers_rpc_support_counted_toward_quorum: bool,
     pub manifest_signature_verified: bool,
@@ -512,7 +516,16 @@ pub fn prove_majority_branch(
     }
     if majority_hash.is_none() {
         errors.push(format!(
-            "no {quorum_threshold}-of-{GENESIS_VALIDATOR_COUNT} active genesis validator majority"
+            "no {quorum_threshold}-of-{} active validator majority",
+            reports
+                .iter()
+                .filter(|report| {
+                    report.role == PeerEvidenceRole::GenesisValidator
+                        && report.active_genesis_validator
+                })
+                .map(|report| report.node_id.as_str())
+                .collect::<BTreeSet<_>>()
+                .len()
         ));
     }
     let counted_validator_count = counts.values().map(BTreeSet::len).sum::<usize>();
@@ -1090,6 +1103,9 @@ pub fn verify_signed_snapshot_manifest(
     let dynamic_required_quorum =
         required_snapshot_quorum_for_validator_count(manifest.active_validator_set.len());
     let required_quorum = policy.required_quorum.max(dynamic_required_quorum);
+    if manifest.active_validator_set.is_empty() {
+        errors.push("snapshot active validator set is empty".to_string());
+    }
     if manifest.quorum_threshold < required_quorum {
         errors.push(format!(
             "snapshot manifest quorum threshold {} is below required {required_quorum}",
@@ -1113,10 +1129,16 @@ pub fn verify_signed_snapshot_manifest(
     if !manifest.qc_evidence.duplicate_signer_check_passed {
         errors.push("snapshot committed QC duplicate signer check failed".to_string());
     }
-    if !manifest.qc_evidence.active_validator_set_is_genesis_5
-        && !active_validator_set_meets_genesis_baseline
-    {
-        errors.push("snapshot QC active validator set is below the genesis baseline".to_string());
+    let qc_active_validator_count = if manifest.qc_evidence.active_validator_count == 0 {
+        manifest.active_validator_set.len()
+    } else {
+        manifest.qc_evidence.active_validator_count
+    };
+    if qc_active_validator_count != manifest.active_validator_set.len() {
+        errors.push(format!(
+            "snapshot QC active validator count {qc_active_validator_count} does not match manifest active validator set {}",
+            manifest.active_validator_set.len()
+        ));
     }
     if manifest
         .qc_evidence
@@ -1139,7 +1161,7 @@ pub fn verify_signed_snapshot_manifest(
             .any(|active| active == signer)
         {
             errors.push(format!(
-                "snapshot committed QC signer {signer} is not an ACTIVE genesis validator"
+                "snapshot committed QC signer {signer} is not in the active validator set"
             ));
         }
     }
@@ -1220,6 +1242,7 @@ pub fn verify_signed_snapshot_manifest(
         committed_qc_signers: manifest.qc_evidence.signer_set.clone(),
         source_qc_aegis_pqc_verified: manifest.qc_evidence.aegis_pqc_verified,
         duplicate_signer_check_passed: manifest.qc_evidence.duplicate_signer_check_passed,
+        active_validator_count: qc_active_validator_count,
         active_validator_set_is_genesis_5: manifest.qc_evidence.active_validator_set_is_genesis_5,
         relayers_rpc_support_counted_toward_quorum: manifest
             .qc_evidence
@@ -1705,6 +1728,7 @@ mod tests {
             ],
             aegis_pqc_verified: true,
             duplicate_signer_check_passed: true,
+            active_validator_count: 5,
             active_validator_set_is_genesis_5: true,
             relayers_rpc_support_counted_toward_quorum: false,
         }
@@ -1864,6 +1888,7 @@ mod tests {
         let mut active_validator_set = validators();
         active_validator_set.push("validator-6".to_string());
         let mut qc_evidence = qc_evidence();
+        qc_evidence.active_validator_count = active_validator_set.len();
         qc_evidence.active_validator_set_is_genesis_5 = false;
         qc_evidence.vote_count =
             required_snapshot_quorum_for_validator_count(active_validator_set.len());
@@ -2059,7 +2084,9 @@ mod tests {
         let active_validator_set = (1..=6)
             .map(|index| format!("validator-{index}"))
             .collect::<Vec<_>>();
-        let signed = signed_manifest_with(active_validator_set, qc_evidence());
+        let mut evidence = qc_evidence();
+        evidence.active_validator_count = active_validator_set.len();
+        let signed = signed_manifest_with(active_validator_set, evidence);
 
         assert_eq!(
             signed.manifest.quorum_threshold,
@@ -2080,7 +2107,7 @@ mod tests {
         assert!(report
             .errors
             .iter()
-            .any(|error| error.contains("ACTIVE genesis")));
+            .any(|error| error.contains("active validator set")));
     }
 
     #[test]

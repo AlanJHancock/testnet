@@ -16,6 +16,7 @@ use crate::consensus::self_realign::{
 };
 use crate::crypto::aegis_pqvm::AegisPqvmSigner;
 use crate::synergy_types::{AegisPqKeyRole, Epoch};
+use crate::validator::{consensus_membership_validators, ValidatorRegistry};
 use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -934,6 +935,7 @@ where
 
 fn active_genesis_validator_addresses() -> Result<Vec<String>, String> {
     let genesis = crate::genesis::load_canonical_genesis_for_runtime()?;
+    let expected_count = genesis.validators().len();
     let validators = genesis
         .validators()
         .iter()
@@ -945,18 +947,53 @@ fn active_genesis_validator_addresses() -> Result<Vec<String>, String> {
             }
         })
         .collect::<Vec<_>>();
-    if validators.len() != 5 {
+    if validators.len() != expected_count {
         return Err(format!(
-            "active genesis validator set has {} validator(s); expected 5",
-            validators.len()
+            "active genesis validator set has {} validator(s); expected {expected_count}",
+            validators.len(),
         ));
     }
     Ok(validators)
 }
 
+fn active_registry_validator_addresses() -> Result<Option<Vec<String>>, String> {
+    let registry_path = crate::utils::resolve_data_path("data/validator_registry.json");
+    if !registry_path.exists() {
+        return Ok(None);
+    }
+
+    let registry_path_text = registry_path.to_string_lossy().to_string();
+    let registry = ValidatorRegistry::load_from_file(&registry_path_text).map_err(|error| {
+        format!(
+            "load active validator registry {}: {error}",
+            registry_path.display()
+        )
+    })?;
+    let active_validators = registry
+        .get_active_validators()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let active_validators = consensus_membership_validators(active_validators);
+    let addresses = active_validators
+        .into_iter()
+        .map(|validator| validator.address)
+        .collect::<Vec<_>>();
+
+    if addresses.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(addresses))
+    }
+}
+
 fn active_validator_addresses_for_snapshot_height(
     snapshot_height: u64,
 ) -> Result<Vec<String>, String> {
+    if let Some(validators) = active_registry_validator_addresses()? {
+        return Ok(validators);
+    }
+
     if let Some(migration) = consensus_fork::active_consensus_fork_migration()? {
         if migration.applies_to_height(snapshot_height) {
             migration.validate()?;
@@ -2684,6 +2721,7 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
             signer_set: signer_set.clone(),
             aegis_pqc_verified: qc.verified,
             duplicate_signer_check_passed: signer_set_unique,
+            active_validator_count: active_validator_set.len(),
             active_validator_set_is_genesis_5: active_validator_set.len() >= 5,
             relayers_rpc_support_counted_toward_quorum: false,
         },
@@ -3813,6 +3851,7 @@ mod tests {
             ],
             aegis_pqc_verified: true,
             duplicate_signer_check_passed: true,
+            active_validator_count: 5,
             active_validator_set_is_genesis_5: true,
             relayers_rpc_support_counted_toward_quorum: false,
         };
@@ -4388,6 +4427,7 @@ mod tests {
         )
         .unwrap();
         let snapshot_dir = root.join("snapshot");
+        let validator_count = 5;
         let materialized_lock = SnapshotCanonicalLockMaterialization {
             block: BlockSummary {
                 height: 10,
@@ -4396,7 +4436,7 @@ mod tests {
                 validator_id: "validator-10".to_string(),
                 transactions_root: "tx-root-10".to_string(),
             },
-            qc_vote_count: required_snapshot_quorum_for_validator_count(5),
+            qc_vote_count: required_snapshot_quorum_for_validator_count(validator_count),
         };
 
         copy_snapshot_state_files(

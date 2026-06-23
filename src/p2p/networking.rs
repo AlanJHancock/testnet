@@ -5336,7 +5336,7 @@ fn hydrate_commit_verifier_validator_manager(validator_manager: &Arc<ValidatorMa
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let required_validator_count = canonical_validator_addresses.len().max(5);
+    let required_validator_count = canonical_validator_addresses.len();
 
     if validator_manager
         .load_registry("data/validator_registry.json")

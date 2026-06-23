@@ -1,6 +1,5 @@
 use crate::consensus::dual_quorum::required_validator_quorum;
-use crate::consensus::self_realign::GENESIS_VALIDATOR_COUNT;
-use crate::crypto::pqc::{PQCManager, PQCAlgorithm};
+use crate::crypto::pqc::{PQCAlgorithm, PQCManager};
 use crate::transaction::Transaction;
 use crate::validator::{consensus_membership_validators, VALIDATOR_MANAGER};
 use hex;
@@ -167,7 +166,7 @@ impl InteroperabilityLayer {
                 require_validator_attestation: true,
                 enable_zero_knowledge_proofs: true,
                 max_message_size: 10 * 1024 * 1024, // 10MB
-                encryption_timeout_seconds: 300, // 5 minutes
+                encryption_timeout_seconds: 300,    // 5 minutes
             },
         }
     }
@@ -178,7 +177,13 @@ impl InteroperabilityLayer {
             .ok()
             .map(|manager| consensus_membership_validators(manager.get_active_validators()).len())
             .filter(|count| *count > 0)
-            .unwrap_or(GENESIS_VALIDATOR_COUNT);
+            .or_else(|| {
+                crate::genesis::canonical_genesis()
+                    .ok()
+                    .map(|genesis| genesis.validators().len())
+                    .filter(|count| *count > 0)
+            })
+            .unwrap_or(0);
         required_validator_quorum(active_validator_count) as u32
     }
 
@@ -196,19 +201,27 @@ impl InteroperabilityLayer {
         }
     }
 
-    pub fn send_cross_chain_message(&self, mut message: CrossChainMessage) -> Result<String, String> {
+    pub fn send_cross_chain_message(
+        &self,
+        mut message: CrossChainMessage,
+    ) -> Result<String, String> {
         let message_id = message.message_id.clone();
 
         // Validate message size
         if message.payload.len() > self.security_config.max_message_size {
-            return Err(format!("Message size exceeds maximum allowed size of {} bytes",
-                             self.security_config.max_message_size));
+            return Err(format!(
+                "Message size exceeds maximum allowed size of {} bytes",
+                self.security_config.max_message_size
+            ));
         }
 
         // Validate destination chain is supported
         if let Ok(chains) = self.supported_chains.lock() {
             if !chains.contains_key(&message.destination_chain) {
-                return Err(format!("Destination chain {} not supported", message.destination_chain));
+                return Err(format!(
+                    "Destination chain {} not supported",
+                    message.destination_chain
+                ));
             }
         }
 
@@ -217,12 +230,12 @@ impl InteroperabilityLayer {
             SecurityLevel::Basic => {
                 // Basic security - just hash the message
                 message.pqc_algorithm = PQCAlgorithm::FNDSA;
-            },
+            }
             SecurityLevel::Enhanced => {
                 // Enhanced security - encrypt payload
                 message.pqc_algorithm = PQCAlgorithm::MLKEM1024;
                 message.encrypted_payload = Some(self.encrypt_message_payload(&message.payload)?);
-            },
+            }
             SecurityLevel::Maximum => {
                 // Maximum security - encrypt + sign with multiple algorithms
                 message.pqc_algorithm = PQCAlgorithm::FNDSA;
@@ -231,7 +244,7 @@ impl InteroperabilityLayer {
                 // Generate multiple signatures for verification
                 let signatures = self.generate_multi_algorithm_signatures(&message.payload)?;
                 message.validator_signatures = signatures;
-            },
+            }
             SecurityLevel::Military => {
                 // Military-grade security - full encryption + zero-knowledge proofs
                 message.pqc_algorithm = PQCAlgorithm::HQCKEM;
@@ -246,7 +259,7 @@ impl InteroperabilityLayer {
                     let zk_proof = self.generate_zero_knowledge_proof(&message.payload)?;
                     // Store ZK proof in encrypted payload (simplified)
                 }
-            },
+            }
         }
 
         // Store message for processing
@@ -283,7 +296,8 @@ impl InteroperabilityLayer {
             .len()
             .try_into()
             .map_err(|_| "Aegis PQC ciphertext too large".to_string())?;
-        let mut encrypted_data = Vec::with_capacity(4 + ciphertext.ciphertext.len() + encrypted_payload.len());
+        let mut encrypted_data =
+            Vec::with_capacity(4 + ciphertext.ciphertext.len() + encrypted_payload.len());
         encrypted_data.extend_from_slice(&ciphertext_len.to_be_bytes());
         encrypted_data.extend_from_slice(&ciphertext.ciphertext);
         encrypted_data.extend_from_slice(&encrypted_payload);
@@ -491,21 +505,38 @@ impl InteroperabilityLayer {
         let bridge_transactions = self.get_bridge_transactions();
 
         stats.insert("supported_chains".to_string(), chains.len().to_string());
-        stats.insert("pending_messages".to_string(), pending_messages.len().to_string());
-        stats.insert("total_bridge_transactions".to_string(), bridge_transactions.len().to_string());
+        stats.insert(
+            "pending_messages".to_string(),
+            pending_messages.len().to_string(),
+        );
+        stats.insert(
+            "total_bridge_transactions".to_string(),
+            bridge_transactions.len().to_string(),
+        );
 
-        let active_chains = chains.iter().filter(|c| c.status == ChainStatus::Active).count();
+        let active_chains = chains
+            .iter()
+            .filter(|c| c.status == ChainStatus::Active)
+            .count();
         stats.insert("active_chains".to_string(), active_chains.to_string());
 
-        let confirmed_messages = pending_messages.iter()
+        let confirmed_messages = pending_messages
+            .iter()
             .filter(|m| m.status == MessageStatus::Confirmed)
             .count();
-        stats.insert("confirmed_messages".to_string(), confirmed_messages.to_string());
+        stats.insert(
+            "confirmed_messages".to_string(),
+            confirmed_messages.to_string(),
+        );
 
-        let executed_messages = pending_messages.iter()
+        let executed_messages = pending_messages
+            .iter()
             .filter(|m| m.status == MessageStatus::Executed)
             .count();
-        stats.insert("executed_messages".to_string(), executed_messages.to_string());
+        stats.insert(
+            "executed_messages".to_string(),
+            executed_messages.to_string(),
+        );
 
         stats
     }
@@ -590,11 +621,7 @@ impl InteroperabilityLayer {
             native_token: "SOL".to_string(),
             block_time: 0, // Sub-second
             finality_blocks: 1,
-            supported_tokens: vec![
-                "SOL".to_string(),
-                "USDC".to_string(),
-                "RAY".to_string(),
-            ],
+            supported_tokens: vec!["SOL".to_string(), "USDC".to_string(), "RAY".to_string()],
             status: ChainStatus::Active,
             consensus_mechanism: "Proof of History".to_string(),
             programming_languages: vec!["Rust".to_string(), "C".to_string()],
@@ -619,7 +646,7 @@ impl InteroperabilityLayer {
             rpc_endpoints: vec!["https://blockstream.info/api/".to_string()],
             bridge_contract: "synergy_btc_bridge".to_string(),
             native_token: "BTC".to_string(),
-            block_time: 600, // 10 minutes
+            block_time: 600,    // 10 minutes
             finality_blocks: 6, // ~1 hour
             supported_tokens: vec!["BTC".to_string()],
             status: ChainStatus::Active,
@@ -648,11 +675,7 @@ impl InteroperabilityLayer {
             native_token: "ATOM".to_string(),
             block_time: 6,
             finality_blocks: 1,
-            supported_tokens: vec![
-                "ATOM".to_string(),
-                "OSMO".to_string(),
-                "JUNO".to_string(),
-            ],
+            supported_tokens: vec!["ATOM".to_string(), "OSMO".to_string(), "JUNO".to_string()],
             status: ChainStatus::Active,
             consensus_mechanism: "Tendermint BFT".to_string(),
             programming_languages: vec!["Go".to_string(), "Rust".to_string()],
@@ -696,7 +719,10 @@ impl InteroperabilityLayer {
                         }
                     }
 
-                    return Err(format!("Destination chain {} not supported", destination_chain));
+                    return Err(format!(
+                        "Destination chain {} not supported",
+                        destination_chain
+                    ));
                 }
             }
         }
@@ -718,7 +744,10 @@ impl InteroperabilityLayer {
         }
     }
 
-    pub fn verify_cross_chain_message_security(&self, message_id: &str) -> Result<SecurityVerification, String> {
+    pub fn verify_cross_chain_message_security(
+        &self,
+        message_id: &str,
+    ) -> Result<SecurityVerification, String> {
         let message = {
             if let Ok(messages) = self.pending_messages.lock() {
                 match messages.get(message_id) {
@@ -747,16 +776,24 @@ impl InteroperabilityLayer {
 
         // Verify PQC signatures
         for signature_id in &message.validator_signatures {
-            match self.pqc_manager.verify_signature(signature_id, &message.payload) {
+            match self
+                .pqc_manager
+                .verify_signature(signature_id, &message.payload)
+            {
                 Ok(is_valid) => {
                     if !is_valid {
                         verification.signatures_valid = false;
-                        verification.errors.push(format!("Invalid signature: {}", signature_id));
+                        verification
+                            .errors
+                            .push(format!("Invalid signature: {}", signature_id));
                     }
-                },
+                }
                 Err(e) => {
                     verification.signatures_valid = false;
-                    verification.errors.push(format!("Signature verification failed for {}: {}", signature_id, e));
+                    verification.errors.push(format!(
+                        "Signature verification failed for {}: {}",
+                        signature_id, e
+                    ));
                 }
             }
         }
@@ -767,12 +804,16 @@ impl InteroperabilityLayer {
                 Ok(is_valid) => {
                     if !is_valid {
                         verification.encryption_valid = false;
-                        verification.errors.push("Message encryption verification failed".to_string());
+                        verification
+                            .errors
+                            .push("Message encryption verification failed".to_string());
                     }
-                },
+                }
                 Err(e) => {
                     verification.encryption_valid = false;
-                    verification.errors.push(format!("Encryption verification error: {}", e));
+                    verification
+                        .errors
+                        .push(format!("Encryption verification error: {}", e));
                 }
             }
         }
@@ -791,12 +832,16 @@ impl InteroperabilityLayer {
                 Ok(is_valid) => {
                     if !is_valid {
                         verification.zk_proofs_valid = false;
-                        verification.warnings.push("Zero-knowledge proof verification failed".to_string());
+                        verification
+                            .warnings
+                            .push("Zero-knowledge proof verification failed".to_string());
                     }
-                },
+                }
                 Err(e) => {
                     verification.zk_proofs_valid = false;
-                    verification.errors.push(format!("ZK proof verification error: {}", e));
+                    verification
+                        .errors
+                        .push(format!("ZK proof verification error: {}", e));
                 }
             }
         }
@@ -804,7 +849,11 @@ impl InteroperabilityLayer {
         Ok(verification)
     }
 
-    fn verify_message_encryption(&self, original_payload: &[u8], encrypted_payload: &[u8]) -> Result<bool, String> {
+    fn verify_message_encryption(
+        &self,
+        original_payload: &[u8],
+        encrypted_payload: &[u8],
+    ) -> Result<bool, String> {
         // In a real implementation, this would verify the encryption was performed correctly
         // For now, we do a basic check
         Ok(!encrypted_payload.is_empty() && encrypted_payload.len() >= original_payload.len())
@@ -826,10 +875,13 @@ impl InteroperabilityLayer {
         message_type: MessageType,
         security_level: SecurityLevel,
     ) -> Result<CrossChainMessage, String> {
-        let message_id = format!("secure_msg_{}", std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs());
+        let message_id = format!(
+            "secure_msg_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        );
 
         // Validate security level meets minimum requirements
         if security_level < self.security_config.minimum_security_level {
@@ -841,7 +893,10 @@ impl InteroperabilityLayer {
 
         // Validate message size
         if payload.len() > self.security_config.max_message_size {
-            return Err(format!("Payload size exceeds maximum of {} bytes", self.security_config.max_message_size));
+            return Err(format!(
+                "Payload size exceeds maximum of {} bytes",
+                self.security_config.max_message_size
+            ));
         }
 
         let message = CrossChainMessage {
