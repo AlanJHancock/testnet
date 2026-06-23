@@ -1734,7 +1734,7 @@ def command_onboarding_dry_run(args: argparse.Namespace) -> None:
             "legacy_fallback": "if a non-validator support node remains strict, its allowed validator address list must include the candidate before activation_effective_block N+1",
         },
         "runtime_consensus_config": {
-            "validator_vote_threshold": 4,
+            "validator_vote_threshold": 0,
             "validator_cluster_size": 7,
             "max_validators_min": 100,
         },
@@ -1747,7 +1747,7 @@ def command_onboarding_dry_run(args: argparse.Namespace) -> None:
             "SYNERGY_PROJECT_ROOT points at the deployed node root",
             "SYNERGY_CONFIG_PATH points at the deployed node.toml",
             "SYNERGY_CONSENSUS_FORK_MIGRATION_FILE points at canonical checkpoint fork metadata",
-            "SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD=4 unless node.toml provides validator_vote_threshold=4",
+            "Use validator_vote_threshold=0 so runtime derives quorum from the active validator set",
         ],
     }
 

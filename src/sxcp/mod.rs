@@ -74,7 +74,7 @@ lazy_static! {
         attestations: Vec::new(),
         events: HashMap::new(),
         slashing_events: Vec::new(),
-        // Default to 2/3 BFT threshold once n is known. Until then, treat as 0.
+        // Default to dynamic 67% threshold once n is known. Until then, treat as 0.
         threshold_t: 0,
         total_n: 0,
         heartbeat_timeout_secs: DEFAULT_HEARTBEAT_TIMEOUT_SECS,
@@ -114,8 +114,7 @@ fn recompute_quorum(state: &mut SxcpState) {
         return;
     }
 
-    // ceil(2/3 * n)
-    state.threshold_t = ((2 * state.total_n) + 2) / 3;
+    state.threshold_t = (state.total_n * 67).div_ceil(100);
 }
 
 fn eligible_supporters(state: &SxcpState, event_hash: &str, ts: u64) -> Vec<String> {
@@ -748,7 +747,7 @@ mod tests {
 
         let r1 = register_test_relayer("r1");
         let r2 = register_test_relayer("r2");
-        let _r3 = register_test_relayer("r3");
+        let r3 = register_test_relayer("r3");
 
         let event_hash = "event-a";
         let first = submit_attestation(
@@ -767,7 +766,16 @@ mod tests {
             json!({"signature_algorithm":"fndsa"}),
         );
         assert_eq!(second["success"], true);
-        assert_eq!(second["finalized"], true);
+        assert_eq!(second["finalized"], false);
+
+        let third = submit_attestation(
+            "r3",
+            event_hash,
+            &sign_event_hash(&r3, event_hash),
+            json!({"signature_algorithm":"fndsa"}),
+        );
+        assert_eq!(third["success"], true);
+        assert_eq!(third["finalized"], true);
 
         let attestations = get_attestations(Some(10));
         assert_eq!(attestations["count"], 1);
@@ -818,7 +826,7 @@ mod tests {
 
         let after = get_sxcp_status();
         assert_eq!(after["quorum"]["n"], 3);
-        assert_eq!(after["quorum"]["t"], 2);
+        assert_eq!(after["quorum"]["t"], 3);
     }
 
     #[test]

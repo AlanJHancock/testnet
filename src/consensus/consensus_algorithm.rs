@@ -347,12 +347,7 @@ impl ProofOfSynergy {
             .unwrap_or(3)
             .max(1);
 
-        let validator_vote_threshold = std::env::var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .or_else(|| consensus_cfg.as_ref().map(|c| c.validator_vote_threshold))
-            .unwrap_or(3)
-            .max(1);
+        let validator_vote_threshold = 0;
 
         let status_ready_gate_enabled = consensus_cfg
             .as_ref()

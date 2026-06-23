@@ -10,7 +10,7 @@ Canonical identity:
 - chain_id_hex: `0x4f0`
 - network_id: `synergy-testnet-v2`
 - genesis validators: 5
-- active validator quorum: 4-of-5
+- active validator quorum: dynamic 67% of the active validator set
 - cluster_count: 1
 - cluster_id: 0
 
@@ -58,7 +58,7 @@ Minimum checks:
 
 ## Non-Negotiable Safety Rules
 
-- Do not lower 4-of-5 quorum locally to work around liveness problems.
+- Do not lower the dynamic 67% validator quorum locally to work around liveness problems.
 - Do not remove a validator from the active set locally unless a finalized epoch transition changes the canonical set.
 - Do not allow public support-node catch-up traffic to share an unbounded queue with votes, proposals, QCs, view-change messages, or handshakes.
 - Do not accept peer blocks, votes, QCs, or transactions with wrong `chain_id`, wrong `network_id`, missing signatures, invalid signatures, or stale validator-set context.

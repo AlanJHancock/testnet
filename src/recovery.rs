@@ -2,6 +2,7 @@ use crate::block::Block;
 use crate::consensus::consensus_fork::{
     self, normalize_consensus_key_algorithm, parse_consensus_public_key_material,
 };
+use crate::consensus::dual_quorum::{required_validator_quorum, VALIDATOR_QUORUM_RATIO};
 use crate::consensus::validator_keys::{
     parse_validator_public_key, parse_validator_public_key_with_declared_algorithm,
 };
@@ -27,8 +28,6 @@ use std::path::{Path, PathBuf};
 pub const EXPECTED_GENESIS_HASH: &str =
     "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789";
 pub const GENESIS_VALIDATOR_COUNT: usize = 5;
-pub const REQUIRED_QUORUM: usize = 4;
-
 const ALLOWED_STATE_FILES: &[&str] = &[
     "chain.json",
     "canonical_locks.json",
@@ -100,6 +99,8 @@ pub struct RecoveryPlan {
     pub source_committed_qc_hash: String,
     pub source_qc_vote_count: u64,
     pub source_qc_signers: Vec<String>,
+    pub source_active_validator_count: usize,
+    pub source_required_quorum: usize,
     pub source_qc_aegis_pqc_verified: bool,
     pub majority_branch_proven: bool,
     pub target_is_minority_or_lagged: bool,
@@ -215,6 +216,8 @@ pub struct QcProofSummary {
     pub hash: String,
     pub vote_count: u64,
     pub signers: Vec<String>,
+    pub active_validator_count: usize,
+    pub required_quorum: usize,
     pub verified: bool,
     pub failure: Option<String>,
 }
@@ -271,7 +274,8 @@ pub fn status() -> Value {
         "network_id": SYNERGY_TESTNET_V2_NETWORK_ID,
         "genesis_hash": EXPECTED_GENESIS_HASH,
         "quorum": {
-            "required": REQUIRED_QUORUM,
+            "policy": "ceil(active_validator_count * 67 / 100)",
+            "genesis_baseline_required": required_validator_quorum(GENESIS_VALIDATOR_COUNT),
             "genesis_validators": GENESIS_VALIDATOR_COUNT,
             "relayers_rpc_archive_count_toward_quorum": false
         },
@@ -356,6 +360,8 @@ pub fn build_plan(input: BuildPlanInput) -> RecoveryPlan {
                     hash: String::new(),
                     vote_count: 0,
                     signers: Vec::new(),
+                    active_validator_count: 0,
+                    required_quorum: 0,
                     verified: false,
                     failure: Some(format!(
                         "{sidecar_error}; legacy committed QC rejected: {legacy_error}"
@@ -373,7 +379,8 @@ pub fn build_plan(input: BuildPlanInput) -> RecoveryPlan {
     } else {
         input.source_nodes_used.clone()
     };
-    let source_node_check = validate_source_nodes(&source_nodes_raw);
+    let required_quorum = qc_summary.required_quorum;
+    let source_node_check = validate_source_nodes(&source_nodes_raw, required_quorum);
     let mut source_nodes_used = source_nodes_raw;
     source_nodes_used.sort();
     source_nodes_used.dedup();
@@ -429,14 +436,17 @@ pub fn build_plan(input: BuildPlanInput) -> RecoveryPlan {
         || target.canonical_lock_hash != Some(source_canonical_lock_hash.clone());
 
     let mut majority_branch_proven = qc_summary.verified
-        && qc_summary.vote_count >= REQUIRED_QUORUM as u64
-        && source_nodes_used.len() >= REQUIRED_QUORUM
+        && qc_summary.vote_count >= required_quorum as u64
+        && source_nodes_used.len() >= required_quorum
         && source_node_check.is_empty();
     if source_common_height == 0 || source_common_hash.is_empty() {
         majority_branch_proven = false;
     }
     if !majority_branch_proven {
-        failures.push("majority branch is not proven by 4-of-5 active genesis validators and a verified Aegis/PQVM QC".to_string());
+        failures.push(format!(
+            "majority branch is not proven by {required_quorum}-of-{} active validators and a verified Aegis/PQVM QC",
+            qc_summary.active_validator_count
+        ));
     }
     if !target_is_minority_or_lagged {
         failures.push("target is not proven minority or lagged relative to source".to_string());
@@ -516,6 +526,8 @@ pub fn build_plan(input: BuildPlanInput) -> RecoveryPlan {
         source_committed_qc_hash: qc_summary.hash,
         source_qc_vote_count: qc_summary.vote_count,
         source_qc_signers: qc_summary.signers,
+        source_active_validator_count: qc_summary.active_validator_count,
+        source_required_quorum: required_quorum,
         source_qc_aegis_pqc_verified: qc_summary.verified,
         majority_branch_proven,
         target_is_minority_or_lagged,
@@ -539,7 +551,7 @@ pub fn build_plan(input: BuildPlanInput) -> RecoveryPlan {
         preconditions,
         postconditions: vec![
             "exact_common_height_match_required_before_rejoin".to_string(),
-            "qc_vote_count_must_remain_at_least_4".to_string(),
+            "qc_vote_count_must_meet_dynamic_67_percent_quorum".to_string(),
             "keys_or_configs_copied=false".to_string(),
             "no_quarantine_marker_after_rejoin".to_string(),
             "no_vote_locks_above_canonical_or_finalized_height".to_string(),
@@ -575,14 +587,22 @@ pub fn verify_plan(plan: &RecoveryPlan) -> RecoveryVerification {
     if !plan.source_qc_aegis_pqc_verified {
         errors.push("source QC is not verified through Aegis/PQVM".to_string());
     }
-    if plan.source_qc_vote_count < REQUIRED_QUORUM as u64 {
+    if plan.source_qc_vote_count < plan.source_required_quorum as u64 {
         errors.push(format!(
-            "source QC vote_count {} is below {REQUIRED_QUORUM}-of-{GENESIS_VALIDATOR_COUNT}",
-            plan.source_qc_vote_count
+            "source QC vote_count {} is below {}-of-{}",
+            plan.source_qc_vote_count,
+            plan.source_required_quorum,
+            plan.source_active_validator_count
         ));
     }
-    errors.extend(validate_source_nodes(&plan.source_qc_signers));
-    errors.extend(validate_source_nodes(&plan.source_nodes_used));
+    errors.extend(validate_source_nodes(
+        &plan.source_qc_signers,
+        plan.source_required_quorum,
+    ));
+    errors.extend(validate_source_nodes(
+        &plan.source_nodes_used,
+        plan.source_required_quorum,
+    ));
     if has_duplicates(&plan.source_qc_signers) {
         errors.push("source QC contains duplicate signer".to_string());
     }
@@ -1068,8 +1088,8 @@ fn verify_legacy_qc(
     if total_weight <= 0.0 {
         return Err("active canonical validator set has zero voting weight".to_string());
     }
-    if signed_weight + 0.000_001 < (total_weight * 2.0 / 3.0) {
-        return Err("committed QC signed weight is below two thirds".to_string());
+    if signed_weight + 0.000_001 < (total_weight * VALIDATOR_QUORUM_RATIO) {
+        return Err("committed QC signed weight is below validator quorum threshold".to_string());
     }
     if qc.cumulative_weight > 0.0 && (qc.cumulative_weight - signed_weight).abs() > 0.000_001 {
         return Err(format!(
@@ -1083,6 +1103,8 @@ fn verify_legacy_qc(
         hash: qc.block_hash,
         vote_count: seen.len() as u64,
         signers: seen.into_iter().collect(),
+        active_validator_count: validators.len(),
+        required_quorum,
         verified: true,
         failure: None,
     })
@@ -1094,20 +1116,7 @@ fn required_quorum_for_active_validator_count(
     if active_validator_count == 0 {
         return Err("active canonical validator set is empty".to_string());
     }
-    let protocol_required = ((active_validator_count * 2) + 2) / 3;
-    let configured = std::env::var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .or_else(|| {
-            std::env::var("SYNERGY_CONFIG_PATH").ok().and_then(|_| {
-                crate::config::load_node_config(None)
-                    .ok()
-                    .map(|config| config.consensus.validator_vote_threshold)
-            })
-        })
-        .unwrap_or(protocol_required)
-        .max(1);
-    Ok(configured.max(protocol_required.max(1)))
+    Ok(required_validator_quorum(active_validator_count).max(1))
 }
 
 fn legacy_qc_height(qc: &LegacyQuorumCertificate) -> Result<u64, String> {
@@ -1463,6 +1472,13 @@ fn canonical_genesis_consensus_keys() -> Result<BTreeSet<Vec<u8>>, String> {
 
 fn verify_recovery_proof(proof: &RecoveryProof) -> QcProofSummary {
     let mut failure = Vec::new();
+    let active_validator_count = proof
+        .validator_set
+        .validators
+        .iter()
+        .filter(|validator| validator.status == ValidatorStatus::Active)
+        .count();
+    let required_quorum = required_validator_quorum(active_validator_count);
     if proof.chain_id != 0 && proof.chain_id != SYNERGY_TESTNET_V2_CHAIN_ID {
         failure.push(format!("proof chain_id {} is not 1264", proof.chain_id));
     }
@@ -1509,6 +1525,8 @@ fn verify_recovery_proof(proof: &RecoveryProof) -> QcProofSummary {
         hash: proof.qc.block_id.0.clone(),
         vote_count: proof.qc.aegis_pq_key_ids.len() as u64,
         signers,
+        active_validator_count,
+        required_quorum,
         verified,
         failure: (!failure.is_empty()).then(|| failure.join("; ")),
     }
@@ -1788,12 +1806,12 @@ fn committed_qc_span(data_dir: &Path) -> Result<CommittedQcSpan, String> {
     })
 }
 
-fn validate_source_nodes(nodes: &[String]) -> Vec<String> {
+fn validate_source_nodes(nodes: &[String], required_quorum: usize) -> Vec<String> {
     let mut failures = Vec::new();
-    if nodes.len() < REQUIRED_QUORUM {
+    if nodes.len() < required_quorum {
         failures.push(format!(
-            "source has {} signer/source node(s), {REQUIRED_QUORUM} required",
-            nodes.len()
+            "source has {} signer/source node(s), {required_quorum} required",
+            nodes.len(),
         ));
     }
     if has_duplicates(nodes) {
@@ -1985,6 +2003,10 @@ mod tests {
         root
     }
 
+    fn genesis_required_quorum() -> usize {
+        required_validator_quorum(GENESIS_VALIDATOR_COUNT)
+    }
+
     fn write_chain(root: &Path, heights: &[(&str, u64)]) {
         let mut previous = EXPECTED_GENESIS_HASH.to_string();
         let blocks = heights
@@ -2113,7 +2135,7 @@ mod tests {
             block_id,
             active_validator_set_hash: set_hash,
             cluster_map_hash: cluster_hash,
-            threshold_weight_required: REQUIRED_QUORUM as u64,
+            threshold_weight_required: genesis_required_quorum() as u64,
             signed_weight: signer_count as u64,
             signer_bitmap: vec![((1u16 << signer_count) - 1) as u8],
             aegis_pq_signatures: votes
@@ -2137,7 +2159,9 @@ mod tests {
                 "chain_id": SYNERGY_TESTNET_V2_CHAIN_ID,
                 "network_id": SYNERGY_TESTNET_V2_NETWORK_ID,
                 "genesis_hash": EXPECTED_GENESIS_HASH,
-                "source_nodes_used": ["validator-1", "validator-2", "validator-3", "validator-4"],
+                "source_nodes_used": (1..=genesis_required_quorum())
+                    .map(|index| format!("validator-{index}"))
+                    .collect::<Vec<_>>(),
                 "source_common_height": 10,
                 "source_common_hash": "majority-hash",
                 "source_canonical_lock_height": 10,
@@ -2267,7 +2291,7 @@ mod tests {
     }
 
     #[test]
-    fn post_fork_qc_verification_accepts_configured_four_of_six_quorum_for_expanded_set() {
+    fn post_fork_qc_verification_requires_five_of_six_quorum_for_expanded_set() {
         let root = temp_root("post-fork-untyped-registry-qc");
         fs::create_dir_all(root.join("config")).unwrap();
         let mut manager = PQCManager::new();
@@ -2325,9 +2349,10 @@ mod tests {
 
         let height = 204216;
         let block_hash = "post-fork-majority-hash";
+        let required_quorum = required_validator_quorum(keys.len());
         let votes = keys
             .iter()
-            .take(REQUIRED_QUORUM)
+            .take(required_quorum)
             .map(|(address, public_key, private_key)| {
                 let payload = format!("{address}:{height}:0:{block_hash}:0");
                 let signature = manager.sign(private_key, payload.as_bytes()).unwrap();
@@ -2353,7 +2378,7 @@ mod tests {
                     "round_number": 0,
                     "aggregate_signature": [1, 2, 3, 4],
                     "participant_bitmap": [15],
-                    "cumulative_weight": REQUIRED_QUORUM as f64,
+                    "cumulative_weight": required_quorum as f64,
                     "validation_quorum_met": true,
                     "cooperation_quorum_met": true,
                     "timestamp": 100,
@@ -2373,9 +2398,8 @@ mod tests {
             None => std::env::remove_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV),
         }
 
-        let summary =
-            result.expect("configured four-of-six quorum must satisfy current Testnet QC");
-        assert_eq!(summary.vote_count, REQUIRED_QUORUM as u64);
+        let summary = result.expect("five-of-six quorum must satisfy current Testnet QC");
+        assert_eq!(summary.vote_count, required_quorum as u64);
         assert_eq!(summary.height, height);
     }
 
@@ -2452,7 +2476,7 @@ mod tests {
         );
 
         let block_hash = "post-fork-activated-validator-hash";
-        let signer_indices = [0usize, 1, 2, GENESIS_VALIDATOR_COUNT];
+        let signer_indices = [0usize, 1, 2, 3, GENESIS_VALIDATOR_COUNT];
         let votes = signer_indices
             .iter()
             .map(|index| {
@@ -2481,7 +2505,7 @@ mod tests {
                     "round_number": 0,
                     "aggregate_signature": [1, 2, 3, 4],
                     "participant_bitmap": [15],
-                    "cumulative_weight": REQUIRED_QUORUM as f64,
+                    "cumulative_weight": signer_indices.len() as f64,
                     "validation_quorum_met": true,
                     "cooperation_quorum_met": true,
                     "timestamp": 100,
@@ -2504,7 +2528,7 @@ mod tests {
         let summary = result.unwrap();
         assert!(summary.verified);
         assert_eq!(summary.height, height);
-        assert_eq!(summary.vote_count, REQUIRED_QUORUM as u64);
+        assert_eq!(summary.vote_count, signer_indices.len() as u64);
         assert_eq!(summary.hash, block_hash);
         assert!(summary.signers.contains(&activated_validator_address));
     }
@@ -2572,7 +2596,7 @@ mod tests {
         .unwrap();
 
         let block_hash = "post-fork-unactivated-validator-hash";
-        let signer_indices = [0usize, 1, 2, GENESIS_VALIDATOR_COUNT];
+        let signer_indices = [0usize, 1, 2, 3, GENESIS_VALIDATOR_COUNT];
         let votes = signer_indices
             .iter()
             .map(|index| {
@@ -2601,7 +2625,7 @@ mod tests {
                     "round_number": 0,
                     "aggregate_signature": [1, 2, 3, 4],
                     "participant_bitmap": [15],
-                    "cumulative_weight": REQUIRED_QUORUM as f64,
+                    "cumulative_weight": signer_indices.len() as f64,
                     "validation_quorum_met": true,
                     "cooperation_quorum_met": true,
                     "timestamp": 100,
@@ -2630,7 +2654,7 @@ mod tests {
         let root = temp_root("bounded-qc");
         write_legacy_qc_fixture_at_heights(
             &root,
-            REQUIRED_QUORUM,
+            genesis_required_quorum(),
             &[(10, "hash-10"), (11, "hash-11"), (12, "hash-12")],
         );
 
@@ -2639,7 +2663,7 @@ mod tests {
         assert!(summary.verified);
         assert_eq!(summary.height, 11);
         assert_eq!(summary.hash, "hash-11");
-        assert_eq!(summary.vote_count, REQUIRED_QUORUM as u64);
+        assert_eq!(summary.vote_count, genesis_required_quorum() as u64);
     }
 
     fn base_input(target: &Path, source: &Path) -> BuildPlanInput {
@@ -2652,12 +2676,9 @@ mod tests {
             target_data_dir: target.to_path_buf(),
             source_state_dir: Some(source.to_path_buf()),
             source_evidence_dirs: Vec::new(),
-            source_nodes_used: vec![
-                "validator-1".to_string(),
-                "validator-2".to_string(),
-                "validator-3".to_string(),
-                "validator-4".to_string(),
-            ],
+            source_nodes_used: (1..=genesis_required_quorum())
+                .map(|index| format!("validator-{index}"))
+                .collect(),
             source_common_height: Some(10),
             source_common_hash: Some("majority-hash".to_string()),
             source_canonical_lock_height: Some(10),
@@ -2681,8 +2702,8 @@ mod tests {
         write_chain(&source, &[("majority-hash", 10)]);
         write_lock(&source, 10, "majority-hash");
         write_recoverable_files(&source);
-        write_legacy_qc_fixture(&source, REQUIRED_QUORUM);
-        let (_signer, set, cluster, qc) = signed_qc_fixture(REQUIRED_QUORUM);
+        write_legacy_qc_fixture(&source, genesis_required_quorum());
+        let (_signer, set, cluster, qc) = signed_qc_fixture(genesis_required_quorum());
         write_proof(&source, &qc, &set, &cluster);
         let plan = build_plan(base_input(&target, &source));
         (target, source, plan)
@@ -2697,8 +2718,8 @@ mod tests {
         write_chain(&source, &[("majority-hash", 10)]);
         write_lock(&source, 10, "majority-hash");
         write_recoverable_files(&source);
-        write_legacy_qc_fixture(&source, REQUIRED_QUORUM);
-        let (_signer, set, cluster, qc) = signed_qc_fixture(REQUIRED_QUORUM);
+        write_legacy_qc_fixture(&source, genesis_required_quorum());
+        let (_signer, set, cluster, qc) = signed_qc_fixture(genesis_required_quorum());
         write_proof(&source, &qc, &set, &cluster);
 
         let plan = build_plan(base_input(&target, &source));
@@ -2717,8 +2738,8 @@ mod tests {
         write_chain(&source, &[("majority-hash", 10)]);
         write_lock(&source, 10, "majority-hash");
         write_recoverable_files(&source);
-        write_legacy_qc_fixture(&source, REQUIRED_QUORUM);
-        let (_signer, set, cluster, qc) = signed_qc_fixture(REQUIRED_QUORUM);
+        write_legacy_qc_fixture(&source, genesis_required_quorum());
+        let (_signer, set, cluster, qc) = signed_qc_fixture(genesis_required_quorum());
         write_proof(&source, &qc, &set, &cluster);
 
         let plan = build_plan(base_input(&target, &source));
@@ -2764,7 +2785,7 @@ mod tests {
         write_chain(&source, &[("majority-hash", 10)]);
         write_lock(&source, 10, "majority-hash");
         write_recoverable_files(&source);
-        let (_signer, set, cluster, mut qc) = signed_qc_fixture(REQUIRED_QUORUM);
+        let (_signer, set, cluster, mut qc) = signed_qc_fixture(genesis_required_quorum());
         qc.aegis_pq_signatures[0].signature_bytes[0] ^= 1;
         write_proof(&source, &qc, &set, &cluster);
         let plan = build_plan(base_input(&target, &source));
@@ -2782,7 +2803,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_rejects_qc_below_4_of_5() {
+    fn plan_rejects_qc_below_dynamic_quorum() {
         let target = temp_root("below-target");
         let source = temp_root("below-source");
         write_chain(&target, &[("minority-hash", 10)]);
@@ -2820,7 +2841,7 @@ mod tests {
         write_chain(&source, &[("majority-hash", 10)]);
         write_lock(&source, 10, "majority-hash");
         write_recoverable_files(&source);
-        let (_signer, mut set, cluster, qc) = signed_qc_fixture(REQUIRED_QUORUM);
+        let (_signer, mut set, cluster, qc) = signed_qc_fixture(genesis_required_quorum());
         set.validators[0].status = ValidatorStatus::Shadow;
         write_proof(&source, &qc, &set, &cluster);
         let plan = build_plan(base_input(&target, &source));
@@ -2905,7 +2926,7 @@ mod tests {
         write_chain(&source, &[("majority-hash", 10)]);
         write_lock(&source, 10, "majority-hash");
         write_recoverable_files(&source);
-        write_legacy_qc_fixture(&source, REQUIRED_QUORUM);
+        write_legacy_qc_fixture(&source, genesis_required_quorum());
         let plan = build_plan(base_input(&target, &source));
         let verification = verify_plan(&plan);
         assert!(verification.errors.is_empty(), "{:?}", verification.errors);
@@ -2920,8 +2941,8 @@ mod tests {
         write_chain(&target, &[("minority-hash", 5)]);
         write_lock(&target, 5, "minority-hash");
         write_lock(&source, 10, "majority-hash");
-        write_legacy_qc_fixture(&source, REQUIRED_QUORUM);
-        let (_signer, set, cluster, qc) = signed_qc_fixture(REQUIRED_QUORUM);
+        write_legacy_qc_fixture(&source, genesis_required_quorum());
+        let (_signer, set, cluster, qc) = signed_qc_fixture(genesis_required_quorum());
         write_proof(&source, &qc, &set, &cluster);
 
         let mut input = base_input(&target, &source);
@@ -2949,8 +2970,8 @@ mod tests {
         write_lock(&target, 5, "target-tip");
         write_chain(&source, &[("majority-hash", 10)]);
         write_lock(&source, 10, "majority-hash");
-        write_legacy_qc_fixture(&source, REQUIRED_QUORUM);
-        let (_signer, set, cluster, qc) = signed_qc_fixture(REQUIRED_QUORUM);
+        write_legacy_qc_fixture(&source, genesis_required_quorum());
+        let (_signer, set, cluster, qc) = signed_qc_fixture(genesis_required_quorum());
         write_proof(&source, &qc, &set, &cluster);
 
         let mut input = base_input(&target, &source);

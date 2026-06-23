@@ -547,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn five_validators_require_four_real_pqc_signatures_to_commit() {
+    fn validators_require_dynamic_pqc_quorum_to_commit() {
         let (mut signer, set, cluster, protocol) = setup_validators();
         let verifier = signer.verifier();
         let mut consensus =
@@ -566,8 +566,11 @@ mod tests {
                 Hash::zero(),
             )
             .unwrap();
-        let votes = set.validators[0..4]
+        let required_votes = set.threshold_weight() as usize;
+        let votes = set
+            .validators
             .iter()
+            .take(required_votes)
             .map(|validator| consensus.vote(&mut signer, validator, &block).unwrap())
             .collect::<Vec<_>>();
         let qc = consensus.form_qc(&votes).unwrap();

@@ -197,7 +197,7 @@ else:
     while cluster_count > 1 and validator_count // cluster_count < min_cluster:
         cluster_count -= 1
 cluster_size = 0 if cluster_count == 0 else (validator_count + cluster_count - 1) // cluster_count
-quorum = (validator_count * 2 + 2) // 3
+quorum = (validator_count * 67 + 99) // 100
 print(validator_count, cluster_size, quorum)
 PY
 )
@@ -226,8 +226,8 @@ for bundle in bootnode1 bootnode2 bootnode3; do
     echo "[$bundle] validator_cluster_size must be ${EXPECTED_VALIDATOR_CLUSTER_SIZE}" >&2
     failures=$((failures + 1))
   fi
-  if ! rg -q "^validator_vote_threshold = ${EXPECTED_VALIDATOR_QUORUM}$" "$node_config"; then
-    echo "[$bundle] validator_vote_threshold must be ${EXPECTED_VALIDATOR_QUORUM}" >&2
+  if ! rg -q "^validator_vote_threshold = 0$" "$node_config"; then
+    echo "[$bundle] validator_vote_threshold must be 0 so runtime derives dynamic quorum (${EXPECTED_VALIDATOR_QUORUM} for current manifest)" >&2
     failures=$((failures + 1))
   fi
   if ! rg -q "^max_validators = ${EXPECTED_VALIDATOR_COUNT}$" "$node_config"; then

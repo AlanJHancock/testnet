@@ -471,6 +471,12 @@ mod tests {
         }
     }
 
+    fn assign_peer_genesis(peers: &mut [PeerInfo], local_genesis: &str) {
+        for peer in peers {
+            peer.genesis_hash = local_genesis.to_string();
+        }
+    }
+
     #[test]
     fn sync_overlap_is_smaller_than_support_response_budget() {
         assert_eq!(sync_progress_overlap(0), 0);
@@ -488,6 +494,8 @@ mod tests {
             peer("duty-disabled", Some("synv1shadow"), 180, false, true),
             peer("active", Some("synv1active"), 100, false, false),
         ];
+        let local_genesis = resolve_local_genesis_hash(&manager.blockchain);
+        assign_peer_genesis(&mut manager.peers, &local_genesis);
 
         assert_eq!(manager.select_sync_peer(), Some("active".to_string()));
         assert_eq!(manager.eligible_network_height(""), 100);
@@ -501,6 +509,8 @@ mod tests {
             peer("active-validator", Some("synv1active"), 100, false, false),
             peer("relayer", None, 195_000, false, true),
         ];
+        let local_genesis = resolve_local_genesis_hash(&manager.blockchain);
+        assign_peer_genesis(&mut manager.peers, &local_genesis);
 
         assert_eq!(manager.select_sync_peer(), Some("relayer".to_string()));
         assert_eq!(manager.eligible_network_height(""), 195_000);

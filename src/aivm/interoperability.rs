@@ -1,9 +1,12 @@
+use crate::consensus::dual_quorum::required_validator_quorum;
+use crate::consensus::self_realign::GENESIS_VALIDATOR_COUNT;
+use crate::crypto::pqc::{PQCManager, PQCAlgorithm};
+use crate::transaction::Transaction;
+use crate::validator::{consensus_membership_validators, VALIDATOR_MANAGER};
+use hex;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use serde::{Deserialize, Serialize};
-use hex;
-use crate::transaction::Transaction;
-use crate::crypto::pqc::{PQCManager, PQCAlgorithm};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossChainMessage {
@@ -167,6 +170,16 @@ impl InteroperabilityLayer {
                 encryption_timeout_seconds: 300, // 5 minutes
             },
         }
+    }
+
+    fn required_validator_confirmations(&self) -> u32 {
+        let active_validator_count = VALIDATOR_MANAGER
+            .lock()
+            .ok()
+            .map(|manager| consensus_membership_validators(manager.get_active_validators()).len())
+            .filter(|count| *count > 0)
+            .unwrap_or(GENESIS_VALIDATOR_COUNT);
+        required_validator_quorum(active_validator_count) as u32
     }
 
     pub fn with_security_config(mut self, config: SecurityConfiguration) -> Self {
@@ -371,7 +384,7 @@ impl InteroperabilityLayer {
                         gas_price: tx.gas_price,
                         status: MessageStatus::Pending,
                         confirmations: 0,
-                        required_confirmations: 12,
+                        required_confirmations: self.required_validator_confirmations(),
                     };
 
                     return self.send_cross_chain_message(message);
@@ -848,7 +861,7 @@ impl InteroperabilityLayer {
             gas_price: 1000,
             status: MessageStatus::Pending,
             confirmations: 0,
-            required_confirmations: 12, // 67% of 18 validators
+            required_confirmations: self.required_validator_confirmations(),
             pqc_algorithm: self.security_config.default_pqc_algorithm.clone(),
             security_level,
             validator_signatures: Vec::new(),

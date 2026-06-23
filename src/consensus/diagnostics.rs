@@ -1796,7 +1796,7 @@ fn current_validator_id() -> String {
 fn latest_verified_qc_summary() -> Result<crate::recovery::QcProofSummary, String> {
     let data_dir = crate::utils::resolve_data_path("data");
     let summary = crate::recovery::verify_latest_committed_qc_in_state_dir(&data_dir, None)?;
-    if !summary.verified || summary.vote_count < 4 {
+    if !summary.verified || summary.vote_count < summary.required_quorum as u64 {
         return Err("latest committed QC is not verified through Aegis/PQC quorum".to_string());
     }
     Ok(summary)
@@ -2566,7 +2566,7 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
         persisted_chain_tip_height,
         None,
     )?;
-    if !qc.verified || qc.vote_count < 4 {
+    if !qc.verified || qc.vote_count < qc.required_quorum as u64 {
         return Err("latest committed QC is not verified through Aegis/PQC quorum".to_string());
     }
     let snapshot_height = qc.height;
@@ -3486,7 +3486,7 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
             exact_common_height_match: options.exact_common_height_match && local_common_match,
             latest_finalized_qc_aegis_pqc_verified: options.latest_finalized_qc_aegis_pqc_verified
                 && qc.verified
-                && qc.vote_count >= 4,
+                && qc.vote_count >= qc.required_quorum as u64,
             no_stale_vote_locks_above_finalized: true,
             no_proposal_cache_conflicts_above_finalized: true,
             quarantine_reason_cleared: true,
@@ -3593,8 +3593,9 @@ mod tests {
     use crate::config::NodeConfig;
     use crate::consensus::consensus_fork;
     use crate::consensus::self_realign::{
-        create_snapshot_manifest, sign_snapshot_manifest, QuarantineMarker, SnapshotBuildInput,
-        SnapshotQcEvidence, SNAPSHOT_CLASS_VALIDATOR_PRUNED,
+        create_snapshot_manifest, required_snapshot_quorum_for_validator_count,
+        sign_snapshot_manifest, QuarantineMarker, SnapshotBuildInput, SnapshotQcEvidence,
+        SNAPSHOT_CLASS_VALIDATOR_PRUNED,
     };
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager};
@@ -4166,14 +4167,14 @@ mod tests {
         let data_dir = root.join("data");
         fs::write(
             data_dir.join("chain.json"),
-            json!([{"block_index": 10, "hash": "h10"}]).to_string(),
+            json!([{"block_index": 10, "hash": "h10", "previous_hash": "h9"}]).to_string(),
         )
         .unwrap();
         fs::write(
             data_dir.join("canonical_locks.json"),
             json!({
-                "10": {"height": 10, "hash": "h10"},
-                "11": {"height": 11, "hash": "h11"}
+                "10": {"height": 10, "hash": "h10", "block_hash": "h10", "parent_hash": "h9"},
+                "11": {"height": 11, "hash": "h11", "block_hash": "h11", "parent_hash": "h10"}
             })
             .to_string(),
         )
@@ -4365,7 +4366,7 @@ mod tests {
         let data_dir = root.join("data");
         fs::write(
             data_dir.join("chain.json"),
-            json!([{"block_index": 10, "hash": "h10"}]).to_string(),
+            json!([{"block_index": 10, "hash": "h10", "previous_hash": "h9"}]).to_string(),
         )
         .unwrap();
         fs::write(
@@ -4395,7 +4396,7 @@ mod tests {
                 validator_id: "validator-10".to_string(),
                 transactions_root: "tx-root-10".to_string(),
             },
-            qc_vote_count: 4,
+            qc_vote_count: required_snapshot_quorum_for_validator_count(5),
         };
 
         copy_snapshot_state_files(

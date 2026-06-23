@@ -42,7 +42,8 @@ lazy_static::lazy_static! {
 
 static COMMITTED_QC_STORE_INIT: Once = Once::new();
 
-const TWO_THIRDS_QUORUM_THRESHOLD: f64 = 2.0 / 3.0;
+pub const VALIDATOR_QUORUM_PERCENT: usize = 67;
+pub const VALIDATOR_QUORUM_RATIO: f64 = VALIDATOR_QUORUM_PERCENT as f64 / 100.0;
 pub const MIN_LAUNCH_VOTE_TIMEOUT_SECS: u64 = 1;
 const LOCAL_VOTE_LOCK_COMPACTION_MIN_LOCKS: usize = 1024;
 const LOCAL_VOTE_LOCK_FINALIZED_RETENTION_DEPTH: u64 = 16;
@@ -217,9 +218,9 @@ impl DualQuorumConsensus {
             pqc_manager,
             penalization_enabled,
             minimum_validator_count: minimum_validator_count.max(1),
-            validator_vote_threshold: validator_vote_threshold.max(1),
-            validation_quorum_threshold: TWO_THIRDS_QUORUM_THRESHOLD,
-            cooperation_quorum_threshold: 0.51,
+            validator_vote_threshold,
+            validation_quorum_threshold: VALIDATOR_QUORUM_RATIO,
+            cooperation_quorum_threshold: VALIDATOR_QUORUM_RATIO,
             vote_timeout: vote_timeout_secs.max(MIN_LAUNCH_VOTE_TIMEOUT_SECS),
             block_timeout: block_timeout_secs.max(1),
             current_epoch: 0,
@@ -1326,16 +1327,15 @@ impl DualQuorumConsensus {
         } else {
             0.0
         };
-        let required_validation_ratio = self
-            .validation_quorum_threshold
-            .max(TWO_THIRDS_QUORUM_THRESHOLD);
+        let required_validation_ratio =
+            self.validation_quorum_threshold.max(VALIDATOR_QUORUM_RATIO);
         let validation_quorum_met = validation_ratio > required_validation_ratio;
 
         // Check cooperation quorum using a BFT-style supermajority count.
         let cooperation_ratio = validator_count as f64 / total_validators as f64;
         let required_cooperation_ratio = self
             .cooperation_quorum_threshold
-            .max(TWO_THIRDS_QUORUM_THRESHOLD);
+            .max(VALIDATOR_QUORUM_RATIO);
         let cooperation_quorum_met = cooperation_ratio > required_cooperation_ratio
             && validator_count >= required_validator_votes;
 
@@ -1375,7 +1375,7 @@ impl DualQuorumConsensus {
     }
 
     fn required_validator_votes(&self, total_validators: usize) -> usize {
-        Self::required_votes_from_config(total_validators, Some(self.validator_vote_threshold)).0
+        required_validator_quorum(total_validators).max(1)
     }
 
     fn has_commit_quorum(&self, live_validators: &[Validator], votes: &[Vote]) -> bool {
@@ -1394,9 +1394,8 @@ impl DualQuorumConsensus {
         }
 
         let cumulative_weight = self.calculate_cumulative_vote_weight(votes);
-        let required_validation_ratio = self
-            .validation_quorum_threshold
-            .max(TWO_THIRDS_QUORUM_THRESHOLD);
+        let required_validation_ratio =
+            self.validation_quorum_threshold.max(VALIDATOR_QUORUM_RATIO);
         cumulative_weight + 0.000_001 >= total_live_weight * required_validation_ratio
     }
 
@@ -1728,16 +1727,10 @@ impl DualQuorumConsensus {
             signed_weight += (validator.synergy_score / 100.0).max(0.0);
         }
 
-        let (required_votes, configured_quorum) =
-            Self::required_qc_validator_votes(active_validators.len());
+        let required_votes = Self::required_qc_validator_votes(active_validators.len());
         if seen.len() < required_votes {
-            let quorum_label = if configured_quorum {
-                "configured quorum"
-            } else {
-                "BFT quorum"
-            };
             return Err(format!(
-                "QC has {} signer(s), {} required for {quorum_label}",
+                "QC has {} signer(s), {} required for dynamic validator quorum",
                 seen.len(),
                 required_votes,
             ));
@@ -1750,38 +1743,15 @@ impl DualQuorumConsensus {
         if total_weight <= 0.0 {
             return Err("active validator set has zero voting weight".to_string());
         }
-        if signed_weight + 0.000_001 < total_weight * TWO_THIRDS_QUORUM_THRESHOLD {
-            return Err("QC signed weight is below two thirds".to_string());
+        if signed_weight + 0.000_001 < total_weight * VALIDATOR_QUORUM_RATIO {
+            return Err("QC signed weight is below validator quorum threshold".to_string());
         }
 
         Ok(())
     }
 
-    fn required_qc_validator_votes(total_validators: usize) -> (usize, bool) {
-        let configured = env::var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .or_else(|| {
-                crate::config::load_node_config(None)
-                    .ok()
-                    .map(|config| config.consensus.validator_vote_threshold)
-            });
-
-        Self::required_votes_from_config(total_validators, configured)
-    }
-
-    fn required_votes_from_config(
-        total_validators: usize,
-        configured: Option<usize>,
-    ) -> (usize, bool) {
-        let bft_required = (total_validators * 2).div_ceil(3);
-        let Some(configured) = configured else {
-            return (bft_required.max(1), false);
-        };
-
-        let configured = configured.max(1);
-        let required = configured.max(bft_required.max(1));
-        (required, required != bft_required)
+    fn required_qc_validator_votes(total_validators: usize) -> usize {
+        required_validator_quorum(total_validators).max(1)
     }
 
     fn vote_signature_cache_contains(&self, cache_key: &str) -> bool {
@@ -2809,6 +2779,14 @@ impl DualQuorumConsensus {
     }
 }
 
+pub fn required_validator_quorum(total_validators: usize) -> usize {
+    if total_validators == 0 {
+        0
+    } else {
+        (total_validators * VALIDATOR_QUORUM_PERCENT).div_ceil(100)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2906,54 +2884,30 @@ mod tests {
     }
 
     #[test]
-    fn qc_verification_does_not_allow_configured_threshold_below_bft() {
+    fn qc_verification_requires_dynamic_quorum_for_five_validators() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
-        let previous = env::var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD").ok();
-        env::set_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD", "3");
 
-        let (required, configured_quorum) = DualQuorumConsensus::required_qc_validator_votes(5);
+        let required = DualQuorumConsensus::required_qc_validator_votes(5);
 
-        assert_eq!(required, 4);
-        assert!(!configured_quorum);
-
-        match previous {
-            Some(value) => env::set_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD", value),
-            None => env::remove_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD"),
-        }
+        assert_eq!(required, required_validator_quorum(5));
     }
 
     #[test]
-    fn qc_verification_accepts_dynamic_four_of_six_quorum() {
+    fn qc_verification_requires_dynamic_five_of_six_quorum() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
-        let previous = env::var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD").ok();
-        env::set_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD", "4");
 
-        let (required, configured_quorum) = DualQuorumConsensus::required_qc_validator_votes(6);
+        let required = DualQuorumConsensus::required_qc_validator_votes(6);
 
-        assert_eq!(required, 4);
-        assert!(!configured_quorum);
-
-        match previous {
-            Some(value) => env::set_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD", value),
-            None => env::remove_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD"),
-        }
+        assert_eq!(required, required_validator_quorum(6));
     }
 
     #[test]
-    fn qc_verification_allows_configured_quorum_above_bft() {
+    fn qc_verification_requires_dynamic_quorum_for_expanded_set() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
-        let previous = env::var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD").ok();
-        env::set_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD", "6");
 
-        let (required, configured_quorum) = DualQuorumConsensus::required_qc_validator_votes(6);
+        let required = DualQuorumConsensus::required_qc_validator_votes(10);
 
-        assert_eq!(required, 6);
-        assert!(configured_quorum);
-
-        match previous {
-            Some(value) => env::set_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD", value),
-            None => env::remove_var("SYNERGY_CONSENSUS_VALIDATOR_VOTE_THRESHOLD"),
-        }
+        assert_eq!(required, required_validator_quorum(10));
     }
 
     #[test]
@@ -3629,20 +3583,8 @@ mod tests {
             .and_then(|data| data.parent())
             .expect("vote lock path has test root")
             .to_path_buf();
-        let fork_path = root.join("config").join("consensus-fork-migration.json");
-        fs::create_dir_all(fork_path.parent().expect("fork config path has parent"))
-            .expect("fork config parent should be created");
         fs::create_dir_all(path.parent().expect("vote lock path has parent"))
             .expect("vote lock parent should be created");
-
-        let previous_root = std::env::var("SYNERGY_PROJECT_ROOT").ok();
-        let previous_fork =
-            std::env::var(crate::consensus::consensus_fork::CONSENSUS_FORK_MIGRATION_ENV).ok();
-        std::env::set_var("SYNERGY_PROJECT_ROOT", &root);
-        std::env::set_var(
-            crate::consensus::consensus_fork::CONSENSUS_FORK_MIGRATION_ENV,
-            &fork_path,
-        );
         crate::consensus::legacy_canonical_lock::clear_legacy_canonical_locks_for_tests();
         DualQuorumConsensus::set_test_local_vote_lock_path(Some(path.clone()));
 
@@ -3666,11 +3608,10 @@ mod tests {
             "migration_reason": "test checkpointed FN-DSA fork",
             "parser_mode": "fail_closed"
         });
-        fs::write(
-            &fork_path,
-            serde_json::to_vec_pretty(&fork).expect("fork config should encode"),
-        )
-        .expect("fork config should be written");
+        let migration: crate::consensus::consensus_fork::ConsensusForkMigration =
+            serde_json::from_value(fork.clone()).expect("test fork config should decode");
+        let _fork_guard =
+            crate::consensus::consensus_fork::set_test_active_consensus_fork_migration(migration);
 
         let mut first_block = signed_block(204_216, 1, "validator1");
         first_block.previous_hash = fork["parent_hash"]
@@ -3709,19 +3650,6 @@ mod tests {
 
         DualQuorumConsensus::set_test_local_vote_lock_path(None);
         crate::consensus::legacy_canonical_lock::clear_legacy_canonical_locks_for_tests();
-        match previous_root {
-            Some(value) => std::env::set_var("SYNERGY_PROJECT_ROOT", value),
-            None => std::env::remove_var("SYNERGY_PROJECT_ROOT"),
-        }
-        match previous_fork {
-            Some(value) => std::env::set_var(
-                crate::consensus::consensus_fork::CONSENSUS_FORK_MIGRATION_ENV,
-                value,
-            ),
-            None => {
-                std::env::remove_var(crate::consensus::consensus_fork::CONSENSUS_FORK_MIGRATION_ENV)
-            }
-        }
         let _ = fs::remove_dir_all(root);
     }
 
@@ -4043,7 +3971,7 @@ mod tests {
     }
 
     #[test]
-    fn four_of_six_equal_weight_votes_satisfy_dynamic_quorum() {
+    fn below_dynamic_quorum_equal_weight_votes_do_not_commit() {
         let validator_manager = approved_validator_manager(&[
             "validator1",
             "validator2",
@@ -4086,11 +4014,11 @@ mod tests {
 
         assert_eq!(
             consensus.required_validator_votes(active_validators.len()),
-            4
+            5
         );
         assert!(
-            consensus.has_commit_quorum(&active_validators, &votes),
-            "4 collected votes across six active validators should satisfy ceil(2/3) quorum"
+            !consensus.has_commit_quorum(&active_validators, &votes),
+            "4 collected votes across six active validators must not satisfy 67% quorum"
         );
 
         let five_votes = [
@@ -4120,12 +4048,12 @@ mod tests {
         .collect::<Vec<_>>();
         assert!(
             consensus.has_commit_quorum(&active_validators, &five_votes),
-            "5 of 6 equal-weight votes should also satisfy ceil(2/3) quorum"
+            "5 of 6 equal-weight votes should satisfy 67% quorum"
         );
     }
 
     #[test]
-    fn configured_quorum_does_not_shrink_to_live_validator_count() {
+    fn validator_quorum_follows_active_validator_count_not_static_config() {
         let validator_manager =
             approved_validator_manager(&["validator1", "validator2", "validator3"]);
         let pqc_manager = Arc::new(Mutex::new(PQCManager::new()));
@@ -4162,11 +4090,11 @@ mod tests {
 
         assert_eq!(
             consensus.required_validator_votes(active_validators.len()),
-            4
+            required_validator_quorum(active_validators.len())
         );
         assert!(
-            !consensus.has_commit_quorum(&active_validators, &votes),
-            "configured 4-of-5 quorum must not silently become 3-of-3 when peers disappear"
+            consensus.has_commit_quorum(&active_validators, &votes),
+            "dynamic quorum must come from the active validator set, not a stale configured value"
         );
     }
 

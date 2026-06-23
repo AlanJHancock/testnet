@@ -2,6 +2,8 @@ use crate::crypto::pqc::{PQCAlgorithm, PQCPublicKey};
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
@@ -12,6 +14,12 @@ pub const DEFAULT_CONSENSUS_FORK_MIGRATION_PATH: &str = "config/consensus-fork-m
 pub const CONSENSUS_FORK_PARSER_MODE_FAIL_CLOSED: &str = "fail_closed";
 pub const LEGACY_CONSENSUS_ALGORITHM_LABEL: &str = "FN-DSA";
 pub const POST_FORK_CONSENSUS_ALGORITHM_LABEL: &str = "FN-DSA";
+
+#[cfg(test)]
+thread_local! {
+    static TEST_ACTIVE_CONSENSUS_FORK_MIGRATION: RefCell<Option<ConsensusForkMigration>> =
+        const { RefCell::new(None) };
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsensusForkMigration {
@@ -34,6 +42,28 @@ pub struct ForkValidatorConsensusKey {
     pub validator_address: String,
     pub consensus_key_type: String,
     pub consensus_public_key: String,
+}
+
+#[cfg(test)]
+pub struct TestConsensusForkMigrationGuard;
+
+#[cfg(test)]
+impl Drop for TestConsensusForkMigrationGuard {
+    fn drop(&mut self) {
+        TEST_ACTIVE_CONSENSUS_FORK_MIGRATION.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+pub fn set_test_active_consensus_fork_migration(
+    migration: ConsensusForkMigration,
+) -> TestConsensusForkMigrationGuard {
+    TEST_ACTIVE_CONSENSUS_FORK_MIGRATION.with(|slot| {
+        *slot.borrow_mut() = Some(migration);
+    });
+    TestConsensusForkMigrationGuard
 }
 
 impl ConsensusForkMigration {
@@ -132,6 +162,15 @@ impl ForkValidatorConsensusKey {
 }
 
 pub fn active_consensus_fork_migration() -> Result<Option<ConsensusForkMigration>, String> {
+    #[cfg(test)]
+    if let Some(migration) = TEST_ACTIVE_CONSENSUS_FORK_MIGRATION.with(|slot| slot.borrow().clone())
+    {
+        migration
+            .validate()
+            .map_err(|error| format!("invalid test consensus fork migration: {error}"))?;
+        return Ok(Some(migration));
+    }
+
     let env_path = env::var(CONSENSUS_FORK_MIGRATION_ENV)
         .ok()
         .map(|value| value.trim().to_string())

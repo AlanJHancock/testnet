@@ -10,7 +10,7 @@ Canonical identity:
 - chain_id_hex: `0x4f0`
 - network_id: `synergy-testnet-v2`
 - genesis validators: 5
-- active validator quorum: 4-of-5
+- active validator quorum: dynamic 67% of the active validator set
 - cluster_count: 1
 - cluster_id: 0
 - target block cadence: 2 seconds

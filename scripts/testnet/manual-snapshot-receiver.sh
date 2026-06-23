@@ -71,8 +71,18 @@ if manifest.get("network_id") != "synergy-testnet-v2":
     raise SystemExit("snapshot network_id mismatch")
 if manifest.get("genesis_hash") != "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789":
     raise SystemExit("snapshot genesis_hash mismatch")
-if (manifest.get("qc_vote_count") or 0) < 4:
-    raise SystemExit("snapshot QC vote count is below 4")
+active_validator_set = manifest.get("active_validator_set") or (manifest.get("consensus_fork") or {}).get("new_validator_registry") or []
+manifest_quorum = int(manifest.get("quorum_threshold") or 0)
+if active_validator_set:
+    dynamic_quorum = ((len(active_validator_set) * 67) + 99) // 100
+elif manifest_quorum:
+    dynamic_quorum = manifest_quorum
+else:
+    raise SystemExit("snapshot is missing active validator set and quorum threshold")
+required_quorum = max(manifest_quorum, dynamic_quorum, 1)
+qc_vote_count = manifest.get("qc_vote_count") or 0
+if qc_vote_count < required_quorum:
+    raise SystemExit(f"snapshot QC vote count is below quorum: {qc_vote_count} < {required_quorum}")
 if not manifest.get("safety", {}).get("h175518_contamination_rejected"):
     raise SystemExit("snapshot does not assert h175518 contamination rejection")
 print(json.dumps({

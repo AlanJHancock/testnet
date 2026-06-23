@@ -24,7 +24,7 @@ Before publishing, prove the source:
 - Has no same-height QC/canonical conflict.
 - Has bounded qRPC responsiveness.
 - Has current committed/canonical material for the chosen snapshot height.
-- Has a valid committed QC with at least four active genesis validator signers.
+- Has a valid committed QC with at least `ceil(active_validator_count * 67 / 100)` active validator signers.
 - Is not under active recovery or fork ambiguity.
 
 Choose a stable materialized height behind the live tip, not an in-flight head height.

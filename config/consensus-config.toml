@@ -14,10 +14,10 @@ clusters = 4
 epoch_length = 1000
 rotation_interval = 1000
 checkpoint_interval = 100
-finality_threshold = 0.6666666667
+finality_threshold = 0.67
 proposer_selection = "synergy_score_weighted"
-validation_quorum_threshold = 0.6666666667
-cooperation_quorum_threshold = 0.51
+validation_quorum_threshold = 0.67
+cooperation_quorum_threshold = 0.67
 vote_timeout = 3
 block_timeout = 5
 

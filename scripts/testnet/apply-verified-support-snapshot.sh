@@ -82,8 +82,17 @@ if manifest.get("genesis_hash") != "f79011f2aaddd40b120d47ba723104fafe3c998d4a17
 qc_vote_count = manifest.get("qc_vote_count")
 if qc_vote_count is None:
     qc_vote_count = (manifest.get("qc_evidence") or {}).get("vote_count")
-if (qc_vote_count or 0) < 4:
-    raise SystemExit("QC vote count below quorum")
+active_validator_set = manifest.get("active_validator_set") or (manifest.get("consensus_fork") or {}).get("new_validator_registry") or []
+manifest_quorum = int(manifest.get("quorum_threshold") or 0)
+if active_validator_set:
+    dynamic_quorum = ((len(active_validator_set) * 67) + 99) // 100
+elif manifest_quorum:
+    dynamic_quorum = manifest_quorum
+else:
+    raise SystemExit("snapshot is missing active validator set and quorum threshold")
+required_quorum = max(manifest_quorum, dynamic_quorum, 1)
+if (qc_vote_count or 0) < required_quorum:
+    raise SystemExit(f"QC vote count below quorum: {qc_vote_count or 0} < {required_quorum}")
 snapshot_height = manifest.get("snapshot_height", manifest.get("height"))
 snapshot_block_hash = manifest.get("snapshot_block_hash", manifest.get("hash"))
 if snapshot_height is None or not snapshot_block_hash:

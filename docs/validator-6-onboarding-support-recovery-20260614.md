@@ -114,7 +114,7 @@ Archive service/config changes on `ssh synergy-archive`:
 | Path | Change |
 | --- | --- |
 | `/usr/local/synergy/bin/synergy-archive-validator-node` | Replaced twice with timestamped backups before each install |
-| `/Users/Shared/Synergy/archive-validator/workspace/config/node.toml` | Set `min_validators = 4`, `validator_cluster_size = 7`, `validator_vote_threshold = 4`, `strict_validator_allowlist = false` |
+| `/Users/Shared/Synergy/archive-validator/workspace/config/node.toml` | Historical recovery set a fixed validator vote threshold; current configs must use `validator_vote_threshold = 0` so runtime derives dynamic quorum from the active validator set. |
 | `/Users/Shared/Synergy/archive-validator/workspace/config/node.toml` | Added Val6 public P2P `157.173.192.45:5622` to `additional_dial_targets` and `persistent_peers` for the next archive restart |
 
 Backups created:

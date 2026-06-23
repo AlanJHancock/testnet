@@ -1,3 +1,4 @@
+use crate::consensus::dual_quorum::required_validator_quorum;
 use crate::consensus::posy::LocalConsensusContext;
 use crate::consensus::self_realign::{QuarantineMarker, RealignmentState};
 use crate::crypto::aegis_pqvm::AegisPqvmVerifier;
@@ -747,13 +748,13 @@ impl LivenessContinuationPolicy {
         active_validators: usize,
         live_validators: usize,
     ) -> bool {
-        let threshold = (active_validators * 2 / 3) + 1;
+        let threshold = required_validator_quorum(active_validators);
         live_validators >= threshold
     }
 }
 
 pub fn emergency_liveness_recommendation() -> &'static str {
-    "With 5 active validators and 4-of-5 quorum, Synergy Testnet tolerates 1 faulty/offline/quarantined validator. If 2 validators are offline, partitioned, or quarantined simultaneously, finality may pause by design to preserve safety. Recommended near-term target is 7 active validators with quorum 5-of-7; stronger target is 10 active validators with quorum 7-of-10. Do not lower quorum below the BFT-safe threshold."
+    "Validator quorum is dynamic: ceil(active_validator_count * 67 / 100). If too many validators are offline, partitioned, or quarantined simultaneously, finality may pause by design to preserve safety. Do not lower quorum below the dynamic validator threshold."
 }
 
 #[cfg(test)]

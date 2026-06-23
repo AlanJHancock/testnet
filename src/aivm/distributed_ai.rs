@@ -164,7 +164,7 @@ impl DistributedAIProtocol {
             results: HashMap::new(),
             final_result: None,
             consensus_threshold: 0.67, // 67% agreement required
-            required_confirmations: (participating_validators.len() as f64 * 0.67) as u32,
+            required_confirmations: (participating_validators.len() as u32 * 67).div_ceil(100),
             current_confirmations: 0,
         };
 
@@ -328,7 +328,7 @@ impl DistributedAIProtocol {
         }
 
         let total_validators = results.len() as u32;
-        let required_votes = (total_validators as f64 * threshold) as u32;
+        let required_votes = (total_validators as f64 * threshold).ceil() as u32;
 
         let mut final_result = None;
         let mut max_votes = 0;

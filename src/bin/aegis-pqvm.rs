@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use synergy_testnet::consensus::self_realign::{
-    create_snapshot_manifest, default_allowed_restore_roles_for_class, sign_snapshot_manifest,
-    SnapshotBuildInput, SnapshotQcEvidence,
+    create_snapshot_manifest, default_allowed_restore_roles_for_class,
+    required_snapshot_quorum_for_validator_count, sign_snapshot_manifest, SnapshotBuildInput,
+    SnapshotQcEvidence,
 };
 use synergy_testnet::crypto::aegis_pqvm::{
     AegisPqKeyLifecycleRecord, AegisPqvmSigner, AegisPqvmVerifier,
@@ -329,9 +330,11 @@ fn test_only_create_snapshot_fixture(args: &[String]) {
     let active_validator_set = (1..=5)
         .map(|index| format!("fixture-validator-{index}"))
         .collect::<Vec<_>>();
+    let required_quorum =
+        required_snapshot_quorum_for_validator_count(active_validator_set.len()) as usize;
     let qc_signers = active_validator_set
         .iter()
-        .take(4)
+        .take(required_quorum)
         .cloned()
         .collect::<Vec<_>>();
     let mut signer = AegisPqvmSigner::initialize_required().expect("Aegis fixture signer");
@@ -360,7 +363,7 @@ fn test_only_create_snapshot_fixture(args: &[String]) {
         qc_evidence: SnapshotQcEvidence {
             committed_qc_height: 100,
             committed_qc_hash: "fixture-block-hash".to_string(),
-            vote_count: 4,
+            vote_count: required_quorum as u64,
             signer_set: qc_signers.clone(),
             aegis_pqc_verified: true,
             duplicate_signer_check_passed: true,
@@ -394,7 +397,7 @@ fn test_only_create_snapshot_fixture(args: &[String]) {
             "manifest_path": manifest_path,
             "snapshot_height": 100,
             "snapshot_hash": "fixture-block-hash",
-            "qc_vote_count": 4,
+            "qc_vote_count": required_quorum,
             "qc_signers": qc_signers,
         })
     );

@@ -1,4 +1,5 @@
 use crate::address::{generate_validator_cluster_address, is_valid_cluster_address};
+use crate::consensus::dual_quorum::required_validator_quorum;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::{BTreeMap, HashMap};
@@ -188,7 +189,7 @@ pub fn fault_tolerance_f(cluster_size: usize) -> usize {
 }
 
 pub fn quorum_threshold(cluster_size: usize) -> usize {
-    (2 * cluster_size).div_ceil(3)
+    required_validator_quorum(cluster_size)
 }
 
 pub fn cluster_count_for_active_validators(
@@ -888,7 +889,7 @@ mod tests {
         assert_eq!(fault_tolerance_f(5), 1);
         assert_eq!(quorum_threshold(5), 4);
         assert_eq!(fault_tolerance_f(12), 3);
-        assert_eq!(quorum_threshold(12), 8);
+        assert_eq!(quorum_threshold(12), 9);
     }
 
     #[test]

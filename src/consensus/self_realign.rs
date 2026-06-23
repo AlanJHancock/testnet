@@ -1,6 +1,7 @@
 use crate::consensus::consensus_fork::{
     active_consensus_fork_migration, validate_snapshot_fork_metadata, ConsensusForkMigration,
 };
+use crate::consensus::dual_quorum::required_validator_quorum;
 use crate::crypto::aegis_pqvm::{
     AegisPqKeyLifecycleRecord, AegisPqvmSigner, AegisPqvmVerifier,
     SYNERGY_ARCHIVE_SNAPSHOT_MANIFEST_V1,
@@ -21,7 +22,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub const EXPECTED_GENESIS_HASH: &str =
     "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789";
 pub const GENESIS_VALIDATOR_COUNT: usize = 5;
-pub const GENESIS_QUORUM_THRESHOLD: usize = 4;
 pub const DEFAULT_SNAPSHOT_INTERVAL_BLOCKS: u64 = 5_000;
 pub const DEFAULT_SNAPSHOT_INTERVAL_SECS: u64 = 15 * 60;
 pub const DEFAULT_SNAPSHOT_RETENTION_COUNT: usize = 2;
@@ -35,6 +35,10 @@ pub const SNAPSHOT_CLASS_INDEXER_FULL: &str = "indexer-full";
 pub const SNAPSHOT_CLASS_INDEXER_REPLAY: &str = "indexer-replay";
 pub const SNAPSHOT_CLASS_ARCHIVE_FULL: &str = "archive-full";
 pub const SNAPSHOT_CLASS_ARCHIVE_BOOTSTRAP: &str = "archive-bootstrap";
+
+pub fn required_snapshot_quorum_for_validator_count(active_validator_count: usize) -> u64 {
+    required_validator_quorum(active_validator_count) as u64
+}
 
 const SNAPSHOT_MANIFEST_VERSION: u32 = 1;
 const SNAPSHOT_STATE_ROOT_DOMAIN: &[u8] = b"SYNERGY_SNAPSHOT_STATE_ROOT_V1";
@@ -334,7 +338,7 @@ impl Default for SnapshotVerificationPolicy {
             expected_genesis_hash: EXPECTED_GENESIS_HASH.to_string(),
             expected_snapshot_class: None,
             target_role: None,
-            required_quorum: GENESIS_QUORUM_THRESHOLD as u64,
+            required_quorum: required_snapshot_quorum_for_validator_count(GENESIS_VALIDATOR_COUNT),
             expected_genesis_validator_count: GENESIS_VALIDATOR_COUNT,
             current_finalized_height: None,
             max_snapshot_lag_blocks: Some(DEFAULT_SNAPSHOT_INTERVAL_BLOCKS * 2),
@@ -951,6 +955,8 @@ pub fn create_snapshot_manifest(input: SnapshotBuildInput) -> Result<SnapshotMan
             ));
         }
     }
+    let quorum_threshold =
+        required_snapshot_quorum_for_validator_count(input.active_validator_set.len());
     Ok(SnapshotManifest {
         manifest_version: SNAPSHOT_MANIFEST_VERSION,
         chain_id: SYNERGY_TESTNET_V2_CHAIN_ID,
@@ -968,7 +974,7 @@ pub fn create_snapshot_manifest(input: SnapshotBuildInput) -> Result<SnapshotMan
         canonical_lock_hash: input.canonical_lock_hash,
         qc_evidence: input.qc_evidence,
         active_validator_set: input.active_validator_set,
-        quorum_threshold: GENESIS_QUORUM_THRESHOLD as u64,
+        quorum_threshold,
         files,
         full_archive_sha256,
         created_at: input.created_at,
@@ -1081,8 +1087,14 @@ pub fn verify_signed_snapshot_manifest(
             ));
         }
     }
-    if manifest.quorum_threshold != policy.required_quorum {
-        errors.push("snapshot manifest wrong quorum threshold".to_string());
+    let dynamic_required_quorum =
+        required_snapshot_quorum_for_validator_count(manifest.active_validator_set.len());
+    let required_quorum = policy.required_quorum.max(dynamic_required_quorum);
+    if manifest.quorum_threshold < required_quorum {
+        errors.push(format!(
+            "snapshot manifest quorum threshold {} is below required {required_quorum}",
+            manifest.quorum_threshold
+        ));
     }
     let active_validator_set_meets_genesis_baseline =
         manifest.active_validator_set.len() >= policy.expected_genesis_validator_count;
@@ -1090,8 +1102,10 @@ pub fn verify_signed_snapshot_manifest(
         errors
             .push("snapshot active validator set is below the genesis validator count".to_string());
     }
-    if manifest.qc_evidence.vote_count < policy.required_quorum {
-        errors.push("snapshot committed QC vote_count below 4".to_string());
+    if manifest.qc_evidence.vote_count < required_quorum {
+        errors.push(format!(
+            "snapshot committed QC vote_count below {required_quorum}"
+        ));
     }
     if !manifest.qc_evidence.aegis_pqc_verified {
         errors.push("snapshot committed QC was not verified through Aegis/PQC".to_string());
@@ -1651,6 +1665,10 @@ mod tests {
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    fn genesis_required_quorum() -> usize {
+        required_snapshot_quorum_for_validator_count(GENESIS_VALIDATOR_COUNT) as usize
+    }
+
     fn temp_root(name: &str) -> PathBuf {
         let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let root = std::env::temp_dir().join(format!(
@@ -1847,6 +1865,9 @@ mod tests {
         active_validator_set.push("validator-6".to_string());
         let mut qc_evidence = qc_evidence();
         qc_evidence.active_validator_set_is_genesis_5 = false;
+        qc_evidence.vote_count =
+            required_snapshot_quorum_for_validator_count(active_validator_set.len());
+        qc_evidence.signer_set.push("validator-5".to_string());
 
         let report = verify(&signed_manifest_with(active_validator_set, qc_evidence));
 
@@ -2020,11 +2041,35 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_rejects_vote_count_below_4() {
+    fn snapshot_rejects_vote_count_below_required_quorum() {
         let mut signed = signed_manifest();
         signed.manifest.qc_evidence.vote_count = 3;
         let report = verify(&signed);
-        assert!(report.errors.iter().any(|error| error.contains("below 4")));
+        let required_quorum = required_snapshot_quorum_for_validator_count(
+            signed.manifest.active_validator_set.len(),
+        );
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains(&format!("below {required_quorum}"))));
+    }
+
+    #[test]
+    fn snapshot_rejects_vote_count_below_expanded_validator_quorum() {
+        let active_validator_set = (1..=6)
+            .map(|index| format!("validator-{index}"))
+            .collect::<Vec<_>>();
+        let signed = signed_manifest_with(active_validator_set, qc_evidence());
+
+        assert_eq!(
+            signed.manifest.quorum_threshold,
+            required_snapshot_quorum_for_validator_count(6)
+        );
+        let report = verify(&signed);
+        assert!(report.errors.iter().any(|error| error.contains(&format!(
+            "below {}",
+            required_snapshot_quorum_for_validator_count(6)
+        ))));
     }
 
     #[test]
@@ -2265,7 +2310,7 @@ mod tests {
                 block_hash: "b".to_string(),
             },
         ];
-        let proof = prove_majority_branch(&reports, GENESIS_QUORUM_THRESHOLD);
+        let proof = prove_majority_branch(&reports, genesis_required_quorum());
         assert!(proof.proven);
         assert_eq!(proof.majority_hash.as_deref(), Some("a"));
         assert_eq!(proof.ignored_support_count, 1);
@@ -2326,7 +2371,7 @@ mod tests {
                 block_hash: "a".to_string(),
             },
         ];
-        assert!(!prove_majority_branch(&reports, GENESIS_QUORUM_THRESHOLD).proven);
+        assert!(!prove_majority_branch(&reports, genesis_required_quorum()).proven);
     }
 
     #[test]
@@ -2361,7 +2406,7 @@ mod tests {
                 block_hash: "a".to_string(),
             },
         ];
-        assert!(!prove_majority_branch(&reports, GENESIS_QUORUM_THRESHOLD).proven);
+        assert!(!prove_majority_branch(&reports, genesis_required_quorum()).proven);
     }
 
     #[test]
@@ -2533,7 +2578,7 @@ mod tests {
     }
 
     #[test]
-    fn four_of_five_continue_when_one_quarantined() {
+    fn genesis_validator_quorum_continues_when_one_quarantined() {
         let proof_reports = (1..=4)
             .map(|index| PeerBranchEvidence {
                 node_id: format!("validator-{index}"),
@@ -2543,16 +2588,16 @@ mod tests {
                 block_hash: "majority".to_string(),
             })
             .collect::<Vec<_>>();
-        assert!(prove_majority_branch(&proof_reports, GENESIS_QUORUM_THRESHOLD).proven);
+        assert!(prove_majority_branch(&proof_reports, genesis_required_quorum()).proven);
     }
 
     #[test]
-    fn divergent_validator_quarantined_does_not_stall_four() {
+    fn divergent_validator_quarantined_does_not_reduce_dynamic_genesis_quorum() {
         assert!(
             ValidatorDutyGate::for_state(RealignmentState::Quarantined).can_count_toward_quorum
                 == false
         );
-        assert!(GENESIS_VALIDATOR_COUNT - 1 >= GENESIS_QUORUM_THRESHOLD);
+        assert!(GENESIS_VALIDATOR_COUNT - 1 >= genesis_required_quorum());
     }
 
     #[test]
@@ -2588,9 +2633,12 @@ mod tests {
     }
 
     #[test]
-    fn no_quorum_threshold_shrink() {
-        assert_eq!(GENESIS_QUORUM_THRESHOLD, 4);
-        assert_eq!(GENESIS_VALIDATOR_COUNT, 5);
+    fn quorum_threshold_follows_dynamic_policy() {
+        assert_eq!(
+            genesis_required_quorum(),
+            required_validator_quorum(GENESIS_VALIDATOR_COUNT)
+        );
+        assert_eq!(required_snapshot_quorum_for_validator_count(6), 5);
     }
 
     #[test]
@@ -2625,7 +2673,7 @@ mod tests {
                 block_hash: "a".to_string(),
             },
         ];
-        assert!(!prove_majority_branch(&reports, GENESIS_QUORUM_THRESHOLD).proven);
+        assert!(!prove_majority_branch(&reports, genesis_required_quorum()).proven);
     }
 
     #[test]
@@ -2660,7 +2708,7 @@ mod tests {
                 block_hash: "a".to_string(),
             },
         ];
-        let proof = prove_majority_branch(&reports, GENESIS_QUORUM_THRESHOLD);
+        let proof = prove_majority_branch(&reports, genesis_required_quorum());
         assert_eq!(proof.majority_hash.as_deref(), Some("a"));
     }
 
