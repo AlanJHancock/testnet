@@ -409,7 +409,10 @@ mod tests {
 
         let error = migration.validate().unwrap_err();
 
-        assert!(error.contains("must be FN-DSA"));
+        assert!(
+            error.contains("unsupported consensus key algorithm"),
+            "{error}"
+        );
     }
 
     #[test]
