@@ -1020,17 +1020,38 @@ fn configured_validator_public_address_map(
     }
 
     let dials = configured_validator_p2p_dials(config);
-    let mapped_dials = if dials.len() == validators.len() {
-        dials
+    let mapped_pairs = if dials.len() == validators.len() {
+        dials.into_iter().zip(validators).collect::<Vec<_>>()
+    } else if dials.len() + 1 == validators.len() {
+        let local_validator = announced_validator_address(config)
+            .map(|address| address.trim().to_string())
+            .filter(|address| !address.is_empty())
+            .filter(|address| validators.iter().any(|validator| validator == address));
+        if let Some(local_validator) = local_validator {
+            let peer_validators = validators
+                .into_iter()
+                .filter(|validator| validator != &local_validator)
+                .collect::<Vec<_>>();
+            if peer_validators.len() == dials.len() {
+                dials.into_iter().zip(peer_validators).collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
     } else if dials.len() > validators.len() {
-        dials[dials.len() - validators.len()..].to_vec()
+        dials[dials.len() - validators.len()..]
+            .iter()
+            .cloned()
+            .zip(validators)
+            .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
 
-    mapped_dials
+    mapped_pairs
         .into_iter()
-        .zip(validators)
         .flat_map(|(dial, validator)| {
             let mut entries = Vec::new();
             entries.push((dial.clone(), validator.clone()));
@@ -7610,6 +7631,91 @@ mod tests {
                 &active_validator_addresses,
             ),
             Some("synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string())
+        );
+    }
+
+    #[test]
+    fn vote_target_identity_maps_validator_dials_excluding_local_validator() {
+        let validators = vec![
+            "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string(),
+            "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt".to_string(),
+            "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string(),
+            "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string(),
+            "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f".to_string(),
+            "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx".to_string(),
+        ];
+        let active_validator_addresses = validators.iter().cloned().collect::<HashSet<_>>();
+        let mut config = NodeConfig::default();
+        config.node.allowed_validator_addresses = validators;
+        config.node.validator_address =
+            "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string();
+        config.p2p.public_address = "62.146.182.209:5622".to_string();
+        config.network.persistent_peers = vec![
+            "62.146.182.207:5622".to_string(),
+            "62.146.182.208:5622".to_string(),
+            "73.79.66.255:5622".to_string(),
+            "194.163.183.166:5622".to_string(),
+            "157.173.192.45:5622".to_string(),
+            "relay1.synergynode.xyz:5622".to_string(),
+            "relay2.synergynode.xyz:5622".to_string(),
+        ];
+
+        let address_map =
+            configured_validator_public_address_map(&config, &active_validator_addresses);
+
+        assert_eq!(
+            address_map.get("62.146.182.207:5622"),
+            Some(&"synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string())
+        );
+        assert_eq!(
+            address_map.get("62.146.182.208:5622"),
+            Some(&"synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt".to_string())
+        );
+        assert_eq!(
+            address_map.get("73.79.66.255:5622"),
+            Some(&"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string())
+        );
+        assert_eq!(
+            address_map.get("194.163.183.166:5622"),
+            Some(&"synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f".to_string())
+        );
+        assert_eq!(
+            address_map.get("157.173.192.45:5622"),
+            Some(&"synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx".to_string())
+        );
+        assert!(!address_map.contains_key("62.146.182.209:5622"));
+
+        let peer = PeerConnection {
+            address: "73.79.66.255:5622".to_string(),
+            direction: ConnectionDirection::Outgoing,
+            public_address: None,
+            validator_address: None,
+            connected_at: 0,
+            last_seen: 0,
+            blocks_sent: 0,
+            blocks_received: 0,
+            txs_sent: 0,
+            txs_received: 0,
+            stream: None,
+            node_id: None,
+            version: None,
+            capabilities: Vec::new(),
+            last_known_height: 0,
+            best_block_hash: String::new(),
+            genesis_hash: String::new(),
+            status_received_at: None,
+            quarantined: false,
+            consensus_duties_disabled: false,
+            recovery_state: None,
+        };
+
+        assert_eq!(
+            recover_peer_validator_address_for_vote_target(
+                &config,
+                &peer,
+                &active_validator_addresses,
+            ),
+            Some("synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string())
         );
     }
 
