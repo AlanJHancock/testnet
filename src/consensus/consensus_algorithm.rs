@@ -929,18 +929,32 @@ impl ProofOfSynergy {
                         let view_anchor_timestamp = latest_block_clone.timestamp;
                         let shared_view_offset =
                             Self::deterministic_view_offset_for_next_block_slot(
-                            latest_block_clone.block_index,
-                            view_anchor_timestamp,
-                            block_time_secs,
-                            leader_timeout_secs,
-                            Self::current_timestamp(),
+                                latest_block_clone.block_index,
+                                view_anchor_timestamp,
+                                block_time_secs,
+                                leader_timeout_secs,
+                                Self::current_timestamp(),
                             );
-                        let view_offset = Self::cap_view_offset_by_tip_observation(
+                        let calculated_view_offset = Self::cap_view_offset_by_tip_observation(
                             shared_view_offset,
                             last_tip_observed_at,
                             leader_timeout_secs,
                             current_time,
                         );
+                        // Launch recovery must not let locally observed wall-clock view offsets
+                        // split the fleet into multiple same-height proposers. Use the canonical
+                        // height schedule for live leaders, then fall back to the live set below
+                        // only when that scheduled leader is not live.
+                        let view_offset = 0;
+                        if calculated_view_offset != 0 {
+                            debug!(
+                                "consensus",
+                                "Ignoring local wall-clock view offset for canonical leader selection",
+                                "calculated_view_offset" => calculated_view_offset,
+                                "canonical_view_offset" => view_offset,
+                                "block_height" => latest_block_clone.block_index + 1
+                            );
+                        }
                         let transient_recovery_min_age_secs =
                             Self::transient_vote_recovery_min_age_secs(
                                 leader_timeout_secs,
