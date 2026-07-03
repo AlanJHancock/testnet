@@ -5659,10 +5659,7 @@ fn is_public_synergy_advertise_host(host: &str) -> bool {
 
     match host.parse::<std::net::IpAddr>() {
         Ok(std::net::IpAddr::V4(ip)) => {
-            !(ip.is_private()
-                || ip.is_loopback()
-                || ip.is_link_local()
-                || ip.is_unspecified())
+            !(ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_unspecified())
         }
         Ok(std::net::IpAddr::V6(ip)) => {
             !(ip.is_loopback()
@@ -6559,10 +6556,10 @@ mod tests {
         peer_is_eligible_block_sync_source, pending_incoming_connections_from_host,
         preferred_connection_direction, receive_message, resolve_bootstrap_dial_targets,
         resolve_duplicate_connection, select_block_sync_response_blocks,
+        should_canonicalize_validator_public_address,
         should_disconnect_for_status_genesis_mismatch, should_prune_stale_peer,
-        should_canonicalize_validator_public_address, should_request_missing_blocks,
-        status_ready_validator_addresses_with_local_duty_gate, status_ready_validator_participants,
-        status_sync_batch,
+        should_request_missing_blocks, status_ready_validator_addresses_with_local_duty_gate,
+        status_ready_validator_participants, status_sync_batch,
         support_peer_sync_request_is_too_deep, validate_vote_request_extends_local_tip,
         validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_handshake_pq_signature,

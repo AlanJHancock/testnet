@@ -116,12 +116,12 @@ lazy_static! {
 }
 
 static SUBSCRIPTION_COUNTER: AtomicU64 = AtomicU64::new(1);
+static QRPC_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
 const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 4 * 1024 * 1024;
 const QRPC_STATUS_CHAIN_SNAPSHOT_RETRY_ATTEMPTS: usize = 8;
 const QRPC_STATUS_CHAIN_SNAPSHOT_RETRY_DELAY_MILLIS: u64 = 25;
-const QRPC_CHAIN_UNAVAILABLE_ERROR: &str =
-    "consensus chain state unavailable without blocking";
+const QRPC_CHAIN_UNAVAILABLE_ERROR: &str = "consensus chain state unavailable without blocking";
 
 #[derive(Debug, Clone)]
 struct ChainTipSnapshot {
@@ -145,6 +145,19 @@ fn cached_last_known_good_chain_tip() -> Option<Block> {
         .and_then(|cached_tip| cached_tip.clone())
 }
 
+pub fn qrpc_fallback_count() -> u64 {
+    QRPC_FALLBACK_COUNT.load(Ordering::Relaxed)
+}
+
+fn record_qrpc_fallback(reason: &str) {
+    QRPC_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+    warn!(
+        "rpc",
+        "qRPC served read from fallback state",
+        "reason" => reason.to_string()
+    );
+}
+
 fn persisted_chain_tip() -> Option<Block> {
     let chain_path = crate::utils::resolve_data_path("data/chain.json");
     BlockChain::load_from_file(chain_path.to_str().unwrap_or("data/chain.json"))
@@ -161,7 +174,11 @@ fn read_through_chain_tip_block(chain: &Arc<Mutex<BlockChain>>) -> Option<Block>
             latest_block
         }
         Err(TryLockError::WouldBlock) | Err(TryLockError::Poisoned(_)) => {
-            cached_last_known_good_chain_tip().or_else(persisted_chain_tip)
+            let fallback = cached_last_known_good_chain_tip().or_else(persisted_chain_tip);
+            if fallback.is_some() {
+                record_qrpc_fallback("chain_tip_lock_unavailable");
+            }
+            fallback
         }
     }
 }
@@ -3247,7 +3264,8 @@ fn handle_json_rpc(
         }
 
         "synergy_getSyncStatus" => {
-            let current_block = chain.lock().unwrap().last().map_or(0, |b| b.block_index);
+            let tip = chain_tip_snapshot_for_status(chain);
+            let current_block = tip.height.unwrap_or(0);
             if let Ok(manager) = SYNC_MANAGER.try_lock() {
                 let state = manager.get_state();
                 let syncing = !matches!(state, SyncState::Synced | SyncState::Idle);
@@ -3258,14 +3276,20 @@ fn handle_json_rpc(
                     "starting_block": manager.get_sync_start_height(),
                     "sync_percentage": manager.get_progress_percentage(),
                     "state": format!("{:?}", state),
+                    "chain_state_available": tip.available,
+                    "chain_state_error": tip.error,
                 })
             } else {
+                record_qrpc_fallback("sync_manager_lock_unavailable");
                 json!({
                     "syncing": true,
                     "current_block": current_block,
                     "highest_block": best_observed_sync_source_height(),
                     "sync_manager_available": false,
-                    "error": "Sync manager is busy with live catch-up"
+                    "chain_state_available": tip.available,
+                    "chain_state_error": tip.error,
+                    "fallback": true,
+                    "fail_closed": false
                 })
             }
         }
@@ -5125,15 +5149,16 @@ fn sync_status_json_with_tip(tip: &ChainTipSnapshot) -> Value {
             "chain": chain_identity_json(),
         })
     } else {
+        record_qrpc_fallback("sync_status_manager_lock_unavailable");
         json!({
             "syncing": true,
             "current_block": tip.height,
-            "highest_block": Value::Null,
+            "highest_block": best_observed_sync_source_height(),
             "sync_manager_available": false,
             "chain_state_available": tip.available,
             "chain_state_error": tip.error,
-            "error": "Sync manager unavailable without blocking qRPC",
-            "fail_closed": true,
+            "fallback": true,
+            "fail_closed": false,
             "chain": chain_identity_json(),
         })
     }

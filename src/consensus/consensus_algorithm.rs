@@ -33,7 +33,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -207,12 +207,23 @@ lazy_static::lazy_static! {
     static ref CONSENSUS_CHAIN_PERSIST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 }
 
+static PROPOSAL_CACHE_DISCARD_COUNT: AtomicU64 = AtomicU64::new(0);
+static EXPIRED_PROPOSAL_TRANSACTION_DROP_COUNT: AtomicU64 = AtomicU64::new(0);
+
 #[cfg(test)]
 lazy_static::lazy_static! {
     static ref TEST_PROPOSAL_CACHE_DIR: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
 }
 
 impl ProofOfSynergy {
+    pub fn proposal_cache_discard_count() -> u64 {
+        PROPOSAL_CACHE_DISCARD_COUNT.load(Ordering::Relaxed)
+    }
+
+    pub fn expired_proposal_transaction_drop_count() -> u64 {
+        EXPIRED_PROPOSAL_TRANSACTION_DROP_COUNT.load(Ordering::Relaxed)
+    }
+
     pub fn new() -> Self {
         // Use the global shared chain instance
         let chain = Arc::clone(&SHARED_CHAIN);
@@ -2811,11 +2822,8 @@ impl ProofOfSynergy {
         );
 
         // Create block and attach the consensus signature required for this height.
-        let consensus_timestamp = Self::bounded_consensus_timestamp(
-            previous_block.timestamp,
-            block_time_secs,
-            now,
-        );
+        let consensus_timestamp =
+            Self::bounded_consensus_timestamp(previous_block.timestamp, block_time_secs, now);
         let mut block = Block::new_with_timestamp(
             previous_block.block_index + 1,
             transactions,
@@ -2925,19 +2933,27 @@ impl ProofOfSynergy {
             return None;
         }
         let now = Self::current_timestamp();
-        let expired_transaction_count = block
+        let expired_transactions = block
             .transactions
             .iter()
             .filter(|tx| Self::transaction_is_expired_for_proposal(tx, now))
-            .count();
+            .collect::<Vec<_>>();
+        let expired_transaction_count = expired_transactions.len();
         if expired_transaction_count > 0 {
+            let oldest_transaction_timestamp = expired_transactions
+                .iter()
+                .map(|tx| tx.timestamp)
+                .min()
+                .unwrap_or(0);
+            PROPOSAL_CACHE_DISCARD_COUNT.fetch_add(1, Ordering::Relaxed);
             warn!(
                 "consensus",
                 "Discarding cached block proposal with expired transaction timestamps",
                 "height" => block.block_index,
                 "hash" => block.hash.clone(),
                 "validator" => leader.address.clone(),
-                "expired_transactions" => expired_transaction_count as u64
+                "expired_transactions" => expired_transaction_count as u64,
+                "oldest_transaction_timestamp" => oldest_transaction_timestamp
             );
             if let Err(error) = fs::remove_file(&path) {
                 warn!(
@@ -2984,6 +3000,7 @@ impl ProofOfSynergy {
             .collect::<Vec<_>>();
         let dropped = original_len.saturating_sub(filtered.len());
         if dropped > 0 {
+            EXPIRED_PROPOSAL_TRANSACTION_DROP_COUNT.fetch_add(dropped as u64, Ordering::Relaxed);
             warn!(
                 "consensus",
                 "Dropping expired transactions from block proposal",
@@ -4648,11 +4665,44 @@ mod tests {
         )
         .expect("cached proposal should be overwritten for regression setup");
 
-        let retry =
-            ProofOfSynergy::create_block_proposal(&previous, &leader, vec![], 2, &pqc_manager);
+        let mut expired_mempool_transaction = Transaction::new(
+            "synw1sender".to_string(),
+            "synw1receiver".to_string(),
+            1,
+            0,
+            vec![9, 9, 9],
+            1,
+            21_000,
+            Some("expired-mempool-transaction".to_string()),
+            "test".to_string(),
+        );
+        expired_mempool_transaction.timestamp = ProofOfSynergy::current_timestamp()
+            .saturating_sub(PROPOSAL_TRANSACTION_MAX_AGE_SECS + 1);
+        let fresh_mempool_transaction = Transaction::new(
+            "synw1sender".to_string(),
+            "synw1receiver".to_string(),
+            1,
+            0,
+            vec![4, 5, 6],
+            1,
+            21_000,
+            Some("fresh-mempool-transaction-after-discard".to_string()),
+            "test".to_string(),
+        );
+        let retry = ProofOfSynergy::create_block_proposal(
+            &previous,
+            &leader,
+            vec![expired_mempool_transaction, fresh_mempool_transaction],
+            2,
+            &pqc_manager,
+        );
 
         assert_ne!(retry.hash, first.hash);
-        assert!(retry.transactions.is_empty());
+        assert_eq!(retry.transactions.len(), 1);
+        assert_eq!(
+            retry.transactions[0].data.as_deref(),
+            Some("fresh-mempool-transaction-after-discard")
+        );
 
         ProofOfSynergy::prune_cached_block_proposals(retry.block_index);
         ProofOfSynergy::set_test_proposal_cache_dir(None);

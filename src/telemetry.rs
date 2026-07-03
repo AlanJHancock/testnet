@@ -427,6 +427,13 @@ fn render_metrics(config: &NodeConfig, start_time: SystemTime) -> String {
         + config.network.bootstrap_dns_records.len()
         + config.network.additional_dial_targets.len()
         + config.network.persistent_peers.len()) as u64;
+    let consensus_runtime_metrics =
+        crate::consensus::dual_quorum::DualQuorumConsensus::consensus_runtime_metrics_snapshot();
+    let proposal_cache_discard_total =
+        crate::consensus::consensus_algorithm::ProofOfSynergy::proposal_cache_discard_count();
+    let expired_transaction_drop_total = crate::consensus::consensus_algorithm::ProofOfSynergy::
+        expired_proposal_transaction_drop_count();
+    let qrpc_fallback_total = crate::rpc::rpc_server::qrpc_fallback_count();
 
     let mut body = String::new();
     push_metric_header(
@@ -640,6 +647,144 @@ fn render_metrics(config: &NodeConfig, start_time: SystemTime) -> String {
     );
     body.push_str(&format!(
         "synergy_configured_peer_targets_total {configured_peer_targets}\n"
+    ));
+
+    push_metric_header(
+        &mut body,
+        "synergy_live_validator_count",
+        "Validators currently observed as live over the P2P status path.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "synergy_live_validator_count {p2p_status_ready_validators}\n"
+    ));
+
+    push_metric_header(
+        &mut body,
+        "synergy_consensus_active_validator_count",
+        "Validators currently eligible for consensus from live P2P status evidence.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "synergy_consensus_active_validator_count {p2p_status_ready_validators}\n"
+    ));
+
+    push_metric_header(
+        &mut body,
+        "synergy_registry_active_validator_count",
+        "Validators marked active in the local validator registry.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "synergy_registry_active_validator_count {validator_active_total}\n"
+    ));
+
+    push_metric_header(
+        &mut body,
+        "synergy_current_consensus_height",
+        "Most recent consensus height observed by the local round runner.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "synergy_current_consensus_height {}\n",
+        consensus_runtime_metrics.current_height
+    ));
+
+    push_metric_header(
+        &mut body,
+        "synergy_current_consensus_round",
+        "Most recent consensus round observed by the local round runner.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "synergy_current_consensus_round {}\n",
+        consensus_runtime_metrics.current_round
+    ));
+
+    push_metric_header(
+        &mut body,
+        "synergy_consensus_timeout_mode",
+        "Current consensus timeout mode, labelled as fast or recovery.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "synergy_consensus_timeout_mode{{mode=\"{}\"}} 1\n",
+        escape_label_value(&consensus_runtime_metrics.timeout_mode)
+    ));
+
+    push_metric_header(
+        &mut body,
+        "synergy_consensus_effective_vote_timeout_seconds",
+        "Effective vote timeout used for the current consensus round.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "synergy_consensus_effective_vote_timeout_seconds {}\n",
+        consensus_runtime_metrics.effective_vote_timeout_secs
+    ));
+
+    push_metric_header(
+        &mut body,
+        "synergy_consensus_votes_collected",
+        "Votes collected in the most recently observed consensus round.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "synergy_consensus_votes_collected {}\n",
+        consensus_runtime_metrics.votes_collected
+    ));
+
+    push_metric_header(
+        &mut body,
+        "synergy_consensus_votes_required",
+        "Votes required for quorum in the most recently observed consensus round.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "synergy_consensus_votes_required {}\n",
+        consensus_runtime_metrics.votes_required
+    ));
+
+    push_metric_header(
+        &mut body,
+        "synergy_consensus_leader_info",
+        "Leader identity for the most recently observed consensus round.",
+        "gauge",
+    );
+    body.push_str(&format!(
+        "synergy_consensus_leader_info{{leader=\"{}\",reason=\"{}\"}} 1\n",
+        escape_label_value(&consensus_runtime_metrics.leader),
+        escape_label_value(&consensus_runtime_metrics.retry_reason)
+    ));
+
+    push_metric_header(
+        &mut body,
+        "synergy_proposal_cache_discard_total",
+        "Cached block proposals discarded because they were unsafe to reuse.",
+        "counter",
+    );
+    body.push_str(&format!(
+        "synergy_proposal_cache_discard_total {proposal_cache_discard_total}\n"
+    ));
+
+    push_metric_header(
+        &mut body,
+        "synergy_expired_transaction_drop_total",
+        "Expired transactions dropped before block proposal construction.",
+        "counter",
+    );
+    body.push_str(&format!(
+        "synergy_expired_transaction_drop_total {expired_transaction_drop_total}\n"
+    ));
+
+    push_metric_header(
+        &mut body,
+        "synergy_qrpc_fallback_total",
+        "qRPC read requests served from last-known-good or fallback state.",
+        "counter",
+    );
+    body.push_str(&format!(
+        "synergy_qrpc_fallback_total {qrpc_fallback_total}\n"
     ));
 
     push_metric_header(
@@ -1140,6 +1285,9 @@ mod tests {
         assert!(body.contains("synergy_sync_info"));
         assert!(body.contains("synergy_p2p_peers_connected"));
         assert!(body.contains("synergy_consensus_config"));
+        assert!(body.contains("synergy_consensus_timeout_mode"));
+        assert!(body.contains("synergy_proposal_cache_discard_total"));
+        assert!(body.contains("synergy_qrpc_fallback_total"));
         assert!(body.contains("synergy_validator_blocks_produced_total"));
     }
 

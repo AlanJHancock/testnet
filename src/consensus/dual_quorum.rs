@@ -46,11 +46,32 @@ pub const VALIDATOR_QUORUM_NUMERATOR: usize = 2;
 pub const VALIDATOR_QUORUM_DENOMINATOR: usize = 3;
 pub const VALIDATOR_QUORUM_RATIO: f64 =
     VALIDATOR_QUORUM_NUMERATOR as f64 / VALIDATOR_QUORUM_DENOMINATOR as f64;
-pub const MIN_LAUNCH_VOTE_TIMEOUT_SECS: u64 = 12;
+pub const FAST_CONSENSUS_VOTE_TIMEOUT_SECS: u64 = 1;
+pub const MAX_FAST_CONSENSUS_VOTE_TIMEOUT_SECS: u64 = 2;
+pub const RECOVERY_FIRST_RETRY_VOTE_TIMEOUT_SECS: u64 = 4;
+pub const RECOVERY_MAX_VOTE_TIMEOUT_SECS: u64 = 8;
+pub const MIN_LAUNCH_VOTE_TIMEOUT_SECS: u64 = FAST_CONSENSUS_VOTE_TIMEOUT_SECS;
 const LOCAL_VOTE_LOCK_COMPACTION_MIN_LOCKS: usize = 1024;
 const LOCAL_VOTE_LOCK_FINALIZED_RETENTION_DEPTH: u64 = 16;
 const COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV: &str = "SYNERGY_COMMITTED_QC_HOT_RETENTION_BLOCKS";
 const COMMITTED_QC_RETENTION_PRUNE_INTERVAL: usize = 1024;
+
+#[derive(Debug, Clone, Default)]
+pub struct ConsensusRuntimeMetrics {
+    pub current_height: u64,
+    pub current_round: u64,
+    pub timeout_mode: String,
+    pub effective_vote_timeout_secs: u64,
+    pub votes_collected: u64,
+    pub votes_required: u64,
+    pub leader: String,
+    pub retry_reason: String,
+}
+
+lazy_static::lazy_static! {
+    static ref CONSENSUS_RUNTIME_METRICS: Mutex<ConsensusRuntimeMetrics> =
+        Mutex::new(ConsensusRuntimeMetrics::default());
+}
 
 #[derive(Debug, Clone)]
 struct SameHeightVoteParent {
@@ -223,7 +244,9 @@ impl DualQuorumConsensus {
             validator_vote_threshold,
             validation_quorum_threshold: VALIDATOR_QUORUM_RATIO,
             cooperation_quorum_threshold: VALIDATOR_QUORUM_RATIO,
-            vote_timeout: vote_timeout_secs.max(MIN_LAUNCH_VOTE_TIMEOUT_SECS),
+            vote_timeout: vote_timeout_secs
+                .max(FAST_CONSENSUS_VOTE_TIMEOUT_SECS)
+                .min(MAX_FAST_CONSENSUS_VOTE_TIMEOUT_SECS),
             block_timeout: block_timeout_secs.max(1),
             current_epoch: 0,
             current_round_by_height: HashMap::new(),
@@ -239,6 +262,56 @@ impl DualQuorumConsensus {
         minimum_round_number: u64,
     ) -> Result<QuorumCertificate, String> {
         self.start_consensus_round_with_recovery(proposed_block, minimum_round_number, u64::MAX)
+    }
+
+    pub fn consensus_runtime_metrics_snapshot() -> ConsensusRuntimeMetrics {
+        CONSENSUS_RUNTIME_METRICS
+            .lock()
+            .map(|metrics| metrics.clone())
+            .unwrap_or_default()
+    }
+
+    fn timeout_mode_for_round(round_number: u64) -> &'static str {
+        if round_number <= 1 {
+            "fast"
+        } else {
+            "recovery"
+        }
+    }
+
+    fn effective_vote_timeout_secs(&self, round_number: u64) -> u64 {
+        if round_number <= 1 {
+            self.vote_timeout
+                .max(FAST_CONSENSUS_VOTE_TIMEOUT_SECS)
+                .min(MAX_FAST_CONSENSUS_VOTE_TIMEOUT_SECS)
+        } else if round_number == 2 {
+            RECOVERY_FIRST_RETRY_VOTE_TIMEOUT_SECS
+                .max(self.vote_timeout)
+                .min(RECOVERY_MAX_VOTE_TIMEOUT_SECS)
+        } else {
+            RECOVERY_MAX_VOTE_TIMEOUT_SECS
+        }
+    }
+
+    fn record_consensus_runtime_metrics(
+        proposed_block: &Block,
+        round_number: u64,
+        timeout_mode: &str,
+        effective_vote_timeout_secs: u64,
+        votes_collected: usize,
+        votes_required: usize,
+        retry_reason: &str,
+    ) {
+        if let Ok(mut metrics) = CONSENSUS_RUNTIME_METRICS.lock() {
+            metrics.current_height = proposed_block.block_index;
+            metrics.current_round = round_number;
+            metrics.timeout_mode = timeout_mode.to_string();
+            metrics.effective_vote_timeout_secs = effective_vote_timeout_secs;
+            metrics.votes_collected = votes_collected as u64;
+            metrics.votes_required = votes_required as u64;
+            metrics.leader = proposed_block.validator_id.clone();
+            metrics.retry_reason = retry_reason.to_string();
+        }
     }
 
     pub fn start_consensus_round_with_recovery(
@@ -364,6 +437,23 @@ impl DualQuorumConsensus {
             .filter(|address| *address != &local_validator_address)
             .count();
         let collection_started = Instant::now();
+        let effective_vote_timeout_secs = self.effective_vote_timeout_secs(round_number);
+        let timeout_mode = Self::timeout_mode_for_round(round_number);
+        let retry_number = round_number.saturating_sub(1);
+        let required_validator_votes = self.required_validator_votes(active_validators.len());
+        Self::record_consensus_runtime_metrics(
+            proposed_block,
+            round_number,
+            timeout_mode,
+            effective_vote_timeout_secs,
+            votes.len(),
+            required_validator_votes,
+            if retry_number == 0 {
+                "initial_round"
+            } else {
+                "missed_quorum_retry"
+            },
+        );
         timing_trace::emit(
             "vote_collection_start",
             serde_json::json!({
@@ -376,8 +466,12 @@ impl DualQuorumConsensus {
                 "local_validator": local_validator_address.clone(),
                 "expected_validators": expected_validators.iter().cloned().collect::<Vec<_>>(),
                 "remote_validators": remote_validators,
+                "votes_required": required_validator_votes,
+                "leader": proposed_block.validator_id.clone(),
+                "retry_number": retry_number,
+                "timeout_mode": timeout_mode,
                 "initial_vote_count": votes.len(),
-                "effective_vote_timeout_secs": self.vote_timeout.max(1)
+                "effective_vote_timeout_secs": effective_vote_timeout_secs
             }),
         );
         if remote_validators > 0 {
@@ -447,7 +541,7 @@ impl DualQuorumConsensus {
             }
         }
 
-        let deadline = Instant::now() + Duration::from_secs(self.vote_timeout.max(1));
+        let deadline = Instant::now() + Duration::from_secs(effective_vote_timeout_secs);
         let mut qc_threshold_reported = false;
         while Instant::now() < deadline {
             self.apply_recorded_equivocations();
@@ -536,22 +630,39 @@ impl DualQuorumConsensus {
                 .cloned()
                 .collect::<Vec<_>>();
             warn!(
-                "consensus",
-                "Vote collection ended without quorum",
-                "height" => proposed_block.block_index,
-                "block_hash" => block_hash.to_string(),
-                "epoch" => epoch_number,
-                "round" => round_number,
-                "vote_count" => votes.len() as u64,
+            "consensus",
+            "Vote collection ended without quorum",
+            "height" => proposed_block.block_index,
+            "block_hash" => block_hash.to_string(),
+            "epoch" => epoch_number,
+            "round" => round_number,
+            "vote_count" => votes.len() as u64,
                 "required_validator_votes" => self.required_validator_votes(active_validators.len()) as u64,
                 "missing_validators" => serde_json::to_string(&missing_validators).unwrap_or_default(),
                 "elapsed_ms" => timing_trace::duration_ms(collection_started.elapsed()),
-                "effective_vote_timeout_secs" => self.vote_timeout.max(1)
+                "leader" => proposed_block.validator_id.clone(),
+                "retry_number" => retry_number,
+                "timeout_mode" => timeout_mode.to_string(),
+                "reason" => "missed_quorum",
+                "effective_vote_timeout_secs" => effective_vote_timeout_secs
             );
         }
 
         Self::reset_network_vote_mailbox(block_hash, epoch_number, round_number);
         self.votes.insert(block_hash.to_string(), votes.clone());
+        Self::record_consensus_runtime_metrics(
+            proposed_block,
+            round_number,
+            timeout_mode,
+            effective_vote_timeout_secs,
+            votes.len(),
+            required_validator_votes,
+            if final_quorum_met {
+                "quorum_reached"
+            } else {
+                "missed_quorum"
+            },
+        );
         timing_trace::emit(
             "vote_collection_end",
             serde_json::json!({
@@ -573,8 +684,12 @@ impl DualQuorumConsensus {
                     .cloned()
                     .collect::<Vec<_>>(),
                 "quorum_met": final_quorum_met,
+                "leader": proposed_block.validator_id.clone(),
+                "retry_number": retry_number,
+                "timeout_mode": timeout_mode,
+                "reason": if final_quorum_met { "quorum_reached" } else { "missed_quorum" },
                 "elapsed_ms": timing_trace::duration_ms(collection_started.elapsed()),
-                "effective_vote_timeout_secs": self.vote_timeout.max(1)
+                "effective_vote_timeout_secs": effective_vote_timeout_secs
             }),
         );
         Ok(votes)
@@ -3104,7 +3219,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_vote_timeout_has_launch_liveness_floor() {
+    fn configured_vote_timeout_keeps_first_round_fast() {
         let validator_manager = approved_validator_manager(&["validator1", "validator2"]);
         let pqc_manager = Arc::new(Mutex::new(PQCManager::new()));
         let consensus = DualQuorumConsensus::new(
@@ -3117,9 +3232,40 @@ mod tests {
             6,
         );
 
-        assert_eq!(consensus.vote_timeout, MIN_LAUNCH_VOTE_TIMEOUT_SECS);
+        assert_eq!(consensus.vote_timeout, FAST_CONSENSUS_VOTE_TIMEOUT_SECS);
+        assert_eq!(
+            consensus.effective_vote_timeout_secs(1),
+            FAST_CONSENSUS_VOTE_TIMEOUT_SECS
+        );
         assert_eq!(consensus.validator_vote_threshold, 2);
         assert_eq!(consensus.minimum_validator_count, 2);
+    }
+
+    #[test]
+    fn adaptive_vote_timeout_only_extends_retries_and_stays_bounded() {
+        let validator_manager = approved_validator_manager(&["validator1", "validator2"]);
+        let pqc_manager = Arc::new(Mutex::new(PQCManager::new()));
+        let consensus = DualQuorumConsensus::new(
+            Arc::clone(&validator_manager),
+            Arc::clone(&pqc_manager),
+            true,
+            2,
+            2,
+            2,
+            6,
+        );
+
+        assert_eq!(consensus.effective_vote_timeout_secs(1), 2);
+        assert_eq!(
+            consensus.effective_vote_timeout_secs(2),
+            RECOVERY_FIRST_RETRY_VOTE_TIMEOUT_SECS
+        );
+        assert_eq!(
+            consensus.effective_vote_timeout_secs(42),
+            RECOVERY_MAX_VOTE_TIMEOUT_SECS
+        );
+        assert_eq!(DualQuorumConsensus::timeout_mode_for_round(1), "fast");
+        assert_eq!(DualQuorumConsensus::timeout_mode_for_round(2), "recovery");
     }
 
     #[test]
