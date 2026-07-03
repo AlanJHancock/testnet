@@ -1075,6 +1075,120 @@ fn merge_peer_state_from_existing(existing: &PeerConnection, replacement: &mut P
     );
 }
 
+fn propagate_identity_to_matching_peers(
+    peers: &mut PeerMap,
+    peer_state_cache: &PeerStateCacheArc,
+    peer_address: &str,
+    node_id: &str,
+    version: &str,
+    capabilities: &[String],
+    public_address: Option<&str>,
+    validator_address: Option<&str>,
+    genesis_hash: &str,
+) {
+    let validator_address = validator_address
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let public_address = public_address
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let node_id = node_id.trim();
+    if node_id.is_empty() && validator_address.is_none() && public_address.is_none() {
+        return;
+    }
+
+    let mut source_hosts = HashSet::<String>::new();
+    source_hosts.insert(peer_socket_host(peer_address));
+    if let Some(public_address) = public_address {
+        source_hosts.insert(peer_socket_host(public_address));
+    }
+    if let Some(peer) = peers.get(peer_address) {
+        source_hosts.insert(peer_socket_host(&peer.address));
+        if let Some(public_address) = peer.public_address.as_deref() {
+            source_hosts.insert(peer_socket_host(public_address));
+        }
+    }
+    source_hosts.retain(|host| !host.trim().is_empty());
+
+    let mut target_keys = peers
+        .iter()
+        .filter_map(|(address, peer)| {
+            if address == peer_address {
+                return Some(address.clone());
+            }
+
+            let existing_validator = peer
+                .validator_address
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let same_validator = validator_address
+                .zip(existing_validator)
+                .map(|(announced, existing)| announced == existing)
+                .unwrap_or(false);
+            if existing_validator.is_some() && !same_validator {
+                return None;
+            }
+
+            let existing_node = peer
+                .node_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            if existing_node.is_some() && existing_node != Some(node_id) && !same_validator {
+                return None;
+            }
+
+            let peer_hosts = [
+                Some(address.as_str()),
+                Some(peer.address.as_str()),
+                peer.public_address.as_deref(),
+            ];
+            let shares_source_host = peer_hosts
+                .into_iter()
+                .flatten()
+                .map(peer_socket_host)
+                .any(|host| source_hosts.contains(&host));
+            let public_address_matches = public_address
+                .map(|public_address| {
+                    address.trim() == public_address || peer_matches_address(peer, public_address)
+                })
+                .unwrap_or(false);
+
+            (peer_matches_address(peer, peer_address)
+                || public_address_matches
+                || shares_source_host)
+                .then(|| address.clone())
+        })
+        .collect::<Vec<_>>();
+    target_keys.sort();
+    target_keys.dedup();
+
+    for target_key in target_keys {
+        if let Some(peer) = peers.get_mut(&target_key) {
+            if !node_id.is_empty() {
+                peer.node_id = Some(node_id.to_string());
+            }
+            if !version.trim().is_empty() {
+                peer.version = Some(version.to_string());
+            }
+            if peer.capabilities.is_empty() {
+                peer.capabilities = capabilities.to_vec();
+            }
+            if let Some(public_address) = public_address {
+                peer.public_address = Some(public_address.to_string());
+            }
+            if let Some(validator_address) = validator_address {
+                peer.validator_address = Some(validator_address.to_string());
+            }
+            if !genesis_hash.trim().is_empty() {
+                peer.genesis_hash = genesis_hash.to_string();
+            }
+            cache_peer_state(peer_state_cache, peer);
+        }
+    }
+}
+
 fn apply_status_to_peer(
     peer: &mut PeerConnection,
     block_height: u64,
@@ -4651,6 +4765,17 @@ fn handle_messages(
                                                     );
                                                     cache_peer_state(&peer_state_cache, peer);
                                                 }
+                                                propagate_identity_to_matching_peers(
+                                                    &mut peers,
+                                                    &peer_state_cache,
+                                                    &existing_key,
+                                                    &node_id,
+                                                    &version,
+                                                    &capabilities,
+                                                    normalized_public_address.as_deref(),
+                                                    announced_validator_address.as_deref(),
+                                                    &genesis_hash,
+                                                );
                                                 request_status_from_connected_peer(
                                                     &mut peers,
                                                     &existing_key,
@@ -4771,6 +4896,17 @@ fn handle_messages(
                                 hydrate_peer_from_cache(&peer_state_cache, &peer_identity, peer);
                                 cache_peer_state(&peer_state_cache, peer);
                             }
+                            propagate_identity_to_matching_peers(
+                                &mut peers,
+                                &peer_state_cache,
+                                &peer_address,
+                                &node_id,
+                                &version,
+                                &capabilities,
+                                normalized_public_address.as_deref(),
+                                announced_validator_address.as_deref(),
+                                &genesis_hash,
+                            );
                             request_status_from_connected_peer(&mut peers, &peer_address);
                         }
 
