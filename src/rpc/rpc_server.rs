@@ -164,6 +164,17 @@ fn persisted_chain_tip() -> Option<Block> {
         .and_then(|chain| chain.last().cloned())
 }
 
+fn cached_or_persisted_chain_tip() -> Option<Block> {
+    if let Some(block) = cached_last_known_good_chain_tip() {
+        return Some(block);
+    }
+    let persisted = persisted_chain_tip();
+    if let Some(block) = persisted.as_ref() {
+        cache_last_known_good_chain_tip(block);
+    }
+    persisted
+}
+
 fn read_through_chain_tip_block(chain: &Arc<Mutex<BlockChain>>) -> Option<Block> {
     match chain.try_lock() {
         Ok(chain_guard) => {
@@ -174,7 +185,7 @@ fn read_through_chain_tip_block(chain: &Arc<Mutex<BlockChain>>) -> Option<Block>
             latest_block
         }
         Err(TryLockError::WouldBlock) | Err(TryLockError::Poisoned(_)) => {
-            let fallback = cached_last_known_good_chain_tip().or_else(persisted_chain_tip);
+            let fallback = cached_or_persisted_chain_tip();
             if fallback.is_some() {
                 record_qrpc_fallback("chain_tip_lock_unavailable");
             }
@@ -543,6 +554,10 @@ pub fn start_rpc_server(
             "✅ Loaded {} validators from registry at startup",
             validators.len()
         );
+    }
+
+    if let Some(block) = persisted_chain_tip() {
+        cache_last_known_good_chain_tip(&block);
     }
 
     if let Some(ws_bind_address) = ws_bind_address {
