@@ -2704,7 +2704,7 @@ impl ProofOfSynergy {
         local_validator_address: Option<&str>,
         current_epoch: u64,
         next_block_index: u64,
-        _finalized_height: u64,
+        finalized_height: u64,
         transient_recovery_min_age_secs: u64,
     ) -> Validator {
         let Some(local_validator_address) = local_validator_address else {
@@ -2778,20 +2778,56 @@ impl ProofOfSynergy {
                     lock_age_secs,
                     transient_recovery_min_age_secs,
                 ) {
-                    warn!(
-                        "consensus",
-                        "Allowing live scheduled leader to supersede stale same-height vote lock",
-                        "local_validator" => local_validator_address.to_string(),
-                        "scheduled_leader" => selected_validator.address.clone(),
-                        "locked_proposer" => locked_vote.proposer.clone(),
-                        "locked_block_hash" => locked_vote.block_hash.clone(),
-                        "locked_first_round" => locked_vote.first_round_number,
-                        "locked_latest_round" => locked_vote.latest_round_number,
-                        "lock_age_secs" => lock_age_secs,
-                        "min_age_secs" => transient_recovery_min_age_secs,
-                        "epoch" => current_epoch,
-                        "height" => next_block_index
+                    let recovery_reason = format!(
+                        "scheduled leader superseded stale same-height vote lock: local_validator={} height={} finalized_height={} scheduled_leader={} locked_proposer={} locked_hash={} locked_latest_round={}",
+                        local_validator_address,
+                        next_block_index,
+                        finalized_height,
+                        selected_validator.address,
+                        locked_vote.proposer,
+                        locked_vote.block_hash,
+                        locked_vote.latest_round_number
                     );
+                    match DualQuorumConsensus::recover_stale_transient_vote_locks_for_leader_selection(
+                        finalized_height,
+                        transient_recovery_min_age_secs,
+                        &recovery_reason,
+                    ) {
+                        Ok(recovered) => {
+                            warn!(
+                                "consensus",
+                                "Allowing live scheduled leader to supersede stale same-height vote lock",
+                                "local_validator" => local_validator_address.to_string(),
+                                "scheduled_leader" => selected_validator.address.clone(),
+                                "locked_proposer" => locked_vote.proposer.clone(),
+                                "locked_block_hash" => locked_vote.block_hash.clone(),
+                                "locked_first_round" => locked_vote.first_round_number,
+                                "locked_latest_round" => locked_vote.latest_round_number,
+                                "lock_age_secs" => lock_age_secs,
+                                "min_age_secs" => transient_recovery_min_age_secs,
+                                "transient_locks_recovered" => recovered,
+                                "epoch" => current_epoch,
+                                "height" => next_block_index
+                            );
+                        }
+                        Err(error) => {
+                            warn!(
+                                "consensus",
+                                "Allowing live scheduled leader to supersede stale same-height vote lock without local transient recovery",
+                                "local_validator" => local_validator_address.to_string(),
+                                "scheduled_leader" => selected_validator.address.clone(),
+                                "locked_proposer" => locked_vote.proposer.clone(),
+                                "locked_block_hash" => locked_vote.block_hash.clone(),
+                                "locked_first_round" => locked_vote.first_round_number,
+                                "locked_latest_round" => locked_vote.latest_round_number,
+                                "lock_age_secs" => lock_age_secs,
+                                "min_age_secs" => transient_recovery_min_age_secs,
+                                "recovery_error" => error,
+                                "epoch" => current_epoch,
+                                "height" => next_block_index
+                            );
+                        }
+                    }
                     return selected_validator;
                 }
                 info!(

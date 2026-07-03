@@ -2478,6 +2478,40 @@ impl DualQuorumConsensus {
         Ok(())
     }
 
+    pub(crate) fn recover_stale_transient_vote_locks_for_leader_selection(
+        finalized_height: u64,
+        min_age_secs: u64,
+        reason: &str,
+    ) -> Result<bool, String> {
+        let report = Self::recover_transient_vote_locks_above_finalized_height(
+            finalized_height,
+            min_age_secs,
+            reason,
+        )?;
+
+        if report.mutated {
+            timing_trace::emit(
+                "stale_transient_lock_recovery_leader_selection",
+                serde_json::json!({
+                    "finalized_height": finalized_height,
+                    "removed_count": report.removed_count,
+                    "evidence_path": report.evidence_path.clone(),
+                    "reason": reason
+                }),
+            );
+            warn!(
+                "consensus",
+                "Recovered stale transient vote locks before scheduled leader handoff",
+                "finalized_height" => finalized_height,
+                "removed_count" => report.removed_count as u64,
+                "evidence_path" => report.evidence_path.clone(),
+                "reason" => reason.to_string()
+            );
+        }
+
+        Ok(report.mutated)
+    }
+
     fn register_local_vote_intent(
         validator_address: &str,
         proposed_block: &Block,
