@@ -4044,6 +4044,7 @@ fn handle_vote_message(
     let announced_validator = {
         let peers = connected_peers.lock().unwrap();
         resolve_announced_validator_for_vote(&peers, peer_address, &vote.validator_address)
+            .or_else(|| recover_active_vote_validator_from_payload(config, &vote.validator_address))
     };
     let Some((announced_validator, recovered_peer_key)) = announced_validator else {
         warn!(
@@ -4097,6 +4098,26 @@ fn handle_vote_message(
         "epoch" => vote.epoch_number,
         "round" => vote.round_number
     );
+}
+
+fn recover_active_vote_validator_from_payload(
+    config: &NodeConfig,
+    vote_validator_address: &str,
+) -> Option<(String, Option<String>)> {
+    let vote_validator_address = vote_validator_address.trim();
+    if vote_validator_address.is_empty() {
+        return None;
+    }
+
+    let active_validator_addresses =
+        configured_vote_target_validator_addresses(config, &HashSet::new())
+            .into_iter()
+            .collect::<HashSet<_>>();
+    if active_validator_addresses.contains(vote_validator_address) {
+        return Some((vote_validator_address.to_string(), None));
+    }
+
+    None
 }
 
 fn handle_block_message(
