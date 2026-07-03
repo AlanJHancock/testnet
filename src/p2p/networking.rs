@@ -3516,24 +3516,18 @@ fn send_vote_to_requester(
     if let Some(proposer_public_address) =
         configured_public_address_for_validator(config, proposer_validator_address)
     {
-        match dial_with_timeout(
-            &proposer_public_address,
-            Duration::from_millis(CONSENSUS_DIRECT_VOTE_DIAL_TIMEOUT_MILLIS),
-        ) {
-            Ok(mut stream) => match send_consensus_message(&mut stream, response) {
-                Ok(()) => {
-                    info!(
-                        "p2p",
-                        "Vote sent over direct proposer path",
-                        "request_peer" => request_peer_address.to_string(),
-                        "response_peer" => proposer_public_address.clone(),
-                        "proposer" => proposer_validator_address.to_string()
-                    );
-                    return Ok(proposer_public_address);
-                }
-                Err(error) => failed_peers.push((proposer_public_address, error.to_string())),
-            },
-            Err(error) => failed_peers.push((proposer_public_address, error.to_string())),
+        match send_direct_vote_to_configured_proposer(config, &proposer_public_address, response) {
+            Ok(()) => {
+                info!(
+                    "p2p",
+                    "Vote sent over direct proposer path",
+                    "request_peer" => request_peer_address.to_string(),
+                    "response_peer" => proposer_public_address.clone(),
+                    "proposer" => proposer_validator_address.to_string()
+                );
+                return Ok(proposer_public_address);
+            }
+            Err(error) => failed_peers.push((proposer_public_address, error)),
         }
     }
 
@@ -3584,6 +3578,28 @@ fn send_vote_to_requester(
         "no writable connection for proposer {} (request peer {})",
         proposer_validator_address, request_peer_address
     ))
+}
+
+fn send_direct_vote_to_configured_proposer(
+    config: &NodeConfig,
+    proposer_public_address: &str,
+    response: &NetworkMessage,
+) -> Result<(), String> {
+    let mut stream = dial_with_timeout(
+        proposer_public_address,
+        Duration::from_millis(CONSENSUS_DIRECT_VOTE_DIAL_TIMEOUT_MILLIS),
+    )
+    .map_err(|error| error.to_string())?;
+
+    let handshake =
+        build_local_handshake(config).map_err(|error| format!("build direct vote handshake: {error}"))?;
+    send_consensus_message(&mut stream, &handshake)
+        .map_err(|error| format!("send direct vote handshake: {error}"))?;
+    send_consensus_message(&mut stream, response)
+        .map_err(|error| format!("send direct vote payload: {error}"))?;
+    let _ = stream.shutdown(Shutdown::Write);
+
+    Ok(())
 }
 
 fn configured_public_address_for_validator(
