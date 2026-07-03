@@ -107,6 +107,10 @@ lazy_static! {
 }
 
 lazy_static! {
+    static ref LAST_KNOWN_GOOD_CHAIN_TIP: Mutex<Option<Block>> = Mutex::new(None);
+}
+
+lazy_static! {
     static ref SIMULATION_CACHE: Mutex<HashMap<String, CachedSimulation>> =
         Mutex::new(HashMap::new());
 }
@@ -116,8 +120,8 @@ const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 4 * 1024 * 1024;
 const QRPC_STATUS_CHAIN_SNAPSHOT_RETRY_ATTEMPTS: usize = 8;
 const QRPC_STATUS_CHAIN_SNAPSHOT_RETRY_DELAY_MILLIS: u64 = 25;
-const QRPC_CHAIN_BUSY_ERROR: &str =
-    "consensus chain state is busy; qRPC read returned without blocking";
+const QRPC_CHAIN_UNAVAILABLE_ERROR: &str =
+    "consensus chain state unavailable without blocking";
 
 #[derive(Debug, Clone)]
 struct ChainTipSnapshot {
@@ -126,6 +130,50 @@ struct ChainTipSnapshot {
     hash: Option<String>,
     timestamp: Option<u64>,
     error: Option<String>,
+}
+
+fn cache_last_known_good_chain_tip(block: &Block) {
+    if let Ok(mut cached_tip) = LAST_KNOWN_GOOD_CHAIN_TIP.lock() {
+        *cached_tip = Some(block.clone());
+    }
+}
+
+fn cached_last_known_good_chain_tip() -> Option<Block> {
+    LAST_KNOWN_GOOD_CHAIN_TIP
+        .lock()
+        .ok()
+        .and_then(|cached_tip| cached_tip.clone())
+}
+
+fn persisted_chain_tip() -> Option<Block> {
+    let chain_path = crate::utils::resolve_data_path("data/chain.json");
+    BlockChain::load_from_file(chain_path.to_str().unwrap_or("data/chain.json"))
+        .and_then(|chain| chain.last().cloned())
+}
+
+fn read_through_chain_tip_block(chain: &Arc<Mutex<BlockChain>>) -> Option<Block> {
+    match chain.try_lock() {
+        Ok(chain_guard) => {
+            let latest_block = chain_guard.last().cloned();
+            if let Some(block) = latest_block.as_ref() {
+                cache_last_known_good_chain_tip(block);
+            }
+            latest_block
+        }
+        Err(TryLockError::WouldBlock) | Err(TryLockError::Poisoned(_)) => {
+            cached_last_known_good_chain_tip().or_else(persisted_chain_tip)
+        }
+    }
+}
+
+fn chain_tip_snapshot_from_block(block: &Block) -> ChainTipSnapshot {
+    ChainTipSnapshot {
+        available: true,
+        height: Some(block.block_index),
+        hash: Some(block.hash.clone()),
+        timestamp: Some(block.timestamp),
+        error: None,
+    }
 }
 
 fn find_http_header_end(bytes: &[u8]) -> Option<usize> {
@@ -1588,9 +1636,8 @@ fn handle_json_rpc(
         }
 
         "synergy_getLatestBlock" => {
-            let chain = chain.lock().unwrap();
-            if let Some(block) = chain.last() {
-                block_to_explorer_json(block)
+            if let Some(block) = read_through_chain_tip_block(chain) {
+                block_to_explorer_json(&block)
             } else {
                 json!(null)
             }
@@ -5262,38 +5309,23 @@ fn best_observed_sync_source_height() -> u64 {
 }
 
 fn chain_tip_snapshot_nonblocking(chain: &Arc<Mutex<BlockChain>>) -> ChainTipSnapshot {
-    match chain.try_lock() {
-        Ok(chain) => {
-            let latest = chain.last();
-            ChainTipSnapshot {
-                available: true,
-                height: latest.map(|block| block.block_index),
-                hash: latest.map(|block| block.hash.clone()),
-                timestamp: latest.map(|block| block.timestamp),
-                error: None,
-            }
+    if let Some(block) = read_through_chain_tip_block(chain) {
+        chain_tip_snapshot_from_block(&block)
+    } else {
+        ChainTipSnapshot {
+            available: false,
+            height: None,
+            hash: None,
+            timestamp: None,
+            error: Some(QRPC_CHAIN_UNAVAILABLE_ERROR.to_string()),
         }
-        Err(TryLockError::WouldBlock) => ChainTipSnapshot {
-            available: false,
-            height: None,
-            hash: None,
-            timestamp: None,
-            error: Some(QRPC_CHAIN_BUSY_ERROR.to_string()),
-        },
-        Err(TryLockError::Poisoned(_)) => ChainTipSnapshot {
-            available: false,
-            height: None,
-            hash: None,
-            timestamp: None,
-            error: Some("consensus chain state lock is poisoned".to_string()),
-        },
     }
 }
 
 fn chain_tip_snapshot_for_status(chain: &Arc<Mutex<BlockChain>>) -> ChainTipSnapshot {
     let mut snapshot = chain_tip_snapshot_nonblocking(chain);
     for _ in 0..QRPC_STATUS_CHAIN_SNAPSHOT_RETRY_ATTEMPTS {
-        if snapshot.available || snapshot.error.as_deref() != Some(QRPC_CHAIN_BUSY_ERROR) {
+        if snapshot.available || snapshot.error.as_deref() != Some(QRPC_CHAIN_UNAVAILABLE_ERROR) {
             return snapshot;
         }
         thread::sleep(Duration::from_millis(
@@ -5423,36 +5455,24 @@ fn latest_finalized_head_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
     if lock.get("found").and_then(Value::as_bool) == Some(true) {
         return lock;
     }
-    match chain.try_lock() {
-        Ok(chain_guard) => {
-            if let Some(block) = chain_guard.last() {
-                json!({
-                    "found": true,
-                    "height": block.block_index,
-                    "block_hash": block.hash,
-                    "parent_hash": block.previous_hash,
-                    "timestamp": block.timestamp,
-                    "source": "chain_tip_without_canonical_lock_file",
-                    "chain": chain_identity_json(),
-                })
-            } else {
-                json!({"found": false, "chain": chain_identity_json()})
-            }
-        }
-        Err(TryLockError::WouldBlock) => json!({
+    if let Some(block) = read_through_chain_tip_block(chain) {
+        json!({
+            "found": true,
+            "height": block.block_index,
+            "block_hash": block.hash,
+            "parent_hash": block.previous_hash,
+            "timestamp": block.timestamp,
+            "source": "chain_tip_without_canonical_lock_file",
+            "chain": chain_identity_json(),
+        })
+    } else {
+        json!({
             "found": false,
-            "error": "consensus chain state is busy; finalized-head fallback returned without blocking",
+            "error": QRPC_CHAIN_UNAVAILABLE_ERROR,
             "fail_closed": true,
             "chain_state_available": false,
             "chain": chain_identity_json(),
-        }),
-        Err(TryLockError::Poisoned(_)) => json!({
-            "found": false,
-            "error": "consensus chain state lock is poisoned",
-            "fail_closed": true,
-            "chain_state_available": false,
-            "chain": chain_identity_json(),
-        }),
+        })
     }
 }
 
@@ -8175,8 +8195,19 @@ mod tests {
     }
 
     #[test]
-    fn qrpc_status_retries_transient_busy_chain_lock() {
-        let chain = Arc::new(Mutex::new(BlockChain::new()));
+    fn qrpc_status_uses_last_known_good_snapshot_when_consensus_chain_lock_is_busy() {
+        if let Ok(mut cached_tip) = LAST_KNOWN_GOOD_CHAIN_TIP.lock() {
+            *cached_tip = None;
+        }
+
+        let mut chain = BlockChain::new();
+        chain.genesis().unwrap();
+        let chain = Arc::new(Mutex::new(chain));
+
+        let primed_tip = chain_tip_snapshot_nonblocking(&chain);
+        assert_eq!(primed_tip.available, true);
+        assert_eq!(primed_tip.height, Some(0));
+
         let worker_chain = Arc::clone(&chain);
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let handle = thread::spawn(move || {
@@ -8188,36 +8219,22 @@ mod tests {
         });
         ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
 
-        let health = node_health_json(&chain);
-        handle.join().unwrap();
+        let block_number = block_number_json(&chain);
+        assert_eq!(block_number, json!(0));
 
+        let health = node_health_json(&chain);
         assert_eq!(health["status"].as_str(), Some("healthy"));
         assert_eq!(health["fail_closed"], false);
         assert_eq!(health["chain_state_available"], true);
+        assert_eq!(health["chain_state_error"], Value::Null);
+        assert_eq!(health["latest_height"], json!(0));
         assert_eq!(health["sync"]["fail_closed"], false);
         assert_eq!(health["sync"]["chain_state_available"], true);
-    }
-
-    #[test]
-    fn qrpc_status_surfaces_fail_closed_when_consensus_chain_lock_is_busy() {
-        let chain = Arc::new(Mutex::new(BlockChain::new()));
-        let _held_consensus_lock = chain.lock().unwrap();
-
-        let block_number = block_number_json(&chain);
-        assert_eq!(block_number["fail_closed"], true);
-        assert_eq!(block_number["chain_state_available"], false);
-
-        let health = node_health_json(&chain);
-        assert_eq!(health["status"].as_str(), Some("degraded"));
-        assert_eq!(health["fail_closed"], true);
-        assert_eq!(health["chain_state_available"], false);
-        assert_eq!(health["latest_height"], Value::Null);
-        assert_eq!(health["sync"]["fail_closed"], true);
 
         let sync = sync_status_json(&chain);
-        assert_eq!(sync["fail_closed"], true);
-        assert_eq!(sync["chain_state_available"], false);
-        assert_eq!(sync["current_block"], Value::Null);
+        assert_eq!(sync["fail_closed"], false);
+        assert_eq!(sync["chain_state_available"], true);
+        assert_eq!(sync["current_block"], json!(0));
 
         let node_info = handle_json_rpc(
             "synergy_nodeInfo",
@@ -8226,9 +8243,21 @@ mod tests {
             &chain,
             &VALIDATOR_MANAGER,
         );
-        assert_eq!(node_info["failClosed"], true);
-        assert_eq!(node_info["chainStateAvailable"], false);
-        assert_eq!(node_info["currentBlock"], Value::Null);
+        assert_eq!(node_info["failClosed"], false);
+        assert_eq!(node_info["chainStateAvailable"], true);
+        assert_eq!(node_info["chainStateError"], Value::Null);
+        assert_eq!(node_info["currentBlock"], json!(0));
+
+        let latest_block = handle_json_rpc(
+            "synergy_getLatestBlock",
+            json!([]),
+            &TX_POOL,
+            &chain,
+            &VALIDATOR_MANAGER,
+        );
+        assert_eq!(latest_block["block_index"], json!(0));
+
+        handle.join().unwrap();
     }
 
     #[test]
