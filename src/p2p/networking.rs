@@ -909,6 +909,195 @@ fn connected_peer_key_for_address(peers: &PeerMap, requested_address: &str) -> O
     })
 }
 
+fn peer_socket_port(address: &str) -> Option<u16> {
+    let normalized = parse_bootnode_dial_address(address)?;
+    normalized
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse::<u16>().ok())
+}
+
+fn genesis_validator_slot_from_text(value: &str) -> Option<usize> {
+    let lower = value.trim().to_ascii_lowercase();
+    let marker = "genesisval";
+    let start = lower.find(marker)? + marker.len();
+    let digits = lower[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse::<usize>().ok().filter(|slot| *slot > 0)
+}
+
+fn canonical_validator_address_for_slot(slot: usize) -> Option<String> {
+    canonical_genesis()
+        .ok()
+        .and_then(|genesis| {
+            genesis
+                .validators()
+                .get(slot.saturating_sub(1))
+                .map(|validator| validator.operator_address.clone())
+        })
+        .filter(|address| !address.trim().is_empty())
+}
+
+fn configured_vote_target_validator_addresses(
+    config: &NodeConfig,
+    active_validator_addresses: &HashSet<String>,
+) -> Vec<String> {
+    let mut configured = config
+        .node
+        .allowed_validator_addresses
+        .iter()
+        .map(|address| address.trim().to_string())
+        .filter(|address| !address.is_empty())
+        .collect::<Vec<_>>();
+
+    if configured.is_empty() {
+        if let Ok(genesis) = canonical_genesis() {
+            configured = genesis
+                .validators()
+                .iter()
+                .map(|validator| validator.operator_address.trim().to_string())
+                .filter(|address| !address.is_empty())
+                .collect();
+        }
+    }
+
+    configured.retain(|address| {
+        active_validator_addresses.is_empty() || active_validator_addresses.contains(address)
+    });
+    configured.dedup();
+    configured
+}
+
+fn configured_validator_p2p_dials(config: &NodeConfig) -> Vec<String> {
+    let mut dials = Vec::new();
+    let mut seen = HashSet::new();
+
+    for dial in config
+        .network
+        .persistent_peers
+        .iter()
+        .chain(config.network.additional_dial_targets.iter())
+    {
+        let Some(parsed) = parse_bootnode_dial_address(dial) else {
+            continue;
+        };
+        if peer_socket_port(&parsed) != Some(VALIDATOR_P2P_PORT) {
+            continue;
+        }
+        if !is_assigned_synergy_dial_address(&parsed) {
+            continue;
+        }
+        let host = peer_socket_host(&parsed).to_ascii_lowercase();
+        if host.contains("relay")
+            || host.contains("rpc")
+            || host.contains("archive")
+            || host.contains("bootnode")
+            || host.contains("seed")
+            || host.contains("observer")
+        {
+            continue;
+        }
+        if seen.insert(parsed.clone()) {
+            dials.push(parsed);
+        }
+    }
+
+    dials
+}
+
+fn configured_validator_public_address_map(
+    config: &NodeConfig,
+    active_validator_addresses: &HashSet<String>,
+) -> HashMap<String, String> {
+    let validators =
+        configured_vote_target_validator_addresses(config, active_validator_addresses);
+    if validators.is_empty() {
+        return HashMap::new();
+    }
+
+    let dials = configured_validator_p2p_dials(config);
+    let mapped_dials = if dials.len() == validators.len() {
+        dials
+    } else if dials.len() > validators.len() {
+        dials[dials.len() - validators.len()..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    mapped_dials
+        .into_iter()
+        .zip(validators)
+        .flat_map(|(dial, validator)| {
+            let mut entries = Vec::new();
+            entries.push((dial.clone(), validator.clone()));
+            let host = peer_socket_host(&dial);
+            if !host.trim().is_empty() {
+                entries.push((format!("{host}:{VALIDATOR_P2P_PORT}"), validator));
+            }
+            entries
+        })
+        .collect()
+}
+
+fn recover_peer_validator_address_for_vote_target(
+    config: &NodeConfig,
+    peer: &PeerConnection,
+    active_validator_addresses: &HashSet<String>,
+) -> Option<String> {
+    if let Some(validator_address) = peer
+        .validator_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(validator_address.to_string());
+    }
+
+    for identity_text in [
+        peer.node_id.as_deref(),
+        peer.public_address.as_deref(),
+        Some(peer.address.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(slot) = genesis_validator_slot_from_text(identity_text) {
+            if let Some(validator_address) = canonical_validator_address_for_slot(slot) {
+                if active_validator_addresses.is_empty()
+                    || active_validator_addresses.contains(&validator_address)
+                {
+                    return Some(validator_address);
+                }
+            }
+        }
+    }
+
+    let address_map = configured_validator_public_address_map(config, active_validator_addresses);
+    for candidate in [peer.public_address.as_deref(), Some(peer.address.as_str())]
+        .into_iter()
+        .flatten()
+    {
+        let Some(parsed) = parse_bootnode_dial_address(candidate) else {
+            continue;
+        };
+        if let Some(validator_address) = address_map.get(&parsed) {
+            return Some(validator_address.clone());
+        }
+        let canonical = canonical_validator_public_address(&parsed, Some(&parsed));
+        if let Some(canonical) = canonical {
+            if let Some(validator_address) = address_map.get(&canonical) {
+                return Some(validator_address.clone());
+            }
+        }
+    }
+
+    None
+}
+
 fn should_prune_stale_peer(peer: &PeerConnection, now: u64) -> bool {
     let connected_age = now.saturating_sub(peer.connected_at);
 
@@ -2715,13 +2904,43 @@ impl P2PNetwork {
                 );
                 continue;
             }
-            let Some(validator_address) = peer.validator_address.as_deref() else {
+            let Some(validator_address) = recover_peer_validator_address_for_vote_target(
+                &self.config,
+                peer,
+                &active_validator_addresses,
+            ) else {
+                debug!(
+                    "p2p",
+                    "Skipping vote request to peer without recoverable validator identity",
+                    "peer" => address.clone(),
+                    "node_id" => peer.node_id.clone().unwrap_or_default(),
+                    "public_address" => peer.public_address.clone().unwrap_or_default(),
+                    "height" => block.block_index
+                );
                 continue;
             };
-            if !active_validator_addresses.contains(validator_address)
-                || sent_validator_addresses.contains(validator_address)
+            let recovered_validator_identity = peer
+                .validator_address
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_none();
+            if !active_validator_addresses.contains(&validator_address)
+                || sent_validator_addresses.contains(&validator_address)
             {
                 continue;
+            }
+            if recovered_validator_identity {
+                info!(
+                    "p2p",
+                    "Recovered vote request target validator identity",
+                    "peer" => address.clone(),
+                    "node_id" => peer.node_id.clone().unwrap_or_default(),
+                    "public_address" => peer.public_address.clone().unwrap_or_default(),
+                    "validator_address" => validator_address.clone(),
+                    "height" => block.block_index
+                );
+                peer.validator_address = Some(validator_address.clone());
             }
             if let Some(ref mut stream) = peer.stream {
                 if let Err(error) = send_consensus_message(stream, &message) {
@@ -2733,7 +2952,7 @@ impl P2PNetwork {
                     );
                     failed_peers.push(address.clone());
                 } else {
-                    sent_validator_addresses.insert(validator_address.to_string());
+                    sent_validator_addresses.insert(validator_address);
                     recipients += 1;
                 }
             }
@@ -2742,6 +2961,8 @@ impl P2PNetwork {
             peers.remove(address);
         }
 
+        let mut sent_validators = sent_validator_addresses.into_iter().collect::<Vec<_>>();
+        sent_validators.sort();
         info!(
             "p2p",
             "Vote request broadcast",
@@ -2749,7 +2970,8 @@ impl P2PNetwork {
             "dropped_peers" => failed_peers.len() as u64,
             "height" => block.block_index,
             "epoch" => epoch_number,
-            "round" => round_number
+            "round" => round_number,
+            "sent_validator_addresses" => sent_validators.join(",")
         );
         recipients
     }
@@ -6548,13 +6770,15 @@ mod tests {
         bypasses_shared_message_queue, cache_peer_state, cache_pending_block,
         canonical_genesis_hash, canonical_validator_public_address, chain_has_block_sync_overlap,
         chain_snapshot_clone_allowed, collect_known_peer_addresses,
-        connected_validator_participants, current_bootstrap_refresh_interval, current_timestamp,
-        dial_with_timeout, disconnect_peer_after_poisoned_write, dispatch_peer_message,
+        configured_validator_public_address_map, connected_validator_participants,
+        current_bootstrap_refresh_interval, current_timestamp, dial_with_timeout,
+        disconnect_peer_after_poisoned_write, dispatch_peer_message,
         ensure_peer_status_allows_chain_data, handle_status_message, hydrate_peer_from_cache,
         local_node_runs_validator_consensus, local_peer_identity, merge_peer_state_from_existing,
         parse_bootnode_dial_address, peer_has_identifying_metadata, peer_identity_key,
         peer_is_eligible_block_sync_source, pending_incoming_connections_from_host,
-        preferred_connection_direction, receive_message, resolve_bootstrap_dial_targets,
+        preferred_connection_direction, receive_message,
+        recover_peer_validator_address_for_vote_target, resolve_bootstrap_dial_targets,
         resolve_duplicate_connection, select_block_sync_response_blocks,
         should_canonicalize_validator_public_address,
         should_disconnect_for_status_genesis_mismatch, should_prune_stale_peer,
@@ -6593,7 +6817,7 @@ mod tests {
     };
     use base64::{engine::general_purpose, Engine as _};
     use lazy_static::lazy_static;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::fs;
     use std::io;
     use std::net::TcpListener;
@@ -7319,6 +7543,115 @@ mod tests {
         assert!(addresses.contains(&"genesisval1.synergy-network.io:5622".to_string()));
         assert!(addresses.contains(&"genesisval2.synergy-network.io:5622".to_string()));
         assert!(addresses.contains(&"genesisval3.synergy-network.io:5622".to_string()));
+    }
+
+    #[test]
+    fn vote_target_identity_recovers_from_configured_validator_public_address() {
+        let validators = vec![
+            "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string(),
+            "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt".to_string(),
+            "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string(),
+            "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string(),
+            "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f".to_string(),
+            "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx".to_string(),
+        ];
+        let active_validator_addresses = validators.iter().cloned().collect::<HashSet<_>>();
+        let mut config = NodeConfig::default();
+        config.node.allowed_validator_addresses = validators.clone();
+        config.network.persistent_peers = vec![
+            "relay1.synergynode.xyz:5622".to_string(),
+            "relay2.synergynode.xyz:5622".to_string(),
+            "rpc.synergynode.xyz:5623".to_string(),
+            "archive.synergynode.xyz:5615".to_string(),
+            "62.146.182.207:5622".to_string(),
+            "62.146.182.208:5622".to_string(),
+            "62.146.182.209:5622".to_string(),
+            "73.79.66.255:5622".to_string(),
+            "194.163.183.166:5622".to_string(),
+            "157.173.192.45:5622".to_string(),
+        ];
+
+        let address_map =
+            configured_validator_public_address_map(&config, &active_validator_addresses);
+
+        assert_eq!(
+            address_map.get("62.146.182.209:5622"),
+            Some(&"synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string())
+        );
+
+        let peer = PeerConnection {
+            address: "62.146.182.209:5622".to_string(),
+            direction: ConnectionDirection::Outgoing,
+            public_address: None,
+            validator_address: None,
+            connected_at: 0,
+            last_seen: 0,
+            blocks_sent: 0,
+            blocks_received: 0,
+            txs_sent: 0,
+            txs_received: 0,
+            stream: None,
+            node_id: None,
+            version: None,
+            capabilities: Vec::new(),
+            last_known_height: 0,
+            best_block_hash: String::new(),
+            genesis_hash: String::new(),
+            status_received_at: None,
+            quarantined: false,
+            consensus_duties_disabled: false,
+            recovery_state: None,
+        };
+
+        assert_eq!(
+            recover_peer_validator_address_for_vote_target(
+                &config,
+                &peer,
+                &active_validator_addresses,
+            ),
+            Some("synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string())
+        );
+    }
+
+    #[test]
+    fn vote_target_identity_recovers_from_genesis_validator_node_id() {
+        configure_canonical_genesis_path_for_tests();
+        let validator =
+            "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f".to_string();
+        let active_validator_addresses = [validator.clone()].into_iter().collect::<HashSet<_>>();
+        let config = NodeConfig::default();
+        let peer = PeerConnection {
+            address: "194.163.183.166:53988".to_string(),
+            direction: ConnectionDirection::Incoming,
+            public_address: None,
+            validator_address: None,
+            connected_at: 0,
+            last_seen: 0,
+            blocks_sent: 0,
+            blocks_received: 0,
+            txs_sent: 0,
+            txs_received: 0,
+            stream: None,
+            node_id: Some("genesisval5".to_string()),
+            version: None,
+            capabilities: Vec::new(),
+            last_known_height: 0,
+            best_block_hash: String::new(),
+            genesis_hash: String::new(),
+            status_received_at: None,
+            quarantined: false,
+            consensus_duties_disabled: false,
+            recovery_state: None,
+        };
+
+        assert_eq!(
+            recover_peer_validator_address_for_vote_target(
+                &config,
+                &peer,
+                &active_validator_addresses,
+            ),
+            Some(validator)
+        );
     }
 
     #[test]
