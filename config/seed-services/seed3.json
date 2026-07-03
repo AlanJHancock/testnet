@@ -24,7 +24,10 @@
   "static_peers": [
     "bootnode1.synergynode.xyz:5620",
     "bootnode2.synergynode.xyz:5620",
-    "bootnode3.synergynode.xyz:5620"
+    "bootnode3.synergynode.xyz:5620",
+    "seed1.synergynode.xyz:5621",
+    "seed2.synergynode.xyz:5621",
+    "seed3.synergynode.xyz:5621"
   ],
   "static_registry": [
     { "role": "validator", "node_name": "Val1", "validator_address": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs", "public_endpoint": "62.146.182.207:5622", "protocol_version": "synergy-p2p/1", "app_version": "static" },

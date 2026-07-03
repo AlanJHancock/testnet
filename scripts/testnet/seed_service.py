@@ -430,7 +430,10 @@ class SeedState:
             endpoint = str(record.get("public_endpoint") or "")
             if endpoint_rejection_reason(endpoint):
                 continue
-            if record.get("dialback_status") != "success" or record.get("health_status") != "healthy":
+            if not record.get("static") and (
+                record.get("dialback_status") != "success"
+                or record.get("health_status") != "healthy"
+            ):
                 continue
             out.append(record)
         return sorted(out, key=lambda item: (str(item.get("role", "")), str(item.get("public_endpoint", ""))))
