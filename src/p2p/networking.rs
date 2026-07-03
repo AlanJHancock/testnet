@@ -1119,6 +1119,24 @@ fn propagate_status_to_matching_peers(
     let identity = peers
         .get(peer_address)
         .and_then(peer_identity_from_connection);
+    let source_hosts = peers
+        .get(peer_address)
+        .map(|peer| {
+            let mut hosts = HashSet::<String>::new();
+            hosts.insert(peer_socket_host(peer_address));
+            hosts.insert(peer_socket_host(&peer.address));
+            if let Some(public_address) = peer.public_address.as_deref() {
+                hosts.insert(peer_socket_host(public_address));
+            }
+            hosts.retain(|host| !host.trim().is_empty());
+            hosts
+        })
+        .unwrap_or_else(|| {
+            let mut hosts = HashSet::<String>::new();
+            hosts.insert(peer_socket_host(peer_address));
+            hosts.retain(|host| !host.trim().is_empty());
+            hosts
+        });
     let mut target_keys = identity
         .as_deref()
         .map(|peer_identity| {
@@ -1132,9 +1150,30 @@ fn propagate_status_to_matching_peers(
         })
         .unwrap_or_default();
 
+    for (address, peer) in peers.iter() {
+        let peer_hosts = [
+            Some(address.as_str()),
+            Some(peer.address.as_str()),
+            peer.public_address.as_deref(),
+        ];
+        let shares_source_host = peer_hosts
+            .into_iter()
+            .flatten()
+            .map(peer_socket_host)
+            .any(|host| source_hosts.contains(&host));
+        if address == peer_address
+            || peer_matches_address(peer, peer_address)
+            || (peer_has_validator_identity(peer) && shares_source_host)
+        {
+            target_keys.push(address.clone());
+        }
+    }
+
     if target_keys.is_empty() {
         target_keys.push(peer_address.to_string());
     }
+    target_keys.sort();
+    target_keys.dedup();
 
     let status_received_at = current_timestamp();
     for target_key in target_keys {
