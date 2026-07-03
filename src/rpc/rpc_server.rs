@@ -119,6 +119,8 @@ static SUBSCRIPTION_COUNTER: AtomicU64 = AtomicU64::new(1);
 static QRPC_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
 const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 4 * 1024 * 1024;
+const QRPC_CHAIN_TIP_RETRY_ATTEMPTS: usize = 40;
+const QRPC_CHAIN_TIP_RETRY_DELAY_MILLIS: u64 = 25;
 const QRPC_STATUS_CHAIN_SNAPSHOT_RETRY_ATTEMPTS: usize = 8;
 const QRPC_STATUS_CHAIN_SNAPSHOT_RETRY_DELAY_MILLIS: u64 = 25;
 const QRPC_CHAIN_UNAVAILABLE_ERROR: &str = "consensus chain state unavailable without blocking";
@@ -164,34 +166,56 @@ fn persisted_chain_tip() -> Option<Block> {
         .and_then(|chain| chain.last().cloned())
 }
 
-fn cached_or_persisted_chain_tip() -> Option<Block> {
-    if let Some(block) = cached_last_known_good_chain_tip() {
-        return Some(block);
+fn newer_chain_tip(left: Option<Block>, right: Option<Block>) -> Option<Block> {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            if right.block_index > left.block_index {
+                Some(right)
+            } else {
+                Some(left)
+            }
+        }
+        (Some(block), None) | (None, Some(block)) => Some(block),
+        (None, None) => None,
     }
-    let persisted = persisted_chain_tip();
-    if let Some(block) = persisted.as_ref() {
-        cache_last_known_good_chain_tip(block);
-    }
-    persisted
 }
 
-fn read_through_chain_tip_block(chain: &Arc<Mutex<BlockChain>>) -> Option<Block> {
+fn cached_or_persisted_chain_tip() -> Option<Block> {
+    let best_tip = newer_chain_tip(cached_last_known_good_chain_tip(), persisted_chain_tip());
+    if let Some(block) = best_tip.as_ref() {
+        cache_last_known_good_chain_tip(block);
+    }
+    best_tip
+}
+
+fn try_live_chain_tip_block(chain: &Arc<Mutex<BlockChain>>) -> Result<Option<Block>, ()> {
     match chain.try_lock() {
         Ok(chain_guard) => {
             let latest_block = chain_guard.last().cloned();
             if let Some(block) = latest_block.as_ref() {
                 cache_last_known_good_chain_tip(block);
             }
-            latest_block
+            Ok(latest_block)
         }
-        Err(TryLockError::WouldBlock) | Err(TryLockError::Poisoned(_)) => {
-            let fallback = cached_or_persisted_chain_tip();
-            if fallback.is_some() {
-                record_qrpc_fallback("chain_tip_lock_unavailable");
-            }
-            fallback
+        Err(TryLockError::WouldBlock) | Err(TryLockError::Poisoned(_)) => Err(()),
+    }
+}
+
+fn read_through_chain_tip_block(chain: &Arc<Mutex<BlockChain>>) -> Option<Block> {
+    for attempt in 0..QRPC_CHAIN_TIP_RETRY_ATTEMPTS {
+        if let Ok(latest_block) = try_live_chain_tip_block(chain) {
+            return latest_block;
+        }
+        if attempt + 1 < QRPC_CHAIN_TIP_RETRY_ATTEMPTS {
+            thread::sleep(Duration::from_millis(QRPC_CHAIN_TIP_RETRY_DELAY_MILLIS));
         }
     }
+
+    let fallback = cached_or_persisted_chain_tip();
+    if fallback.is_some() {
+        record_qrpc_fallback("chain_tip_lock_unavailable");
+    }
+    fallback
 }
 
 fn chain_tip_snapshot_from_block(block: &Block) -> ChainTipSnapshot {
@@ -8298,6 +8322,23 @@ mod tests {
         assert_eq!(latest_block["block_index"], json!(0));
 
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn qrpc_fallback_prefers_newer_persisted_tip_over_stale_cache() {
+        let mut chain = BlockChain::new();
+        chain.genesis().unwrap();
+        let cached_tip = chain.last().cloned().unwrap();
+
+        let mut persisted_tip = cached_tip.clone();
+        persisted_tip.block_index = cached_tip.block_index + 2;
+        persisted_tip.nonce = persisted_tip.block_index;
+        persisted_tip.previous_hash = cached_tip.hash.clone();
+        persisted_tip.hash = "newer-persisted-tip".to_string();
+
+        let selected = newer_chain_tip(Some(cached_tip), Some(persisted_tip.clone())).unwrap();
+        assert_eq!(selected.block_index, persisted_tip.block_index);
+        assert_eq!(selected.hash, persisted_tip.hash);
     }
 
     #[test]
