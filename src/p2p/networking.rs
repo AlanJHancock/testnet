@@ -1069,13 +1069,19 @@ fn recover_peer_validator_address_for_vote_target(
     peer: &PeerConnection,
     active_validator_addresses: &HashSet<String>,
 ) -> Option<String> {
+    let enforce_active_validator_filter = !config.node.allowed_validator_addresses.is_empty();
     if let Some(validator_address) = peer
         .validator_address
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return Some(validator_address.to_string());
+        if !enforce_active_validator_filter
+            || active_validator_addresses.is_empty()
+            || active_validator_addresses.contains(validator_address)
+        {
+            return Some(validator_address.to_string());
+        }
     }
 
     for identity_text in [
@@ -9361,6 +9367,28 @@ mod tests {
             status_ready_validator_participants(&config, &connected_peers),
             2
         );
+    }
+
+    #[test]
+    fn status_ready_validator_addresses_exclude_non_allowlisted_peer_validator_identity() {
+        let local_validator = "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs";
+        let support_identity = "synv21ga3nsdjagzt9pmks4mzjq4vdjyngdwq6jst632";
+        let mut config = NodeConfig::default();
+        config.node.validator_address = local_validator.to_string();
+        config.node.allowed_validator_addresses = vec![local_validator.to_string()];
+
+        let mut support_peer = test_peer_with_validator_address(Some(support_identity));
+        support_peer.status_received_at = Some(current_timestamp());
+        support_peer.genesis_hash = "test-genesis".to_string();
+
+        let mut peers = HashMap::new();
+        peers.insert("support-peer".to_string(), support_peer);
+        let connected_peers = Arc::new(Mutex::new(peers));
+
+        let addresses = status_ready_validator_addresses(&config, &connected_peers);
+        assert!(addresses.contains(&local_validator.to_string()));
+        assert!(!addresses.contains(&support_identity.to_string()));
+        assert_eq!(addresses.len(), 1);
     }
 
     #[test]
