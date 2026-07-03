@@ -52,6 +52,7 @@ const MAX_BLOCK_TIMESTAMP_CATCH_UP_STEP_SECS: u64 = 300;
 const MAX_BLOCK_TIMESTAMP_REANCHOR_DRIFT_SECS: u64 = 86_400;
 const SAFE_HEAD_CATCHUP_WITHOUT_MESH_RESET_BLOCKS: u64 = 1;
 const DEFAULT_MAX_CHAIN_SNAPSHOT_CLONE_HEIGHT: u64 = 50_000;
+const PROPOSAL_TRANSACTION_MAX_AGE_SECS: u64 = 3_600;
 
 macro_rules! consensus_log {
     ($($arg:tt)*) => {
@@ -2801,11 +2802,19 @@ impl ProofOfSynergy {
             return block;
         }
 
+        let now = Self::current_timestamp();
+        let transactions = Self::filter_expired_proposal_transactions(
+            transactions,
+            previous_block.block_index + 1,
+            &leader.address,
+            now,
+        );
+
         // Create block and attach the consensus signature required for this height.
         let consensus_timestamp = Self::bounded_consensus_timestamp(
             previous_block.timestamp,
             block_time_secs,
-            Self::current_timestamp(),
+            now,
         );
         let mut block = Block::new_with_timestamp(
             previous_block.block_index + 1,
@@ -2910,9 +2919,36 @@ impl ProofOfSynergy {
             &previous_block.hash,
             &leader.address,
         );
-        let contents = fs::read_to_string(path).ok()?;
+        let contents = fs::read_to_string(&path).ok()?;
         let block = serde_json::from_str::<Block>(&contents).ok()?;
         if !Self::block_matches_proposal_context(&block, previous_block, leader) {
+            return None;
+        }
+        let now = Self::current_timestamp();
+        let expired_transaction_count = block
+            .transactions
+            .iter()
+            .filter(|tx| Self::transaction_is_expired_for_proposal(tx, now))
+            .count();
+        if expired_transaction_count > 0 {
+            warn!(
+                "consensus",
+                "Discarding cached block proposal with expired transaction timestamps",
+                "height" => block.block_index,
+                "hash" => block.hash.clone(),
+                "validator" => leader.address.clone(),
+                "expired_transactions" => expired_transaction_count as u64
+            );
+            if let Err(error) = fs::remove_file(&path) {
+                warn!(
+                    "consensus",
+                    "Failed to remove expired cached block proposal",
+                    "height" => block.block_index,
+                    "hash" => block.hash.clone(),
+                    "path" => path.display().to_string(),
+                    "error" => error.to_string()
+                );
+            }
             return None;
         }
         if let Err(error) = block.verify_proposer_signature() {
@@ -2926,6 +2962,37 @@ impl ProofOfSynergy {
             return None;
         }
         Some(block)
+    }
+
+    fn transaction_is_expired_for_proposal(
+        tx: &crate::transaction::Transaction,
+        current_time_secs: u64,
+    ) -> bool {
+        current_time_secs.saturating_sub(tx.timestamp) > PROPOSAL_TRANSACTION_MAX_AGE_SECS
+    }
+
+    fn filter_expired_proposal_transactions(
+        transactions: Vec<crate::transaction::Transaction>,
+        block_index: u64,
+        leader_address: &str,
+        current_time_secs: u64,
+    ) -> Vec<crate::transaction::Transaction> {
+        let original_len = transactions.len();
+        let filtered = transactions
+            .into_iter()
+            .filter(|tx| !Self::transaction_is_expired_for_proposal(tx, current_time_secs))
+            .collect::<Vec<_>>();
+        let dropped = original_len.saturating_sub(filtered.len());
+        if dropped > 0 {
+            warn!(
+                "consensus",
+                "Dropping expired transactions from block proposal",
+                "height" => block_index,
+                "validator" => leader_address.to_string(),
+                "dropped_transactions" => dropped as u64
+            );
+        }
+        filtered
     }
 
     fn persist_cached_block_proposal(block: &Block) -> Result<(), std::io::Error> {
@@ -4510,6 +4577,84 @@ mod tests {
             .next()
             .is_none());
 
+        ProofOfSynergy::set_test_proposal_cache_dir(None);
+        let _ = fs::remove_dir_all(cache_dir);
+    }
+
+    #[test]
+    fn leader_discards_cached_proposal_with_expired_transactions() {
+        let _guard = proposal_cache_test_lock()
+            .lock()
+            .expect("proposal cache test lock should succeed");
+        let cache_dir = unique_proposal_cache_dir("leader-expired-retry");
+        ProofOfSynergy::set_test_proposal_cache_dir(Some(cache_dir.clone()));
+
+        let previous = Block::new_with_timestamp(
+            760_975,
+            vec![],
+            "stalled-parent".to_string(),
+            "synv1previous".to_string(),
+            760_975,
+            ProofOfSynergy::current_timestamp().saturating_sub(10),
+        );
+        let mut leader = Validator::new(
+            "synv1leader-expired-retry".to_string(),
+            "leader-pubkey".to_string(),
+            "Leader Expired Retry".to_string(),
+            1_000,
+        );
+        leader.status = ValidatorStatus::Active;
+        let registered_leaders = active_validator_manager(&leader.address);
+        leader.public_key = registered_leaders
+            .get_validator(&leader.address)
+            .expect("test leader should be registered")
+            .public_key;
+        let pqc_manager = Arc::new(Mutex::new(PQCManager::new()));
+
+        let fresh_transaction = Transaction::new(
+            "synw1sender".to_string(),
+            "synw1receiver".to_string(),
+            1,
+            0,
+            vec![1, 2, 3],
+            1,
+            21_000,
+            Some("fresh-mempool-transaction".to_string()),
+            "test".to_string(),
+        );
+        let first = ProofOfSynergy::create_block_proposal(
+            &previous,
+            &leader,
+            vec![fresh_transaction],
+            2,
+            &pqc_manager,
+        );
+        assert_eq!(first.transactions.len(), 1);
+
+        let cache_path = ProofOfSynergy::proposal_cache_path(
+            first.block_index,
+            &first.previous_hash,
+            &first.validator_id,
+        );
+        let mut cached_block = serde_json::from_str::<Block>(
+            &fs::read_to_string(&cache_path).expect("cached proposal should exist"),
+        )
+        .expect("cached proposal should deserialize");
+        cached_block.transactions[0].timestamp = ProofOfSynergy::current_timestamp()
+            .saturating_sub(PROPOSAL_TRANSACTION_MAX_AGE_SECS + 1);
+        fs::write(
+            &cache_path,
+            serde_json::to_vec_pretty(&cached_block).expect("cached proposal should serialize"),
+        )
+        .expect("cached proposal should be overwritten for regression setup");
+
+        let retry =
+            ProofOfSynergy::create_block_proposal(&previous, &leader, vec![], 2, &pqc_manager);
+
+        assert_ne!(retry.hash, first.hash);
+        assert!(retry.transactions.is_empty());
+
+        ProofOfSynergy::prune_cached_block_proposals(retry.block_index);
         ProofOfSynergy::set_test_proposal_cache_dir(None);
         let _ = fs::remove_dir_all(cache_dir);
     }
