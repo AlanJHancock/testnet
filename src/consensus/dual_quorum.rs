@@ -2399,9 +2399,7 @@ impl DualQuorumConsensus {
         let Some(latest_lock) = latest_lock else {
             return Ok(());
         };
-        if latest_lock.block_hash == proposed_block.hash
-            || round_number <= latest_lock.latest_round_number
-        {
+        if latest_lock.block_hash == proposed_block.hash {
             return Ok(());
         }
 
@@ -3545,6 +3543,61 @@ mod tests {
                 .all(|lock| lock.block_hash != conflicting_block.hash),
             "conflicting higher-round vote lock must not be persisted"
         );
+
+        DualQuorumConsensus::set_test_local_vote_lock_path(None);
+        crate::consensus::legacy_canonical_lock::clear_legacy_canonical_locks_for_tests();
+        if let Some(root) = path.parent().and_then(|data| data.parent()) {
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn stale_higher_round_transient_vote_lock_can_recover_for_lower_round_retry() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        crate::consensus::legacy_canonical_lock::clear_legacy_canonical_locks_for_tests();
+
+        let path = temp_vote_lock_path("local-vote-intent-lower-round-recovery");
+        DualQuorumConsensus::set_test_local_vote_lock_path(Some(path.clone()));
+
+        let parent = signed_block(12, 1, "validator0");
+        crate::consensus::legacy_canonical_lock::write_legacy_canonical_lock(
+            &parent,
+            &test_qc(&parent.hash),
+        )
+        .expect("canonical parent lock should be written");
+
+        let mut stale_block = signed_block(13, 1, "validator1");
+        stale_block.previous_hash = parent.hash.clone();
+        let mut recovery_block = signed_block(13, 2, "validator3");
+        recovery_block.previous_hash = parent.hash.clone();
+
+        DualQuorumConsensus::register_local_vote_intent("validator2", &stale_block, 40, 172)
+            .expect("stale high-round vote intent should persist");
+
+        DualQuorumConsensus::recover_stale_conflicting_vote_lock_before_vote(
+            "validator2",
+            &recovery_block,
+            40,
+            84,
+            0,
+            "lower-round clean retry after stale transient lock",
+        )
+        .expect("stale high-round transient lock should recover before lower-round retry");
+
+        DualQuorumConsensus::register_local_vote_intent("validator2", &recovery_block, 40, 84)
+            .expect("lower-round retry should sign after stale transient recovery");
+
+        let locks = DualQuorumConsensus::load_local_vote_locks_unlocked()
+            .expect("persisted vote locks should load");
+        assert!(locks
+            .values()
+            .any(|lock| lock.block_hash == recovery_block.hash
+                && lock.block_index == recovery_block.block_index
+                && lock.latest_round_number == 84));
+        assert!(locks
+            .values()
+            .all(|lock| lock.block_hash != stale_block.hash));
 
         DualQuorumConsensus::set_test_local_vote_lock_path(None);
         crate::consensus::legacy_canonical_lock::clear_legacy_canonical_locks_for_tests();
