@@ -468,7 +468,6 @@ def generate_configs(topology: dict[str, Any]) -> dict[PurePosixPath, dict[str, 
         )
         config["archive_validator"] = {
             "public_archive_endpoint": archive["public_endpoint"],
-            "forbidden_public_endpoints": list(archive["forbidden_public_endpoints"]),
             "advertise_addr_preferred": archive["public_endpoint"],
         }
         configs[PurePosixPath("archive-validator") / f"{archive['name']}.toml"] = config

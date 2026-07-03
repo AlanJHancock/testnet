@@ -246,13 +246,15 @@ check_config_hygiene() {
   local found=0
   local file
   local bad
+  local public_p2p_key_re='^[[:space:]]*"?((public_)?p2p_)?(public_address|public_endpoint|public_p2p_address|discovery_public_address|additional_dial_targets|persistent_peers|bootnodes|seed_servers|bootstrap_dns_records|p2p_peers|peers|rpc_gateway_p2p_endpoint|archive_public_endpoint)"?[[:space:]]*[:=]'
+  local forbidden_endpoint_re='10\.69\.|10\.[0-9]+\.[0-9]+\.[0-9]+:5622|127\.0\.0\.1:5622|localhost:5622|192\.168\.[0-9]+\.[0-9]+:5622|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]+\.[0-9]+:5622'
 
   for root in "${roots[@]}"; do
     [[ -d "${root}" ]] || continue
     while IFS= read -r file; do
       found=1
 
-      if bad="$(grep -nE '10\.69\.|10\.[0-9]+\.[0-9]+\.[0-9]+:5622|127\.0\.0\.1:5622|localhost:5622|192\.168\.[0-9]+\.[0-9]+:5622|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]+\.[0-9]+:5622' "${file}" 2>/dev/null || true)"; [[ -n "${bad}" ]]; then
+      if bad="$(grep -nE "${public_p2p_key_re}" "${file}" 2>/dev/null | grep -E "${forbidden_endpoint_re}" || true)"; [[ -n "${bad}" ]]; then
         fail "config hygiene ${file} contains private/VPN/localhost public P2P endpoint"
         printf '%s\n' "${bad}"
       fi

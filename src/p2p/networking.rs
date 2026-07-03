@@ -69,7 +69,12 @@ const TCP_KEEPALIVE_IDLE_SECS: u64 = 300;
 const TCP_KEEPALIVE_INTERVAL_SECS: u64 = 60;
 const IMMEDIATE_STATUS_SYNC_BATCH: u32 = 32;
 const MAX_STATUS_SYNC_BATCH: u32 = 48;
-const PUBLIC_HISTORY_GATEWAY_DIAL_ADDRESSES: &[&str] = &["167.86.83.83:5623", "73.79.66.255:5622"];
+const PUBLIC_HISTORY_GATEWAY_DIAL_ADDRESSES: &[&str] = &[
+    "167.86.83.83:5623",
+    "73.79.66.255:5622",
+    "archive.synergynode.xyz:5615",
+    "73.79.66.255:5615",
+];
 const MAX_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 64;
 const MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS: u32 = 64;
 const MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 128;
@@ -87,7 +92,7 @@ const VOTE_REQUEST_PARENT_SYNC_POLL_MILLIS: u64 = 25;
 const MAX_PENDING_BLOCK_HEIGHTS: usize = 256;
 const MAX_PENDING_BLOCKS_PER_HEIGHT: usize = 4;
 const OUTBOUND_DIAL_COOLDOWN_SECS: u64 = 3;
-const MAX_PENDING_INCOMING_CONNECTIONS_PER_HOST: usize = 2;
+const MAX_PENDING_INCOMING_CONNECTIONS_PER_HOST: usize = 8;
 const VALIDATOR_P2P_PORT: u16 = 5622;
 const VALIDATOR_STATUS_GENESIS_GRACE_SECS: u64 = 30;
 const STALE_UNIDENTIFIED_PEER_SECS: u64 = 15;
@@ -1588,6 +1593,13 @@ fn canonical_validator_public_address(
     } else {
         None
     }
+}
+
+fn should_canonicalize_validator_public_address(validator_address: Option<&str>) -> bool {
+    validator_address
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|value| value.starts_with("synv1"))
 }
 
 fn is_public_history_gateway_dial_address(address: &str) -> bool {
@@ -4465,7 +4477,11 @@ fn handle_messages(
                             .as_ref()
                             .map(|value| value.trim().to_string())
                             .filter(|value| !value.is_empty());
-                        let normalized_public_address = if announced_validator_address.is_some() {
+                        let canonicalize_validator_public_address =
+                            should_canonicalize_validator_public_address(
+                                announced_validator_address.as_deref(),
+                            );
+                        let normalized_public_address = if canonicalize_validator_public_address {
                             canonical_validator_public_address(
                                 &peer_address,
                                 public_address.as_deref(),
@@ -4476,7 +4492,7 @@ fn handle_messages(
                                 .and_then(parse_bootnode_dial_address)
                                 .or_else(|| public_address.clone())
                         };
-                        if announced_validator_address.is_some()
+                        if canonicalize_validator_public_address
                             && normalized_public_address != public_address
                         {
                             warn!(
@@ -7083,9 +7099,34 @@ mod tests {
             Some("167.86.83.83:5623".to_string())
         );
         assert_eq!(
+            canonical_validator_public_address(
+                "archive.synergynode.xyz:5615",
+                Some("archive.synergynode.xyz:5615")
+            ),
+            Some("archive.synergynode.xyz:5615".to_string())
+        );
+        assert_eq!(
+            canonical_validator_public_address("73.79.66.255:5615", Some("73.79.66.255:5615")),
+            Some("73.79.66.255:5615".to_string())
+        );
+        assert_eq!(
             canonical_validator_public_address("94.72.117.108:62422", Some("94.72.117.108:5622")),
             Some("94.72.117.108:5622".to_string())
         );
+    }
+
+    #[test]
+    fn validator_public_address_canonicalization_requires_synv_identity() {
+        assert!(should_canonicalize_validator_public_address(Some(
+            "synv11validatorxxxxxxxxxxxxxxxxxxxx"
+        )));
+        assert!(!should_canonicalize_validator_public_address(Some(
+            "archive-validator-01"
+        )));
+        assert!(!should_canonicalize_validator_public_address(Some(
+            "rpc-gateway-01"
+        )));
+        assert!(!should_canonicalize_validator_public_address(None));
     }
 
     #[test]

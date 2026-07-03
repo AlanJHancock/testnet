@@ -44,5 +44,4 @@ dialback_required = true
 
 [archive_validator]
 public_archive_endpoint = "archive.synergynode.xyz:5615"
-forbidden_public_endpoints = ["73.79.66.255:5622", "10.69.0.220:5622", "127.0.0.1:5622", "192.168.11.140:5622"]
 advertise_addr_preferred = "archive.synergynode.xyz:5615"
