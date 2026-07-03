@@ -3512,6 +3512,31 @@ fn send_vote_to_requester(
     response: &NetworkMessage,
 ) -> Result<String, String> {
     let mut failed_peers = Vec::new();
+
+    if let Some(proposer_public_address) =
+        configured_public_address_for_validator(config, proposer_validator_address)
+    {
+        match dial_with_timeout(
+            &proposer_public_address,
+            Duration::from_millis(CONSENSUS_DIRECT_VOTE_DIAL_TIMEOUT_MILLIS),
+        ) {
+            Ok(mut stream) => match send_consensus_message(&mut stream, response) {
+                Ok(()) => {
+                    info!(
+                        "p2p",
+                        "Vote sent over direct proposer path",
+                        "request_peer" => request_peer_address.to_string(),
+                        "response_peer" => proposer_public_address.clone(),
+                        "proposer" => proposer_validator_address.to_string()
+                    );
+                    return Ok(proposer_public_address);
+                }
+                Err(error) => failed_peers.push((proposer_public_address, error.to_string())),
+            },
+            Err(error) => failed_peers.push((proposer_public_address, error.to_string())),
+        }
+    }
+
     if let Some(peer) = peers.get_mut(request_peer_address) {
         if let Some(ref mut stream) = peer.stream {
             match send_consensus_message(stream, response) {
@@ -3548,30 +3573,6 @@ fn send_vote_to_requester(
                     }
                 }
             }
-        }
-    }
-
-    if let Some(proposer_public_address) =
-        configured_public_address_for_validator(config, proposer_validator_address)
-    {
-        match dial_with_timeout(
-            &proposer_public_address,
-            Duration::from_millis(CONSENSUS_DIRECT_VOTE_DIAL_TIMEOUT_MILLIS),
-        ) {
-            Ok(mut stream) => match send_consensus_message(&mut stream, response) {
-                Ok(()) => {
-                    info!(
-                        "p2p",
-                        "Vote sent over direct proposer fallback",
-                        "request_peer" => request_peer_address.to_string(),
-                        "response_peer" => proposer_public_address.clone(),
-                        "proposer" => proposer_validator_address.to_string()
-                    );
-                    return Ok(proposer_public_address);
-                }
-                Err(error) => failed_peers.push((proposer_public_address, error.to_string())),
-            },
-            Err(error) => failed_peers.push((proposer_public_address, error.to_string())),
         }
     }
 
