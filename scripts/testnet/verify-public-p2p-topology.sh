@@ -262,7 +262,7 @@ check_config_hygiene() {
       case "${file}" in
         *archive*toml|*archive*json)
           if bad="$(grep -nE '(public|advertis|external).*73\.79\.66\.255:5622|73\.79\.66\.255:5622.*(public|advertis|external)' "${file}" 2>/dev/null || true)"; [[ -n "${bad}" ]]; then
-            fail "archive hygiene ${file} advertises Val4 collision endpoint 73.79.66.255:5622"
+            fail "archive hygiene ${file} advertises validator P2P endpoint 73.79.66.255:5622"
             printf '%s\n' "${bad}"
           fi
           ;;

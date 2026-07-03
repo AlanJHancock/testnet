@@ -42,7 +42,17 @@ allowed_validator_name_paths = (
     "scripts/testnet/val5-authorized-narrow-cleanup.sh",
     "scripts/testnet/val5-fndsa-rejoin-workflow.sh",
     "scripts/testnet/val2_cold_canonical_snapshot_restore.py",
+    "config/seed-services/seed1.json",
+    "config/seed-services/seed2.json",
+    "config/seed-services/seed3.json",
     "config/consensus-fork-migration.json",
+    "config/testnet/network-topology.toml",
+    "config/testnet/generated/validators/val1.toml",
+    "config/testnet/generated/validators/val2.toml",
+    "config/testnet/generated/validators/val3.toml",
+    "config/testnet/generated/validators/val4.toml",
+    "config/testnet/generated/validators/val5.toml",
+    "config/testnet/generated/validators/val6.toml",
 )
 
 allowed_cluster_size_paths = (

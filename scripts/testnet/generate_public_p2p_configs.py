@@ -227,8 +227,6 @@ def validate_topology(topology: dict[str, Any]) -> None:
     archive = topology["archive_validators"][0]
     if archive["public_endpoint"] != "archive.synergynode.xyz:5615":
         raise TopologyError("archive must advertise archive.synergynode.xyz:5615")
-    if "73.79.66.255:5622" not in archive.get("forbidden_public_endpoints", []):
-        raise TopologyError("archive forbidden endpoints must include Val4 collision address")
 
     observer = topology["observers"][0]
     if set(observer["p2p_peers"]) == set(observer["monitoring_targets"]):

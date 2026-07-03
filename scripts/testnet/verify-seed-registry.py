@@ -300,7 +300,7 @@ def main() -> int:
                 Check(
                     "FAIL",
                     f"{seed} archive registry",
-                    "archive advertises Val4 collision endpoint 73.79.66.255:5622",
+                    "archive advertises validator P2P endpoint 73.79.66.255:5622",
                 )
             )
         elif "archive.synergynode.xyz:5615" in archive_endpoints:
