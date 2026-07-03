@@ -1119,25 +1119,43 @@ fn recover_peer_validator_address_for_vote_target(
     None
 }
 
-fn should_prune_stale_peer(peer: &PeerConnection, now: u64) -> bool {
+fn should_prune_stale_peer(
+    config: &NodeConfig,
+    peer: &PeerConnection,
+    now: u64,
+    active_validator_addresses: &HashSet<String>,
+) -> bool {
     let connected_age = now.saturating_sub(peer.connected_at);
+    let recovered_validator =
+        recover_peer_validator_address_for_vote_target(config, peer, active_validator_addresses);
+    let has_identifying_metadata =
+        peer_has_identifying_metadata(peer) || recovered_validator.is_some();
 
-    if !peer_has_identifying_metadata(peer) {
+    if !has_identifying_metadata {
         return connected_age >= STALE_UNIDENTIFIED_PEER_SECS;
     }
 
-    peer_has_validator_identity(peer)
+    (peer_has_validator_identity(peer) || recovered_validator.is_some())
         && !peer_has_remote_status(peer)
         && connected_age >= STALE_VALIDATOR_STATUS_SECS
 }
 
-fn prune_stale_peers(peer_state_cache: &PeerStateCacheArc, connected_peers: &PeersArc) {
+fn prune_stale_peers(
+    config: &NodeConfig,
+    peer_state_cache: &PeerStateCacheArc,
+    connected_peers: &PeersArc,
+) {
     let now = current_timestamp();
+    let active_validator_addresses =
+        configured_vote_target_validator_addresses(config, &HashSet::new())
+            .into_iter()
+            .collect::<HashSet<_>>();
     let mut peers = connected_peers.lock().unwrap();
     let stale_peer_keys = peers
         .iter()
         .filter_map(|(peer_key, peer)| {
-            should_prune_stale_peer(peer, now).then_some(peer_key.clone())
+            should_prune_stale_peer(config, peer, now, &active_validator_addresses)
+                .then_some(peer_key.clone())
         })
         .collect::<Vec<_>>();
 
@@ -1151,7 +1169,13 @@ fn prune_stale_peers(peer_state_cache: &PeerStateCacheArc, connected_peers: &Pee
                 "connected_age_secs" => now.saturating_sub(peer.connected_at),
                 "last_seen_age_secs" => now.saturating_sub(peer.last_seen),
                 "validator_address" => peer.validator_address.clone().unwrap_or_default(),
-                "has_identifying_metadata" => peer_has_identifying_metadata(peer),
+                "has_identifying_metadata" => peer_has_identifying_metadata(peer)
+                    || recover_peer_validator_address_for_vote_target(
+                        config,
+                        peer,
+                        &active_validator_addresses,
+                    )
+                    .is_some(),
                 "has_remote_status" => peer_has_remote_status(peer)
             );
         }
@@ -2109,6 +2133,11 @@ fn status_ready_validator_addresses(
     connected_peers: &PeersArc,
 ) -> Vec<String> {
     let mut validators = HashSet::<String>::new();
+    let active_validator_addresses =
+        configured_vote_target_validator_addresses(config, &HashSet::new())
+            .into_iter()
+            .collect::<HashSet<_>>();
+    let now = current_timestamp();
 
     if current_validator_quarantine_duty_block().is_none() {
         if let Some(local_validator) = announced_validator_address(config) {
@@ -2118,14 +2147,18 @@ fn status_ready_validator_addresses(
 
     if let Ok(peers) = connected_peers.lock() {
         for peer in peers.values() {
-            if !peer_has_remote_status(peer) || peer.quarantined || peer.consensus_duties_disabled {
+            if peer.quarantined || peer.consensus_duties_disabled {
                 continue;
             }
-            if let Some(address) = peer.validator_address.as_deref() {
-                let trimmed = address.trim();
-                if !trimmed.is_empty() {
-                    validators.insert(trimmed.to_string());
-                }
+            let recovered_validator =
+                recover_peer_validator_address_for_vote_target(config, peer, &active_validator_addresses);
+            let recently_seen_configured_validator = recovered_validator.is_some()
+                && now.saturating_sub(peer.last_seen) <= STALE_VALIDATOR_STATUS_SECS;
+            if !peer_has_remote_status(peer) && !recently_seen_configured_validator {
+                continue;
+            }
+            if let Some(address) = recovered_validator {
+                validators.insert(address);
             }
         }
     }
@@ -3246,7 +3279,11 @@ impl P2PNetwork {
                     }
                 }
 
-                prune_stale_peers(&network.peer_state_cache, &network.connected_peers);
+                prune_stale_peers(
+                    &network.config,
+                    &network.peer_state_cache,
+                    &network.connected_peers,
+                );
 
                 // Keep trying bootnodes until at least one peer is connected.
                 for addr in &bootnode_dials {
@@ -6803,8 +6840,9 @@ mod tests {
         resolve_duplicate_connection, select_block_sync_response_blocks,
         should_canonicalize_validator_public_address,
         should_disconnect_for_status_genesis_mismatch, should_prune_stale_peer,
-        should_request_missing_blocks, status_ready_validator_addresses_with_local_duty_gate,
-        status_ready_validator_participants, status_sync_batch,
+        should_request_missing_blocks, status_ready_validator_addresses,
+        status_ready_validator_addresses_with_local_duty_gate, status_ready_validator_participants,
+        status_sync_batch,
         support_peer_sync_request_is_too_deep, validate_vote_request_extends_local_tip,
         validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_handshake_pq_signature,
@@ -9700,14 +9738,97 @@ mod tests {
             consensus_duties_disabled: false,
             recovery_state: None,
         };
+        let config = NodeConfig::default();
+        let active_validator_addresses = HashSet::new();
 
         assert!(!should_prune_stale_peer(
+            &config,
             &peer,
-            100 + STALE_UNIDENTIFIED_PEER_SECS - 1
+            100 + STALE_UNIDENTIFIED_PEER_SECS - 1,
+            &active_validator_addresses,
         ));
         assert!(should_prune_stale_peer(
+            &config,
             &peer,
-            100 + STALE_UNIDENTIFIED_PEER_SECS
+            100 + STALE_UNIDENTIFIED_PEER_SECS,
+            &active_validator_addresses,
+        ));
+    }
+
+    #[test]
+    fn configured_validator_dial_is_status_ready_during_identity_recovery_grace() {
+        let validators = vec![
+            "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string(),
+            "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt".to_string(),
+            "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string(),
+            "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string(),
+            "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f".to_string(),
+            "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx".to_string(),
+        ];
+        let active_validator_addresses = validators.iter().cloned().collect::<HashSet<_>>();
+        let mut config = NodeConfig::default();
+        config.node.allowed_validator_addresses = validators;
+        config.node.validator_address =
+            "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string();
+        config.network.persistent_peers = vec![
+            "62.146.182.207:5622".to_string(),
+            "62.146.182.208:5622".to_string(),
+            "73.79.66.255:5622".to_string(),
+            "194.163.183.166:5622".to_string(),
+            "157.173.192.45:5622".to_string(),
+        ];
+        let now = current_timestamp();
+        let peer = PeerConnection {
+            address: "73.79.66.255:5622".to_string(),
+            direction: ConnectionDirection::Outgoing,
+            public_address: None,
+            validator_address: None,
+            connected_at: now,
+            last_seen: now,
+            blocks_sent: 0,
+            blocks_received: 0,
+            txs_sent: 0,
+            txs_received: 0,
+            stream: None,
+            node_id: None,
+            version: None,
+            capabilities: Vec::new(),
+            last_known_height: 0,
+            best_block_hash: String::new(),
+            genesis_hash: String::new(),
+            status_received_at: None,
+            quarantined: false,
+            consensus_duties_disabled: false,
+            recovery_state: None,
+        };
+        let connected_peers = Arc::new(Mutex::new(HashMap::from([(
+            "73.79.66.255:5622".to_string(),
+            peer,
+        )])));
+
+        let status_ready = status_ready_validator_addresses(&config, &connected_peers);
+
+        assert!(status_ready.contains(
+            &"synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string()
+        ));
+        assert!(status_ready.contains(
+            &"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string()
+        ));
+        let peers = connected_peers.lock().expect("peer map should lock");
+        let peer = peers
+            .get("73.79.66.255:5622")
+            .expect("configured validator peer should exist");
+        assert!(!should_prune_stale_peer(
+            &config,
+            peer,
+            now + STALE_UNIDENTIFIED_PEER_SECS,
+            &active_validator_addresses,
+        ));
+        assert!(should_prune_stale_peer(
+            &config,
+            peer,
+            now + STALE_VALIDATOR_STATUS_SECS,
+            &active_validator_addresses,
         ));
     }
 
@@ -9736,14 +9857,20 @@ mod tests {
             consensus_duties_disabled: false,
             recovery_state: None,
         };
+        let config = NodeConfig::default();
+        let active_validator_addresses = HashSet::new();
 
         assert!(!should_prune_stale_peer(
+            &config,
             &peer,
-            200 + STALE_VALIDATOR_STATUS_SECS - 1
+            200 + STALE_VALIDATOR_STATUS_SECS - 1,
+            &active_validator_addresses,
         ));
         assert!(should_prune_stale_peer(
+            &config,
             &peer,
-            200 + STALE_VALIDATOR_STATUS_SECS
+            200 + STALE_VALIDATOR_STATUS_SECS,
+            &active_validator_addresses,
         ));
     }
 }
