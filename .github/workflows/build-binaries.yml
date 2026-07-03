@@ -40,7 +40,7 @@ jobs:
         with:
           submodules: false
 
-      - name: Checkout private SynQ and AIVM submodules
+      - name: Checkout SynQ and AIVM submodules
         shell: bash
         env:
           SYNQ_LANGUAGE_DEPLOY_KEY: ${{ secrets.SYNQ_LANGUAGE_DEPLOY_KEY }}
@@ -48,19 +48,16 @@ jobs:
           AEGIS_PQSYNQ_DEPLOY_KEY: ${{ secrets.AEGIS_PQSYNQ_DEPLOY_KEY }}
         run: |
           set -euo pipefail
-          : "${SYNQ_LANGUAGE_DEPLOY_KEY:?missing SYNQ_LANGUAGE_DEPLOY_KEY}"
-          : "${SYNERGY_AIVM_DEPLOY_KEY:?missing SYNERGY_AIVM_DEPLOY_KEY}"
-          : "${AEGIS_PQSYNQ_DEPLOY_KEY:?missing AEGIS_PQSYNQ_DEPLOY_KEY}"
+          if [[ -n "${SYNQ_LANGUAGE_DEPLOY_KEY}" && -n "${SYNERGY_AIVM_DEPLOY_KEY}" && -n "${AEGIS_PQSYNQ_DEPLOY_KEY}" ]]; then
+            mkdir -p "${HOME}/.ssh"
+            chmod 700 "${HOME}/.ssh"
+            printf '%s\n' "${SYNQ_LANGUAGE_DEPLOY_KEY}" > "${HOME}/.ssh/synq_language_deploy_key"
+            printf '%s\n' "${SYNERGY_AIVM_DEPLOY_KEY}" > "${HOME}/.ssh/synergy_aivm_deploy_key"
+            printf '%s\n' "${AEGIS_PQSYNQ_DEPLOY_KEY}" > "${HOME}/.ssh/aegis_pqsynq_deploy_key"
+            chmod 600 "${HOME}/.ssh/"*_deploy_key
+            ssh-keyscan github.com >> "${HOME}/.ssh/known_hosts"
 
-          mkdir -p "${HOME}/.ssh"
-          chmod 700 "${HOME}/.ssh"
-          printf '%s\n' "${SYNQ_LANGUAGE_DEPLOY_KEY}" > "${HOME}/.ssh/synq_language_deploy_key"
-          printf '%s\n' "${SYNERGY_AIVM_DEPLOY_KEY}" > "${HOME}/.ssh/synergy_aivm_deploy_key"
-          printf '%s\n' "${AEGIS_PQSYNQ_DEPLOY_KEY}" > "${HOME}/.ssh/aegis_pqsynq_deploy_key"
-          chmod 600 "${HOME}/.ssh/"*_deploy_key
-          ssh-keyscan github.com >> "${HOME}/.ssh/known_hosts"
-
-          cat > "${HOME}/.ssh/config" <<'EOF'
+            cat > "${HOME}/.ssh/config" <<'EOF'
           Host github.com-synq-language
             HostName github.com
             User git
@@ -83,9 +80,13 @@ jobs:
             StrictHostKeyChecking yes
           EOF
 
-          git config --global url."git@github.com-synq-language:synergy-network-hq/synq-language.git".insteadOf "https://github.com/synergy-network-hq/synq-language.git"
-          git config --global url."git@github.com-synergy-aivm:synergy-network-hq/synergy-aivm.git".insteadOf "https://github.com/synergy-network-hq/synergy-aivm.git"
-          git config --global url."git@github.com-aegis-pqsynq:synergy-network-hq/aegis-pqsynq".insteadOf "https://github.com/synergy-network-hq/aegis-pqsynq"
+            git config --global url."git@github.com-synq-language:synergy-network-hq/synq-language.git".insteadOf "https://github.com/synergy-network-hq/synq-language.git"
+            git config --global url."git@github.com-synergy-aivm:synergy-network-hq/synergy-aivm.git".insteadOf "https://github.com/synergy-network-hq/synergy-aivm.git"
+            git config --global url."git@github.com-aegis-pqsynq:synergy-network-hq/aegis-pqsynq".insteadOf "https://github.com/synergy-network-hq/aegis-pqsynq"
+          else
+            echo "Deploy-key secrets are not fully configured; using public HTTPS submodule URLs."
+          fi
+
           git submodule sync --recursive
           git submodule update --init --recursive
 
