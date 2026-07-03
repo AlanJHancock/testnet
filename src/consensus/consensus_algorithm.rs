@@ -2773,6 +2773,27 @@ impl ProofOfSynergy {
                 .any(|validator| validator.address == selected_validator.address);
 
             if locked_proposer.address != selected_validator.address {
+                if Self::should_supersede_same_height_vote_lock_with_scheduled_leader(
+                    selected_validator_is_live,
+                    lock_age_secs,
+                    transient_recovery_min_age_secs,
+                ) {
+                    warn!(
+                        "consensus",
+                        "Allowing live scheduled leader to supersede stale same-height vote lock",
+                        "local_validator" => local_validator_address.to_string(),
+                        "scheduled_leader" => selected_validator.address.clone(),
+                        "locked_proposer" => locked_vote.proposer.clone(),
+                        "locked_block_hash" => locked_vote.block_hash.clone(),
+                        "locked_first_round" => locked_vote.first_round_number,
+                        "locked_latest_round" => locked_vote.latest_round_number,
+                        "lock_age_secs" => lock_age_secs,
+                        "min_age_secs" => transient_recovery_min_age_secs,
+                        "epoch" => current_epoch,
+                        "height" => next_block_index
+                    );
+                    return selected_validator;
+                }
                 info!(
                     "consensus",
                     "Preserving live same-height vote lock leader over deterministic scheduled leader",
@@ -2793,6 +2814,14 @@ impl ProofOfSynergy {
         }
 
         selected_validator
+    }
+
+    fn should_supersede_same_height_vote_lock_with_scheduled_leader(
+        selected_validator_is_live: bool,
+        lock_age_secs: u64,
+        transient_recovery_min_age_secs: u64,
+    ) -> bool {
+        selected_validator_is_live && lock_age_secs >= transient_recovery_min_age_secs
     }
 
     fn create_block_proposal(
@@ -4284,6 +4313,28 @@ mod tests {
         assert!(
             view_advanced_to_different_active_validator,
             "deterministic view advance must move past an unresponsive scheduled proposer"
+        );
+    }
+
+    #[test]
+    fn stale_same_height_vote_lock_does_not_permanently_override_live_scheduled_leader() {
+        assert!(
+            ProofOfSynergy::should_supersede_same_height_vote_lock_with_scheduled_leader(
+                true, 8, 8
+            ),
+            "a live scheduled leader must supersede a stale same-height lock at recovery age"
+        );
+        assert!(
+            !ProofOfSynergy::should_supersede_same_height_vote_lock_with_scheduled_leader(
+                true, 7, 8
+            ),
+            "fresh same-height locks should still protect normal deterministic retry"
+        );
+        assert!(
+            !ProofOfSynergy::should_supersede_same_height_vote_lock_with_scheduled_leader(
+                false, 30, 8
+            ),
+            "an offline scheduled leader should not displace a live locked proposer"
         );
     }
 
