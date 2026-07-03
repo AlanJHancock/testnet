@@ -6,8 +6,8 @@ usage() {
 apply-verified-support-snapshot.sh \
   --distribution-manifest <distribution-manifest.json> \
   --snapshot-root <extracted-snapshot-root> \
-  --snapshot-class <support-relayer|support-rpc|indexer-replay|indexer-full> \
-  --target-role <relayer|rpc|indexer> \
+  --snapshot-class <support-relayer|support-rpc|support-observer|indexer-replay|indexer-full> \
+  --target-role <relayer|rpc|observer|indexer> \
   --target-data-dir <data-dir> \
   --evidence-path <dir> \
   --rollback-path <dir> \
@@ -48,7 +48,7 @@ if [[ "$confirm_target_stopped" != "true" ]]; then
   exit 3
 fi
 case "$snapshot_class:$target_role" in
-  support-relayer:relayer|support-rpc:rpc|indexer-replay:indexer|indexer-full:indexer) ;;
+  support-relayer:relayer|support-rpc:rpc|support-observer:observer|indexer-replay:indexer|indexer-full:indexer) ;;
   *) echo "snapshot class $snapshot_class is not compatible with target role $target_role" >&2; exit 4 ;;
 esac
 if [[ ! -f "$distribution_manifest" || ! -d "$snapshot_root" || ! -d "$target_data_dir" ]]; then
@@ -85,12 +85,12 @@ if qc_vote_count is None:
 active_validator_set = manifest.get("active_validator_set") or (manifest.get("consensus_fork") or {}).get("new_validator_registry") or []
 manifest_quorum = int(manifest.get("quorum_threshold") or 0)
 if active_validator_set:
-    dynamic_quorum = ((len(active_validator_set) * 67) + 99) // 100
+    dynamic_quorum = ((len(active_validator_set) * 2) + 2) // 3
 elif manifest_quorum:
     dynamic_quorum = manifest_quorum
 else:
     raise SystemExit("snapshot is missing active validator set and quorum threshold")
-required_quorum = max(manifest_quorum, dynamic_quorum, 1)
+required_quorum = manifest_quorum or dynamic_quorum or 1
 if (qc_vote_count or 0) < required_quorum:
     raise SystemExit(f"QC vote count below quorum: {qc_vote_count or 0} < {required_quorum}")
 snapshot_height = manifest.get("snapshot_height", manifest.get("height"))
@@ -161,8 +161,8 @@ for file in "${allowed_files[@]}"; do
   esac
   sha256sum "$source" >> "$evidence_path/source/source-sha256.txt"
   if [[ -f "$target" ]]; then
-    cp -p "$target" "$rollback_path/$file"
     sha256sum "$target" >> "$evidence_path/target-before/target-sha256.txt"
+    mv "$target" "$rollback_path/$file"
   fi
   tmp="$target.tmp-support-snapshot-$$"
   if [[ "$file" == "chain.json" ]]; then

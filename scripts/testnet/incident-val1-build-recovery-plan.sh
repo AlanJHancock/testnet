@@ -223,6 +223,14 @@ import json
 import sys
 from pathlib import Path
 
+def _active_validator_set_meets_baseline(plan):
+    return (
+        plan.get("active_validator_set_meets_baseline")
+        if plan.get("active_validator_set_meets_baseline") is not None
+        else plan.get("source_qc_aegis_pqc_verified")
+    )
+
+
 plan = json.load(open(sys.argv[1]))
 verify = json.load(open(sys.argv[2]))
 out = Path(sys.argv[3])
@@ -244,7 +252,7 @@ summary = {
     "source_qc_signers": signers,
     "source_qc_aegis_pqc_verified": plan.get("source_qc_aegis_pqc_verified"),
     "duplicate_signer_check_passed": len(signers) == len(set(signers)),
-    "active_validator_set_is_genesis_5": plan.get("source_qc_aegis_pqc_verified") is True,
+    "active_validator_set_meets_baseline": _active_validator_set_meets_baseline(plan),
     "relayers_rpc_support_counted_toward_quorum": False,
     "evidence_path": plan.get("evidence_path"),
     "rollback_path": plan.get("rollback_path"),

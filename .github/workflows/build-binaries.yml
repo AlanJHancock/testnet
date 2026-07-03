@@ -108,6 +108,14 @@ jobs:
         shell: bash
         run: scripts/testnet/check-release-manifests.sh
 
+      - name: Enforce dynamic validator topology
+        shell: bash
+        run: scripts/testnet/check-no-hardcoded-validator-topology.sh
+
+      - name: Run Prompt 2 offline safety gates
+        shell: bash
+        run: scripts/testnet/check-prompt2-offline-gates.sh
+
       - name: Build release binaries
         shell: bash
         run: |

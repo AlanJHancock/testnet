@@ -68,7 +68,8 @@ const NORMAL_BOOTSTRAP_REFRESH_SECS: u64 = 120;
 const TCP_KEEPALIVE_IDLE_SECS: u64 = 300;
 const TCP_KEEPALIVE_INTERVAL_SECS: u64 = 60;
 const IMMEDIATE_STATUS_SYNC_BATCH: u32 = 32;
-const MAX_STATUS_SYNC_BATCH: u32 = 64;
+const MAX_STATUS_SYNC_BATCH: u32 = 48;
+const PUBLIC_HISTORY_GATEWAY_DIAL_ADDRESSES: &[&str] = &["167.86.83.83:5623", "73.79.66.255:5622"];
 const MAX_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 64;
 const MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS: u32 = 64;
 const MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 128;
@@ -699,14 +700,19 @@ fn ensure_peer_status_allows_chain_data(
 ) -> bool {
     let local_genesis_hash = resolve_local_genesis_hash(blockchain);
     let mut peers = connected_peers.lock().unwrap();
-    let Some((remote_genesis_hash, peer_validator_address, status_received_at)) =
-        peers.get(peer_address).map(|peer| {
-            (
-                peer.genesis_hash.clone(),
-                peer.validator_address.clone(),
-                peer.status_received_at,
-            )
-        })
+    let Some((
+        remote_genesis_hash,
+        peer_validator_address,
+        status_received_at,
+        authenticated_public_history_gateway,
+    )) = peers.get(peer_address).map(|peer| {
+        (
+            peer.genesis_hash.clone(),
+            peer.validator_address.clone(),
+            peer.status_received_at,
+            peer_has_authenticated_public_history_gateway_status(peer, &local_genesis_hash),
+        )
+    })
     else {
         return false;
     };
@@ -728,7 +734,9 @@ fn ensure_peer_status_allows_chain_data(
         return false;
     }
 
-    if status_received_at.is_none() || remote_genesis_hash.trim().is_empty() {
+    if (status_received_at.is_none() || remote_genesis_hash.trim().is_empty())
+        && !authenticated_public_history_gateway
+    {
         debug!(
             "p2p",
             "Ignoring chain data until peer status confirms canonical genesis",
@@ -850,6 +858,50 @@ fn peer_has_validator_identity(peer: &PeerConnection) -> bool {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .is_some()
+}
+
+fn peer_matches_address(peer: &PeerConnection, requested_address: &str) -> bool {
+    let requested_address = requested_address.trim();
+    peer.address.trim() == requested_address
+        || peer
+            .public_address
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            == Some(requested_address)
+}
+
+fn peer_is_public_history_gateway(peer: &PeerConnection) -> bool {
+    let node_id = peer
+        .node_id
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    (node_id.contains("rpc") || node_id.contains("gateway") || node_id.contains("archive"))
+        && PUBLIC_HISTORY_GATEWAY_DIAL_ADDRESSES
+            .iter()
+            .any(|address| peer_matches_address(peer, address))
+}
+
+fn peer_has_authenticated_public_history_gateway_status(
+    peer: &PeerConnection,
+    local_genesis_hash: &str,
+) -> bool {
+    !local_genesis_hash.trim().is_empty()
+        && peer.genesis_hash.trim() == local_genesis_hash
+        && peer_is_public_history_gateway(peer)
+}
+
+fn connected_peer_key_for_address(peers: &PeerMap, requested_address: &str) -> Option<String> {
+    if peers.contains_key(requested_address) {
+        return Some(requested_address.to_string());
+    }
+
+    peers.iter().find_map(|(address, peer)| {
+        peer_matches_address(peer, requested_address).then(|| address.clone())
+    })
 }
 
 fn should_prune_stale_peer(peer: &PeerConnection, now: u64) -> bool {
@@ -1106,7 +1158,7 @@ fn status_sync_batch(block_height: u64, local_height: u64) -> Option<u32> {
     Some(if behind > 5000 {
         MAX_STATUS_SYNC_BATCH
     } else if behind > 1000 {
-        96
+        MAX_STATUS_SYNC_BATCH
     } else {
         IMMEDIATE_STATUS_SYNC_BATCH
     })
@@ -1117,11 +1169,24 @@ fn block_sync_request_range(
     remote_height: u64,
     desired_new_blocks: u32,
 ) -> Option<(u64, u32)> {
+    block_sync_request_range_with_overlap(local_height, remote_height, desired_new_blocks, true)
+}
+
+fn block_sync_request_range_with_overlap(
+    local_height: u64,
+    remote_height: u64,
+    desired_new_blocks: u32,
+    include_reconciliation_overlap: bool,
+) -> Option<(u64, u32)> {
     if remote_height <= local_height || desired_new_blocks == 0 {
         return None;
     }
 
-    let overlap = block_sync_progress_overlap(desired_new_blocks);
+    let overlap = if include_reconciliation_overlap {
+        block_sync_progress_overlap(desired_new_blocks)
+    } else {
+        0
+    };
     let request_start = local_height.saturating_sub(overlap);
     let target_height = remote_height.min(local_height.saturating_add(desired_new_blocks as u64));
     let request_count = target_height
@@ -1140,6 +1205,20 @@ fn block_sync_progress_overlap(desired_new_blocks: u32) -> u64 {
     BLOCK_SYNC_RECONCILIATION_LOOKBACK
         .min(BLOCK_SYNC_PROGRESS_OVERLAP)
         .min(desired_new_blocks as u64 - 1)
+}
+
+fn chain_has_block_sync_overlap(
+    chain: &BlockChain,
+    local_height: u64,
+    desired_new_blocks: u32,
+) -> bool {
+    let overlap = block_sync_progress_overlap(desired_new_blocks);
+    if overlap == 0 {
+        return true;
+    }
+
+    let start = local_height.saturating_sub(overlap);
+    (start..=local_height).all(|height| chain.block_at_height(height).is_some())
 }
 
 fn handle_status_message(
@@ -1166,12 +1245,18 @@ fn handle_status_message(
     }
 
     let local_genesis_hash = resolve_local_genesis_hash(blockchain);
-    let (peer_validator_address, peer_connected_at) = {
+    let (peer_validator_address, peer_node_id, peer_connected_at) = {
         let peers = connected_peers.lock().unwrap();
         peers
             .get(peer_address)
-            .map(|peer| (peer.validator_address.clone(), peer.connected_at))
-            .unwrap_or((None, current_timestamp()))
+            .map(|peer| {
+                (
+                    peer.validator_address.clone(),
+                    peer.node_id.clone(),
+                    peer.connected_at,
+                )
+            })
+            .unwrap_or((None, None, current_timestamp()))
     };
     let now = current_timestamp();
     let validator_genesis_pending = genesis_hash.is_empty()
@@ -1258,6 +1343,8 @@ fn handle_status_message(
     };
     if !status_peer_is_eligible_block_sync_source(
         peer_validator_address.as_deref(),
+        peer_node_id.as_deref(),
+        recovery_state,
         quarantined,
         consensus_duties_disabled,
     ) {
@@ -1476,15 +1563,39 @@ fn canonical_validator_public_address(
     peer_address: &str,
     announced_public_address: Option<&str>,
 ) -> Option<String> {
+    if let Some(peer_dial) = parse_bootnode_dial_address(peer_address) {
+        if is_public_history_gateway_dial_address(&peer_dial) {
+            return Some(peer_dial);
+        }
+    }
+
+    if let Some(announced_dial) = announced_public_address.and_then(parse_bootnode_dial_address) {
+        if is_public_history_gateway_dial_address(&announced_dial) {
+            return Some(announced_dial);
+        }
+    }
+
     let announced_host = announced_public_address
         .and_then(dial_target_host)
-        .filter(|host| host.ends_with(".synergy-network.io"));
+        .filter(|host| is_public_synergy_advertise_host(host));
     if let Some(host) = announced_host {
         return Some(format!("{host}:{VALIDATOR_P2P_PORT}"));
     }
 
     let peer_host = dial_target_host(peer_address)?;
-    Some(format!("{peer_host}:{VALIDATOR_P2P_PORT}"))
+    if is_public_synergy_advertise_host(&peer_host) {
+        Some(format!("{peer_host}:{VALIDATOR_P2P_PORT}"))
+    } else {
+        None
+    }
+}
+
+fn is_public_history_gateway_dial_address(address: &str) -> bool {
+    let normalized =
+        parse_bootnode_dial_address(address).unwrap_or_else(|| address.trim().to_string());
+    PUBLIC_HISTORY_GATEWAY_DIAL_ADDRESSES
+        .iter()
+        .any(|dial| *dial == normalized)
 }
 
 fn is_validator_allowed(config: &NodeConfig, validator_address: &str) -> bool {
@@ -1504,16 +1615,22 @@ fn resolve_bootstrap_dial_targets(config: &NodeConfig) -> Vec<String> {
 
     for bootnode in &config.network.bootnodes {
         if let Some(dial) = parse_bootnode_dial_address(bootnode) {
-            targets.insert(dial);
+            if is_assigned_synergy_dial_address(&dial) {
+                targets.insert(dial);
+            }
         }
     }
 
     for dial in resolve_dns_bootstrap_targets(&config.network.bootstrap_dns_records) {
-        targets.insert(dial);
+        if is_assigned_synergy_dial_address(&dial) {
+            targets.insert(dial);
+        }
     }
 
     for dial in resolve_seed_server_targets(&config.network.seed_servers) {
-        targets.insert(dial);
+        if is_assigned_synergy_dial_address(&dial) {
+            targets.insert(dial);
+        }
     }
 
     for dial in config
@@ -1523,7 +1640,9 @@ fn resolve_bootstrap_dial_targets(config: &NodeConfig) -> Vec<String> {
         .chain(config.network.additional_dial_targets.iter())
     {
         if let Some(parsed) = parse_bootnode_dial_address(dial) {
-            targets.insert(parsed);
+            if is_assigned_synergy_dial_address(&parsed) {
+                targets.insert(parsed);
+            }
         }
     }
 
@@ -1707,11 +1826,18 @@ fn peer_is_eligible_block_sync_source(peer: &PeerConnection) -> bool {
         return false;
     }
 
-    !peer.consensus_duties_disabled || !peer_has_validator_identity(peer)
+    !peer.consensus_duties_disabled
+        || !peer_has_validator_identity(peer)
+        || peer_identity_is_support_sync_source(
+            peer.node_id.as_deref(),
+            peer.recovery_state.as_deref(),
+        )
 }
 
 fn status_peer_is_eligible_block_sync_source(
     peer_validator_address: Option<&str>,
+    peer_node_id: Option<&str>,
+    recovery_state: Option<&str>,
     quarantined: bool,
     consensus_duties_disabled: bool,
 ) -> bool {
@@ -1724,6 +1850,28 @@ fn status_peer_is_eligible_block_sync_source(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .is_none()
+        || peer_identity_is_support_sync_source(peer_node_id, recovery_state)
+}
+
+fn peer_identity_is_support_sync_source(
+    peer_node_id: Option<&str>,
+    recovery_state: Option<&str>,
+) -> bool {
+    let node_id = peer_node_id.unwrap_or_default().trim().to_ascii_lowercase();
+    let recovery_state = recovery_state
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    node_id.starts_with("sentry")
+        || node_id.starts_with("relayer")
+        || node_id.starts_with("relay")
+        || node_id.contains("rpc")
+        || node_id.contains("gateway")
+        || node_id.contains("archive")
+        || recovery_state.contains("support")
+        || recovery_state.contains("sentry")
+        || recovery_state.contains("relay")
 }
 
 fn select_block_sync_targets(peers: &PeerMap, max_targets: usize) -> Vec<String> {
@@ -2004,17 +2152,24 @@ fn fetch_seed_server_targets(
                     Ok(payload) => {
                         for bootnode in payload.bootnodes {
                             if bootnode.reachable.unwrap_or(true) {
-                                out.insert(format!("{}:{}", bootnode.hostname, bootnode.port));
+                                let dial = format!("{}:{}", bootnode.hostname, bootnode.port);
+                                if is_assigned_synergy_dial_address(&dial) {
+                                    out.insert(dial);
+                                }
                             }
                         }
                         for value in payload.dnsaddr_bootstrap {
                             if let Some(dial) = parse_dnsaddr_multiaddr_to_dial_address(&value) {
-                                out.insert(dial);
+                                if is_assigned_synergy_dial_address(&dial) {
+                                    out.insert(dial);
+                                }
                             }
                         }
                         for peer in payload.peers {
                             if let Some(dial) = parse_bootnode_dial_address(&peer) {
-                                out.insert(dial);
+                                if is_assigned_synergy_dial_address(&dial) {
+                                    out.insert(dial);
+                                }
                             }
                         }
                         return;
@@ -2580,13 +2735,16 @@ impl P2PNetwork {
     ) -> bool {
         let message = NetworkMessage::GetBlocks { from_height, count };
         let mut peers = self.connected_peers.lock().unwrap();
-        if let Some(peer) = peers.get_mut(peer_address) {
+        let resolved_peer_address = connected_peer_key_for_address(&peers, peer_address)
+            .unwrap_or_else(|| peer_address.to_string());
+        if let Some(peer) = peers.get_mut(&resolved_peer_address) {
             if let Some(ref mut stream) = peer.stream {
                 if let Err(e) = send_message(stream, &message) {
                     warn!(
                         "p2p",
                         "Failed to request blocks from peer",
-                        "peer" => peer_address.to_string(),
+                        "peer" => resolved_peer_address.to_string(),
+                        "requested_peer" => peer_address.to_string(),
                         "error" => e.to_string()
                     );
                     return false;
@@ -2746,12 +2904,21 @@ impl P2PNetwork {
                     let batch = if behind > 5000 {
                         MAX_STATUS_SYNC_BATCH
                     } else if behind > 1000 {
-                        96
+                        MAX_STATUS_SYNC_BATCH
                     } else {
                         IMMEDIATE_STATUS_SYNC_BATCH
                     };
+                    let include_reconciliation_overlap = {
+                        let chain = network.blockchain.lock().unwrap();
+                        chain_has_block_sync_overlap(&chain, local_height, batch)
+                    };
                     if let Some((request_start, request_count)) =
-                        block_sync_request_range(local_height, best_peer_height, batch)
+                        block_sync_request_range_with_overlap(
+                            local_height,
+                            best_peer_height,
+                            batch,
+                            include_reconciliation_overlap,
+                        )
                     {
                         network.request_blocks(request_start, request_count);
                     }
@@ -2844,13 +3011,16 @@ fn start_listener(
 
 fn request_status_from_connected_peer(peers: &mut PeerMap, peer_address: &str) {
     let message = NetworkMessage::GetStatus;
-    if let Some(peer) = peers.get_mut(peer_address) {
+    let resolved_peer_address = connected_peer_key_for_address(peers, peer_address)
+        .unwrap_or_else(|| peer_address.to_string());
+    if let Some(peer) = peers.get_mut(&resolved_peer_address) {
         if let Some(ref mut stream) = peer.stream {
             if let Err(error) = send_message(stream, &message) {
                 warn!(
                     "p2p",
                     "Failed to request status from peer",
-                    "peer" => peer_address.to_string(),
+                    "peer" => resolved_peer_address.to_string(),
+                    "requested_peer" => peer_address.to_string(),
                     "error" => error.to_string()
                 );
             }
@@ -2865,13 +3035,16 @@ fn request_blocks_from_connected_peer(
     count: u32,
 ) {
     let message = NetworkMessage::GetBlocks { from_height, count };
-    if let Some(peer) = peers.get_mut(peer_address) {
+    let resolved_peer_address = connected_peer_key_for_address(peers, peer_address)
+        .unwrap_or_else(|| peer_address.to_string());
+    if let Some(peer) = peers.get_mut(&resolved_peer_address) {
         if let Some(ref mut stream) = peer.stream {
             if let Err(error) = send_message(stream, &message) {
                 warn!(
                     "p2p",
                     "Failed to request blocks from peer",
-                    "peer" => peer_address.to_string(),
+                    "peer" => resolved_peer_address.to_string(),
+                    "requested_peer" => peer_address.to_string(),
                     "error" => error.to_string()
                 );
             }
@@ -3892,8 +4065,13 @@ fn build_local_status_message(blockchain: &BlockchainArc, config: &NodeConfig) -
         )
     };
     let quarantine_block = current_validator_quarantine_duty_block();
-    let quarantined = quarantine_block.is_some();
-    let recovery_state = quarantine_block.map(|block| block.source);
+    let vote_only_rejoin = local_vote_only_rejoin_active();
+    let quarantined = quarantine_block.is_some() && !vote_only_rejoin;
+    let recovery_state = if vote_only_rejoin {
+        Some("VOTE_ONLY".to_string())
+    } else {
+        quarantine_block.map(|block| block.source)
+    };
 
     NetworkMessage::Status {
         block_height,
@@ -3903,6 +4081,29 @@ fn build_local_status_message(blockchain: &BlockchainArc, config: &NodeConfig) -
         consensus_duties_disabled: quarantined,
         recovery_state,
     }
+}
+
+fn local_vote_only_rejoin_active() -> bool {
+    let path = crate::utils::resolve_data_path("data/self_heal_status.json");
+    let Ok(bytes) = fs::read(path) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    ["typed_status", "new_state", "recovery_state", "status"]
+        .iter()
+        .filter_map(|key| value.get(*key).and_then(|item| item.as_str()))
+        .any(|state| {
+            matches!(
+                state.trim().to_ascii_uppercase().as_str(),
+                "VOTE_ONLY" | "VOTEONLY"
+            )
+        })
+        || value
+            .get("vote_only_rejoin")
+            .and_then(|item| item.as_bool())
+            .unwrap_or(false)
 }
 
 fn handle_incoming_connection(
@@ -4299,7 +4500,7 @@ fn handle_messages(
                             "version" => version.clone(),
                             "protocol_version" => protocol_version.unwrap_or_default(),
                             "consensus_version" => consensus_version.unwrap_or_default(),
-                            "genesis_hash" => genesis_hash,
+                            "genesis_hash" => genesis_hash.clone(),
                             "network_magic_bytes" => network_magic_bytes,
                             "public_address" => normalized_public_address.clone().unwrap_or_default()
                         );
@@ -4384,6 +4585,9 @@ fn handle_messages(
                                                     if announced_validator_address.is_some() {
                                                         peer.validator_address =
                                                             announced_validator_address.clone();
+                                                    }
+                                                    if !genesis_hash.trim().is_empty() {
+                                                        peer.genesis_hash = genesis_hash.clone();
                                                     }
                                                     hydrate_peer_from_cache(
                                                         &peer_state_cache,
@@ -4506,6 +4710,9 @@ fn handle_messages(
                                 peer.capabilities = capabilities.clone();
                                 peer.public_address = normalized_public_address.clone();
                                 peer.validator_address = announced_validator_address.clone();
+                                if !genesis_hash.trim().is_empty() {
+                                    peer.genesis_hash = genesis_hash.clone();
+                                }
                                 hydrate_peer_from_cache(&peer_state_cache, &peer_identity, peer);
                                 cache_peer_state(&peer_state_cache, peer);
                             }
@@ -5244,7 +5451,36 @@ fn is_assigned_synergy_dial_address(value: &str) -> bool {
         .trim_start_matches('[')
         .trim_end_matches(']')
         .to_ascii_lowercase();
-    !host.is_empty() && host.ends_with(".synergy-network.io")
+    is_public_synergy_advertise_host(&host)
+}
+
+fn is_public_synergy_advertise_host(host: &str) -> bool {
+    let host = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+
+    if host.is_empty() || host == "localhost" {
+        return false;
+    }
+
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => {
+            !(ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified())
+        }
+        Ok(std::net::IpAddr::V6(ip)) => {
+            !(ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local())
+        }
+        Err(_) => host.ends_with(".synergynode.xyz") || host.ends_with(".synergy-network.io"),
+    }
 }
 
 fn verify_network_block(block: &Block) -> Result<(), String> {
@@ -5659,13 +5895,17 @@ fn apply_block_batch(
 
     let locally_matching_prefix = {
         let chain = blockchain.lock().unwrap();
+        let local_tip_height = chain.last().map(|entry| entry.block_index).unwrap_or(0);
         blocks
             .iter()
             .filter(|block| {
                 chain
                     .block_at_height(block.block_index)
                     .map(|local| local.hash == block.hash)
-                    .unwrap_or(false)
+                    .unwrap_or_else(|| {
+                        block.block_index <= local_tip_height
+                            && block_matches_legacy_canonical_lock(block)
+                    })
             })
             .map(|block| block.hash.clone())
             .collect::<HashSet<_>>()
@@ -5863,6 +6103,14 @@ fn apply_block_batch(
     apply_token_state_for_blocks(&applied_blocks);
 
     applied
+}
+
+fn block_matches_legacy_canonical_lock(block: &Block) -> bool {
+    legacy_canonical_commit_record(block.block_index)
+        .ok()
+        .flatten()
+        .map(|record| record.block_hash == block.hash)
+        .unwrap_or(false)
 }
 
 fn apply_token_state_for_blocks(blocks: &[Block]) {
@@ -6107,12 +6355,13 @@ mod tests {
     use super::{
         apply_block_batch, apply_block_if_new, background_poll_interval,
         best_connected_validator_height, block_sync_min_serve_interval_secs,
-        block_sync_request_range, block_sync_response_policy, build_local_handshake,
-        build_local_status_message, bypasses_shared_message_queue, cache_peer_state,
-        cache_pending_block, canonical_genesis_hash, chain_snapshot_clone_allowed,
-        collect_known_peer_addresses, connected_validator_participants,
-        current_bootstrap_refresh_interval, current_timestamp, dial_with_timeout,
-        disconnect_peer_after_poisoned_write, dispatch_peer_message,
+        block_sync_request_range, block_sync_request_range_with_overlap,
+        block_sync_response_policy, build_local_handshake, build_local_status_message,
+        bypasses_shared_message_queue, cache_peer_state, cache_pending_block,
+        canonical_genesis_hash, canonical_validator_public_address, chain_has_block_sync_overlap,
+        chain_snapshot_clone_allowed, collect_known_peer_addresses,
+        connected_validator_participants, current_bootstrap_refresh_interval, current_timestamp,
+        dial_with_timeout, disconnect_peer_after_poisoned_write, dispatch_peer_message,
         ensure_peer_status_allows_chain_data, handle_status_message, hydrate_peer_from_cache,
         local_node_runs_validator_consensus, local_peer_identity, merge_peer_state_from_existing,
         parse_bootnode_dial_address, peer_has_identifying_metadata, peer_identity_key,
@@ -6246,7 +6495,9 @@ mod tests {
 
     #[test]
     fn block_sync_source_accepts_duty_disabled_support_peer_but_not_shadow_validator() {
-        let mut relayer_peer = test_peer_with_validator_address(None);
+        let mut relayer_peer =
+            test_peer_with_validator_address(Some("synv21ga3nsdjagzt9pmks4mzjq4vdjyngdwq6jst632"));
+        relayer_peer.node_id = Some("sentry1".to_string());
         relayer_peer.consensus_duties_disabled = true;
         relayer_peer.last_known_height = 195_000;
         assert!(peer_is_eligible_block_sync_source(&relayer_peer));
@@ -6826,6 +7077,18 @@ mod tests {
     }
 
     #[test]
+    fn canonical_validator_public_address_preserves_public_history_gateway_port() {
+        assert_eq!(
+            canonical_validator_public_address("167.86.83.83:5623", Some("167.86.83.83:5622")),
+            Some("167.86.83.83:5623".to_string())
+        );
+        assert_eq!(
+            canonical_validator_public_address("94.72.117.108:62422", Some("94.72.117.108:5622")),
+            Some("94.72.117.108:5622".to_string())
+        );
+    }
+
+    #[test]
     fn collect_known_peer_addresses_includes_assigned_synergy_targets() {
         let mut config = NodeConfig::default();
         config.p2p.public_address = "genesisval1.synergy-network.io:5622".to_string();
@@ -7340,7 +7603,7 @@ mod tests {
     fn status_sync_batch_only_requests_blocks_for_ahead_peer() {
         assert_eq!(status_sync_batch(10, 10), None);
         assert_eq!(status_sync_batch(11, 10), Some(IMMEDIATE_STATUS_SYNC_BATCH));
-        assert_eq!(status_sync_batch(2_500, 1_000), Some(96));
+        assert_eq!(status_sync_batch(2_500, 1_000), Some(MAX_STATUS_SYNC_BATCH));
         assert_eq!(status_sync_batch(7_000, 1_000), Some(MAX_STATUS_SYNC_BATCH));
     }
 
@@ -7366,10 +7629,51 @@ mod tests {
 
         assert!(from_height <= local_height);
         assert!(
-            from_height + MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS as u64 - 1 > local_height,
+            from_height + count as u64 - 1 > local_height,
             "first throttled validator response must include at least one block above local height"
         );
-        assert!(count >= MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS);
+        assert!(count <= MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS);
+    }
+
+    #[test]
+    fn block_sync_request_range_can_disable_overlap_for_compact_snapshot_chain() {
+        assert_eq!(
+            block_sync_request_range_with_overlap(743_026, 743_122, 96, false),
+            Some((743_026, 97))
+        );
+    }
+
+    #[test]
+    fn block_sync_overlap_requires_contiguous_local_window() {
+        let mut compact_chain = BlockChain::new();
+        let mut retained_tip = Block::new_with_timestamp(
+            743_026,
+            Vec::new(),
+            "snapshot-parent".to_string(),
+            "validator".to_string(),
+            0,
+            743_026,
+        );
+        retained_tip.hash = "snapshot-tip".to_string();
+        compact_chain.chain.push(retained_tip);
+
+        assert!(!chain_has_block_sync_overlap(&compact_chain, 743_026, 96));
+
+        let mut contiguous_chain = BlockChain::new();
+        for height in 743_024..=743_026 {
+            let mut block = Block::new_with_timestamp(
+                height,
+                Vec::new(),
+                format!("parent-{height}"),
+                "validator".to_string(),
+                0,
+                height,
+            );
+            block.hash = format!("hash-{height}");
+            contiguous_chain.chain.push(block);
+        }
+
+        assert!(chain_has_block_sync_overlap(&contiguous_chain, 743_026, 96));
     }
 
     #[test]
@@ -8165,7 +8469,9 @@ mod tests {
         let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
         let config = NodeConfig::default();
 
-        let mut support_peer = test_peer_with_validator_address(None);
+        let mut support_peer =
+            test_peer_with_validator_address(Some("synv21ga3nsdjagzt9pmks4mzjq4vdjyngdwq6jst632"));
+        support_peer.node_id = Some("sentry1".to_string());
         support_peer.stream = Some(client);
         support_peer.status_received_at = None;
         support_peer.consensus_duties_disabled = true;

@@ -1,5 +1,5 @@
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Gets the project root directory by looking for Cargo.toml
 /// or by using the binary's location to infer the project root
@@ -119,6 +119,10 @@ pub fn resolve_data_path(relative_path: &str) -> PathBuf {
         return PathBuf::from(relative_path);
     }
 
+    if let Some(data_path) = resolve_synergy_data_path(relative_path) {
+        return data_path;
+    }
+
     // Prefer the explicit runtime root for launched nodes so state/log paths stay
     // anchored to the node workspace even when the process starts from another cwd.
     if let Some(runtime_root) = get_runtime_root() {
@@ -138,6 +142,35 @@ pub fn resolve_data_path(relative_path: &str) -> PathBuf {
     }
 }
 
+fn resolve_synergy_data_path(relative_path: &str) -> Option<PathBuf> {
+    let data_root = env::var("SYNERGY_DATA_PATH").ok()?;
+    let data_root = data_root.trim();
+    if data_root.is_empty() {
+        return None;
+    }
+
+    let path = Path::new(relative_path);
+    if path.is_absolute() {
+        return None;
+    }
+
+    let mut components = path.components();
+    match components.next() {
+        Some(Component::Normal(first)) if first == "data" => {
+            let mut resolved = PathBuf::from(data_root);
+            for component in components {
+                match component {
+                    Component::Normal(segment) => resolved.push(segment),
+                    Component::CurDir => {}
+                    _ => return None,
+                }
+            }
+            Some(resolved)
+        }
+        _ => None,
+    }
+}
+
 /// Validates that we're running from the correct project root
 pub fn validate_project_root() -> Result<PathBuf, String> {
     if let Some(project_root) = get_runtime_root() {
@@ -152,7 +185,7 @@ pub fn validate_project_root() -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::get_runtime_root;
+    use super::{get_runtime_root, resolve_data_path};
     use std::env;
     use std::fs;
     use std::path::PathBuf;
@@ -249,5 +282,43 @@ mod tests {
         );
 
         assert_eq!(get_runtime_root(), Some(workspace.root.clone()));
+    }
+
+    #[test]
+    fn resolve_data_path_uses_synergy_data_path_for_legacy_data_files() {
+        let _lock = env_lock().lock().expect("env lock should be available");
+        let workspace = TempWorkspace::new();
+        let data_path = workspace.root.join("state").join("store");
+        let _project_root = EnvVarGuard::clear("SYNERGY_PROJECT_ROOT");
+        let _config_path = EnvVarGuard::clear("SYNERGY_CONFIG_PATH");
+        let _data_path = EnvVarGuard::set(
+            "SYNERGY_DATA_PATH",
+            data_path.to_str().expect("data path should be utf-8"),
+        );
+
+        assert_eq!(resolve_data_path("data"), data_path);
+        assert_eq!(
+            resolve_data_path("data/chain.json"),
+            data_path.join("chain.json")
+        );
+    }
+
+    #[test]
+    fn resolve_data_path_does_not_redirect_non_data_paths() {
+        let _lock = env_lock().lock().expect("env lock should be available");
+        let workspace = TempWorkspace::new();
+        let _project_root = EnvVarGuard::set(
+            "SYNERGY_PROJECT_ROOT",
+            workspace
+                .root
+                .to_str()
+                .expect("workspace path should be utf-8"),
+        );
+        let _data_path = EnvVarGuard::set("SYNERGY_DATA_PATH", "/tmp/synergy-data");
+
+        assert_eq!(
+            resolve_data_path("logs/synergy-testnet.log"),
+            workspace.root.join("logs").join("synergy-testnet.log")
+        );
     }
 }

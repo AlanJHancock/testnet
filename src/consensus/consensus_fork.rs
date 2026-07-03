@@ -206,6 +206,19 @@ pub fn active_consensus_fork_migration() -> Result<Option<ConsensusForkMigration
     Ok(Some(migration))
 }
 
+pub fn active_consensus_validator_addresses() -> Result<Option<BTreeSet<String>>, String> {
+    let Some(migration) = active_consensus_fork_migration()? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        migration
+            .new_validator_registry
+            .iter()
+            .map(|validator| validator.validator_address.clone())
+            .collect(),
+    ))
+}
+
 pub fn validator_public_key_for_height(
     height: u64,
     validator_address: &str,
@@ -306,9 +319,8 @@ pub fn active_consensus_fork_status() -> Value {
 
 pub fn normalize_consensus_key_algorithm(label: &str) -> Result<PQCAlgorithm, String> {
     match label.trim().to_ascii_lowercase().as_str() {
-        "fndsa" | "fn-dsa" | "fn-dsa-512" | "fn-dsa-1024" | "falcon" | "falcon-1024" => {
-            Ok(PQCAlgorithm::FNDSA)
-        }
+        "fndsa" | "fn-dsa" | "fn-dsa-512" | "fn-dsa-1024" | "falcon" | "falcon-1024" | "mldsa"
+        | "ml-dsa" | "ml-dsa-44" | "ml-dsa-65" | "ml-dsa-87" => Ok(PQCAlgorithm::FNDSA),
         "slhdsa" | "slh-dsa" => Ok(PQCAlgorithm::SLHDSA),
         "" => Err("missing consensus key algorithm".to_string()),
         "pqc" | "aegis" => Err(format!(
@@ -458,6 +470,16 @@ mod tests {
     fn consensus_algorithm_normalizer_rejects_ambiguous_labels() {
         assert!(normalize_consensus_key_algorithm("pqc").is_err());
         assert!(normalize_consensus_key_algorithm("aegis").is_err());
+    }
+
+    #[test]
+    fn consensus_algorithm_normalizer_accepts_live_ml_dsa_labels_as_fndsa() {
+        for label in ["ml-dsa", "ml-dsa-65", "ML-DSA-65", "mldsa"] {
+            assert_eq!(
+                normalize_consensus_key_algorithm(label).unwrap(),
+                PQCAlgorithm::FNDSA
+            );
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 {
   "atlas_latest_height": "206045",
   "captured_at": "2026-06-03T21:02:34.323246+00:00",
-  "evidence_dir": "/Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/gate-final-postfork-proof-20260603T203052Z",
+  "evidence_dir": "/Users/devpup/Desktop/Testnet-Beta/synergy-testnet/gate-final-postfork-proof-20260603T203052Z",
   "fixed_all_match": true,
   "fixed_hash": "e64f31282497eb2093130ab2c7e2a6433c40d6b8efc36f35a140471fcc32ed4f",
   "fixed_height": 205905,

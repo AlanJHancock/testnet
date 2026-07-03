@@ -6,12 +6,14 @@ DIST_DIR="${ROOT_DIR}/dist"
 GENERIC_ARTIFACT="${ROOT_DIR}/synergy-archive-validator-testnet-v2.zip"
 LINUX_ARTIFACT="${ROOT_DIR}/synergy-archive-validator-testnet-v2-linux-x64.zip"
 MACOS_ARTIFACT="${ROOT_DIR}/synergy-archive-validator-testnet-v2-macos-universal.zip"
+WINDOWS_ARTIFACT="${ROOT_DIR}/synergy-archive-validator-testnet-v2-windows-receiver.zip"
 TARGET="linux"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --linux) TARGET="linux"; shift ;;
     --macos) TARGET="macos"; shift ;;
+    --windows) TARGET="windows"; shift ;;
     --all) TARGET="all"; shift ;;
     *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
@@ -72,8 +74,25 @@ package_macos() {
   echo "Created ${MACOS_ARTIFACT}"
 }
 
+package_windows() {
+  rm -f "${WINDOWS_ARTIFACT}"
+  rm -rf "${DIST_DIR}/windows-receiver"
+  mkdir -p "${DIST_DIR}/windows-receiver/windows" "${DIST_DIR}/windows-receiver/docs" "${DIST_DIR}/windows-receiver/config"
+  install -m 0644 "${ROOT_DIR}/README.md" "${DIST_DIR}/windows-receiver/README.md"
+  install -m 0644 "${ROOT_DIR}/windows/"*.ps1 "${DIST_DIR}/windows-receiver/windows/"
+  install -m 0644 "${ROOT_DIR}/docs/WINDOWS_VALIDATOR_SNAPSHOT_RESTORE.md" "${DIST_DIR}/windows-receiver/docs/"
+  install -m 0644 "${ROOT_DIR}/docs/NEW_VALIDATOR_FAST_SYNC.md" "${DIST_DIR}/windows-receiver/docs/"
+  install -m 0644 "${ROOT_DIR}/docs/SNAPSHOT_FORMAT.md" "${DIST_DIR}/windows-receiver/docs/"
+  install -m 0644 "${ROOT_DIR}/docs/SNAPSHOT_VERIFICATION.md" "${DIST_DIR}/windows-receiver/docs/"
+  install -m 0644 "${ROOT_DIR}/config/snapshot-policy.testnet.toml" "${DIST_DIR}/windows-receiver/config/"
+  (cd "${DIST_DIR}/windows-receiver" && zip -r "${WINDOWS_ARTIFACT}" README.md windows docs config)
+  (cd "${ROOT_DIR}" && shasum -a 256 "$(basename "${WINDOWS_ARTIFACT}")" > "${DIST_DIR}/SHA256SUMS.windows")
+  echo "Created ${WINDOWS_ARTIFACT}"
+}
+
 case "${TARGET}" in
   linux) package_linux ;;
   macos) package_macos ;;
-  all) package_linux; package_macos ;;
+  windows) package_windows ;;
+  all) package_linux; package_macos; package_windows ;;
 esac

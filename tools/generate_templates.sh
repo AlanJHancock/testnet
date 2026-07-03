@@ -38,13 +38,13 @@ generate_template() {
     local metrics_bind="127.0.0.1:${metrics_port}"
     local strict_allowlist="false"
     local snapshots_enabled="false"
-    local snapshot_interval_blocks="10000"
+    local snapshot_interval_blocks="5000"
     if [[ "$compiled_profile" == "validator_node" ]]; then
         strict_allowlist="true"
     fi
     if [[ "$role_id" == "archive_validator" ]]; then
         snapshots_enabled="true"
-        snapshot_interval_blocks="5000"
+        snapshot_interval_blocks="15000"
     fi
 
     case "$bootstrap_mode" in
@@ -120,10 +120,15 @@ chain_id = 1264
 algorithm = "Proof of Synergy"
 block_time_secs = 2
 epoch_length = 1000
-min_validators = 3
+emergency_stable_committee_mode = true
+freeze_validator_set = true
+freeze_score_weighted_proposer_order = true
+vote_only_rejoin_enabled = true
+vote_only_probation_blocks = 1000
+min_validators = 4
 validator_cluster_size = 6
 validator_vote_threshold = 0
-max_validators = 6
+max_validators = 0
 status_ready_gate_enabled = true
 status_ready_min_validators = 4
 status_ready_genesis_grace_secs = 0

@@ -49,6 +49,7 @@ const VALIDATOR_REGISTRY_PATH: &str = "data/validator_registry.json";
 const VERBOSE_CONSENSUS_LOGS: bool = false;
 const POST_COMMIT_PARENT_PROPAGATION_GRACE_MILLIS: u64 = 250;
 const MAX_BLOCK_TIMESTAMP_CATCH_UP_STEP_SECS: u64 = 300;
+const MAX_BLOCK_TIMESTAMP_REANCHOR_DRIFT_SECS: u64 = 86_400;
 const SAFE_HEAD_CATCHUP_WITHOUT_MESH_RESET_BLOCKS: u64 = 1;
 const DEFAULT_MAX_CHAIN_SNAPSHOT_CLONE_HEIGHT: u64 = 50_000;
 
@@ -249,18 +250,18 @@ impl ProofOfSynergy {
             Arc::clone(&synergy_calculator),
         )));
 
-        // Load validator registry from file or initialize genesis validators
+        // Load validator registry from file or initialize baseline validators
         if let Err(e) = validator_manager.load_registry(VALIDATOR_REGISTRY_PATH) {
             println!(
-                "🔧 No validator registry found — initializing with genesis validators: {}",
+                "🔧 No validator registry found — initializing with baseline validators: {}",
                 e
             );
-            Self::initialize_genesis_validators(&validator_manager);
+            Self::initialize_baseline_validators(&validator_manager);
 
-            // Save the registry after initializing genesis validators
+            // Save the registry after initializing baseline validators
             if let Err(save_err) = validator_manager.save_registry(VALIDATOR_REGISTRY_PATH) {
                 println!(
-                    "⚠️ Failed to save validator registry after genesis initialization: {}",
+                    "⚠️ Failed to save validator registry after baseline validator initialization: {}",
                     save_err
                 );
             } else {
@@ -271,13 +272,15 @@ impl ProofOfSynergy {
             // added after the node's first run (e.g. multi-node setups where the
             // genesis.json was populated after initial launch) are registered and
             // approved, not just staked.
-            println!("🔧 Validator registry loaded, ensuring genesis validators have stakes");
-            Self::ensure_genesis_validator_stakes(&validator_manager);
+            println!(
+                "🔧 Validator registry loaded, ensuring baseline validators have baseline stakes"
+            );
+            Self::ensure_baseline_validator_stakes(&validator_manager);
 
             // Persist any newly-registered validators back to disk.
             if let Err(save_err) = validator_manager.save_registry(VALIDATOR_REGISTRY_PATH) {
                 println!(
-                    "⚠️ Failed to save validator registry after genesis stake check: {}",
+                    "⚠️ Failed to save validator registry after baseline stake check: {}",
                     save_err
                 );
             } else {
@@ -639,19 +642,34 @@ impl ProofOfSynergy {
                                 "latest_height" => latest_block.block_index,
                                 "previous_qc_block_hash" => previous_qc.block_hash.clone()
                             );
+                            let latest_height = latest_block.block_index;
                             drop(chain_guard);
                             drop(pool);
-                            Self::handle_epoch_transition(
-                                &mut current_epoch,
-                                previous_qc,
-                                &validator_manager,
-                                &synergy_calculator,
-                                &dual_quorum_consensus,
-                                &entropy_beacon,
-                                &validator_rotation,
-                                &dao_governance,
-                                &cartel_detection,
-                            );
+                            if Self::emergency_stable_committee_mode_enabled() {
+                                current_epoch = next_epoch;
+                                if let Ok(mut consensus) = dual_quorum_consensus.lock() {
+                                    consensus.current_epoch = current_epoch;
+                                }
+                                info!(
+                                    "consensus",
+                                    "Emergency stable committee mode held validator set fixed across epoch boundary",
+                                    "current_epoch" => current_epoch,
+                                    "latest_height" => latest_height,
+                                    "previous_qc_block_hash" => previous_qc.block_hash.clone()
+                                );
+                            } else {
+                                Self::handle_epoch_transition(
+                                    &mut current_epoch,
+                                    previous_qc,
+                                    &validator_manager,
+                                    &synergy_calculator,
+                                    &dual_quorum_consensus,
+                                    &entropy_beacon,
+                                    &validator_rotation,
+                                    &dao_governance,
+                                    &cartel_detection,
+                                );
+                            }
                             thread::sleep(Duration::from_millis(100));
                             continue;
                         }
@@ -1062,7 +1080,8 @@ impl ProofOfSynergy {
                             .unwrap_or(0);
                         let quarantine_block =
                             crate::consensus::anti_divergence::current_validator_quarantine_duty_block();
-                        let self_quarantined = quarantine_block.is_some();
+                        let vote_only_rejoin = Self::local_vote_only_rejoin_active();
+                        let self_quarantined = quarantine_block.is_some() || vote_only_rejoin;
                         if let Some(quarantine_block) = quarantine_block {
                             warn!(
                                 "consensus",
@@ -1091,6 +1110,36 @@ impl ProofOfSynergy {
                                     "quarantine_height": quarantine_block.divergence_height.0,
                                     "quarantine_source": quarantine_block.source,
                                     "quarantine_reason": quarantine_block.reason
+                                }),
+                            );
+                            drop(chain_guard);
+                            drop(pool);
+                            thread::sleep(Duration::from_millis(250));
+                            continue;
+                        }
+                        if vote_only_rejoin {
+                            warn!(
+                                "consensus",
+                                "Local validator is in vote-only probation; skipping proposer duties",
+                                "chosen_proposer" => selected_validator.address.clone(),
+                                "local_validator" => local_validator_address.clone().unwrap_or_default(),
+                                "height" => next_block_index,
+                                "local_view_round" => view_offset
+                            );
+                            timing_trace::emit(
+                                "proposal_build_blocked_by_vote_only_rejoin",
+                                serde_json::json!({
+                                    "previous_block_height": latest_block_clone.block_index,
+                                    "previous_block_hash": latest_block_clone.hash.clone(),
+                                    "height": next_block_index,
+                                    "chosen_proposer": selected_validator.address.clone(),
+                                    "local_validator": local_validator_address.clone(),
+                                    "local_view_round": view_offset,
+                                    "effective_leader_timeout_secs": leader_timeout_secs,
+                                    "effective_vote_timeout_secs": vote_timeout_secs,
+                                    "proposer_quarantined": false,
+                                    "duties_disabled": false,
+                                    "vote_only_rejoin": true
                                 }),
                             );
                             drop(chain_guard);
@@ -1892,12 +1941,12 @@ impl ProofOfSynergy {
         CatchupReadinessDecision::preserve("safe_one_block_head_catchup")
     }
 
-    fn initialize_genesis_validators(validator_manager: &Arc<ValidatorManager>) {
-        println!("🔧 INITIALIZE_GENESIS_VALIDATORS CALLED - START");
+    fn initialize_baseline_validators(validator_manager: &Arc<ValidatorManager>) {
+        println!("🔧 INITIALIZE_BASELINE_VALIDATORS CALLED - START");
         match canonical_genesis() {
             Ok(genesis) => {
                 println!(
-                    "🔧 Found {} canonical genesis validators",
+                    "🔧 Found {} baseline validators",
                     genesis.validators().len()
                 );
                 for validator in genesis.validators() {
@@ -1916,19 +1965,19 @@ impl ProofOfSynergy {
                             Ok(_) => {
                                 if let Err(error) = validator_manager.approve_validator(address) {
                                     println!(
-                                        "⚠️ Failed to approve genesis validator {}: {}",
+                                        "⚠️ Failed to approve baseline validator {}: {}",
                                         address, error
                                     );
                                     continue;
                                 }
                                 println!(
-                                    "✅ Genesis validator {} registered and approved",
+                                    "✅ Baseline validator {} registered and approved",
                                     address
                                 );
                             }
                             Err(error) => {
                                 println!(
-                                    "⚠️ Failed to register genesis validator {}: {}",
+                                    "⚠️ Failed to register baseline validator {}: {}",
                                     address, error
                                 );
                                 continue;
@@ -1940,10 +1989,13 @@ impl ProofOfSynergy {
                 }
             }
             Err(error) => {
-                println!("⚠️ Failed to load canonical genesis validators: {}", error);
+                println!(
+                    "⚠️ Failed to load baseline validators from canonical genesis: {}",
+                    error
+                );
             }
         }
-        println!("🔧 INITIALIZE_GENESIS_VALIDATORS CALLED - END");
+        println!("🔧 INITIALIZE_BASELINE_VALIDATORS CALLED - END");
     }
 
     fn resolve_local_validator_address() -> Option<String> {
@@ -1981,8 +2033,48 @@ impl ProofOfSynergy {
         live_validator_addresses
     }
 
-    fn ensure_genesis_validator_stakes(validator_manager: &Arc<ValidatorManager>) {
-        println!("🔧 ENSURING_GENESIS_VALIDATOR_STAKES - START");
+    fn emergency_stable_committee_mode_enabled() -> bool {
+        if let Ok(value) = std::env::var("SYNERGY_EMERGENCY_STABLE_COMMITTEE_MODE") {
+            return matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            );
+        }
+        crate::config::load_node_config(None)
+            .ok()
+            .map(|config| {
+                config.consensus.emergency_stable_committee_mode
+                    && config.consensus.freeze_validator_set
+                    && config.consensus.freeze_score_weighted_proposer_order
+            })
+            .unwrap_or(true)
+    }
+
+    fn local_vote_only_rejoin_active() -> bool {
+        let path = crate::utils::resolve_data_path("data/self_heal_status.json");
+        let Ok(bytes) = fs::read(path) else {
+            return false;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return false;
+        };
+        ["typed_status", "new_state", "recovery_state", "status"]
+            .iter()
+            .filter_map(|key| value.get(*key).and_then(|item| item.as_str()))
+            .any(|state| {
+                matches!(
+                    state.trim().to_ascii_uppercase().as_str(),
+                    "VOTE_ONLY" | "VOTEONLY"
+                )
+            })
+            || value
+                .get("vote_only_rejoin")
+                .and_then(|item| item.as_bool())
+                .unwrap_or(false)
+    }
+
+    fn ensure_baseline_validator_stakes(validator_manager: &Arc<ValidatorManager>) {
+        println!("🔧 ENSURING_BASELINE_VALIDATOR_STAKES - START");
         match canonical_genesis() {
             Ok(genesis) => {
                 for validator in genesis.validators() {
@@ -2001,19 +2093,19 @@ impl ProofOfSynergy {
                             Ok(_) => {
                                 if let Err(error) = validator_manager.approve_validator(address) {
                                     println!(
-                                        "⚠️ Failed to approve late-joined genesis validator {}: {}",
+                                        "⚠️ Failed to approve late-joined baseline validator {}: {}",
                                         address, error
                                     );
                                     continue;
                                 }
                                 println!(
-                                    "✅ Late-joined genesis validator {} registered and approved",
+                                    "✅ Late-joined baseline validator {} registered and approved",
                                     address
                                 );
                             }
                             Err(error) => {
                                 println!(
-                                    "⚠️ Failed to register late-joined genesis validator {}: {}",
+                                    "⚠️ Failed to register late-joined baseline validator {}: {}",
                                     address, error
                                 );
                                 continue;
@@ -2025,13 +2117,10 @@ impl ProofOfSynergy {
                 }
             }
             Err(error) => {
-                println!(
-                    "⚠️ Failed to ensure canonical genesis validator stakes: {}",
-                    error
-                );
+                println!("⚠️ Failed to ensure baseline validator stakes: {}", error);
             }
         }
-        println!("🔧 ENSURING_GENESIS_VALIDATOR_STAKES - END");
+        println!("🔧 ENSURING_BASELINE_VALIDATOR_STAKES - END");
     }
 
     fn load_synergy_scores() -> Option<SynergyScores> {
@@ -2063,6 +2152,11 @@ impl ProofOfSynergy {
         current_timestamp_secs: u64,
     ) -> u64 {
         let target_timestamp = previous_block_timestamp_secs.saturating_add(block_time_secs.max(1));
+        if current_timestamp_secs
+            > previous_block_timestamp_secs.saturating_add(MAX_BLOCK_TIMESTAMP_REANCHOR_DRIFT_SECS)
+        {
+            return current_timestamp_secs.max(target_timestamp);
+        }
         let max_catch_up_timestamp = previous_block_timestamp_secs
             .saturating_add(block_time_secs.max(MAX_BLOCK_TIMESTAMP_CATCH_UP_STEP_SECS));
 
@@ -2443,11 +2537,11 @@ impl ProofOfSynergy {
         );
 
         if validators.is_empty() {
-            println!("⚠️ [select_leader_for_block] No validators, returning genesis validator");
+            println!("⚠️ [select_leader_for_block] No validators, returning bootstrap validator");
             return Validator::new(
                 "synv1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1".to_string(),
                 "genesis_key".to_string(),
-                "Genesis Validator".to_string(),
+                "Bootstrap Validator".to_string(),
                 1000,
             );
         }
@@ -2474,47 +2568,46 @@ impl ProofOfSynergy {
                 current_epoch
             );
 
-            // Calculate priority for each validator using Equation 17 from PoSy spec
-            let mut validator_priorities = Vec::new();
+            let stable_committee_mode = Self::emergency_stable_committee_mode_enabled();
+            let top_k_addresses: Vec<String> = if stable_committee_mode {
+                candidate_addresses.clone()
+            } else {
+                // Calculate priority for each validator using Equation 17 from PoSy spec.
+                let mut validator_priorities = Vec::new();
 
-            consensus_log!(
-                "🔄 [select_leader_for_block] Calculating priorities for {} validators",
-                validators.len()
-            );
-            for validator in validators.iter() {
-                // Calculate priority: H(r_e || validatorID_v) * SS_v,normalized (PoSy Equation 17)
-                let mut hasher = Sha3_512::new();
-                hasher.update(epoch_randomness);
-                hasher.update(validator.address.as_bytes());
-                let hash = hasher.finalize();
-                let raw_hash = u64::from_be_bytes(hash[..8].try_into().unwrap());
+                consensus_log!(
+                    "🔄 [select_leader_for_block] Calculating priorities for {} validators",
+                    validators.len()
+                );
+                for validator in validators.iter() {
+                    let mut hasher = Sha3_512::new();
+                    hasher.update(epoch_randomness);
+                    hasher.update(validator.address.as_bytes());
+                    let hash = hasher.finalize();
+                    let raw_hash = u64::from_be_bytes(hash[..8].try_into().unwrap());
+                    let consensus_weight = Self::stable_leader_weight(validators, validator);
+                    let priority_value = raw_hash as f64 * consensus_weight;
+                    validator_priorities.push((validator.clone(), priority_value, raw_hash));
+                }
 
-                let consensus_weight = Self::stable_leader_weight(validators, validator);
+                // Sort deterministically. When priorities tie, fall back to the raw
+                // hash and finally the validator address so every node computes the
+                // same top-K order from the same epoch randomness.
+                validator_priorities.sort_by(|a, b| {
+                    b.1.partial_cmp(&a.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| b.2.cmp(&a.2))
+                        .then_with(|| a.0.address.cmp(&b.0.address))
+                });
 
-                // Calculate priority value
-                let priority_value = raw_hash as f64 * consensus_weight;
-
-                validator_priorities.push((validator.clone(), priority_value, raw_hash));
-            }
-
-            // Sort deterministically. When priorities tie, fall back to the raw
-            // hash and finally the validator address so every node computes the
-            // same top-K order from the same epoch randomness.
-            validator_priorities.sort_by(|a, b| {
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| b.2.cmp(&a.2))
-                    .then_with(|| a.0.address.cmp(&b.0.address))
-            });
-
-            // Select top K validators for round-robin (K = min(10, |validators|) as per PoSy)
-            // Use all validators if we have 3 or fewer, otherwise use min(10, validators.len())
-            let k = std::cmp::min(10, validators.len());
-            let top_k_addresses: Vec<String> = validator_priorities
-                .iter()
-                .take(k)
-                .map(|(v, _, _)| v.address.clone())
-                .collect();
+                let k = std::cmp::min(10, validators.len());
+                validator_priorities
+                    .iter()
+                    .take(k)
+                    .map(|(v, _, _)| v.address.clone())
+                    .collect()
+            };
+            let k = top_k_addresses.len();
 
             info!("consensus", "Selected top K validators for epoch", 
                   "k" => k, 
@@ -2599,7 +2692,7 @@ impl ProofOfSynergy {
         local_validator_address: Option<&str>,
         current_epoch: u64,
         next_block_index: u64,
-        finalized_height: u64,
+        _finalized_height: u64,
         transient_recovery_min_age_secs: u64,
     ) -> Validator {
         let Some(local_validator_address) = local_validator_address else {
@@ -2663,94 +2756,28 @@ impl ProofOfSynergy {
 
         if locked_vote.proposer != selected_validator.address {
             let lock_age_secs = Self::current_timestamp().saturating_sub(locked_vote.updated_at);
-            if transient_recovery_min_age_secs != u64::MAX
-                && lock_age_secs >= transient_recovery_min_age_secs
-                && live_validators
-                    .iter()
-                    .any(|validator| validator.address == selected_validator.address)
-            {
-                let reason = format!(
-                    "leader selection stale same-height vote-lock recovery: local_validator={} height={} locked_hash={} locked_proposer={} locked_latest_round={} scheduled_leader={} lock_age_secs={} min_age_secs={}",
-                    local_validator_address,
-                    next_block_index,
-                    locked_vote.block_hash,
-                    locked_vote.proposer,
-                    locked_vote.latest_round_number,
-                    selected_validator.address,
-                    lock_age_secs,
-                    transient_recovery_min_age_secs
-                );
-                match DualQuorumConsensus::recover_transient_vote_locks_above_finalized_height(
-                    finalized_height,
-                    transient_recovery_min_age_secs,
-                    &reason,
-                ) {
-                    Ok(report) if report.mutated => {
-                        warn!(
-                            "consensus",
-                            "Recovered stale same-height vote lock before leader selection",
-                            "local_validator" => local_validator_address.to_string(),
-                            "scheduled_leader" => selected_validator.address.clone(),
-                            "locked_proposer" => locked_vote.proposer.clone(),
-                            "locked_block_hash" => locked_vote.block_hash.clone(),
-                            "locked_latest_round" => locked_vote.latest_round_number,
-                            "lock_age_secs" => lock_age_secs,
-                            "min_age_secs" => transient_recovery_min_age_secs,
-                            "removed_count" => report.removed_count as u64,
-                            "evidence_path" => report.evidence_path.clone(),
-                            "epoch" => current_epoch,
-                            "height" => next_block_index
-                        );
-                        return selected_validator;
-                    }
-                    Ok(report) => {
-                        info!(
-                            "consensus",
-                            "Stale same-height vote lock recovery checked but no lock was eligible",
-                            "local_validator" => local_validator_address.to_string(),
-                            "scheduled_leader" => selected_validator.address.clone(),
-                            "locked_proposer" => locked_vote.proposer.clone(),
-                            "locked_block_hash" => locked_vote.block_hash.clone(),
-                            "lock_age_secs" => lock_age_secs,
-                            "min_age_secs" => transient_recovery_min_age_secs,
-                            "removed_count" => report.removed_count as u64,
-                            "epoch" => current_epoch,
-                            "height" => next_block_index
-                        );
-                    }
-                    Err(error) => {
-                        warn!(
-                            "consensus",
-                            "Failed closed while recovering stale same-height vote lock before leader selection",
-                            "local_validator" => local_validator_address.to_string(),
-                            "scheduled_leader" => selected_validator.address.clone(),
-                            "locked_proposer" => locked_vote.proposer.clone(),
-                            "locked_block_hash" => locked_vote.block_hash.clone(),
-                            "lock_age_secs" => lock_age_secs,
-                            "min_age_secs" => transient_recovery_min_age_secs,
-                            "epoch" => current_epoch,
-                            "height" => next_block_index,
-                            "error" => error
-                        );
-                    }
-                }
-            }
+            let selected_validator_is_live = live_validators
+                .iter()
+                .any(|validator| validator.address == selected_validator.address);
 
-            info!(
-                "consensus",
-                "Preferring live same-height vote lock leader",
-                "local_validator" => local_validator_address.to_string(),
-                "scheduled_leader" => selected_validator.address.clone(),
-                "locked_proposer" => locked_vote.proposer.clone(),
-                "locked_block_hash" => locked_vote.block_hash.clone(),
-                "locked_first_round" => locked_vote.first_round_number,
-                "locked_latest_round" => locked_vote.latest_round_number,
-                "lock_age_secs" => lock_age_secs,
-                "min_age_secs" => transient_recovery_min_age_secs,
-                "epoch" => current_epoch,
-                "height" => next_block_index
-            );
-            return locked_proposer;
+            if locked_proposer.address != selected_validator.address {
+                info!(
+                    "consensus",
+                    "Preserving live same-height vote lock leader over deterministic scheduled leader",
+                    "local_validator" => local_validator_address.to_string(),
+                    "scheduled_leader" => selected_validator.address.clone(),
+                    "scheduled_leader_live" => selected_validator_is_live,
+                    "locked_proposer" => locked_vote.proposer.clone(),
+                    "locked_block_hash" => locked_vote.block_hash.clone(),
+                    "locked_first_round" => locked_vote.first_round_number,
+                    "locked_latest_round" => locked_vote.latest_round_number,
+                    "lock_age_secs" => lock_age_secs,
+                    "min_age_secs" => transient_recovery_min_age_secs,
+                    "epoch" => current_epoch,
+                    "height" => next_block_index
+                );
+                return locked_proposer;
+            }
         }
 
         selected_validator
@@ -3124,9 +3151,8 @@ impl ProofOfSynergy {
         result
     }
 
-    fn consensus_failure_needs_transient_lock_recovery(error: &str) -> bool {
-        error.contains("same-height vote supersede")
-            || error.contains("already locally voted for different block")
+    fn consensus_failure_needs_transient_lock_recovery(_error: &str) -> bool {
+        false
     }
 
     fn transient_vote_recovery_min_age_secs(leader_timeout_secs: u64, block_time_secs: u64) -> u64 {
@@ -3759,6 +3785,16 @@ mod tests {
         assert_eq!(
             next_timestamp.saturating_sub(previous_timestamp),
             MAX_BLOCK_TIMESTAMP_CATCH_UP_STEP_SECS
+        );
+    }
+
+    #[test]
+    fn bounded_consensus_timestamp_reanchors_catastrophically_stale_header_time() {
+        let wall_clock_timestamp = 1_782_703_600;
+
+        assert_eq!(
+            ProofOfSynergy::bounded_consensus_timestamp(31_200, 2, wall_clock_timestamp),
+            wall_clock_timestamp
         );
     }
 
@@ -4576,12 +4612,12 @@ mod tests {
             ))
         );
         assert!(
-            ProofOfSynergy::consensus_failure_needs_transient_lock_recovery(
+            !ProofOfSynergy::consensus_failure_needs_transient_lock_recovery(
                 "same-height vote supersede requires a durable finalized canonical parent lock"
             )
         );
         assert!(
-            ProofOfSynergy::consensus_failure_needs_transient_lock_recovery(
+            !ProofOfSynergy::consensus_failure_needs_transient_lock_recovery(
                 "already locally voted for different block at height 256039"
             )
         );
@@ -4604,7 +4640,7 @@ mod tests {
     }
 
     #[test]
-    fn leader_selection_prefers_live_local_vote_lock_over_scheduled_leader() {
+    fn leader_selection_preserves_live_same_height_vote_lock_over_scheduled_leader() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
 
@@ -4798,7 +4834,7 @@ mod tests {
     }
 
     #[test]
-    fn leader_selection_recovers_stale_local_vote_lock_before_following_scheduled_leader() {
+    fn leader_selection_preserves_stale_live_local_vote_lock_without_auto_recovery() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
 
@@ -4853,10 +4889,10 @@ mod tests {
             1,
         );
 
-        assert_eq!(selected.address, scheduled.address);
+        assert_eq!(selected.address, locked.address);
         let lock = DualQuorumConsensus::local_locked_vote_for_height("validator-local", 55, 810)
             .expect("vote lock lookup should succeed");
-        assert!(lock.is_none());
+        assert!(lock.is_some());
 
         DualQuorumConsensus::set_test_local_vote_lock_path(None);
         if let Some(root) = path.parent().and_then(|data| data.parent()) {

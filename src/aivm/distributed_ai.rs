@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
+use crate::consensus::dual_quorum::{required_validator_quorum, VALIDATOR_QUORUM_RATIO};
 use crate::consensus::consensus_algorithm::ProofOfSynergy;
 use crate::validator::ValidatorManager;
 use crate::block::BlockChain;
@@ -163,8 +164,9 @@ impl DistributedAIProtocol {
             completed_at: None,
             results: HashMap::new(),
             final_result: None,
-            consensus_threshold: 0.67, // 67% agreement required
-            required_confirmations: (participating_validators.len() as u32 * 67).div_ceil(100),
+            consensus_threshold: VALIDATOR_QUORUM_RATIO,
+            required_confirmations: required_validator_quorum(participating_validators.len())
+                as u32,
             current_confirmations: 0,
         };
 

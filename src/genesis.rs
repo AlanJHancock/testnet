@@ -15,7 +15,7 @@ pub struct GenesisBalance {
 }
 
 #[derive(Debug, Clone)]
-pub struct GenesisValidator {
+pub struct InitialValidator {
     pub validator_id: String,
     pub operator_address: String,
     pub consensus_key_type: String,
@@ -45,7 +45,7 @@ pub struct GenesisDocument {
     consensus_version: String,
     timestamp: u64,
     balances: Vec<GenesisBalance>,
-    validators: Vec<GenesisValidator>,
+    validators: Vec<InitialValidator>,
     token: GenesisTokenConfig,
 }
 
@@ -106,7 +106,7 @@ impl GenesisDocument {
         &self.balances
     }
 
-    pub fn validators(&self) -> &[GenesisValidator] {
+    pub fn validators(&self) -> &[InitialValidator] {
         &self.validators
     }
 
@@ -182,7 +182,7 @@ fn parse_balances(value: &Value) -> Result<Vec<GenesisBalance>, String> {
         .collect()
 }
 
-fn parse_validators(value: &Value) -> Result<Vec<GenesisValidator>, String> {
+fn parse_validators(value: &Value) -> Result<Vec<InitialValidator>, String> {
     let validators = required_array(value, &["validators"])?;
     if validators.is_empty() {
         return Err("validators must not be empty".to_string());
@@ -191,7 +191,7 @@ fn parse_validators(value: &Value) -> Result<Vec<GenesisValidator>, String> {
     validators
         .iter()
         .map(|entry| {
-            Ok(GenesisValidator {
+            Ok(InitialValidator {
                 validator_id: required_string(entry, &["validator_id"])?,
                 operator_address: required_string(entry, &["operator_address"])?,
                 consensus_key_type: required_string(entry, &["consensus_key_type"])?,

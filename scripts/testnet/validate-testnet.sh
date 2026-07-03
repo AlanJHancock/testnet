@@ -6,6 +6,10 @@ GENESIS_FILE="${TESTNET_GENESIS_FILE:-$ROOT_DIR/config/genesis.json}"
 NETWORK_IDENTIFIERS_FILE="${TESTNET_NETWORK_IDENTIFIERS_FILE:-$ROOT_DIR/network-identifiers.testnet.json}"
 MANIFEST_FILE="${TESTNET_MANIFEST_FILE:-$ROOT_DIR/config/operational-manifest.json}"
 BUNDLE_DIR="${TESTNET_BUNDLE_DIR:-$ROOT_DIR/bootstrap-bundles}"
+EXPECTED_GENESIS_MIN_VALIDATOR_COUNT="${EXPECTED_GENESIS_MIN_VALIDATOR_COUNT:-4}"
+EXPECTED_GENESIS_MIN_QUORUM_THRESHOLD="${EXPECTED_GENESIS_MIN_QUORUM_THRESHOLD:-auto}"
+EXPECTED_BASELINE_VALIDATOR_COUNT="${EXPECTED_BASELINE_VALIDATOR_COUNT:-5}"
+EXPECTED_DYNAMIC_MAX_VALIDATORS="${EXPECTED_DYNAMIC_MAX_VALIDATORS:-0}"
 
 for required in "$GENESIS_FILE" "$NETWORK_IDENTIFIERS_FILE" "$MANIFEST_FILE" "$BUNDLE_DIR"; do
   if [[ ! -e "$required" ]]; then
@@ -14,13 +18,23 @@ for required in "$GENESIS_FILE" "$NETWORK_IDENTIFIERS_FILE" "$MANIFEST_FILE" "$B
   fi
 done
 
-python3 - "$ROOT_DIR" "$GENESIS_FILE" "$NETWORK_IDENTIFIERS_FILE" "$MANIFEST_FILE" <<'PY'
+python3 - "$ROOT_DIR" "$GENESIS_FILE" "$NETWORK_IDENTIFIERS_FILE" "$MANIFEST_FILE" \
+  "$EXPECTED_GENESIS_MIN_VALIDATOR_COUNT" "$EXPECTED_GENESIS_MIN_QUORUM_THRESHOLD" \
+  "$EXPECTED_BASELINE_VALIDATOR_COUNT" <<'PY'
 import importlib.util
 import json
 import sys
 from pathlib import Path
 
 root_dir, genesis_path, identifiers_path, manifest_path = sys.argv[1:5]
+expected_min_validator_count = int(sys.argv[5])
+expected_min_quorum_threshold_arg = sys.argv[6]
+expected_baseline_validator_count = int(sys.argv[7])
+if expected_min_quorum_threshold_arg == "auto":
+    fault_tolerance = max(0, (expected_baseline_validator_count - 1) // 3)
+    expected_min_quorum_threshold = 2 * fault_tolerance + 1
+else:
+    expected_min_quorum_threshold = int(expected_min_quorum_threshold_arg)
 errors = []
 
 with open(genesis_path, encoding="utf-8") as handle:
@@ -93,12 +107,21 @@ if genesis.get("token", {}).get("symbol") != "SNRG":
     errors.append("genesis token.symbol must be SNRG")
 if genesis.get("token", {}).get("minting_policy") != "fixed_cap":
     errors.append("genesis token.minting_policy must be fixed_cap")
-if genesis.get("consensus", {}).get("min_validator_count") != 4:
-    errors.append("genesis consensus.min_validator_count must be 4")
-if genesis.get("consensus", {}).get("min_quorum_threshold") != 3:
-    errors.append("genesis consensus.min_quorum_threshold must be 3")
-if len(genesis.get("validators", [])) != 5:
-    errors.append("genesis must contain exactly 5 validators")
+if genesis.get("consensus", {}).get("min_validator_count") != expected_min_validator_count:
+    errors.append(
+        "genesis consensus.min_validator_count must be "
+        f"{expected_min_validator_count}"
+    )
+if genesis.get("consensus", {}).get("min_quorum_threshold") != expected_min_quorum_threshold:
+    errors.append(
+        "genesis consensus.min_quorum_threshold must be "
+        f"{expected_min_quorum_threshold}"
+    )
+if len(genesis.get("validators", [])) != expected_baseline_validator_count:
+    errors.append(
+        "genesis must contain exactly "
+        f"{expected_baseline_validator_count} validators"
+    )
 if not isinstance(genesis.get("contracts"), dict):
     errors.append("genesis contracts must be an object")
 else:
@@ -154,10 +177,10 @@ if len(manifest.get("bootstrap", {}).get("seed_servers", [])) != 3:
     errors.append("operational manifest must contain exactly 3 seed servers")
 if manifest.get("bootstrap", {}).get("routing", {}).get("bootnodes") != ["sentry1"]:
     errors.append("operational manifest bootnode routing must pin to sentry1")
-if manifest.get("bootstrap", {}).get("routing", {}).get("seed_servers") != ["sentry2"]:
-    errors.append("operational manifest seed server routing must pin to sentry2")
+    if manifest.get("bootstrap", {}).get("routing", {}).get("seed_servers") != ["sentry2"]:
+        errors.append("operational manifest seed server routing must pin to sentry2")
 if len(manifest.get("validators", [])) < 5:
-    errors.append("operational manifest must contain at least the 5 genesis validators")
+    errors.append("operational manifest must contain at least the 5 baseline validators")
 if manifest.get("ports") != expected_ports:
     errors.append("operational manifest ports must match the frozen public testnet port model")
 
@@ -230,8 +253,8 @@ for bundle in bootnode1 bootnode2 bootnode3; do
     echo "[$bundle] validator_vote_threshold must be 0 so runtime derives dynamic quorum (${EXPECTED_VALIDATOR_QUORUM} for current manifest)" >&2
     failures=$((failures + 1))
   fi
-  if ! rg -q "^max_validators = ${EXPECTED_VALIDATOR_COUNT}$" "$node_config"; then
-    echo "[$bundle] max_validators must be ${EXPECTED_VALIDATOR_COUNT}" >&2
+  if ! rg -q "^max_validators = ${EXPECTED_DYNAMIC_MAX_VALIDATORS}$" "$node_config"; then
+    echo "[$bundle] max_validators must be ${EXPECTED_DYNAMIC_MAX_VALIDATORS} so runtime remains uncapped for future validator expansion" >&2
     failures=$((failures + 1))
   fi
   if rg -q '38638|48638|58638|18080|5730|5830|5930' "$node_config"; then

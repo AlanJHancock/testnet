@@ -18,7 +18,7 @@
   "pass": true,
   "pending_pool_empty_after_public_rpc": true,
   "post_rollout": true,
-  "proof_dir": "/Users/devpup/Desktop/Testnet-Beta/synergy-testnet-beta/gate-final-postfork-proof-20260603T203052Z/transactions/post-rollout-valid-20260603T215518Z",
+  "proof_dir": "/Users/devpup/Desktop/Testnet-Beta/synergy-testnet/gate-final-postfork-proof-20260603T203052Z/transactions/post-rollout-valid-20260603T215518Z",
   "public_rpc_receipt_lookup_success": true,
   "receipt_status": "0x1",
   "receiver": "synw17nh265ug2fgc8guv2ad7tt8kv0wlhesxndl8",

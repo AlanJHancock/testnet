@@ -19,15 +19,16 @@ use base64::{engine::general_purpose, Engine as _};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::Sha256;
 use sha3::{Digest, Sha3_256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 pub const EXPECTED_GENESIS_HASH: &str =
     "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789";
-pub const GENESIS_VALIDATOR_COUNT: usize = 5;
+pub const BASELINE_VALIDATOR_COUNT: usize = 5;
 const ALLOWED_STATE_FILES: &[&str] = &[
     "chain.json",
     "canonical_locks.json",
@@ -274,9 +275,9 @@ pub fn status() -> Value {
         "network_id": SYNERGY_TESTNET_V2_NETWORK_ID,
         "genesis_hash": EXPECTED_GENESIS_HASH,
         "quorum": {
-            "policy": "ceil(active_validator_count * 67 / 100)",
-            "genesis_baseline_required": required_validator_quorum(GENESIS_VALIDATOR_COUNT),
-            "genesis_validators": GENESIS_VALIDATOR_COUNT,
+            "policy": "ceil(active_validator_count * 2 / 3)",
+            "genesis_baseline_required": required_validator_quorum(BASELINE_VALIDATOR_COUNT),
+            "baseline_validators": BASELINE_VALIDATOR_COUNT,
             "relayers_rpc_archive_count_toward_quorum": false
         },
         "mutation_policy": {
@@ -287,6 +288,529 @@ pub fn status() -> Value {
             "require_aegis_pqvm_qc": true
         }
     })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ValidatorUpgradePreflightCode {
+    DataRootMissing,
+    ChainBodyMissing,
+    ChainBodyEmpty,
+    ChainBodyMalformed,
+    ChainBodyNonMonotonic,
+    CanonicalLocksMissing,
+    CanonicalLocksMalformed,
+    CompactBoundaryLockMissing,
+    CompactBoundaryLockHashMismatch,
+    BoundaryCommittedQcMissing,
+    BoundaryCommittedQcHashMismatch,
+    CanonicalLocksAheadOfChainBody,
+    UpgradeArtifactUnreadable,
+    RollbackBinaryUnreadable,
+    RollbackBinaryNotExecutable,
+    ConfigDigestUnavailable,
+    ValidatorSetDigestUnavailable,
+    ArchiveNotDisabled,
+    ArchiveCanonicalUnverified,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidatorUpgradePreflightSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ValidatorUpgradePreflightFinding {
+    pub code: ValidatorUpgradePreflightCode,
+    pub severity: ValidatorUpgradePreflightSeverity,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ValidatorUpgradePreflightFileDigest {
+    pub label: String,
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockSummaryReport {
+    pub height: u64,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ValidatorUpgradePreflightReport {
+    pub ok: bool,
+    pub decision: String,
+    pub data_dir: String,
+    pub first_retained_height: Option<u64>,
+    pub first_retained_hash: Option<String>,
+    pub latest_height: Option<u64>,
+    pub latest_hash: Option<String>,
+    pub canonical_lock_min_height: Option<u64>,
+    pub canonical_lock_max_height: Option<u64>,
+    pub boundary_lock_present: bool,
+    pub boundary_committed_qc_present: bool,
+    pub locks_above_chain_tip: Vec<LockSummaryReport>,
+    pub file_digests: Vec<ValidatorUpgradePreflightFileDigest>,
+    pub findings: Vec<ValidatorUpgradePreflightFinding>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ValidatorUpgradePreflightOptions {
+    pub allow_derived_index_rebuild: bool,
+    pub artifact_path: Option<PathBuf>,
+    pub current_binary_path: Option<PathBuf>,
+    pub rollback_binary_path: Option<PathBuf>,
+    pub config_path: Option<PathBuf>,
+    pub validator_set_path: Option<PathBuf>,
+    pub archive_status_path: Option<PathBuf>,
+}
+
+pub fn preflight_validator_upgrade(
+    source_root: &Path,
+    options: ValidatorUpgradePreflightOptions,
+) -> Result<ValidatorUpgradePreflightReport, String> {
+    let data_dir = data_dir(source_root);
+    let mut findings = Vec::new();
+    let mut file_digests = Vec::new();
+
+    if !data_dir.is_dir() {
+        findings.push(preflight_error(
+            ValidatorUpgradePreflightCode::DataRootMissing,
+            format!("data directory does not exist: {}", data_dir.display()),
+        ));
+        return Ok(ValidatorUpgradePreflightReport {
+            ok: false,
+            decision: "NO_GO".to_string(),
+            data_dir: data_dir.display().to_string(),
+            first_retained_height: None,
+            first_retained_hash: None,
+            latest_height: None,
+            latest_hash: None,
+            canonical_lock_min_height: None,
+            canonical_lock_max_height: None,
+            boundary_lock_present: false,
+            boundary_committed_qc_present: false,
+            locks_above_chain_tip: Vec::new(),
+            file_digests,
+            findings,
+        });
+    }
+
+    for (label, path, code) in [
+        (
+            "upgrade_artifact",
+            options.artifact_path.as_ref(),
+            ValidatorUpgradePreflightCode::UpgradeArtifactUnreadable,
+        ),
+        (
+            "current_binary",
+            options.current_binary_path.as_ref(),
+            ValidatorUpgradePreflightCode::UpgradeArtifactUnreadable,
+        ),
+        (
+            "config",
+            options.config_path.as_ref(),
+            ValidatorUpgradePreflightCode::ConfigDigestUnavailable,
+        ),
+        (
+            "validator_set",
+            options.validator_set_path.as_ref(),
+            ValidatorUpgradePreflightCode::ValidatorSetDigestUnavailable,
+        ),
+    ] {
+        if let Some(path) = path {
+            match sha256_file(path) {
+                Ok(sha256) => file_digests.push(ValidatorUpgradePreflightFileDigest {
+                    label: label.to_string(),
+                    path: path.display().to_string(),
+                    sha256,
+                }),
+                Err(error) => findings.push(preflight_error(
+                    code,
+                    format!("cannot digest {label} {}: {error}", path.display()),
+                )),
+            }
+        }
+    }
+
+    if let Some(path) = options.rollback_binary_path.as_ref() {
+        match sha256_file(path) {
+            Ok(sha256) => {
+                file_digests.push(ValidatorUpgradePreflightFileDigest {
+                    label: "rollback_binary".to_string(),
+                    path: path.display().to_string(),
+                    sha256,
+                });
+                if !is_executable(path) {
+                    findings.push(preflight_error(
+                        ValidatorUpgradePreflightCode::RollbackBinaryNotExecutable,
+                        format!("rollback binary is not executable: {}", path.display()),
+                    ));
+                }
+            }
+            Err(error) => findings.push(preflight_error(
+                ValidatorUpgradePreflightCode::RollbackBinaryUnreadable,
+                format!("cannot digest rollback binary {}: {error}", path.display()),
+            )),
+        }
+    }
+
+    if let Some(path) = options.archive_status_path.as_ref() {
+        match read_json(path) {
+            Ok(value) => {
+                let enabled = value
+                    .get("enabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or_else(|| {
+                        value
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .map(|status| {
+                                !matches!(
+                                    status.trim().to_ascii_lowercase().as_str(),
+                                    "disabled" | "offline" | "stopped" | "contained"
+                                )
+                            })
+                            .unwrap_or(false)
+                    });
+                if enabled {
+                    findings.push(preflight_error(
+                        ValidatorUpgradePreflightCode::ArchiveNotDisabled,
+                        format!("archive status is not disabled/offline: {}", path.display()),
+                    ));
+                }
+                if value
+                    .get("canonical_verified")
+                    .and_then(Value::as_bool)
+                    .is_some_and(|verified| !verified)
+                {
+                    findings.push(preflight_error(
+                        ValidatorUpgradePreflightCode::ArchiveCanonicalUnverified,
+                        format!("archive canonical verification failed: {}", path.display()),
+                    ));
+                }
+            }
+            Err(error) => findings.push(preflight_warning(
+                ValidatorUpgradePreflightCode::ArchiveCanonicalUnverified,
+                format!("archive status was not readable: {error}"),
+            )),
+        }
+    }
+
+    let chain = match read_chain_summaries(&data_dir) {
+        Ok(chain) => chain,
+        Err(error) => {
+            findings.push(preflight_error(
+                ValidatorUpgradePreflightCode::ChainBodyMalformed,
+                error,
+            ));
+            Vec::new()
+        }
+    };
+    if !data_dir.join("chain.json").is_file() {
+        findings.push(preflight_error(
+            ValidatorUpgradePreflightCode::ChainBodyMissing,
+            format!("missing {}", data_dir.join("chain.json").display()),
+        ));
+    }
+    if chain.is_empty() && data_dir.join("chain.json").is_file() {
+        findings.push(preflight_error(
+            ValidatorUpgradePreflightCode::ChainBodyEmpty,
+            "chain.json contains no retained blocks".to_string(),
+        ));
+    }
+
+    let mut first_retained = chain.first().cloned();
+    let mut latest = chain.last().cloned();
+    if let Err(error) = validate_chain_monotonic(&chain) {
+        findings.push(preflight_error(
+            ValidatorUpgradePreflightCode::ChainBodyNonMonotonic,
+            error,
+        ));
+        first_retained = None;
+        latest = None;
+    }
+
+    let locks = match read_canonical_lock_map(&data_dir) {
+        Ok(locks) => locks,
+        Err(error) => {
+            let code = if data_dir.join("canonical_locks.json").is_file() {
+                ValidatorUpgradePreflightCode::CanonicalLocksMalformed
+            } else {
+                ValidatorUpgradePreflightCode::CanonicalLocksMissing
+            };
+            findings.push(preflight_error(code, error));
+            BTreeMap::new()
+        }
+    };
+
+    let canonical_lock_min_height = locks.keys().next().copied();
+    let canonical_lock_max_height = locks.keys().next_back().copied();
+    let mut boundary_lock_present = false;
+    let mut boundary_committed_qc_present = false;
+
+    if let Some(boundary) = first_retained.as_ref() {
+        match locks.get(&boundary.height) {
+            Some(hash) if hash == &boundary.hash => {
+                boundary_lock_present = true;
+            }
+            Some(hash) => findings.push(preflight_error(
+                ValidatorUpgradePreflightCode::CompactBoundaryLockHashMismatch,
+                format!(
+                    "boundary h{} lock hash {} does not match chain body hash {}",
+                    boundary.height, hash, boundary.hash
+                ),
+            )),
+            None => findings.push(preflight_error(
+                ValidatorUpgradePreflightCode::CompactBoundaryLockMissing,
+                format!(
+                    "first retained chain body height h{} has no canonical lock",
+                    boundary.height
+                ),
+            )),
+        }
+
+        match read_committed_qc_summaries(&data_dir) {
+            Ok(qcs) => {
+                if qcs
+                    .iter()
+                    .any(|qc| qc.height == boundary.height && qc.hash == boundary.hash)
+                {
+                    boundary_committed_qc_present = true;
+                } else if qcs.iter().any(|qc| qc.height == boundary.height) {
+                    findings.push(preflight_error(
+                        ValidatorUpgradePreflightCode::BoundaryCommittedQcHashMismatch,
+                        format!(
+                            "committed QC exists for boundary h{} but not for hash {}",
+                            boundary.height, boundary.hash
+                        ),
+                    ));
+                } else if boundary.height > 0 {
+                    findings.push(preflight_error(
+                        ValidatorUpgradePreflightCode::BoundaryCommittedQcMissing,
+                        format!(
+                            "no committed QC proves first retained chain body height h{}",
+                            boundary.height
+                        ),
+                    ));
+                } else {
+                    boundary_committed_qc_present = true;
+                }
+            }
+            Err(error) => {
+                if boundary.height > 0 {
+                    findings.push(preflight_error(
+                        ValidatorUpgradePreflightCode::BoundaryCommittedQcMissing,
+                        error,
+                    ));
+                } else {
+                    boundary_committed_qc_present = true;
+                }
+            }
+        }
+    }
+
+    let locks_above_chain_tip = latest
+        .as_ref()
+        .map(|tip| {
+            locks
+                .range((tip.height + 1)..)
+                .map(|(height, hash)| LockSummaryReport {
+                    height: *height,
+                    hash: hash.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !locks_above_chain_tip.is_empty() {
+        let detail = format!(
+            "{} canonical lock(s) are above retained chain tip h{}",
+            locks_above_chain_tip.len(),
+            latest.as_ref().map(|tip| tip.height).unwrap_or_default()
+        );
+        if options.allow_derived_index_rebuild
+            && boundary_lock_present
+            && boundary_committed_qc_present
+        {
+            findings.push(preflight_warning(
+                ValidatorUpgradePreflightCode::CanonicalLocksAheadOfChainBody,
+                format!("{detail}; derived index rebuild/prune is required before start"),
+            ));
+        } else {
+            findings.push(preflight_error(
+                ValidatorUpgradePreflightCode::CanonicalLocksAheadOfChainBody,
+                detail,
+            ));
+        }
+    }
+
+    let ok = !findings
+        .iter()
+        .any(|finding| finding.severity == ValidatorUpgradePreflightSeverity::Error);
+    Ok(ValidatorUpgradePreflightReport {
+        ok,
+        decision: if ok { "GO" } else { "NO_GO" }.to_string(),
+        data_dir: data_dir.display().to_string(),
+        first_retained_height: first_retained.as_ref().map(|block| block.height),
+        first_retained_hash: first_retained.as_ref().map(|block| block.hash.clone()),
+        latest_height: latest.as_ref().map(|block| block.height),
+        latest_hash: latest.as_ref().map(|block| block.hash.clone()),
+        canonical_lock_min_height,
+        canonical_lock_max_height,
+        boundary_lock_present,
+        boundary_committed_qc_present,
+        locks_above_chain_tip,
+        file_digests,
+        findings,
+    })
+}
+
+fn preflight_error(
+    code: ValidatorUpgradePreflightCode,
+    detail: String,
+) -> ValidatorUpgradePreflightFinding {
+    ValidatorUpgradePreflightFinding {
+        code,
+        severity: ValidatorUpgradePreflightSeverity::Error,
+        detail,
+    }
+}
+
+fn preflight_warning(
+    code: ValidatorUpgradePreflightCode,
+    detail: String,
+) -> ValidatorUpgradePreflightFinding {
+    ValidatorUpgradePreflightFinding {
+        code,
+        severity: ValidatorUpgradePreflightSeverity::Warning,
+        detail,
+    }
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+fn read_chain_summaries(data_dir: &Path) -> Result<Vec<BlockSummary>, String> {
+    let path = data_dir.join("chain.json");
+    let value = read_json(&path)?;
+    let blocks = value
+        .as_array()
+        .ok_or_else(|| format!("{} is not a JSON array", path.display()))?;
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            let height = get_u64(block, &["height", "number", "block_number", "block_index"])
+                .ok_or_else(|| format!("chain block at array index {index} is missing height"))?;
+            let hash = get_string(block, &["hash", "block_hash"]).ok_or_else(|| {
+                format!("chain block at array index {index} is missing block hash")
+            })?;
+            Ok(BlockSummary { height, hash })
+        })
+        .collect()
+}
+
+fn validate_chain_monotonic(chain: &[BlockSummary]) -> Result<(), String> {
+    for pair in chain.windows(2) {
+        let previous = &pair[0];
+        let next = &pair[1];
+        if next.height != previous.height + 1 {
+            return Err(format!(
+                "chain body is not contiguous: h{} followed by h{}",
+                previous.height, next.height
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_canonical_lock_map(data_dir: &Path) -> Result<BTreeMap<u64, String>, String> {
+    let path = data_dir.join("canonical_locks.json");
+    let value = read_json(&path)?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| format!("{} is not a JSON object", path.display()))?;
+    let mut locks = BTreeMap::new();
+    for (height, entry) in object {
+        let height = height
+            .parse::<u64>()
+            .map_err(|error| format!("canonical lock height {height:?} is invalid: {error}"))?;
+        let hash = get_string(entry, &["hash", "block_hash"])
+            .ok_or_else(|| format!("canonical lock h{height} is missing hash/block_hash"))?;
+        locks.insert(height, hash);
+    }
+    if locks.is_empty() {
+        return Err(format!("{} contains no locks", path.display()));
+    }
+    Ok(locks)
+}
+
+#[derive(Debug, Clone)]
+struct CommittedQcSummary {
+    height: u64,
+    hash: String,
+}
+
+fn read_committed_qc_summaries(data_dir: &Path) -> Result<Vec<CommittedQcSummary>, String> {
+    let path = data_dir.join("committed_qcs.jsonl");
+    let file =
+        fs::File::open(&path).map_err(|error| format!("open {}: {error}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut qcs = Vec::new();
+    for (index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|error| format!("read {}: {error}", path.display()))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = serde_json::from_str::<Value>(&line)
+            .map_err(|error| format!("parse committed QC line {}: {error}", index + 1))?;
+        if let Some(summary) = committed_qc_summary_from_value(&value) {
+            qcs.push(summary);
+        }
+    }
+    if qcs.is_empty() {
+        return Err(format!("{} has no committed QC entries", path.display()));
+    }
+    Ok(qcs)
+}
+
+fn committed_qc_summary_from_value(value: &Value) -> Option<CommittedQcSummary> {
+    let qc = value.get("qc").unwrap_or(value);
+    let hash = get_string(qc, &["block_hash", "hash"])
+        .or_else(|| get_string(value, &["block_hash", "hash"]))?;
+    let height = get_u64(qc, &["height", "block_height", "block_index"])
+        .or_else(|| get_u64(value, &["height", "block_height", "block_index"]))
+        .or_else(|| {
+            qc.get("votes")
+                .and_then(Value::as_array)
+                .and_then(|votes| votes.first())
+                .and_then(|vote| get_u64(vote, &["height", "block_height", "block_index"]))
+        })?;
+    Some(CommittedQcSummary { height, hash })
 }
 
 pub fn inspect_divergence(input: &BuildPlanInput) -> Value {
@@ -484,7 +1008,7 @@ pub fn build_plan(input: BuildPlanInput) -> RecoveryPlan {
         "network_id=synergy-testnet-v2".to_string(),
         "genesis_hash_matches_canonical".to_string(),
         "source_qc_aegis_pqc_verified=true".to_string(),
-        "source_signers_are_active_genesis_validators=true".to_string(),
+        "source_signers_are_active_baseline_validators=true".to_string(),
         "keys_or_configs_copied=false".to_string(),
         "evidence_preserved_before_mutation=true".to_string(),
         "rollback_backup_written_before_mutation=true".to_string(),
@@ -551,7 +1075,7 @@ pub fn build_plan(input: BuildPlanInput) -> RecoveryPlan {
         preconditions,
         postconditions: vec![
             "exact_common_height_match_required_before_rejoin".to_string(),
-            "qc_vote_count_must_meet_dynamic_67_percent_quorum".to_string(),
+            "qc_vote_count_must_meet_dynamic_two_thirds_quorum".to_string(),
             "keys_or_configs_copied=false".to_string(),
             "no_quarantine_marker_after_rejoin".to_string(),
             "no_vote_locks_above_canonical_or_finalized_height".to_string(),
@@ -1019,7 +1543,7 @@ fn verify_legacy_qc(
     }
 
     let height = legacy_qc_height(&qc)?;
-    let validators = load_legacy_active_genesis_validators(data_dir, height)?;
+    let validators = load_legacy_active_baseline_validators(data_dir, height)?;
     let required_quorum = required_quorum_for_active_validator_count(validators.len())?;
     if qc.votes.len() < required_quorum {
         return Err(format!(
@@ -1046,7 +1570,7 @@ fn verify_legacy_qc(
         }
         let validator = validators.get(&vote.validator_address).ok_or_else(|| {
             format!(
-                "committed QC signer {} is not an ACTIVE canonical genesis validator",
+                "committed QC signer {} is not an ACTIVE canonical baseline validator",
                 vote.validator_address
             )
         })?;
@@ -1141,7 +1665,7 @@ fn legacy_vote_signature_payload(vote: &LegacyVote) -> String {
     )
 }
 
-fn load_legacy_active_genesis_validators(
+fn load_legacy_active_baseline_validators(
     data_dir: &Path,
     consensus_height: u64,
 ) -> Result<std::collections::BTreeMap<String, LegacyValidator>, String> {
@@ -1188,9 +1712,10 @@ fn load_legacy_active_genesis_validators(
                     let activation_effective_height =
                         active_post_fork_validator_effective_height(data_dir, address, record)?;
                     if activation_effective_height > consensus_height {
-                        return Err(format!(
-                            "active post-fork validator {address} activation effective height {activation_effective_height} is after QC height {consensus_height}"
-                        ));
+                        continue;
+                    }
+                    if !post_fork_dynamic_validator_has_consensus_participation(record) {
+                        continue;
                     }
                     let public_key_text =
                         get_string(record, &["public_key", "consensus_public_key"]).ok_or_else(
@@ -1248,9 +1773,9 @@ fn load_legacy_active_genesis_validators(
             if active.is_empty() {
                 return Err("post-fork active validator registry is empty".to_string());
             }
-            if active.len() < GENESIS_VALIDATOR_COUNT {
+            if active.len() < BASELINE_VALIDATOR_COUNT {
                 return Err(format!(
-                    "post-fork active validator registry has {} validator(s), expected at least {GENESIS_VALIDATOR_COUNT}",
+                    "post-fork active validator registry has {} validator(s), expected at least {BASELINE_VALIDATOR_COUNT}",
                     active.len()
                 ));
             }
@@ -1281,7 +1806,16 @@ fn load_legacy_active_genesis_validators(
                 &algorithm_label,
             )?
         } else {
-            parse_validator_public_key(address, &public_key_text)?
+            parse_validator_public_key(address, &public_key_text).or_else(|error| {
+                if error.contains("missing consensus key algorithm prefix") {
+                    return parse_validator_public_key_with_declared_algorithm(
+                        address,
+                        &public_key_text,
+                        "FN-DSA",
+                    );
+                }
+                Err(error)
+            })?
         };
         if !canonical_keys.is_empty() && !canonical_keys.contains(&public_key.key_data) {
             return Err(format!(
@@ -1301,19 +1835,25 @@ fn load_legacy_active_genesis_validators(
             },
         );
     }
-    if active.len() != GENESIS_VALIDATOR_COUNT {
+    if active.len() != BASELINE_VALIDATOR_COUNT {
         return Err(format!(
-            "active validator registry has {} canonical validator(s), expected {GENESIS_VALIDATOR_COUNT}",
+            "active validator registry has {} canonical validator(s), expected {BASELINE_VALIDATOR_COUNT}",
             active.len()
         ));
     }
-    if seen_canonical_keys.len() != GENESIS_VALIDATOR_COUNT {
+    if seen_canonical_keys.len() != BASELINE_VALIDATOR_COUNT {
         return Err(format!(
-            "active validator registry has {} unique canonical key(s), expected {GENESIS_VALIDATOR_COUNT}",
+            "active validator registry has {} unique canonical key(s), expected {BASELINE_VALIDATOR_COUNT}",
             seen_canonical_keys.len()
         ));
     }
     Ok(active)
+}
+
+fn post_fork_dynamic_validator_has_consensus_participation(record: &Value) -> bool {
+    get_u64(record, &["last_vote_timestamp"]).unwrap_or(0) > 0
+        || get_u64(record, &["total_transactions_validated"]).unwrap_or(0) > 0
+        || get_u64(record, &["total_blocks_produced"]).unwrap_or(0) > 0
 }
 
 fn active_post_fork_validator_effective_height(
@@ -1542,7 +2082,7 @@ fn validate_validator_set_against_active_registry(
     consensus_height: u64,
     data_dir: &Path,
 ) -> Result<(), String> {
-    let active = load_legacy_active_genesis_validators(data_dir, consensus_height)?;
+    let active = load_legacy_active_baseline_validators(data_dir, consensus_height)?;
     let active_records = validator_set
         .validators
         .iter()
@@ -1592,9 +2132,9 @@ fn validate_validator_set_against_active_registry(
     _consensus_height: u64,
     _data_dir: &Path,
 ) -> Result<(), String> {
-    if validator_set.validators.len() != GENESIS_VALIDATOR_COUNT {
+    if validator_set.validators.len() != BASELINE_VALIDATOR_COUNT {
         return Err(format!(
-            "validator set has {} validators, expected canonical {GENESIS_VALIDATOR_COUNT}",
+            "validator set has {} validators, expected canonical {BASELINE_VALIDATOR_COUNT}",
             validator_set.validators.len()
         ));
     }
@@ -2014,7 +2554,7 @@ mod tests {
     }
 
     fn genesis_required_quorum() -> usize {
-        required_validator_quorum(GENESIS_VALIDATOR_COUNT)
+        required_validator_quorum(BASELINE_VALIDATOR_COUNT)
     }
 
     fn write_chain(root: &Path, heights: &[(&str, u64)]) {
@@ -2050,6 +2590,35 @@ mod tests {
         .unwrap();
     }
 
+    fn write_locks(root: &Path, locks: &[(u64, &str)]) {
+        let mut object = serde_json::Map::new();
+        for (height, hash) in locks {
+            object.insert(height.to_string(), json!({"block_hash": hash}));
+        }
+        fs::write(
+            root.join("data/canonical_locks.json"),
+            Value::Object(object).to_string(),
+        )
+        .unwrap();
+    }
+
+    fn write_preflight_qc(root: &Path, height: u64, hash: &str) {
+        fs::write(
+            root.join("data/committed_qcs.jsonl"),
+            format!(
+                "{}\n",
+                json!({
+                    "block_hash": hash,
+                    "qc": {
+                        "block_hash": hash,
+                        "votes": [{"block_index": height}]
+                    }
+                })
+            ),
+        )
+        .unwrap();
+    }
+
     fn write_recoverable_files(root: &Path) {
         for file in ALLOWED_STATE_FILES {
             let path = root.join("data").join(file);
@@ -2057,6 +2626,78 @@ mod tests {
                 fs::write(path, format!("{file}\n")).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn preflight_upgrade_classifies_val1_compact_boundary_failure() {
+        let root = temp_root("val1-compact-boundary-preflight");
+        write_chain(
+            &root,
+            &[("boundary-h175518", 175_518), ("tip-h175519", 175_519)],
+        );
+        write_locks(&root, &[(175_520, "stale-lock-above-tip")]);
+        fs::write(root.join("data/committed_qcs.jsonl"), "").unwrap();
+
+        let report =
+            preflight_validator_upgrade(&root, ValidatorUpgradePreflightOptions::default())
+                .expect("preflight should return a report");
+
+        assert!(!report.ok);
+        assert_eq!(report.decision, "NO_GO");
+        assert_eq!(report.first_retained_height, Some(175_518));
+        assert_eq!(report.latest_height, Some(175_519));
+        assert_eq!(report.locks_above_chain_tip.len(), 1);
+        let codes = report
+            .findings
+            .iter()
+            .map(|finding| &finding.code)
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&&ValidatorUpgradePreflightCode::CompactBoundaryLockMissing));
+        assert!(codes.contains(&&ValidatorUpgradePreflightCode::BoundaryCommittedQcMissing));
+        assert!(codes.contains(&&ValidatorUpgradePreflightCode::CanonicalLocksAheadOfChainBody));
+    }
+
+    #[test]
+    fn preflight_upgrade_rejects_stale_locks_above_tip_by_default() {
+        let root = temp_root("stale-lock-default-no-go");
+        write_chain(&root, &[("boundary-h10", 10), ("tip-h11", 11)]);
+        write_locks(&root, &[(10, "boundary-h10"), (12, "stale-lock-above-tip")]);
+        write_preflight_qc(&root, 10, "boundary-h10");
+
+        let report =
+            preflight_validator_upgrade(&root, ValidatorUpgradePreflightOptions::default())
+                .expect("preflight should return a report");
+
+        assert!(!report.ok);
+        assert!(report.findings.iter().any(|finding| finding.code
+            == ValidatorUpgradePreflightCode::CanonicalLocksAheadOfChainBody
+            && finding.severity == ValidatorUpgradePreflightSeverity::Error));
+    }
+
+    #[test]
+    fn preflight_upgrade_allows_stale_locks_when_boundary_qc_is_safe_and_rebuild_requested() {
+        let root = temp_root("stale-lock-safe-rebuild");
+        write_chain(&root, &[("boundary-h10", 10), ("tip-h11", 11)]);
+        write_locks(&root, &[(10, "boundary-h10"), (12, "stale-lock-above-tip")]);
+        write_preflight_qc(&root, 10, "boundary-h10");
+
+        let report = preflight_validator_upgrade(
+            &root,
+            ValidatorUpgradePreflightOptions {
+                allow_derived_index_rebuild: true,
+                ..ValidatorUpgradePreflightOptions::default()
+            },
+        )
+        .expect("preflight should return a report");
+
+        assert!(report.ok);
+        assert_eq!(report.decision, "GO");
+        assert!(report.boundary_lock_present);
+        assert!(report.boundary_committed_qc_present);
+        assert_eq!(report.locks_above_chain_tip.len(), 1);
+        assert!(report.findings.iter().any(|finding| finding.code
+            == ValidatorUpgradePreflightCode::CanonicalLocksAheadOfChainBody
+            && finding.severity == ValidatorUpgradePreflightSeverity::Warning));
     }
 
     fn signed_qc_fixture(
@@ -2070,7 +2711,7 @@ mod tests {
         let mut signer = AegisPqvmSigner::initialize_required().unwrap();
         let mut records = Vec::new();
         let mut key_ids = Vec::new();
-        for index in 0..GENESIS_VALIDATOR_COUNT {
+        for index in 0..BASELINE_VALIDATOR_COUNT {
             let uma = format!("uma-{index}");
             let key_id = signer
                 .generate_and_register_key(&uma, vec![AegisPqKeyRole::ConsensusVote], Epoch(0))
@@ -2197,7 +2838,7 @@ mod tests {
         let mut manager = PQCManager::new();
         let mut validators = serde_json::Map::new();
         let mut keys = Vec::new();
-        for index in 0..GENESIS_VALIDATOR_COUNT {
+        for index in 0..BASELINE_VALIDATOR_COUNT {
             let address = format!("synv11testvalidator{index}");
             let (public_key, private_key) = manager.generate_keypair(PQCAlgorithm::FNDSA).unwrap();
             validators.insert(
@@ -2266,6 +2907,91 @@ mod tests {
         fs::write(root.join("data/committed_qcs.jsonl"), lines).unwrap();
     }
 
+    #[test]
+    fn legacy_qc_verification_accepts_unprefixed_active_validator_public_keys_as_fndsa() {
+        let root = temp_root("legacy-unprefixed-validator-keys");
+        let mut manager = PQCManager::new();
+        let mut validators = serde_json::Map::new();
+        let mut keys = Vec::new();
+        let height = 10;
+        let block_hash = "legacy-unprefixed-majority-hash";
+        let signer_count = genesis_required_quorum();
+
+        for index in 0..BASELINE_VALIDATOR_COUNT {
+            let address = format!("synv11testvalidator{index}");
+            let (public_key, private_key) = manager.generate_keypair(PQCAlgorithm::FNDSA).unwrap();
+            validators.insert(
+                address.clone(),
+                json!({
+                    "address": address,
+                    "status": "Active",
+                    "public_key": general_purpose::STANDARD.encode(&public_key.key_data),
+                    "synergy_score": 100.0,
+                    "cluster_id": 0,
+                }),
+            );
+            keys.push((address, public_key, private_key));
+        }
+        fs::write(
+            root.join("data/validator_registry.json"),
+            json!({
+                "validators": validators,
+                "clusters": {"0": []},
+                "current_epoch": 0,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let votes = keys
+            .iter()
+            .take(signer_count)
+            .map(|(address, public_key, private_key)| {
+                let payload = format!("{address}:{height}:0:{block_hash}:0");
+                let signature = manager.sign(private_key, payload.as_bytes()).unwrap();
+                json!({
+                    "validator_address": address,
+                    "block_hash": block_hash,
+                    "block_index": height,
+                    "epoch_number": 0,
+                    "round_number": 0,
+                    "signature": signature,
+                    "signer_public_key": public_key.key_data,
+                    "timestamp": 100,
+                })
+            })
+            .collect::<Vec<_>>();
+        fs::write(
+            root.join("data/committed_qcs.jsonl"),
+            serde_json::to_string(&json!({
+                "block_hash": block_hash,
+                "qc": {
+                    "block_hash": block_hash,
+                    "epoch_number": 0,
+                    "round_number": 0,
+                    "aggregate_signature": [1, 2, 3, 4],
+                    "participant_bitmap": [15],
+                    "cumulative_weight": signer_count as f64,
+                    "validation_quorum_met": true,
+                    "cooperation_quorum_met": true,
+                    "timestamp": 100,
+                    "votes": votes,
+                }
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+
+        let summary =
+            verify_latest_committed_qc_in_state_dir_at_or_below(&root, height, None).unwrap();
+
+        assert!(summary.verified);
+        assert_eq!(summary.height, height);
+        assert_eq!(summary.vote_count, signer_count as u64);
+        assert_eq!(summary.hash, block_hash);
+    }
+
     fn write_activation_dag_fixture(
         root: &Path,
         validator_address: &str,
@@ -2301,14 +3027,14 @@ mod tests {
     }
 
     #[test]
-    fn post_fork_qc_verification_requires_five_of_six_quorum_for_expanded_set() {
+    fn post_fork_qc_verification_requires_four_of_six_quorum_for_expanded_set() {
         let root = temp_root("post-fork-untyped-registry-qc");
         fs::create_dir_all(root.join("config")).unwrap();
         let mut manager = PQCManager::new();
         let mut validators = serde_json::Map::new();
         let mut registry = Vec::new();
         let mut keys = Vec::new();
-        for index in 0..=GENESIS_VALIDATOR_COUNT {
+        for index in 0..=BASELINE_VALIDATOR_COUNT {
             let address = format!("synv11postforkvalidator{index}");
             let (public_key, private_key) = manager.generate_keypair(PQCAlgorithm::FNDSA).unwrap();
             let encoded = general_purpose::STANDARD.encode(&public_key.key_data);
@@ -2360,6 +3086,7 @@ mod tests {
         let height = 204216;
         let block_hash = "post-fork-majority-hash";
         let required_quorum = required_validator_quorum(keys.len());
+        assert_eq!(required_quorum, 4);
         let votes = keys
             .iter()
             .take(required_quorum)
@@ -2425,9 +3152,9 @@ mod tests {
         let activation_block_height = height - VALIDATOR_SHADOW_PHASE_BLOCKS - 1;
         let activation_tx_hash = "syntxn-later-activated-validator";
         let activated_validator_address =
-            format!("synv11postforkvalidator{GENESIS_VALIDATOR_COUNT}");
+            format!("synv11postforkvalidator{BASELINE_VALIDATOR_COUNT}");
 
-        for index in 0..=GENESIS_VALIDATOR_COUNT {
+        for index in 0..=BASELINE_VALIDATOR_COUNT {
             let address = format!("synv11postforkvalidator{index}");
             let (public_key, private_key) = manager.generate_keypair(PQCAlgorithm::FNDSA).unwrap();
             let encoded = general_purpose::STANDARD.encode(&public_key.key_data);
@@ -2438,8 +3165,10 @@ mod tests {
                 "synergy_score": 100.0,
                 "cluster_id": 0,
             });
-            if index == GENESIS_VALIDATOR_COUNT {
+            if index == BASELINE_VALIDATOR_COUNT {
                 record["activation_tx_hash"] = json!(activation_tx_hash);
+                record["last_vote_timestamp"] = json!(100);
+                record["total_transactions_validated"] = json!(1);
             } else {
                 record["consensus_key_type"] = json!("FN-DSA");
                 registry.push(json!({
@@ -2486,7 +3215,7 @@ mod tests {
         );
 
         let block_hash = "post-fork-activated-validator-hash";
-        let signer_indices = [0usize, 1, 2, 3, GENESIS_VALIDATOR_COUNT];
+        let signer_indices = [0usize, 1, 2, 3, BASELINE_VALIDATOR_COUNT];
         let votes = signer_indices
             .iter()
             .map(|index| {
@@ -2544,6 +3273,131 @@ mod tests {
     }
 
     #[test]
+    fn post_fork_qc_verification_ignores_activated_validator_without_consensus_participation() {
+        let root = temp_root("post-fork-activated-nonparticipant-qc");
+        fs::create_dir_all(root.join("config")).unwrap();
+        let mut manager = PQCManager::new();
+        let mut validators = serde_json::Map::new();
+        let mut registry = Vec::new();
+        let mut keys = Vec::new();
+        let height = 760_908;
+        let activated_validator_address =
+            format!("synv11postforkvalidator{}", BASELINE_VALIDATOR_COUNT + 1);
+
+        for index in 0..=(BASELINE_VALIDATOR_COUNT + 1) {
+            let address = format!("synv11postforkvalidator{index}");
+            let (public_key, private_key) = manager.generate_keypair(PQCAlgorithm::FNDSA).unwrap();
+            let encoded = general_purpose::STANDARD.encode(&public_key.key_data);
+            let mut record = json!({
+                "address": address,
+                "status": "Active",
+                "public_key": encoded,
+                "synergy_score": 100.0,
+                "cluster_id": 0,
+            });
+            if index == BASELINE_VALIDATOR_COUNT + 1 {
+                record["activation_effective_height"] = json!(height - 100);
+                record["last_vote_timestamp"] = json!(0);
+                record["total_blocks_produced"] = json!(0);
+                record["total_transactions_validated"] = json!(0);
+            } else {
+                registry.push(json!({
+                    "validator_address": address,
+                    "consensus_key_type": "FN-DSA",
+                    "consensus_public_key": encoded,
+                }));
+            }
+            validators.insert(address.clone(), record);
+            keys.push((address, public_key, private_key));
+        }
+        fs::write(
+            root.join("data/validator_registry.json"),
+            json!({
+                "validators": validators,
+                "clusters": {"0": []},
+                "current_epoch": 0,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let fork_path = root.join("config/consensus-fork-migration.json");
+        fs::write(
+            &fork_path,
+            serde_json::to_vec_pretty(&json!({
+                "fork_height": 204216,
+                "parent_height": 204215,
+                "parent_hash": "e209bd7554a06dfb052d5ff7ffd5664efc05e6cd1c5cadc9d139fa5bb9072816",
+                "state_root": "test-state-root",
+                "old_consensus_algorithm": "FN-DSA",
+                "new_consensus_algorithm": "FN-DSA",
+                "new_validator_registry": registry,
+                "migration_reason": "test activated nonparticipant QC verification",
+                "parser_mode": "fail_closed",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let block_hash = "post-fork-activated-nonparticipant-hash";
+        let required_quorum = required_validator_quorum(BASELINE_VALIDATOR_COUNT + 1);
+        assert_eq!(required_quorum, 4);
+        let votes = keys
+            .iter()
+            .take(required_quorum)
+            .map(|(address, public_key, private_key)| {
+                let payload = format!("{address}:{height}:0:{block_hash}:0");
+                let signature = manager.sign(private_key, payload.as_bytes()).unwrap();
+                json!({
+                    "validator_address": address,
+                    "block_hash": block_hash,
+                    "block_index": height,
+                    "epoch_number": 0,
+                    "round_number": 0,
+                    "signature": signature,
+                    "signer_public_key": public_key.key_data,
+                    "timestamp": 100,
+                })
+            })
+            .collect::<Vec<_>>();
+        fs::write(
+            root.join("data/committed_qcs.jsonl"),
+            serde_json::to_string(&json!({
+                "block_hash": block_hash,
+                "qc": {
+                    "block_hash": block_hash,
+                    "epoch_number": 0,
+                    "round_number": 0,
+                    "aggregate_signature": [1, 2, 3, 4],
+                    "participant_bitmap": [15],
+                    "cumulative_weight": required_quorum as f64,
+                    "validation_quorum_met": true,
+                    "cooperation_quorum_met": true,
+                    "timestamp": 100,
+                    "votes": votes,
+                }
+            }))
+            .unwrap()
+                + "\n",
+        )
+        .unwrap();
+
+        let previous_fork = std::env::var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV).ok();
+        std::env::set_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV, &fork_path);
+        let result = verify_latest_committed_qc_in_state_dir_at_or_below(&root, height, None);
+        match previous_fork {
+            Some(value) => std::env::set_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV, value),
+            None => std::env::remove_var(consensus_fork::CONSENSUS_FORK_MIGRATION_ENV),
+        }
+
+        let summary = result.unwrap();
+        assert!(summary.verified);
+        assert_eq!(summary.height, height);
+        assert_eq!(summary.vote_count, required_quorum as u64);
+        assert!(!summary.signers.contains(&activated_validator_address));
+        assert_eq!(summary.active_validator_count, BASELINE_VALIDATOR_COUNT + 1);
+    }
+
+    #[test]
     fn post_fork_qc_verification_rejects_unactivated_extra_validator() {
         let root = temp_root("post-fork-unactivated-validator-qc");
         fs::create_dir_all(root.join("config")).unwrap();
@@ -2553,7 +3407,7 @@ mod tests {
         let mut keys = Vec::new();
         let height = 204300;
 
-        for index in 0..=GENESIS_VALIDATOR_COUNT {
+        for index in 0..=BASELINE_VALIDATOR_COUNT {
             let address = format!("synv11postforkvalidator{index}");
             let (public_key, private_key) = manager.generate_keypair(PQCAlgorithm::FNDSA).unwrap();
             let encoded = general_purpose::STANDARD.encode(&public_key.key_data);
@@ -2568,7 +3422,7 @@ mod tests {
                     "cluster_id": 0,
                 }),
             );
-            if index < GENESIS_VALIDATOR_COUNT {
+            if index < BASELINE_VALIDATOR_COUNT {
                 registry.push(json!({
                     "validator_address": address,
                     "consensus_key_type": "FN-DSA",
@@ -2606,7 +3460,7 @@ mod tests {
         .unwrap();
 
         let block_hash = "post-fork-unactivated-validator-hash";
-        let signer_indices = [0usize, 1, 2, 3, GENESIS_VALIDATOR_COUNT];
+        let signer_indices = [0usize, 1, 2, 3, BASELINE_VALIDATOR_COUNT];
         let votes = signer_indices
             .iter()
             .map(|index| {

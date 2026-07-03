@@ -16,8 +16,8 @@ ROOT = Path(__file__).resolve().parents[2]
 GENERATOR = ROOT / "scripts" / "testnet" / "genesis_art.py"
 GENESIS = ROOT / "genesis.testnet.json"
 NETWORK_IDENTIFIERS = ROOT / "network-identifiers.testnet.json"
-EXPECTED_GENESIS_HASH = "85b26d520e1621adaa212012dae540dcb223e0a9648666b919d64cb8c4394c75"
-EXPECTED_NETWORK_MAGIC = "e312fa40"
+EXPECTED_GENESIS_HASH = "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789"
+EXPECTED_NETWORK_MAGIC = "ec6a253c"
 
 REQUIRED_FILES = [
     "synergy-art-styleguide.json",
@@ -143,7 +143,7 @@ class GenesisArtworkTests(unittest.TestCase):
     def test_visible_full_sigil_metadata_requirements(self) -> None:
         svg = (self.out_a / "synergy-testnet-genesis-sigil.svg").read_text(encoding="utf-8")
         self.assertIn("CHAIN 1264", svg)
-        self.assertIn("MAGIC e312fa40", svg)
+        self.assertIn("MAGIC ec6a253c", svg)
         self.assertIn("GENESIS HASH 85b26d52...c4394c75", svg)
 
     def test_minimal_sigil_has_no_raw_genesis_dump(self) -> None:
@@ -174,7 +174,7 @@ class GenesisArtworkTests(unittest.TestCase):
             for token in forbidden:
                 self.assertNotIn(token.encode("utf-8"), payload, path.name)
 
-    def test_validator_plaque_files_are_generated_for_all_five_genesis_validators(self) -> None:
+    def test_validator_plaque_files_are_generated_for_all_five_initial_validators(self) -> None:
         plaques = sorted(path.name for path in self.out_a.glob("synergy-testnet-validator-*-plaque.svg"))
         self.assertEqual(
             plaques,

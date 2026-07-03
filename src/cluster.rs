@@ -888,8 +888,72 @@ mod tests {
     fn quorum_and_fault_tolerance_are_bft_derived() {
         assert_eq!(fault_tolerance_f(5), 1);
         assert_eq!(quorum_threshold(5), 4);
+        assert_eq!(fault_tolerance_f(6), 1);
+        assert_eq!(quorum_threshold(6), 4);
+        assert_eq!(fault_tolerance_f(7), 2);
+        assert_eq!(quorum_threshold(7), 5);
+        assert_eq!(fault_tolerance_f(10), 3);
+        assert_eq!(quorum_threshold(10), 7);
         assert_eq!(fault_tolerance_f(12), 3);
-        assert_eq!(quorum_threshold(12), 9);
+        assert_eq!(quorum_threshold(12), 8);
+        assert_eq!(fault_tolerance_f(13), 4);
+        assert_eq!(quorum_threshold(13), 9);
+    }
+
+    #[test]
+    fn dynamic_cluster_assignments_keep_independent_quorum_per_cluster() {
+        let config = ClusterConfig::default();
+        let active = validators(13);
+        let assignments = compute_cluster_assignments(
+            11,
+            &active,
+            "synergy-testnet",
+            "genesis",
+            "block-hash",
+            500,
+            &config,
+        )
+        .unwrap();
+
+        let cluster_sizes = assignments
+            .cluster_assignments
+            .iter()
+            .map(|assignment| assignment.validator_ids.len())
+            .collect::<Vec<_>>();
+        assert_eq!(cluster_sizes, vec![7, 6]);
+        for assignment in assignments.cluster_assignments {
+            assert_eq!(
+                assignment.quorum_threshold,
+                quorum_threshold(assignment.validator_ids.len())
+            );
+            assert_eq!(
+                assignment.fault_tolerance_f,
+                fault_tolerance_f(assignment.validator_ids.len())
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_cluster_assignment_supports_three_clusters() {
+        let config = ClusterConfig::default();
+        let active = validators(36);
+        let assignments = compute_cluster_assignments(
+            12,
+            &active,
+            "synergy-testnet",
+            "genesis",
+            "block-hash",
+            600,
+            &config,
+        )
+        .unwrap();
+
+        assert_eq!(assignments.cluster_assignments.len(), 3);
+        assert!(assignments
+            .cluster_assignments
+            .iter()
+            .all(|assignment| assignment.validator_ids.len() == 12
+                && assignment.quorum_threshold == quorum_threshold(12)));
     }
 
     #[test]

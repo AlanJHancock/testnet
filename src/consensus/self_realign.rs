@@ -21,7 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const EXPECTED_GENESIS_HASH: &str =
     "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789";
-pub const GENESIS_VALIDATOR_COUNT: usize = 5;
+pub const BASELINE_VALIDATOR_COUNT: usize = 5;
 pub const DEFAULT_SNAPSHOT_INTERVAL_BLOCKS: u64 = 5_000;
 pub const DEFAULT_SNAPSHOT_INTERVAL_SECS: u64 = 15 * 60;
 pub const DEFAULT_SNAPSHOT_RETENTION_COUNT: usize = 2;
@@ -105,6 +105,19 @@ pub fn default_allowed_restore_roles_for_class(snapshot_class: &str) -> Option<V
     Some(roles.into_iter().map(str::to_string).collect())
 }
 
+pub fn supported_restore_roles_for_class(snapshot_class: &str) -> Option<Vec<String>> {
+    let snapshot_class = normalize_snapshot_class(snapshot_class)?;
+    let mut roles = default_allowed_restore_roles_for_class(snapshot_class)?;
+    if snapshot_class == SNAPSHOT_CLASS_ARCHIVE_FULL {
+        roles.extend(
+            ["validator", "onboarding_validator", "quarantined_validator"]
+                .into_iter()
+                .map(str::to_string),
+        );
+    }
+    Some(roles)
+}
+
 pub fn snapshot_class_uses_compact_history(snapshot_class: &str) -> bool {
     match normalize_snapshot_class(snapshot_class) {
         Some(SNAPSHOT_CLASS_ARCHIVE_FULL)
@@ -124,11 +137,11 @@ pub fn normalize_snapshot_role(role: &str) -> String {
 }
 
 pub fn snapshot_class_allows_role(snapshot_class: &str, role: &str) -> bool {
-    let Some(defaults) = default_allowed_restore_roles_for_class(snapshot_class) else {
+    let Some(supported) = supported_restore_roles_for_class(snapshot_class) else {
         return false;
     };
     let role = normalize_snapshot_role(role);
-    defaults.iter().any(|allowed| allowed == &role)
+    supported.iter().any(|allowed| allowed == &role)
 }
 const SNAPSHOT_FORBIDDEN_PATH_FRAGMENTS: &[&str] = &[
     "config",
@@ -170,12 +183,21 @@ pub enum RealignmentState {
     ShadowObserving,
     ShadowPassed,
     ReadyToRejoin,
+    VoteOnly,
     PendingReactivation,
     FailedClosed,
 }
 
 impl RealignmentState {
     pub fn consensus_duties_enabled(self) -> bool {
+        matches!(self, Self::Active | Self::VoteOnly)
+    }
+
+    pub fn voting_duties_enabled(self) -> bool {
+        matches!(self, Self::Active | Self::VoteOnly)
+    }
+
+    pub fn proposer_duties_enabled(self) -> bool {
         self == Self::Active
     }
 
@@ -236,8 +258,8 @@ pub struct SnapshotQcEvidence {
     pub duplicate_signer_check_passed: bool,
     #[serde(default)]
     pub active_validator_count: usize,
-    #[serde(default)]
-    pub active_validator_set_is_genesis_5: bool,
+    #[serde(default, alias = "active_validator_set_is_genesis_5")]
+    pub active_validator_set_meets_baseline: bool,
     pub relayers_rpc_support_counted_toward_quorum: bool,
 }
 
@@ -326,7 +348,7 @@ pub struct SnapshotVerificationPolicy {
     pub expected_snapshot_class: Option<String>,
     pub target_role: Option<String>,
     pub required_quorum: u64,
-    pub expected_genesis_validator_count: usize,
+    pub expected_validator_count: usize,
     pub current_finalized_height: Option<u64>,
     pub max_snapshot_lag_blocks: Option<u64>,
     pub require_manifest_signature: bool,
@@ -342,7 +364,7 @@ impl Default for SnapshotVerificationPolicy {
             expected_snapshot_class: None,
             target_role: None,
             required_quorum: 0,
-            expected_genesis_validator_count: 0,
+            expected_validator_count: 0,
             current_finalized_height: None,
             max_snapshot_lag_blocks: Some(DEFAULT_SNAPSHOT_INTERVAL_BLOCKS * 2),
             require_manifest_signature: true,
@@ -367,7 +389,8 @@ pub struct SnapshotVerificationReport {
     pub source_qc_aegis_pqc_verified: bool,
     pub duplicate_signer_check_passed: bool,
     pub active_validator_count: usize,
-    pub active_validator_set_is_genesis_5: bool,
+    #[serde(default)]
+    pub active_validator_set_meets_baseline: bool,
     pub relayers_rpc_support_counted_toward_quorum: bool,
     pub manifest_signature_verified: bool,
     pub file_checksums_verified: bool,
@@ -439,13 +462,14 @@ pub struct ValidatorDutyGate {
 
 impl ValidatorDutyGate {
     pub fn for_state(state: RealignmentState) -> Self {
-        let active = state.consensus_duties_enabled();
+        let active = state == RealignmentState::Active;
+        let vote_only = state == RealignmentState::VoteOnly;
         Self {
             state,
-            can_vote: active,
+            can_vote: active || vote_only,
             can_propose: active,
             can_aggregate_qc: active,
-            can_count_toward_quorum: active,
+            can_count_toward_quorum: active || vote_only,
             can_enter_proposer_schedule: active,
             can_serve_as_canonical_source: active,
             shadow_signs_real_votes: false,
@@ -457,7 +481,7 @@ impl ValidatorDutyGate {
 pub struct PeerBranchEvidence {
     pub node_id: String,
     pub role: PeerEvidenceRole,
-    pub active_genesis_validator: bool,
+    pub active_validator: bool,
     pub height: u64,
     pub block_hash: String,
 }
@@ -465,7 +489,7 @@ pub struct PeerBranchEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PeerEvidenceRole {
-    GenesisValidator,
+    Validator,
     Relayer,
     RpcGateway,
     Archive,
@@ -494,7 +518,7 @@ pub fn prove_majority_branch(
     let mut height = 0;
     for report in reports {
         height = height.max(report.height);
-        if report.role == PeerEvidenceRole::GenesisValidator && report.active_genesis_validator {
+        if report.role == PeerEvidenceRole::Validator && report.active_validator {
             counts
                 .entry(report.block_hash.clone())
                 .or_default()
@@ -520,8 +544,7 @@ pub fn prove_majority_branch(
             reports
                 .iter()
                 .filter(|report| {
-                    report.role == PeerEvidenceRole::GenesisValidator
-                        && report.active_genesis_validator
+                    report.role == PeerEvidenceRole::Validator && report.active_validator
                 })
                 .map(|report| report.node_id.as_str())
                 .collect::<BTreeSet<_>>()
@@ -788,11 +811,23 @@ pub fn evaluate_rejoin_eligibility(input: RejoinEligibilityInput) -> RejoinEligi
     let mut blocked = Vec::new();
     if input.state != RealignmentState::ReadyToRejoin
         && input.state != RealignmentState::ShadowPassed
+        && input.state != RealignmentState::CaughtUp
     {
-        blocked.push("validator is not READY_TO_REJOIN or SHADOW_PASSED".to_string());
+        blocked.push("validator is not CAUGHT_UP, READY_TO_REJOIN, or SHADOW_PASSED".to_string());
     }
-    if !input.shadow_passed {
-        blocked.push("shadow observation has not passed".to_string());
+    let vote_only_proof_ready = input.exact_common_height_match
+        && input.latest_finalized_qc_aegis_pqc_verified
+        && input.no_stale_vote_locks_above_finalized
+        && input.no_proposal_cache_conflicts_above_finalized
+        && input.quarantine_reason_cleared
+        && input.state_root_matches
+        && input.own_validator_key_intact
+        && !input.keys_or_configs_copied
+        && input.cluster_marks_pending_reactivation;
+    if !input.shadow_passed && !vote_only_proof_ready {
+        blocked.push(
+            "shadow observation has not passed and vote-only proof is incomplete".to_string(),
+        );
     }
     if !input.exact_common_height_match {
         blocked.push("exact common-height hash does not match quorum".to_string());
@@ -830,7 +865,7 @@ pub fn evaluate_rejoin_eligibility(input: RejoinEligibilityInput) -> RejoinEligi
     if input.keys_or_configs_copied {
         blocked.push("keys or configs were copied".to_string());
     }
-    if !input.rejoin_at_finalized_safe_boundary {
+    if input.shadow_passed && !input.rejoin_at_finalized_safe_boundary {
         blocked.push("rejoin is not at a finalized safe boundary".to_string());
     }
     if !input.cluster_marks_pending_reactivation {
@@ -843,7 +878,7 @@ pub fn evaluate_rejoin_eligibility(input: RejoinEligibilityInput) -> RejoinEligi
         validator_id: input.validator_id,
         previous_state: input.state,
         new_state: if eligible {
-            RealignmentState::PendingReactivation
+            RealignmentState::VoteOnly
         } else {
             RealignmentState::Quarantined
         },
@@ -1112,11 +1147,10 @@ pub fn verify_signed_snapshot_manifest(
             manifest.quorum_threshold
         ));
     }
-    let active_validator_set_meets_genesis_baseline =
-        manifest.active_validator_set.len() >= policy.expected_genesis_validator_count;
-    if !active_validator_set_meets_genesis_baseline {
-        errors
-            .push("snapshot active validator set is below the genesis validator count".to_string());
+    let active_validator_set_meets_baseline =
+        manifest.active_validator_set.len() >= policy.expected_validator_count;
+    if !active_validator_set_meets_baseline {
+        errors.push("snapshot active validator set is below the validator count".to_string());
     }
     if manifest.qc_evidence.vote_count < required_quorum {
         errors.push(format!(
@@ -1172,7 +1206,7 @@ pub fn verify_signed_snapshot_manifest(
         errors.push("snapshot producer identity is invalid".to_string());
     }
     match manifest.source_role.as_str() {
-        "GENESIS_VALIDATOR" | "ARCHIVE" | "ARCHIVE_NODE" | "EXPLORER_INDEXER" => {}
+        "VALIDATOR" | "ARCHIVE" | "ARCHIVE_NODE" | "EXPLORER_INDEXER" => {}
         _ => errors.push("snapshot producer role is not authorized".to_string()),
     }
     if manifest.runtime_checksum.trim().is_empty() || manifest.runtime_checksum == "unknown" {
@@ -1243,7 +1277,7 @@ pub fn verify_signed_snapshot_manifest(
         source_qc_aegis_pqc_verified: manifest.qc_evidence.aegis_pqc_verified,
         duplicate_signer_check_passed: manifest.qc_evidence.duplicate_signer_check_passed,
         active_validator_count: qc_active_validator_count,
-        active_validator_set_is_genesis_5: manifest.qc_evidence.active_validator_set_is_genesis_5,
+        active_validator_set_meets_baseline,
         relayers_rpc_support_counted_toward_quorum: manifest
             .qc_evidence
             .relayers_rpc_support_counted_toward_quorum,
@@ -1435,10 +1469,15 @@ fn allowed_transition(current: RealignmentState, next: RealignmentState) -> bool
             | (SnapshotVerified, SnapshotRestored)
             | (SnapshotRestored, SpeedSyncing)
             | (SpeedSyncing, CaughtUp)
+            | (CaughtUp, VoteOnly)
             | (CaughtUp, ShadowObserving)
             | (ShadowObserving, ShadowPassed)
             | (ShadowPassed, ReadyToRejoin)
+            | (ShadowPassed, VoteOnly)
+            | (ReadyToRejoin, VoteOnly)
             | (ReadyToRejoin, PendingReactivation)
+            | (VoteOnly, Active)
+            | (VoteOnly, Quarantined)
             | (PendingReactivation, Active)
             | (_, FailedClosed)
             | (ShadowObserving, Quarantined)
@@ -1577,10 +1616,27 @@ fn verify_manifest_signature(signed: &SignedSnapshotManifest) -> Result<(), Stri
         lifecycle,
     )
     .map_err(|error| error.to_string())?;
+    let current_payload = manifest.canonical_bytes()?;
+    match verify_manifest_signature_payload(&verifier, signed, &current_payload) {
+        Ok(()) => Ok(()),
+        Err(current_error) => {
+            let legacy_payload = legacy_snapshot_manifest_canonical_bytes(manifest)?;
+            verify_manifest_signature_payload(&verifier, signed, &legacy_payload)
+                .map_err(|_| current_error)
+        }
+    }
+}
+
+fn verify_manifest_signature_payload(
+    verifier: &AegisPqvmVerifier,
+    signed: &SignedSnapshotManifest,
+    payload: &[u8],
+) -> Result<(), String> {
+    let manifest = &signed.manifest;
     verifier
         .verify_domain_signature(
             SYNERGY_ARCHIVE_SNAPSHOT_MANIFEST_V1,
-            &manifest.canonical_bytes()?,
+            payload,
             &manifest.manifest_signer_uma_id,
             &manifest.manifest_signing_key_id,
             Epoch(manifest.manifest_signature_epoch),
@@ -1588,6 +1644,107 @@ fn verify_manifest_signature(signed: &SignedSnapshotManifest) -> Result<(), Stri
             &signed.aegis_pq_signature,
         )
         .map_err(|error| error.to_string())
+}
+
+#[derive(Serialize)]
+struct LegacySnapshotManifestRef<'a> {
+    manifest_version: u32,
+    chain_id: u64,
+    chain_id_hex: &'a str,
+    network_id: &'a str,
+    genesis_hash: &'a str,
+    snapshot_class: &'a str,
+    allowed_restore_roles: &'a [String],
+    snapshot_height: u64,
+    snapshot_block_hash: &'a str,
+    parent_hash: &'a str,
+    state_root: Option<&'a String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    consensus_fork: Option<&'a ConsensusForkMigration>,
+    canonical_lock_height: u64,
+    canonical_lock_hash: &'a str,
+    qc_evidence: LegacySnapshotQcEvidenceRef<'a>,
+    active_validator_set: &'a [String],
+    quorum_threshold: u64,
+    files: &'a [SnapshotFileEntry],
+    full_archive_sha256: &'a str,
+    created_at: u64,
+    source_node_id: &'a str,
+    source_role: &'a str,
+    runtime_checksum: &'a str,
+    source_node_quarantined: bool,
+    source_node_majority_branch: bool,
+    conflict_height_hash: Option<&'a String>,
+    manifest_signer_uma_id: &'a str,
+    manifest_signing_key_id: &'a AegisPqKeyId,
+    manifest_signer_public_key: &'a AegisPqPublicKey,
+    manifest_signature_epoch: u64,
+}
+
+#[derive(Serialize)]
+struct LegacySnapshotQcEvidenceRef<'a> {
+    committed_qc_height: u64,
+    committed_qc_hash: &'a str,
+    vote_count: u64,
+    signer_set: &'a [String],
+    aegis_pqc_verified: bool,
+    duplicate_signer_check_passed: bool,
+    active_validator_count: usize,
+    active_validator_set_is_genesis_5: bool,
+    relayers_rpc_support_counted_toward_quorum: bool,
+}
+
+fn legacy_snapshot_manifest_canonical_bytes(
+    manifest: &SnapshotManifest,
+) -> Result<Vec<u8>, String> {
+    let legacy = LegacySnapshotManifestRef {
+        manifest_version: manifest.manifest_version,
+        chain_id: manifest.chain_id,
+        chain_id_hex: &manifest.chain_id_hex,
+        network_id: &manifest.network_id,
+        genesis_hash: &manifest.genesis_hash,
+        snapshot_class: &manifest.snapshot_class,
+        allowed_restore_roles: &manifest.allowed_restore_roles,
+        snapshot_height: manifest.snapshot_height,
+        snapshot_block_hash: &manifest.snapshot_block_hash,
+        parent_hash: &manifest.parent_hash,
+        state_root: manifest.state_root.as_ref(),
+        consensus_fork: manifest.consensus_fork.as_ref(),
+        canonical_lock_height: manifest.canonical_lock_height,
+        canonical_lock_hash: &manifest.canonical_lock_hash,
+        qc_evidence: LegacySnapshotQcEvidenceRef {
+            committed_qc_height: manifest.qc_evidence.committed_qc_height,
+            committed_qc_hash: &manifest.qc_evidence.committed_qc_hash,
+            vote_count: manifest.qc_evidence.vote_count,
+            signer_set: &manifest.qc_evidence.signer_set,
+            aegis_pqc_verified: manifest.qc_evidence.aegis_pqc_verified,
+            duplicate_signer_check_passed: manifest.qc_evidence.duplicate_signer_check_passed,
+            active_validator_count: manifest.qc_evidence.active_validator_count,
+            active_validator_set_is_genesis_5: manifest
+                .qc_evidence
+                .active_validator_set_meets_baseline,
+            relayers_rpc_support_counted_toward_quorum: manifest
+                .qc_evidence
+                .relayers_rpc_support_counted_toward_quorum,
+        },
+        active_validator_set: &manifest.active_validator_set,
+        quorum_threshold: manifest.quorum_threshold,
+        files: &manifest.files,
+        full_archive_sha256: &manifest.full_archive_sha256,
+        created_at: manifest.created_at,
+        source_node_id: &manifest.source_node_id,
+        source_role: &manifest.source_role,
+        runtime_checksum: &manifest.runtime_checksum,
+        source_node_quarantined: manifest.source_node_quarantined,
+        source_node_majority_branch: manifest.source_node_majority_branch,
+        conflict_height_hash: manifest.conflict_height_hash.as_ref(),
+        manifest_signer_uma_id: &manifest.manifest_signer_uma_id,
+        manifest_signing_key_id: &manifest.manifest_signing_key_id,
+        manifest_signer_public_key: &manifest.manifest_signer_public_key,
+        manifest_signature_epoch: manifest.manifest_signature_epoch,
+    };
+    serde_json::to_vec(&legacy)
+        .map_err(|error| format!("legacy canonical serialize failed: {error}"))
 }
 
 fn verify_snapshot_relative_path(relative_path: &str) -> Result<(), String> {
@@ -1688,8 +1845,8 @@ mod tests {
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn genesis_required_quorum() -> usize {
-        required_snapshot_quorum_for_validator_count(GENESIS_VALIDATOR_COUNT) as usize
+    fn baseline_required_quorum() -> usize {
+        required_snapshot_quorum_for_validator_count(BASELINE_VALIDATOR_COUNT) as usize
     }
 
     fn temp_root(name: &str) -> PathBuf {
@@ -1729,7 +1886,7 @@ mod tests {
             aegis_pqc_verified: true,
             duplicate_signer_check_passed: true,
             active_validator_count: 5,
-            active_validator_set_is_genesis_5: true,
+            active_validator_set_meets_baseline: true,
             relayers_rpc_support_counted_toward_quorum: false,
         }
     }
@@ -1764,7 +1921,7 @@ mod tests {
             qc_evidence,
             active_validator_set,
             source_node_id: "validator-2".to_string(),
-            source_role: "GENESIS_VALIDATOR".to_string(),
+            source_role: "VALIDATOR".to_string(),
             runtime_checksum: "runtime-sha256".to_string(),
             source_node_quarantined: false,
             source_node_majority_branch: true,
@@ -1835,6 +1992,69 @@ mod tests {
             SNAPSHOT_CLASS_ARCHIVE_FULL,
             "archive_validator"
         ));
+        assert!(snapshot_class_allows_role(
+            SNAPSHOT_CLASS_ARCHIVE_FULL,
+            "validator"
+        ));
+    }
+
+    #[test]
+    fn archive_full_defaults_remain_archive_only() {
+        assert_eq!(
+            default_allowed_restore_roles_for_class(SNAPSHOT_CLASS_ARCHIVE_FULL).unwrap(),
+            vec![
+                "archive".to_string(),
+                "archive_validator".to_string(),
+                "snapshot_authority".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn archive_full_can_explicitly_authorize_validator_recovery() {
+        let (mut signer, key_id, public) = signer();
+        let manifest = create_snapshot_manifest(SnapshotBuildInput {
+            state_dir: state_dir(),
+            snapshot_class: SNAPSHOT_CLASS_ARCHIVE_FULL.to_string(),
+            allowed_restore_roles: vec![
+                "archive_validator".to_string(),
+                "validator".to_string(),
+                "quarantined_validator".to_string(),
+            ],
+            snapshot_height: 100,
+            snapshot_block_hash: "block-hash".to_string(),
+            parent_hash: "parent-hash".to_string(),
+            state_root: None,
+            canonical_lock_height: 100,
+            canonical_lock_hash: "block-hash".to_string(),
+            qc_evidence: qc_evidence(),
+            active_validator_set: validators(),
+            source_node_id: "validator-2".to_string(),
+            source_role: "VALIDATOR".to_string(),
+            runtime_checksum: "runtime-sha256".to_string(),
+            source_node_quarantined: false,
+            source_node_majority_branch: true,
+            conflict_height_hash: Some("block-hash".to_string()),
+            manifest_signer_uma_id: "archive-1".to_string(),
+            manifest_signing_key_id: key_id,
+            manifest_signer_public_key: public,
+            manifest_signature_epoch: 0,
+            created_at: 1,
+        })
+        .unwrap();
+        let signed = sign_snapshot_manifest(&mut signer, manifest).unwrap();
+        let policy = SnapshotVerificationPolicy {
+            expected_snapshot_class: Some(SNAPSHOT_CLASS_ARCHIVE_FULL.to_string()),
+            target_role: Some("validator".to_string()),
+            ..SnapshotVerificationPolicy::default()
+        };
+        let report = verify_signed_snapshot_manifest(&signed, &policy, None);
+        assert!(report.success, "{:?}", report.errors);
+        assert_eq!(report.snapshot_class, SNAPSHOT_CLASS_ARCHIVE_FULL);
+        assert!(report
+            .allowed_restore_roles
+            .iter()
+            .any(|role| role == "validator"));
     }
 
     #[test]
@@ -1889,7 +2109,7 @@ mod tests {
         active_validator_set.push("validator-6".to_string());
         let mut qc_evidence = qc_evidence();
         qc_evidence.active_validator_count = active_validator_set.len();
-        qc_evidence.active_validator_set_is_genesis_5 = false;
+        qc_evidence.active_validator_set_meets_baseline = false;
         qc_evidence.vote_count =
             required_snapshot_quorum_for_validator_count(active_validator_set.len());
         qc_evidence.signer_set.push("validator-5".to_string());
@@ -1928,7 +2148,7 @@ mod tests {
             qc_evidence: qc_evidence(),
             active_validator_set: validators(),
             source_node_id: "validator-2".to_string(),
-            source_role: "GENESIS_VALIDATOR".to_string(),
+            source_role: "VALIDATOR".to_string(),
             runtime_checksum: "runtime-sha256".to_string(),
             source_node_quarantined: false,
             source_node_majority_branch: true,
@@ -2013,7 +2233,7 @@ mod tests {
     #[test]
     fn snapshot_manifest_requires_network_id() {
         let mut signed = signed_manifest();
-        signed.manifest.network_id = "testbeta".to_string();
+        signed.manifest.network_id = "testnet".to_string();
         let report = verify(&signed);
         assert!(report
             .errors
@@ -2086,6 +2306,9 @@ mod tests {
             .collect::<Vec<_>>();
         let mut evidence = qc_evidence();
         evidence.active_validator_count = active_validator_set.len();
+        evidence.active_validator_set_meets_baseline = false;
+        evidence.vote_count = required_snapshot_quorum_for_validator_count(6) - 1;
+        evidence.signer_set.truncate(evidence.vote_count as usize);
         let signed = signed_manifest_with(active_validator_set, evidence);
 
         assert_eq!(
@@ -2152,7 +2375,7 @@ mod tests {
             qc_evidence: qc_evidence(),
             active_validator_set: validators(),
             source_node_id: "validator-2".to_string(),
-            source_role: "GENESIS_VALIDATOR".to_string(),
+            source_role: "VALIDATOR".to_string(),
             runtime_checksum: "runtime-sha256".to_string(),
             source_node_quarantined: false,
             source_node_majority_branch: true,
@@ -2303,41 +2526,41 @@ mod tests {
         let reports = vec![
             PeerBranchEvidence {
                 node_id: "validator-1".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
             PeerBranchEvidence {
                 node_id: "validator-2".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
             PeerBranchEvidence {
                 node_id: "validator-3".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
             PeerBranchEvidence {
                 node_id: "validator-4".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
             PeerBranchEvidence {
                 node_id: "rpc".to_string(),
                 role: PeerEvidenceRole::RpcGateway,
-                active_genesis_validator: false,
+                active_validator: false,
                 height: 10,
                 block_hash: "b".to_string(),
             },
         ];
-        let proof = prove_majority_branch(&reports, genesis_required_quorum());
+        let proof = prove_majority_branch(&reports, baseline_required_quorum());
         assert!(proof.proven);
         assert_eq!(proof.majority_hash.as_deref(), Some("a"));
         assert_eq!(proof.ignored_support_count, 1);
@@ -2367,38 +2590,48 @@ mod tests {
     }
 
     #[test]
+    fn vote_only_rejoin_votes_but_cannot_propose() {
+        let gate = ValidatorDutyGate::for_state(RealignmentState::VoteOnly);
+        assert!(gate.can_vote);
+        assert!(gate.can_count_toward_quorum);
+        assert!(!gate.can_propose);
+        assert!(!gate.can_aggregate_qc);
+        assert!(!gate.can_enter_proposer_schedule);
+    }
+
+    #[test]
     fn relayer_not_counted_toward_quarantine_quorum() {
         let reports = vec![
             PeerBranchEvidence {
                 node_id: "validator-1".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
             PeerBranchEvidence {
                 node_id: "validator-2".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
             PeerBranchEvidence {
                 node_id: "validator-3".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
             PeerBranchEvidence {
                 node_id: "relayer-1".to_string(),
                 role: PeerEvidenceRole::Relayer,
-                active_genesis_validator: false,
+                active_validator: false,
                 height: 10,
                 block_hash: "a".to_string(),
             },
         ];
-        assert!(!prove_majority_branch(&reports, genesis_required_quorum()).proven);
+        assert!(!prove_majority_branch(&reports, baseline_required_quorum()).proven);
     }
 
     #[test]
@@ -2406,34 +2639,34 @@ mod tests {
         let reports = vec![
             PeerBranchEvidence {
                 node_id: "validator-1".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
             PeerBranchEvidence {
                 node_id: "validator-2".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
             PeerBranchEvidence {
                 node_id: "validator-3".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
             PeerBranchEvidence {
                 node_id: "rpc".to_string(),
                 role: PeerEvidenceRole::RpcGateway,
-                active_genesis_validator: false,
+                active_validator: false,
                 height: 10,
                 block_hash: "a".to_string(),
             },
         ];
-        assert!(!prove_majority_branch(&reports, genesis_required_quorum()).proven);
+        assert!(!prove_majority_branch(&reports, baseline_required_quorum()).proven);
     }
 
     #[test]
@@ -2594,6 +2827,7 @@ mod tests {
     fn rejoin_requires_shadow_pass() {
         let mut input = eligible_rejoin_input();
         input.shadow_passed = false;
+        input.exact_common_height_match = false;
         assert!(!evaluate_rejoin_eligibility(input).eligible);
     }
 
@@ -2605,17 +2839,17 @@ mod tests {
     }
 
     #[test]
-    fn genesis_validator_quorum_continues_when_one_quarantined() {
+    fn validator_quorum_continues_when_one_quarantined() {
         let proof_reports = (1..=4)
             .map(|index| PeerBranchEvidence {
                 node_id: format!("validator-{index}"),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 99,
                 block_hash: "majority".to_string(),
             })
             .collect::<Vec<_>>();
-        assert!(prove_majority_branch(&proof_reports, genesis_required_quorum()).proven);
+        assert!(prove_majority_branch(&proof_reports, baseline_required_quorum()).proven);
     }
 
     #[test]
@@ -2624,14 +2858,14 @@ mod tests {
             ValidatorDutyGate::for_state(RealignmentState::Quarantined).can_count_toward_quorum
                 == false
         );
-        assert!(GENESIS_VALIDATOR_COUNT - 1 >= genesis_required_quorum());
+        assert!(BASELINE_VALIDATOR_COUNT - 1 >= baseline_required_quorum());
     }
 
     #[test]
     fn recovered_validator_rejoins_without_split() {
         let report = evaluate_rejoin_eligibility(eligible_rejoin_input());
         assert!(report.eligible);
-        assert_eq!(report.new_state, RealignmentState::PendingReactivation);
+        assert_eq!(report.new_state, RealignmentState::VoteOnly);
     }
 
     #[test]
@@ -2662,45 +2896,48 @@ mod tests {
     #[test]
     fn quorum_threshold_follows_dynamic_policy() {
         assert_eq!(
-            genesis_required_quorum(),
-            required_validator_quorum(GENESIS_VALIDATOR_COUNT)
+            baseline_required_quorum(),
+            required_validator_quorum(BASELINE_VALIDATOR_COUNT)
         );
-        assert_eq!(required_snapshot_quorum_for_validator_count(6), 5);
+        assert_eq!(required_snapshot_quorum_for_validator_count(6), 4);
+        assert_eq!(required_snapshot_quorum_for_validator_count(7), 5);
+        assert_eq!(required_snapshot_quorum_for_validator_count(10), 7);
+        assert_eq!(required_snapshot_quorum_for_validator_count(13), 9);
     }
 
     #[test]
-    fn non_genesis_shadow_validator_not_counted() {
+    fn shadow_validator_not_counted() {
         let reports = vec![
             PeerBranchEvidence {
                 node_id: "validator-1".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
             PeerBranchEvidence {
                 node_id: "validator-2".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
             PeerBranchEvidence {
                 node_id: "validator-3".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
             PeerBranchEvidence {
                 node_id: "new-validator".to_string(),
                 role: PeerEvidenceRole::ShadowValidator,
-                active_genesis_validator: false,
+                active_validator: false,
                 height: 10,
                 block_hash: "a".to_string(),
             },
         ];
-        assert!(!prove_majority_branch(&reports, genesis_required_quorum()).proven);
+        assert!(!prove_majority_branch(&reports, baseline_required_quorum()).proven);
     }
 
     #[test]
@@ -2708,34 +2945,34 @@ mod tests {
         let reports = vec![
             PeerBranchEvidence {
                 node_id: "validator-1".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
             PeerBranchEvidence {
                 node_id: "validator-2".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
             PeerBranchEvidence {
                 node_id: "validator-3".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
             PeerBranchEvidence {
                 node_id: "validator-4".to_string(),
-                role: PeerEvidenceRole::GenesisValidator,
-                active_genesis_validator: true,
+                role: PeerEvidenceRole::Validator,
+                active_validator: true,
                 height: 10,
                 block_hash: "a".to_string(),
             },
         ];
-        let proof = prove_majority_branch(&reports, genesis_required_quorum());
+        let proof = prove_majority_branch(&reports, baseline_required_quorum());
         assert_eq!(proof.majority_hash.as_deref(), Some("a"));
     }
 

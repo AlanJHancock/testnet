@@ -22,7 +22,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -42,8 +42,10 @@ lazy_static::lazy_static! {
 
 static COMMITTED_QC_STORE_INIT: Once = Once::new();
 
-pub const VALIDATOR_QUORUM_PERCENT: usize = 67;
-pub const VALIDATOR_QUORUM_RATIO: f64 = VALIDATOR_QUORUM_PERCENT as f64 / 100.0;
+pub const VALIDATOR_QUORUM_NUMERATOR: usize = 2;
+pub const VALIDATOR_QUORUM_DENOMINATOR: usize = 3;
+pub const VALIDATOR_QUORUM_RATIO: f64 =
+    VALIDATOR_QUORUM_NUMERATOR as f64 / VALIDATOR_QUORUM_DENOMINATOR as f64;
 pub const MIN_LAUNCH_VOTE_TIMEOUT_SECS: u64 = 1;
 const LOCAL_VOTE_LOCK_COMPACTION_MIN_LOCKS: usize = 1024;
 const LOCAL_VOTE_LOCK_FINALIZED_RETENTION_DEPTH: u64 = 16;
@@ -1858,6 +1860,12 @@ impl DualQuorumConsensus {
         }
     }
 
+    fn vote_lock_evidence_root_for_path(path: &Path) -> PathBuf {
+        path.parent()
+            .map(|data_dir| data_dir.join("consensus_recovery_evidence"))
+            .unwrap_or_else(|| crate::utils::resolve_data_path("data/consensus_recovery_evidence"))
+    }
+
     fn preserve_vote_lock_compaction_evidence_unlocked(
         path: &PathBuf,
         locks: &HashMap<String, LocalVoteLock>,
@@ -1868,7 +1876,7 @@ impl DualQuorumConsensus {
         reason: &str,
         now: u64,
     ) -> Result<PathBuf, String> {
-        let evidence_root = crate::utils::resolve_data_path("data/consensus_recovery_evidence");
+        let evidence_root = Self::vote_lock_evidence_root_for_path(path);
         fs::create_dir_all(&evidence_root)
             .map_err(|err| format!("failed to create vote-lock evidence directory: {err}"))?;
         let evidence_nonce = SystemTime::now()
@@ -2070,7 +2078,7 @@ impl DualQuorumConsensus {
             });
         }
 
-        let evidence_root = crate::utils::resolve_data_path("data/consensus_recovery_evidence");
+        let evidence_root = Self::vote_lock_evidence_root_for_path(&path);
         fs::create_dir_all(&evidence_root)
             .map_err(|err| format!("failed to create vote-lock evidence directory: {err}"))?;
         let evidence_nonce = SystemTime::now()
@@ -2169,10 +2177,23 @@ impl DualQuorumConsensus {
                 latest_lock.block_hash, proposed_block.previous_hash
             ));
         }
+        if !latest_lock.checkpoint_fork_parent {
+            return Err(format!(
+                "ordinary same-height vote supersede requires transient vote-lock recovery before signing: height={} locked_round={} requested_round={} requested_hash={} requested_proposer={} canonical_parent_height={} canonical_parent_hash={} canonical_parent_source={}",
+                proposed_block.block_index,
+                latest_conflicting_round,
+                round_number,
+                proposed_block.hash,
+                proposed_block.validator_id,
+                latest_lock.height,
+                latest_lock.block_hash,
+                latest_lock.source
+            ));
+        }
 
         warn!(
             "consensus",
-            "Accepting higher-round same-height vote supersede after deterministic view change",
+            "Accepting checkpoint-fork same-height vote supersede after deterministic view change",
             "height" => proposed_block.block_index,
             "new_hash" => proposed_block.hash.clone(),
             "new_proposer" => proposed_block.validator_id.clone(),
@@ -2282,7 +2303,6 @@ impl DualQuorumConsensus {
         {
             return Ok(());
         }
-
         let now = Self::current_timestamp();
         let effective_min_age_secs = if canonical_parent.checkpoint_fork_parent {
             0
@@ -2329,7 +2349,7 @@ impl DualQuorumConsensus {
             );
             warn!(
                 "consensus",
-                "Recovered stale transient vote locks before signing higher-round proposal",
+                "Recovered stale transient vote locks before signing higher-round view-change proposal",
                 "validator" => validator_address.to_string(),
                 "height" => proposed_block.block_index,
                 "requested_hash" => proposed_block.hash.clone(),
@@ -2752,7 +2772,7 @@ pub fn required_validator_quorum(total_validators: usize) -> usize {
     if total_validators == 0 {
         0
     } else {
-        (total_validators * VALIDATOR_QUORUM_PERCENT).div_ceil(100)
+        (total_validators * VALIDATOR_QUORUM_NUMERATOR).div_ceil(VALIDATOR_QUORUM_DENOMINATOR)
     }
 }
 
@@ -2886,11 +2906,12 @@ mod tests {
     }
 
     #[test]
-    fn qc_verification_requires_dynamic_five_of_six_quorum() {
+    fn qc_verification_requires_dynamic_four_of_six_quorum() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
 
         let required = DualQuorumConsensus::required_qc_validator_votes(6);
 
+        assert_eq!(required, 4);
         assert_eq!(required, required_validator_quorum(6));
     }
 
@@ -3276,7 +3297,7 @@ mod tests {
     }
 
     #[test]
-    fn same_height_higher_round_extending_canonical_parent_supersedes_transient_lock() {
+    fn ordinary_same_height_higher_round_extending_canonical_parent_is_rejected() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
         crate::consensus::legacy_canonical_lock::clear_legacy_canonical_locks_for_tests();
@@ -3310,16 +3331,27 @@ mod tests {
             "unexpected same-round error: {same_round_error}"
         );
 
-        DualQuorumConsensus::register_local_vote_intent("validator2", &conflicting_block, 40, 2)
-            .expect("higher-round canonical-parent vote supersede should be accepted");
+        let higher_round_error = DualQuorumConsensus::register_local_vote_intent(
+            "validator2",
+            &conflicting_block,
+            40,
+            2,
+        )
+        .expect_err("ordinary higher-round same-height conflict must stay fail-closed");
+        assert!(
+            higher_round_error.contains(
+                "ordinary same-height vote supersede requires transient vote-lock recovery"
+            ),
+            "unexpected higher-round error: {higher_round_error}"
+        );
 
         let locked = DualQuorumConsensus::local_locked_vote_for_height("validator2", 40, 13)
             .expect("local vote lock lookup should succeed")
-            .expect("latest local vote lock should advance");
-        assert_eq!(locked.block_hash, conflicting_block.hash);
-        assert_eq!(locked.first_round_number, 2);
-        assert_eq!(locked.latest_round_number, 2);
-        assert_eq!(locked.proposer, "validator3");
+            .expect("latest local vote lock should remain on the first block");
+        assert_eq!(locked.block_hash, block.hash);
+        assert_eq!(locked.first_round_number, 1);
+        assert_eq!(locked.latest_round_number, 1);
+        assert_eq!(locked.proposer, "validator1");
 
         let locks = DualQuorumConsensus::load_local_vote_locks_unlocked()
             .expect("persisted vote locks should load");
@@ -3330,15 +3362,8 @@ mod tests {
         assert!(
             locks
                 .values()
-                .any(|lock| lock.block_hash == conflicting_block.hash
-                    && lock.block_index == 13
-                    && lock.latest_round_number == 2
-                    && lock.superseded.iter().any(|superseded| {
-                        superseded.block_hash == block.hash
-                            && superseded.first_round_number == 1
-                            && superseded.latest_round_number == 1
-                    })),
-            "higher-round superseding vote lock should be persisted"
+                .all(|lock| lock.block_hash != conflicting_block.hash),
+            "conflicting higher-round vote lock must not be persisted"
         );
 
         DualQuorumConsensus::set_test_local_vote_lock_path(None);
@@ -3482,7 +3507,7 @@ mod tests {
             .values()
             .any(|lock| lock.block_hash == next.hash && lock.block_index == 2_001));
 
-        let evidence_root = crate::utils::resolve_data_path("data/consensus_recovery_evidence");
+        let evidence_root = DualQuorumConsensus::vote_lock_evidence_root_for_path(&path);
         let evidence_found = fs::read_dir(&evidence_root)
             .ok()
             .into_iter()
@@ -3508,7 +3533,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_conflicting_vote_lock_is_recovered_before_higher_round_vote() {
+    fn stale_ordinary_conflicting_vote_lock_is_recovered_before_higher_round_view_change() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
         crate::consensus::legacy_canonical_lock::clear_legacy_canonical_locks_for_tests();
@@ -3539,10 +3564,10 @@ mod tests {
             0,
             "test higher-round transient recovery",
         )
-        .expect("stale conflicting lock should recover before signing");
+        .expect("ordinary stale conflicting lock should be recovered before view change");
 
         DualQuorumConsensus::register_local_vote_intent("validator2", &recovery_block, 40, 2)
-            .expect("higher-round vote may proceed only after stale transient evidence recovery");
+            .expect("higher-round proposal should replace tossed-out deadlock candidate");
 
         let locks = DualQuorumConsensus::load_local_vote_locks_unlocked()
             .expect("persisted vote locks should load");
@@ -3555,7 +3580,7 @@ mod tests {
             locks
                 .values()
                 .all(|lock| lock.block_hash != first_block.hash),
-            "stale lock must be archived as recovery evidence before replacement"
+            "tossed-out deadlock candidate must be removed from active locks"
         );
 
         DualQuorumConsensus::set_test_local_vote_lock_path(None);
@@ -3647,7 +3672,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_conflicting_vote_lock_can_supersede_at_higher_round_without_recovery() {
+    fn fresh_conflicting_vote_lock_rejects_higher_round_without_checkpoint_fork() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
         crate::consensus::legacy_canonical_lock::clear_legacy_canonical_locks_for_tests();
@@ -3680,24 +3705,26 @@ mod tests {
         )
         .expect("fresh lock check should fail closed without mutation");
 
-        DualQuorumConsensus::register_local_vote_intent("validator2", &recovery_block, 40, 2)
-            .expect(
-                "higher-round canonical-parent vote supersede should not wait for stale recovery",
-            );
+        let err =
+            DualQuorumConsensus::register_local_vote_intent("validator2", &recovery_block, 40, 2)
+                .expect_err("ordinary higher-round same-height conflict must stay locked");
+        assert!(
+            err.contains(
+                "ordinary same-height vote supersede requires transient vote-lock recovery"
+            ),
+            "unexpected higher-round conflict error: {err}"
+        );
 
         let locked = DualQuorumConsensus::local_locked_vote_for_height("validator2", 40, 13)
             .expect("local vote lock lookup should succeed")
-            .expect("higher-round lock should become latest");
-        assert_eq!(locked.block_hash, recovery_block.hash);
-        assert_eq!(locked.latest_round_number, 2);
+            .expect("original lock should remain latest");
+        assert_eq!(locked.block_hash, first_block.hash);
+        assert_eq!(locked.latest_round_number, 1);
         let locks = DualQuorumConsensus::load_local_vote_locks_unlocked()
             .expect("persisted vote locks should load");
-        assert!(locks.values().any(|lock| {
-            lock.block_hash == recovery_block.hash
-                && lock.superseded.iter().any(|superseded| {
-                    superseded.block_hash == first_block.hash && superseded.latest_round_number == 1
-                })
-        }));
+        assert!(locks
+            .values()
+            .all(|lock| lock.block_hash != recovery_block.hash));
 
         DualQuorumConsensus::set_test_local_vote_lock_path(None);
         crate::consensus::legacy_canonical_lock::clear_legacy_canonical_locks_for_tests();
@@ -3964,7 +3991,7 @@ mod tests {
     }
 
     #[test]
-    fn below_dynamic_quorum_equal_weight_votes_do_not_commit() {
+    fn below_dynamic_two_thirds_equal_weight_votes_do_not_commit() {
         let validator_manager = approved_validator_manager(&[
             "validator1",
             "validator2",
@@ -3985,7 +4012,7 @@ mod tests {
         );
         let active_validators =
             consensus_membership_validators(validator_manager.get_active_validators());
-        let votes = ["validator1", "validator2", "validator3", "validator4"]
+        let votes = ["validator1", "validator2", "validator3"]
             .into_iter()
             .map(|validator_address| Vote {
                 validator_address: validator_address.to_string(),
@@ -4007,46 +4034,40 @@ mod tests {
 
         assert_eq!(
             consensus.required_validator_votes(active_validators.len()),
-            5
+            4
         );
         assert!(
             !consensus.has_commit_quorum(&active_validators, &votes),
-            "4 collected votes across six active validators must not satisfy 67% quorum"
+            "3 collected votes across six active validators must not satisfy two-thirds quorum"
         );
 
-        let five_votes = [
-            "validator1",
-            "validator2",
-            "validator3",
-            "validator4",
-            "validator5",
-        ]
-        .into_iter()
-        .map(|validator_address| Vote {
-            validator_address: validator_address.to_string(),
-            block_hash: "block-hash".to_string(),
-            block_index: 42,
-            epoch_number: 1,
-            round_number: 1,
-            signature: PQCSignature {
-                algorithm: PQCAlgorithm::FNDSA,
-                signature_data: Vec::new(),
-                message_hash: Vec::new(),
-                public_key_id: String::new(),
-                created_at: 0,
-            },
-            signer_public_key: Vec::new(),
-            timestamp: 0,
-        })
-        .collect::<Vec<_>>();
+        let four_votes = ["validator1", "validator2", "validator3", "validator4"]
+            .into_iter()
+            .map(|validator_address| Vote {
+                validator_address: validator_address.to_string(),
+                block_hash: "block-hash".to_string(),
+                block_index: 42,
+                epoch_number: 1,
+                round_number: 1,
+                signature: PQCSignature {
+                    algorithm: PQCAlgorithm::FNDSA,
+                    signature_data: Vec::new(),
+                    message_hash: Vec::new(),
+                    public_key_id: String::new(),
+                    created_at: 0,
+                },
+                signer_public_key: Vec::new(),
+                timestamp: 0,
+            })
+            .collect::<Vec<_>>();
         assert!(
-            consensus.has_commit_quorum(&active_validators, &five_votes),
-            "5 of 6 equal-weight votes should satisfy 67% quorum"
+            consensus.has_commit_quorum(&active_validators, &four_votes),
+            "4 of 6 equal-weight votes should satisfy exact two-thirds quorum"
         );
     }
 
     #[test]
-    fn exact_sixty_seven_percent_equal_weight_votes_commit() {
+    fn exact_two_thirds_equal_weight_votes_commit() {
         let validator_manager = equal_weight_validator_manager(100);
         let pqc_manager = Arc::new(Mutex::new(PQCManager::new()));
         let consensus = DualQuorumConsensus::new(
@@ -4087,7 +4108,7 @@ mod tests {
         );
         assert!(
             consensus.has_commit_quorum(&active_validators, &votes),
-            "exactly 67 of 100 equal-weight votes must satisfy dynamic 67% quorum"
+            "exactly 67 of 100 equal-weight votes must satisfy dynamic two-thirds quorum"
         );
     }
 

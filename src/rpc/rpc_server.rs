@@ -4,16 +4,20 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::address::generate_cluster_address;
-use crate::block::{BlockChain, HOT_CHAIN_RETENTION_BLOCKS_ENV};
+use crate::block::{Block, BlockChain, HOT_CHAIN_RETENTION_BLOCKS_ENV};
+use crate::cluster::{fault_tolerance_f, quorum_threshold};
 use crate::consensus::chain_durability::recover_chain_and_validate_canonical;
 use crate::consensus::consensus_algorithm::ProofOfSynergy;
 use crate::consensus::consensus_fork;
-use crate::consensus::legacy_canonical_lock::legacy_canonical_commit_record;
+use crate::consensus::dual_quorum::{required_validator_quorum, DualQuorumConsensus};
+use crate::consensus::legacy_canonical_lock::{
+    legacy_canonical_commit_record, write_legacy_canonical_lock,
+};
 use crate::consensus::synergy_score::SynergyScoreCalculator;
 use crate::crypto::pqc::PQCManager;
 use crate::genesis::canonical_genesis;
@@ -32,7 +36,7 @@ use crate::token::TOKEN_MANAGER;
 use crate::transaction::Transaction;
 use crate::validator::{
     balanced_validator_cluster_id, Validator, ValidatorManager, ValidatorStatus,
-    INITIAL_VALIDATOR_SYNERGY_SCORE, VALIDATOR_MANAGER,
+    INITIAL_VALIDATOR_SYNERGY_SCORE, TESTNET_MIN_VALIDATOR_STAKE_NWEI, VALIDATOR_MANAGER,
 };
 use crate::wallet::WALLET_MANAGER;
 use crate::{info, warn};
@@ -63,6 +67,37 @@ fn compact_hot_chain_state_from_env(chain: &mut BlockChain, context: &str) {
     }
 }
 
+fn compact_boundary_has_or_rebuilds_canonical_lock(block: &Block) -> Result<bool, String> {
+    match legacy_canonical_commit_record(block.block_index)? {
+        Some(record) if record.block_hash == block.hash && record.parent_hash == block.previous_hash => {
+            Ok(true)
+        }
+        Some(record) => Err(format!(
+            "compact chain boundary h{} does not match canonical lock: chain_hash={} chain_parent={} lock_hash={} lock_parent={}",
+            block.block_index,
+            block.hash,
+            block.previous_hash,
+            record.block_hash,
+            record.parent_hash
+        )),
+        None => {
+            let Some(qc) = DualQuorumConsensus::committed_qc_for_block_hash(&block.hash) else {
+                return Err(format!(
+                    "compact chain starts at h{} but canonical lock is missing and no committed QC can rebuild it",
+                    block.block_index
+                ));
+            };
+            write_legacy_canonical_lock(block, &qc).map_err(|error| {
+                format!(
+                    "compact chain starts at h{} but canonical lock rebuild failed: {error}",
+                    block.block_index
+                )
+            })?;
+            Ok(true)
+        }
+    }
+}
+
 lazy_static! {
     pub static ref TX_POOL: Arc<Mutex<Vec<Transaction>>> = Arc::new(Mutex::new(Vec::new()));
 }
@@ -79,6 +114,19 @@ lazy_static! {
 static SUBSCRIPTION_COUNTER: AtomicU64 = AtomicU64::new(1);
 const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
 const MAX_HTTP_BODY_BYTES: usize = 4 * 1024 * 1024;
+const QRPC_STATUS_CHAIN_SNAPSHOT_RETRY_ATTEMPTS: usize = 8;
+const QRPC_STATUS_CHAIN_SNAPSHOT_RETRY_DELAY_MILLIS: u64 = 25;
+const QRPC_CHAIN_BUSY_ERROR: &str =
+    "consensus chain state is busy; qRPC read returned without blocking";
+
+#[derive(Debug, Clone)]
+struct ChainTipSnapshot {
+    available: bool,
+    height: Option<u64>,
+    hash: Option<String>,
+    timestamp: Option<u64>,
+    error: Option<String>,
+}
 
 fn find_http_header_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
@@ -323,30 +371,7 @@ lazy_static! {
                             .chain
                             .first()
                             .filter(|block| block.block_index > 0)
-                            .map(|block| {
-                                legacy_canonical_commit_record(block.block_index).and_then(
-                                    |record| match record {
-                                        Some(record)
-                                            if record.block_hash == block.hash
-                                                && record.parent_hash == block.previous_hash =>
-                                        {
-                                            Ok(true)
-                                        }
-                                        Some(record) => Err(format!(
-                                            "compact chain boundary h{} does not match canonical lock: chain_hash={} chain_parent={} lock_hash={} lock_parent={}",
-                                            block.block_index,
-                                            block.hash,
-                                            block.previous_hash,
-                                            record.block_hash,
-                                            record.parent_hash
-                                        )),
-                                        None => Err(format!(
-                                            "compact chain starts at h{} but canonical lock is missing",
-                                            block.block_index
-                                        )),
-                                    },
-                                )
-                            })
+                            .map(compact_boundary_has_or_rebuilds_canonical_lock)
                             .transpose()
                             .unwrap_or_else(|boundary_error| {
                                 panic!(
@@ -798,7 +823,13 @@ fn recent_active_validator_addresses(
         .collect()
 }
 
-fn canonical_genesis_validator_addresses() -> HashSet<String> {
+fn configured_validator_addresses() -> HashSet<String> {
+    if let Ok(Some(addresses)) = consensus_fork::active_consensus_validator_addresses() {
+        if !addresses.is_empty() {
+            return addresses.into_iter().collect();
+        }
+    }
+
     canonical_genesis()
         .map(|genesis| {
             genesis
@@ -822,9 +853,10 @@ fn network_validator_snapshot(
     let genesis_timestamp = canonical_genesis()
         .map(|genesis| genesis.timestamp())
         .unwrap_or(0);
+    let configured_addresses = configured_validator_addresses();
 
     if let Ok(genesis) = canonical_genesis() {
-        let genesis_validator_count = genesis.validators().len();
+        let configured_validator_count = configured_addresses.len().max(genesis.validators().len());
         for (index, entry) in genesis.validators().iter().enumerate() {
             let address = entry.operator_address.clone();
             let validator = validators.entry(address.clone()).or_insert_with(|| {
@@ -849,12 +881,24 @@ fn network_validator_snapshot(
                 validator.min_stake_required = entry.stake_nwei.max(1);
             }
             if validator.cluster_id.is_none() {
-                validator.cluster_id = default_cluster_id(index, genesis_validator_count);
+                validator.cluster_id = default_cluster_id(index, configured_validator_count);
             }
             if validator.registered_at == 0 {
                 validator.registered_at = genesis.timestamp();
             }
         }
+    }
+
+    for address in &configured_addresses {
+        validators.entry(address.clone()).or_insert_with(|| {
+            synthesize_validator(
+                address.clone(),
+                String::new(),
+                format!("Validator-{}", &address[..8.min(address.len())]),
+                TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+                genesis_timestamp,
+            )
+        });
     }
 
     let total_observed_blocks = chain
@@ -863,7 +907,6 @@ fn network_validator_snapshot(
         .filter(|block| block.block_index > 0)
         .count() as u64;
     let recent_active = recent_active_validator_addresses(chain, validators.len());
-    let genesis_addresses = canonical_genesis_validator_addresses();
 
     for block in chain.chain.iter().filter(|block| block.block_index > 0) {
         let address = block.validator_id.clone();
@@ -889,8 +932,7 @@ fn network_validator_snapshot(
     let observed_validator_count = ordered.len();
     for (index, validator) in ordered.iter_mut().enumerate() {
         let is_recently_active = recent_active.contains(&validator.address);
-        let is_genesis_validator = genesis_addresses.contains(&validator.address);
-        let has_observed_activity = validator.total_blocks_produced > 0;
+        let is_configured_validator = configured_addresses.contains(&validator.address);
         let registry_active = matches!(
             validator.status,
             ValidatorStatus::Active | ValidatorStatus::Pending
@@ -915,10 +957,7 @@ fn network_validator_snapshot(
         };
         if disciplined {
             // Preserve explicit jail/slash state.
-        } else if is_genesis_validator
-            || is_recently_active
-            || (registry_active && !has_observed_activity)
-        {
+        } else if is_configured_validator || registry_active || is_recently_active {
             validator.status = ValidatorStatus::Active;
         } else {
             validator.status = ValidatorStatus::Inactive;
@@ -937,6 +976,153 @@ fn network_validator_snapshot(
     assign_cluster_addresses(&mut ordered);
 
     ordered
+}
+
+#[derive(Debug, Clone)]
+struct LocalValidatorNickname {
+    address: String,
+    nickname: String,
+}
+
+fn configured_local_validator_nickname() -> Option<LocalValidatorNickname> {
+    let config = crate::config::load_node_config(None).ok()?;
+    let address = if !config.node.validator_address.trim().is_empty() {
+        config.node.validator_address.trim().to_string()
+    } else {
+        config.identity.address.trim().to_string()
+    };
+    let nickname = config.identity.label.trim().to_string();
+    if address.is_empty() || nickname.is_empty() {
+        return None;
+    }
+    Some(LocalValidatorNickname { address, nickname })
+}
+
+fn validator_display_metadata(
+    validator: &Validator,
+    local_nickname: Option<&LocalValidatorNickname>,
+) -> (String, Option<String>) {
+    if let Some(local) = local_nickname {
+        if local.address.eq_ignore_ascii_case(&validator.address)
+            && !local.nickname.trim().is_empty()
+        {
+            return (local.nickname.clone(), Some(local.nickname.clone()));
+        }
+    }
+    (validator.name.clone(), None)
+}
+
+fn validator_to_rpc_json(
+    validator: Validator,
+    local_nickname: Option<&LocalValidatorNickname>,
+) -> Value {
+    let moniker = validator.name.clone();
+    let (display_name, nickname) = validator_display_metadata(&validator, local_nickname);
+    let mut value = serde_json::to_value(&validator).unwrap_or_else(|_| json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.insert("name".to_string(), json!(display_name));
+        object.insert("moniker".to_string(), json!(moniker));
+        object.insert("nickname".to_string(), json!(nickname));
+    }
+    value
+}
+
+fn network_cluster_summary(validators: &[Validator]) -> Value {
+    let mut validators_by_cluster = BTreeMap::<u64, Vec<&Validator>>::new();
+    for (index, validator) in validators.iter().enumerate() {
+        let cluster_id = validator
+            .cluster_id
+            .or_else(|| default_cluster_id(index, validators.len()))
+            .unwrap_or(0);
+        validators_by_cluster
+            .entry(cluster_id)
+            .or_default()
+            .push(validator);
+    }
+
+    let mut clusters = Vec::with_capacity(validators_by_cluster.len());
+    for (cluster_id, members) in validators_by_cluster {
+        let validator_count = members.len();
+        let active_validator_count = members
+            .iter()
+            .filter(|validator| validator.status == ValidatorStatus::Active)
+            .count();
+        let quorum_threshold = quorum_threshold(validator_count);
+        let fault_tolerance_f = fault_tolerance_f(validator_count);
+        let can_finalize = validator_count > 0 && active_validator_count >= quorum_threshold;
+        let validators_until_liveness_risk =
+            active_validator_count.saturating_sub(quorum_threshold);
+        let health = if validator_count == 0 {
+            "empty"
+        } else if can_finalize && active_validator_count == validator_count {
+            "healthy"
+        } else if can_finalize {
+            "degraded"
+        } else {
+            "halted_safely"
+        };
+        let mut status_counts = BTreeMap::<String, usize>::new();
+        for validator in &members {
+            *status_counts
+                .entry(format!("{:?}", validator.status))
+                .or_default() += 1;
+        }
+        let cluster_address = members
+            .iter()
+            .find_map(|validator| validator.cluster_address.clone())
+            .unwrap_or_else(|| format!("cluster-{cluster_id}"));
+        let validator_details = members
+            .iter()
+            .map(|validator| {
+                json!({
+                    "address": validator.address,
+                    "name": validator.name,
+                    "status": format!("{:?}", validator.status),
+                    "cluster_id": cluster_id,
+                    "cluster_address": validator.cluster_address,
+                    "last_vote_timestamp": validator.last_vote_timestamp,
+                    "missed_vote_window": validator.missed_vote_window,
+                    "consecutive_missed_votes": validator.consecutive_missed_votes
+                })
+            })
+            .collect::<Vec<_>>();
+
+        clusters.push(json!({
+            "cluster_id": cluster_id,
+            "cluster_address": cluster_address,
+            "validator_count": validator_count,
+            "active_validator_count": active_validator_count,
+            "fault_tolerance_f": fault_tolerance_f,
+            "quorum_threshold": quorum_threshold,
+            "can_finalize": can_finalize,
+            "validators_until_liveness_risk": validators_until_liveness_risk,
+            "health": health,
+            "status_counts": status_counts,
+            "validators": validator_details
+        }));
+    }
+
+    let active_validators = validators
+        .iter()
+        .filter(|validator| validator.status == ValidatorStatus::Active)
+        .count();
+    let all_clusters_can_finalize = clusters
+        .iter()
+        .all(|cluster| cluster["can_finalize"].as_bool().unwrap_or(false));
+    let consensus_mode = if clusters.len() <= 1 {
+        "single_cluster_testnet"
+    } else {
+        "multi_cluster_posy"
+    };
+
+    json!({
+        "total_validators": validators.len(),
+        "active_validators": active_validators,
+        "cluster_count": clusters.len(),
+        "consensus_mode": consensus_mode,
+        "all_clusters_can_finalize": all_clusters_can_finalize,
+        "clusters": clusters
+    })
 }
 
 fn start_ws_rpc_server(
@@ -1358,21 +1544,17 @@ fn handle_json_rpc(
 
         "synergy_syncing" => sync_status_json(chain),
 
+        "synergy_startSync" => start_live_sync_json(),
+
         "synergy_getHealth" => node_health_json(chain),
 
         "synergy_getReadiness" => node_readiness_json(chain),
 
         "synergy_getPeers" => peer_info_json(),
 
-        "synergy_blockNumber" => {
-            let chain = chain.lock().unwrap();
-            json!(chain.last().map_or(0, |b| b.block_index))
-        }
+        "synergy_blockNumber" => block_number_json(chain),
 
-        "synergy_getBlockNumber" => {
-            let chain = chain.lock().unwrap();
-            json!(chain.last().map_or(0, |b| b.block_index))
-        }
+        "synergy_getBlockNumber" => block_number_json(chain),
 
         "synergy_getBlockByNumber" => {
             if let Some(block_num) = params.get(0).and_then(|v| v.as_u64()) {
@@ -1962,10 +2144,7 @@ fn handle_json_rpc(
 
         // Node status
         "synergy_nodeInfo" => {
-            let current_block = {
-                let chain = chain.lock().unwrap();
-                chain.last().map_or(0, |b| b.block_index)
-            };
+            let tip = chain_tip_snapshot_for_status(chain);
             let config = crate::config::load_node_config(None).ok();
             let node_name = config
                 .as_ref()
@@ -1975,10 +2154,10 @@ fn handle_json_rpc(
             let network_id = config.as_ref().map(|cfg| cfg.network.id);
             let chain_id = config.as_ref().map(|cfg| cfg.blockchain.chain_id);
             let consensus = config.as_ref().map(|cfg| cfg.consensus.algorithm.clone());
-            let syncing = SYNC_MANAGER
-                .lock()
-                .ok()
-                .map(|manager| !matches!(manager.get_state(), SyncState::Synced | SyncState::Idle));
+            let syncing = SYNC_MANAGER.try_lock().ok().map(|manager| {
+                !matches!(manager.get_state(), SyncState::Synced | SyncState::Idle)
+            });
+            let sync_manager_available = syncing.is_some();
             json!({
                 "name": node_name,
                 "version": env!("CARGO_PKG_VERSION"),
@@ -1987,7 +2166,12 @@ fn handle_json_rpc(
                 "chainId": chain_id,
                 "consensus": consensus,
                 "syncing": syncing,
-                "currentBlock": current_block,
+                "syncManagerAvailable": sync_manager_available,
+                "currentBlock": tip.height,
+                "latestHash": tip.hash,
+                "chainStateAvailable": tip.available,
+                "chainStateError": tip.error,
+                "failClosed": !tip.available,
                 "timestamp": current_timestamp()
             })
         }
@@ -2036,9 +2220,11 @@ fn handle_json_rpc(
         // Validator management
         "synergy_getValidators" => {
             let chain = chain.lock().unwrap();
+            let local_nickname = configured_local_validator_nickname();
             let validators = network_validator_snapshot(&chain, &validator_manager)
                 .into_iter()
                 .filter(|validator| validator.status == ValidatorStatus::Active)
+                .map(|validator| validator_to_rpc_json(validator, local_nickname.as_ref()))
                 .collect::<Vec<_>>();
             println!(
                 "🔍 [RPC] synergy_getValidators called, returning {} validators",
@@ -2050,11 +2236,12 @@ fn handle_json_rpc(
         "synergy_getValidator" => {
             if let Some(address) = params.get(0).and_then(|v| v.as_str()) {
                 let chain = chain.lock().unwrap();
+                let local_nickname = configured_local_validator_nickname();
                 match network_validator_snapshot(&chain, &validator_manager)
                     .into_iter()
                     .find(|validator| validator.address.eq_ignore_ascii_case(address))
                 {
-                    Some(validator) => json!(validator),
+                    Some(validator) => validator_to_rpc_json(validator, local_nickname.as_ref()),
                     None => json!(null),
                 }
             } else {
@@ -2591,11 +2778,13 @@ fn handle_json_rpc(
                     .then_with(|| right.stake_amount.cmp(&left.stake_amount))
                     .then_with(|| left.address.cmp(&right.address))
             });
+            let cluster_summary = network_cluster_summary(&validators);
             let top_validators = validators.into_iter().take(20).collect::<Vec<_>>();
 
             json!({
                 "total_validators": total_validators,
                 "active_validators": active_validators,
+                "cluster_summary": cluster_summary,
                 "top_validators": top_validators,
                 "epoch_rewards": validator_manager.calculate_epoch_rewards(0)
             })
@@ -2837,7 +3026,9 @@ fn handle_json_rpc(
             json!({
                 "block_height": chain.last().map_or(0, |b| b.block_index),
                 "total_transactions": chain.chain.iter().map(|b| b.transactions.len()).sum::<usize>(),
+                "total_validators": validators.len(),
                 "active_validators": active_validator_count,
+                "cluster_summary": network_cluster_summary(&validators),
                 "total_supply": total_supply.to_string(),
                 "tokens": token_manager.get_all_tokens().len(),
                 "network_uptime": "99.9%",
@@ -3010,7 +3201,7 @@ fn handle_json_rpc(
 
         "synergy_getSyncStatus" => {
             let current_block = chain.lock().unwrap().last().map_or(0, |b| b.block_index);
-            if let Ok(manager) = SYNC_MANAGER.lock() {
+            if let Ok(manager) = SYNC_MANAGER.try_lock() {
                 let state = manager.get_state();
                 let syncing = !matches!(state, SyncState::Synced | SyncState::Idle);
                 json!({
@@ -3022,7 +3213,13 @@ fn handle_json_rpc(
                     "state": format!("{:?}", state),
                 })
             } else {
-                json!({"error": "Sync manager unavailable"})
+                json!({
+                    "syncing": true,
+                    "current_block": current_block,
+                    "highest_block": best_observed_sync_source_height(),
+                    "sync_manager_available": false,
+                    "error": "Sync manager is busy with live catch-up"
+                })
             }
         }
 
@@ -3074,6 +3271,7 @@ fn handle_json_rpc(
 
         "synergy_getValidatorActivity" => {
             let chain = chain.lock().unwrap();
+            let local_nickname = configured_local_validator_nickname();
             let active_validators = network_validator_snapshot(&chain, &validator_manager)
                 .into_iter()
                 .filter(|validator| validator.status == ValidatorStatus::Active)
@@ -3081,9 +3279,14 @@ fn handle_json_rpc(
             let mut validator_activity = Vec::new();
 
             for validator in active_validators {
+                let moniker = validator.name.clone();
+                let (display_name, nickname) =
+                    validator_display_metadata(&validator, local_nickname.as_ref());
                 validator_activity.push(json!({
                     "address": validator.address,
-                    "name": validator.name,
+                    "name": display_name,
+                    "nickname": nickname,
+                    "moniker": moniker,
                     "synergy_score": validator.synergy_score,
                     "blocks_produced": validator.total_blocks_produced,
                     "uptime": format!("{:.1}%", validator.uptime_percentage),
@@ -4507,6 +4710,7 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_getDagDependencies"
         | "synergy_getDagTxOrderRoot"
         | "synergy_getValidatorStats"
+        | "synergy_getNetworkStats"
         | "synergy_getTokenStats"
         | "synergy_getAllBalances"
         | "synergy_getTransferHistory"
@@ -4626,6 +4830,7 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_mine"
         | "synergy_setAccountBalance"
         | "synergy_resetChainHead"
+        | "synergy_startSync"
         | "synergy_startSelfHeal"
         | "synergy_recoverTransientVoteLocks"
         | "synergy_syncFromCanonicalPeer"
@@ -4827,14 +5032,16 @@ fn chain_identity_json() -> Value {
 }
 
 fn protocol_config_json() -> Value {
+    let validator_count = configured_validator_addresses().len().max(1);
+    let required_quorum = required_validator_quorum(validator_count).max(1);
     json!({
         "chain": chain_identity_json(),
         "protocol_version": current_protocol_version(),
         "package_version": env!("CARGO_PKG_VERSION"),
-        "genesis_validators": 5,
+        "validator_count": validator_count,
         "validator_quorum": {
-            "required": 4,
-            "total": 5,
+            "required": required_quorum,
+            "total": validator_count,
         },
         "target_block_cadence_seconds": 2,
         "cluster_count": 1,
@@ -4843,25 +5050,179 @@ fn protocol_config_json() -> Value {
 }
 
 fn sync_status_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
-    let current_block = chain.lock().unwrap().last().map_or(0, |b| b.block_index);
-    if let Ok(manager) = SYNC_MANAGER.lock() {
+    let tip = chain_tip_snapshot_for_status(chain);
+    sync_status_json_with_tip(&tip)
+}
+
+fn sync_status_json_with_tip(tip: &ChainTipSnapshot) -> Value {
+    if let Ok(manager) = SYNC_MANAGER.try_lock() {
         let state = manager.get_state();
         let highest_block = manager
             .get_network_height()
             .max(best_observed_sync_source_height());
-        let syncing =
-            !matches!(state, SyncState::Synced | SyncState::Idle) || current_block < highest_block;
+        let syncing = !matches!(state, SyncState::Synced | SyncState::Idle)
+            || tip
+                .height
+                .map(|current_block| current_block < highest_block)
+                .unwrap_or(true);
         json!({
             "syncing": syncing,
-            "current_block": current_block,
+            "current_block": tip.height,
             "highest_block": highest_block,
             "starting_block": manager.get_sync_start_height(),
             "sync_percentage": manager.get_progress_percentage(),
             "state": format!("{:?}", state),
+            "chain_state_available": tip.available,
+            "chain_state_error": tip.error,
+            "fail_closed": !tip.available,
             "chain": chain_identity_json(),
         })
     } else {
-        json!({"error": "Sync manager unavailable", "fail_closed": true})
+        json!({
+            "syncing": true,
+            "current_block": tip.height,
+            "highest_block": Value::Null,
+            "sync_manager_available": false,
+            "chain_state_available": tip.available,
+            "chain_state_error": tip.error,
+            "error": "Sync manager unavailable without blocking qRPC",
+            "fail_closed": true,
+            "chain": chain_identity_json(),
+        })
+    }
+}
+
+fn sync_state_is_active(state: SyncState) -> bool {
+    matches!(
+        state,
+        SyncState::Discovering
+            | SyncState::Downloading
+            | SyncState::Validating
+            | SyncState::Applying
+    )
+}
+
+fn start_live_sync_json() -> Value {
+    let Some(network) = crate::p2p::get_p2p_network() else {
+        return json!({
+            "success": false,
+            "fail_closed": true,
+            "status": "blocked",
+            "error": "P2P network is not available; start the node runtime before requesting live sync.",
+            "chain": chain_identity_json(),
+        });
+    };
+
+    let peer_count = network.get_peer_count() as u64;
+    let observed_height = best_observed_sync_source_height();
+    let current_block = SHARED_CHAIN
+        .lock()
+        .ok()
+        .and_then(|chain| chain.last().map(|block| block.block_index))
+        .unwrap_or(0);
+
+    {
+        let mut manager = match SYNC_MANAGER.try_lock() {
+            Ok(manager) => manager,
+            Err(TryLockError::WouldBlock) => {
+                return json!({
+                    "success": true,
+                    "status": "already_running",
+                    "message": "Live sync is already running.",
+                    "current_block": current_block,
+                    "highest_block": observed_height,
+                    "peer_count": peer_count,
+                    "chain": chain_identity_json(),
+                });
+            }
+            Err(TryLockError::Poisoned(_)) => {
+                return json!({
+                    "success": false,
+                    "fail_closed": true,
+                    "status": "failed",
+                    "error": "Sync manager lock is poisoned.",
+                    "chain": chain_identity_json(),
+                });
+            }
+        };
+
+        if sync_state_is_active(manager.get_state()) {
+            return json!({
+                "success": true,
+                "status": "already_running",
+                "message": "Live sync is already running.",
+                "current_block": current_block,
+                "highest_block": manager.get_network_height().max(observed_height),
+                "peer_count": peer_count,
+                "chain": chain_identity_json(),
+            });
+        }
+
+        manager.attach_network(Arc::clone(&network));
+        let discovered_height = manager.discover_network_height().unwrap_or(observed_height);
+        if current_block >= discovered_height {
+            return json!({
+                "success": true,
+                "status": "already_synced",
+                "message": "Local chain is already at the best observed peer height.",
+                "current_block": current_block,
+                "highest_block": discovered_height,
+                "peer_count": peer_count,
+                "chain": chain_identity_json(),
+            });
+        }
+    }
+
+    match thread::Builder::new()
+        .name("synergy-live-sync".to_string())
+        .spawn(move || {
+            let mut manager = match SYNC_MANAGER.lock() {
+                Ok(manager) => manager,
+                Err(error) => {
+                    warn!(
+                        "rpc",
+                        "Live sync could not acquire sync manager",
+                        "error" => error.to_string()
+                    );
+                    return;
+                }
+            };
+            manager.attach_network(Arc::clone(&network));
+            match manager.start_sync() {
+                Ok(()) => info!(
+                    "rpc",
+                    "Live sync completed",
+                    "local_height" => manager.local_height,
+                    "network_height" => manager.get_network_height()
+                ),
+                Err(error) => warn!(
+                    "rpc",
+                    "Live sync failed",
+                    "error" => error.to_string(),
+                    "local_height" => manager.local_height,
+                    "network_height" => manager.get_network_height()
+                ),
+            }
+        }) {
+        Ok(_) => json!({
+            "success": true,
+            "status": "started",
+            "message": "Live sync was requested for the running node.",
+            "current_block": current_block,
+            "highest_block": observed_height,
+            "peer_count": peer_count,
+            "chain": chain_identity_json(),
+        }),
+        Err(error) => json!({
+            "success": false,
+            "fail_closed": true,
+            "status": "failed",
+            "error": format!("Failed to spawn live sync worker: {error}"),
+            "current_block": current_block,
+            "highest_block": observed_height,
+            "peer_count": peer_count,
+            "chain": chain_identity_json(),
+        }),
     }
 }
 
@@ -4900,20 +5261,87 @@ fn best_observed_sync_source_height() -> u64 {
         .unwrap_or(0)
 }
 
+fn chain_tip_snapshot_nonblocking(chain: &Arc<Mutex<BlockChain>>) -> ChainTipSnapshot {
+    match chain.try_lock() {
+        Ok(chain) => {
+            let latest = chain.last();
+            ChainTipSnapshot {
+                available: true,
+                height: latest.map(|block| block.block_index),
+                hash: latest.map(|block| block.hash.clone()),
+                timestamp: latest.map(|block| block.timestamp),
+                error: None,
+            }
+        }
+        Err(TryLockError::WouldBlock) => ChainTipSnapshot {
+            available: false,
+            height: None,
+            hash: None,
+            timestamp: None,
+            error: Some(QRPC_CHAIN_BUSY_ERROR.to_string()),
+        },
+        Err(TryLockError::Poisoned(_)) => ChainTipSnapshot {
+            available: false,
+            height: None,
+            hash: None,
+            timestamp: None,
+            error: Some("consensus chain state lock is poisoned".to_string()),
+        },
+    }
+}
+
+fn chain_tip_snapshot_for_status(chain: &Arc<Mutex<BlockChain>>) -> ChainTipSnapshot {
+    let mut snapshot = chain_tip_snapshot_nonblocking(chain);
+    for _ in 0..QRPC_STATUS_CHAIN_SNAPSHOT_RETRY_ATTEMPTS {
+        if snapshot.available || snapshot.error.as_deref() != Some(QRPC_CHAIN_BUSY_ERROR) {
+            return snapshot;
+        }
+        thread::sleep(Duration::from_millis(
+            QRPC_STATUS_CHAIN_SNAPSHOT_RETRY_DELAY_MILLIS,
+        ));
+        snapshot = chain_tip_snapshot_nonblocking(chain);
+    }
+    snapshot
+}
+
+fn block_number_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let tip = chain_tip_snapshot_nonblocking(chain);
+    if tip.available {
+        json!(tip.height.unwrap_or(0))
+    } else {
+        json!({
+            "error": tip.error,
+            "fail_closed": true,
+            "chain_state_available": false,
+            "chain": chain_identity_json(),
+        })
+    }
+}
+
 fn node_health_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
-    let latest = chain.lock().unwrap().last().cloned();
-    let timestamp_delta_seconds = latest
-        .as_ref()
-        .map(|block| current_timestamp().saturating_sub(block.timestamp));
+    let tip = chain_tip_snapshot_for_status(chain);
+    let timestamp_delta_seconds = tip
+        .timestamp
+        .map(|timestamp| current_timestamp().saturating_sub(timestamp));
     let quarantine_files = quarantine_marker_paths();
+    let status = if !quarantine_files.is_empty() {
+        "quarantined"
+    } else if tip.available {
+        "healthy"
+    } else {
+        "degraded"
+    };
     json!({
-        "status": if quarantine_files.is_empty() { "healthy" } else { "quarantined" },
-        "latest_height": latest.as_ref().map(|block| block.block_index).unwrap_or(0),
-        "latest_hash": latest.as_ref().map(|block| block.hash.clone()),
-        "latest_timestamp": latest.as_ref().map(|block| block.timestamp),
+        "status": status,
+        "latest_height": tip.height,
+        "latest_hash": tip.hash,
+        "latest_timestamp": tip.timestamp,
         "timestamp_delta_seconds": timestamp_delta_seconds,
         "quarantine_files": quarantine_files,
-        "sync": sync_status_json(chain),
+        "chain_state_available": tip.available,
+        "chain_state_error": tip.error,
+        "fail_closed": !tip.available,
+        "sync": sync_status_json_with_tip(&tip),
         "chain": chain_identity_json(),
     })
 }
@@ -4995,19 +5423,36 @@ fn latest_finalized_head_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
     if lock.get("found").and_then(Value::as_bool) == Some(true) {
         return lock;
     }
-    let chain_guard = chain.lock().unwrap();
-    if let Some(block) = chain_guard.last() {
-        json!({
-            "found": true,
-            "height": block.block_index,
-            "block_hash": block.hash,
-            "parent_hash": block.previous_hash,
-            "timestamp": block.timestamp,
-            "source": "chain_tip_without_canonical_lock_file",
+    match chain.try_lock() {
+        Ok(chain_guard) => {
+            if let Some(block) = chain_guard.last() {
+                json!({
+                    "found": true,
+                    "height": block.block_index,
+                    "block_hash": block.hash,
+                    "parent_hash": block.previous_hash,
+                    "timestamp": block.timestamp,
+                    "source": "chain_tip_without_canonical_lock_file",
+                    "chain": chain_identity_json(),
+                })
+            } else {
+                json!({"found": false, "chain": chain_identity_json()})
+            }
+        }
+        Err(TryLockError::WouldBlock) => json!({
+            "found": false,
+            "error": "consensus chain state is busy; finalized-head fallback returned without blocking",
+            "fail_closed": true,
+            "chain_state_available": false,
             "chain": chain_identity_json(),
-        })
-    } else {
-        json!({"found": false, "chain": chain_identity_json()})
+        }),
+        Err(TryLockError::Poisoned(_)) => json!({
+            "found": false,
+            "error": "consensus chain state lock is poisoned",
+            "fail_closed": true,
+            "chain_state_available": false,
+            "chain": chain_identity_json(),
+        }),
     }
 }
 
@@ -7389,6 +7834,8 @@ mod tests {
             "synergy_getDagGraph",
             "synergy_getDagDependencies",
             "synergy_getDagTxOrderRoot",
+            "synergy_getValidatorStats",
+            "synergy_getNetworkStats",
             "synergy_estimateFee",
             "synergy_getFeeCollector",
             "synergy_getFeeCollectorBalance",
@@ -7728,6 +8175,63 @@ mod tests {
     }
 
     #[test]
+    fn qrpc_status_retries_transient_busy_chain_lock() {
+        let chain = Arc::new(Mutex::new(BlockChain::new()));
+        let worker_chain = Arc::clone(&chain);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let handle = thread::spawn(move || {
+            let _held_consensus_lock = worker_chain.lock().unwrap();
+            ready_tx.send(()).unwrap();
+            thread::sleep(Duration::from_millis(
+                QRPC_STATUS_CHAIN_SNAPSHOT_RETRY_DELAY_MILLIS * 2,
+            ));
+        });
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        let health = node_health_json(&chain);
+        handle.join().unwrap();
+
+        assert_eq!(health["status"].as_str(), Some("healthy"));
+        assert_eq!(health["fail_closed"], false);
+        assert_eq!(health["chain_state_available"], true);
+        assert_eq!(health["sync"]["fail_closed"], false);
+        assert_eq!(health["sync"]["chain_state_available"], true);
+    }
+
+    #[test]
+    fn qrpc_status_surfaces_fail_closed_when_consensus_chain_lock_is_busy() {
+        let chain = Arc::new(Mutex::new(BlockChain::new()));
+        let _held_consensus_lock = chain.lock().unwrap();
+
+        let block_number = block_number_json(&chain);
+        assert_eq!(block_number["fail_closed"], true);
+        assert_eq!(block_number["chain_state_available"], false);
+
+        let health = node_health_json(&chain);
+        assert_eq!(health["status"].as_str(), Some("degraded"));
+        assert_eq!(health["fail_closed"], true);
+        assert_eq!(health["chain_state_available"], false);
+        assert_eq!(health["latest_height"], Value::Null);
+        assert_eq!(health["sync"]["fail_closed"], true);
+
+        let sync = sync_status_json(&chain);
+        assert_eq!(sync["fail_closed"], true);
+        assert_eq!(sync["chain_state_available"], false);
+        assert_eq!(sync["current_block"], Value::Null);
+
+        let node_info = handle_json_rpc(
+            "synergy_nodeInfo",
+            json!([]),
+            &TX_POOL,
+            &chain,
+            &VALIDATOR_MANAGER,
+        );
+        assert_eq!(node_info["failClosed"], true);
+        assert_eq!(node_info["chainStateAvailable"], false);
+        assert_eq!(node_info["currentBlock"], Value::Null);
+    }
+
+    #[test]
     fn prune_confirmed_transactions_from_pool_removes_only_matching_hashes() {
         let tx_a = Transaction::new(
             "syna1sendera".to_string(),
@@ -7798,8 +8302,100 @@ mod tests {
         assert!(TX_POOL.lock().unwrap().is_empty());
     }
 
+    fn rpc_test_validator(address: &str, cluster_id: u64, status: ValidatorStatus) -> Validator {
+        let mut validator = synthesize_validator(
+            address.to_string(),
+            String::new(),
+            address.to_string(),
+            50_000_000_000_000,
+            0,
+        );
+        validator.cluster_id = Some(cluster_id);
+        validator.cluster_address = Some(format!("cluster-{cluster_id}"));
+        validator.status = status;
+        validator
+    }
+
     #[test]
-    fn network_validator_snapshot_uses_canonical_genesis_for_read_only_nodes() {
+    fn network_cluster_summary_reports_current_six_validator_quorum() {
+        let validators = (1..=6)
+            .map(|index| {
+                rpc_test_validator(&format!("validator-{index}"), 0, ValidatorStatus::Active)
+            })
+            .collect::<Vec<_>>();
+
+        let summary = network_cluster_summary(&validators);
+        let clusters = summary["clusters"].as_array().expect("clusters array");
+        let cluster = &clusters[0];
+
+        assert_eq!(summary["total_validators"].as_u64(), Some(6));
+        assert_eq!(summary["active_validators"].as_u64(), Some(6));
+        assert_eq!(summary["cluster_count"].as_u64(), Some(1));
+        assert_eq!(
+            summary["consensus_mode"].as_str(),
+            Some("single_cluster_testnet")
+        );
+        assert_eq!(cluster["validator_count"].as_u64(), Some(6));
+        assert_eq!(cluster["active_validator_count"].as_u64(), Some(6));
+        assert_eq!(cluster["fault_tolerance_f"].as_u64(), Some(1));
+        assert_eq!(cluster["quorum_threshold"].as_u64(), Some(4));
+        assert_eq!(cluster["can_finalize"].as_bool(), Some(true));
+        assert_eq!(cluster["validators_until_liveness_risk"].as_u64(), Some(2));
+        assert_eq!(cluster["health"].as_str(), Some("healthy"));
+    }
+
+    #[test]
+    fn network_cluster_summary_reports_independent_multicluster_liveness() {
+        let mut validators = (1..=6)
+            .map(|index| {
+                let status = if index <= 4 {
+                    ValidatorStatus::Active
+                } else {
+                    ValidatorStatus::Inactive
+                };
+                rpc_test_validator(&format!("cluster-a-validator-{index}"), 0, status)
+            })
+            .collect::<Vec<_>>();
+        validators.extend((1..=7).map(|index| {
+            let status = if index <= 4 {
+                ValidatorStatus::Active
+            } else {
+                ValidatorStatus::Inactive
+            };
+            rpc_test_validator(&format!("cluster-b-validator-{index}"), 1, status)
+        }));
+
+        let summary = network_cluster_summary(&validators);
+        let clusters = summary["clusters"].as_array().expect("clusters array");
+        let first = &clusters[0];
+        let second = &clusters[1];
+
+        assert_eq!(summary["total_validators"].as_u64(), Some(13));
+        assert_eq!(summary["active_validators"].as_u64(), Some(8));
+        assert_eq!(summary["cluster_count"].as_u64(), Some(2));
+        assert_eq!(
+            summary["consensus_mode"].as_str(),
+            Some("multi_cluster_posy")
+        );
+        assert_eq!(summary["all_clusters_can_finalize"].as_bool(), Some(false));
+
+        assert_eq!(first["validator_count"].as_u64(), Some(6));
+        assert_eq!(first["active_validator_count"].as_u64(), Some(4));
+        assert_eq!(first["quorum_threshold"].as_u64(), Some(4));
+        assert_eq!(first["can_finalize"].as_bool(), Some(true));
+        assert_eq!(first["validators_until_liveness_risk"].as_u64(), Some(0));
+        assert_eq!(first["health"].as_str(), Some("degraded"));
+
+        assert_eq!(second["validator_count"].as_u64(), Some(7));
+        assert_eq!(second["active_validator_count"].as_u64(), Some(4));
+        assert_eq!(second["quorum_threshold"].as_u64(), Some(5));
+        assert_eq!(second["fault_tolerance_f"].as_u64(), Some(2));
+        assert_eq!(second["can_finalize"].as_bool(), Some(false));
+        assert_eq!(second["health"].as_str(), Some("halted_safely"));
+    }
+
+    #[test]
+    fn network_validator_snapshot_uses_configured_validators_for_read_only_nodes() {
         let genesis_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../config/genesis.json")
             .canonicalize()
@@ -7836,14 +8432,14 @@ mod tests {
     }
 
     #[test]
-    fn network_validator_snapshot_ages_out_historical_non_genesis_validators() {
+    fn network_validator_snapshot_ages_out_historical_unconfigured_validators() {
         let genesis_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../config/genesis.json")
             .canonicalize()
             .expect("repo genesis path should resolve");
         std::env::set_var("SYNERGY_GENESIS_FILE", genesis_path);
         let genesis = canonical_genesis().expect("canonical genesis must load");
-        let genesis_validator = genesis
+        let initial_validator = genesis
             .validators()
             .first()
             .expect("canonical genesis should define validators")
@@ -7866,7 +8462,7 @@ mod tests {
                 height,
                 Vec::new(),
                 chain.last().unwrap().hash.clone(),
-                genesis_validator.clone(),
+                initial_validator.clone(),
                 1,
                 genesis.timestamp().saturating_add(height.saturating_mul(2)),
             ));
@@ -7878,13 +8474,75 @@ mod tests {
             .iter()
             .find(|validator| validator.address == stale_validator)
             .expect("historical validator should remain visible for block attribution");
-        let genesis = validators
+        let configured = validators
             .iter()
-            .find(|validator| validator.address == genesis_validator)
-            .expect("genesis validator should remain visible");
+            .find(|validator| validator.address == initial_validator)
+            .expect("configured validator should remain visible");
 
         assert_eq!(stale.total_blocks_produced, 1);
         assert_eq!(stale.status, ValidatorStatus::Inactive);
-        assert_eq!(genesis.status, ValidatorStatus::Active);
+        assert_eq!(configured.status, ValidatorStatus::Active);
+    }
+
+    #[test]
+    fn network_validator_snapshot_keeps_active_registered_validator_active_after_proposer_gap() {
+        let genesis_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../config/genesis.json")
+            .canonicalize()
+            .expect("repo genesis path should resolve");
+        std::env::set_var("SYNERGY_GENESIS_FILE", genesis_path);
+        let genesis = canonical_genesis().expect("canonical genesis must load");
+        let steady_validator = genesis
+            .validators()
+            .first()
+            .expect("canonical genesis should define validators")
+            .operator_address
+            .clone();
+        let registered_validator = "synv11registeredvalidator0000000000000000".to_string();
+
+        let mut chain = BlockChain::new();
+        chain.genesis().expect("genesis block should load");
+        chain.add_block(Block::new_with_timestamp(
+            1,
+            Vec::new(),
+            chain.last().unwrap().hash.clone(),
+            registered_validator.clone(),
+            1,
+            genesis.timestamp().saturating_add(2),
+        ));
+        for height in 2..=160 {
+            chain.add_block(Block::new_with_timestamp(
+                height,
+                Vec::new(),
+                chain.last().unwrap().hash.clone(),
+                steady_validator.clone(),
+                1,
+                genesis.timestamp().saturating_add(height.saturating_mul(2)),
+            ));
+        }
+
+        let validator_manager = ValidatorManager::new();
+        validator_manager
+            .register_validator(crate::validator::ValidatorRegistration {
+                address: registered_validator.clone(),
+                public_key: "registered-public-key".to_string(),
+                name: "Registered Validator".to_string(),
+                stake_amount: TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+                submitted_at: genesis.timestamp(),
+                registration_tx_hash: "syntxn-registered".to_string(),
+            })
+            .expect("validator registration should be accepted");
+        validator_manager
+            .approve_validator(&registered_validator)
+            .expect("validator should activate");
+
+        let validators = network_validator_snapshot(&chain, &validator_manager);
+        let registered = validators
+            .iter()
+            .find(|validator| validator.address == registered_validator)
+            .expect("registered validator should remain visible");
+
+        assert_eq!(registered.total_blocks_produced, 1);
+        assert_eq!(registered.status, ValidatorStatus::Active);
     }
 }

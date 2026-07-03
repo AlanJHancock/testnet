@@ -1,3 +1,4 @@
+use crate::consensus::dual_quorum::VALIDATOR_QUORUM_RATIO;
 use crate::validator::Validator;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
@@ -76,7 +77,7 @@ pub struct VRFConsensus {
 impl VRFConsensus {
     pub fn new() -> Self {
         VRFConsensus {
-            threshold: 0.67, // 67% threshold for consensus
+            threshold: VALIDATOR_QUORUM_RATIO,
             _max_validators: 100,
             epoch_length: 100, // Blocks per epoch
         }
@@ -447,12 +448,12 @@ mod tests {
         votes.insert("validator3".to_string(), true);
 
         let has_consensus = vrf.verify_consensus_threshold(&votes, 3);
-        assert!(has_consensus); // 3/3 = 100% >= 67% threshold
+        assert!(has_consensus); // 3/3 = 100% >= two-thirds threshold
 
         votes.insert("validator4".to_string(), false);
         votes.insert("validator5".to_string(), false);
         let has_consensus = vrf.verify_consensus_threshold(&votes, 5);
-        assert!(!has_consensus); // 3/5 = 60% < 67% threshold
+        assert!(!has_consensus); // 3/5 = 60% < two-thirds threshold
     }
 
     #[test]

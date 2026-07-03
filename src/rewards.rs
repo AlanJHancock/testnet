@@ -11,8 +11,8 @@ pub struct RewardConfig {
     pub validator_fee_share_bps: u64,
     pub treasury_fee_share_bps: u64,
     pub burn_fee_share_bps: u64,
-    pub genesis_validator_treasury_share_bps: u64,
-    pub genesis_validator_bonus_pool_share_bps: u64,
+    pub network_owned_validator_treasury_share_bps: u64,
+    pub network_owned_validator_bonus_pool_share_bps: u64,
     pub phase1_consensus_participation_weight_bps: u64,
     pub phase1_block_proposal_weight_bps: u64,
     pub phase1_validation_accuracy_weight_bps: u64,
@@ -48,8 +48,8 @@ impl Default for RewardConfig {
             validator_fee_share_bps: 6_500,
             treasury_fee_share_bps: 2_500,
             burn_fee_share_bps: 1_000,
-            genesis_validator_treasury_share_bps: 7_000,
-            genesis_validator_bonus_pool_share_bps: 3_000,
+            network_owned_validator_treasury_share_bps: 7_000,
+            network_owned_validator_bonus_pool_share_bps: 3_000,
             phase1_consensus_participation_weight_bps: 3_500,
             phase1_block_proposal_weight_bps: 2_000,
             phase1_validation_accuracy_weight_bps: 2_000,
@@ -92,10 +92,10 @@ impl RewardConfig {
             ],
         )?;
         validate_sum(
-            "genesis validator reward shares",
+            "network-owned validator reward shares",
             &[
-                self.genesis_validator_treasury_share_bps,
-                self.genesis_validator_bonus_pool_share_bps,
+                self.network_owned_validator_treasury_share_bps,
+                self.network_owned_validator_bonus_pool_share_bps,
             ],
         )?;
         validate_sum(
@@ -141,12 +141,12 @@ impl RewardConfig {
             ("treasury_fee_share_bps", self.treasury_fee_share_bps),
             ("burn_fee_share_bps", self.burn_fee_share_bps),
             (
-                "genesis_validator_treasury_share_bps",
-                self.genesis_validator_treasury_share_bps,
+                "network_owned_validator_treasury_share_bps",
+                self.network_owned_validator_treasury_share_bps,
             ),
             (
-                "genesis_validator_bonus_pool_share_bps",
-                self.genesis_validator_bonus_pool_share_bps,
+                "network_owned_validator_bonus_pool_share_bps",
+                self.network_owned_validator_bonus_pool_share_bps,
             ),
             (
                 "phase1_consensus_participation_weight_bps",
@@ -594,7 +594,7 @@ pub fn settle_pending_reward(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GenesisValidatorRewardRouting {
+pub struct NetworkOwnedValidatorRewardRouting {
     pub epoch_id: u64,
     pub validator_id: String,
     pub total_reward_nwei: u128,
@@ -608,22 +608,28 @@ pub struct GenesisValidatorRewardRouting {
 pub struct ValidatorMetadata {
     pub validator_id: String,
     pub reward_payout_address: String,
-    pub is_network_owned_genesis_validator: bool,
+    pub is_network_owned_validator: bool,
 }
 
-pub fn route_genesis_validator_reward(
+pub fn route_network_owned_validator_reward(
     epoch_id: u64,
     validator: &ValidatorMetadata,
     reward_nwei: u128,
     routing_block_height: u64,
     config: &RewardConfig,
-) -> Result<GenesisValidatorRewardRouting, String> {
+) -> Result<NetworkOwnedValidatorRewardRouting, String> {
     config.validate()?;
-    if !validator.is_network_owned_genesis_validator {
-        return Err("validator is not marked as network-owned genesis validator".to_string());
+    if !validator.is_network_owned_validator {
+        return Err("validator is not marked as network-owned validator".to_string());
     }
-    let bonus_pool_share = mul_bps(reward_nwei, config.genesis_validator_bonus_pool_share_bps)?;
-    let nominal_treasury = mul_bps(reward_nwei, config.genesis_validator_treasury_share_bps)?;
+    let bonus_pool_share = mul_bps(
+        reward_nwei,
+        config.network_owned_validator_bonus_pool_share_bps,
+    )?;
+    let nominal_treasury = mul_bps(
+        reward_nwei,
+        config.network_owned_validator_treasury_share_bps,
+    )?;
     let assigned = bonus_pool_share
         .checked_add(nominal_treasury)
         .ok_or_else(|| "genesis reward routing overflow".to_string())?;
@@ -632,7 +638,7 @@ pub fn route_genesis_validator_reward(
         .checked_add(dust)
         .ok_or_else(|| "genesis treasury dust overflow".to_string())?;
 
-    Ok(GenesisValidatorRewardRouting {
+    Ok(NetworkOwnedValidatorRewardRouting {
         epoch_id,
         validator_id: validator.validator_id.clone(),
         total_reward_nwei: reward_nwei,
@@ -808,7 +814,7 @@ pub struct ValidatorRewardStatus {
     pub slashing_status: bool,
     pub pending_settlements: Vec<ValidatorPendingReward>,
     pub completed_settlements: Vec<ValidatorRewardSettlement>,
-    pub genesis_validator_routing: Vec<GenesisValidatorRewardRouting>,
+    pub network_owned_validator_routing: Vec<NetworkOwnedValidatorRewardRouting>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -832,7 +838,7 @@ pub enum RewardAuditEvent {
         validator_id: String,
         amount_nwei: u128,
     },
-    GenesisValidatorRewardRouted(GenesisValidatorRewardRouting),
+    NetworkOwnedValidatorRewardRouted(NetworkOwnedValidatorRewardRouting),
     ReliabilityBonusPoolFunded {
         epoch_id: u64,
         amount_nwei: u128,
@@ -851,7 +857,7 @@ pub struct RewardLedger {
     pub cluster_settlements: HashMap<(u64, String), ClusterRewardSettlement>,
     pub pending_rewards: Vec<ValidatorPendingReward>,
     pub reward_settlements: Vec<ValidatorRewardSettlement>,
-    pub genesis_routings: HashMap<(u64, String), GenesisValidatorRewardRouting>,
+    pub network_owned_routings: HashMap<(u64, String), NetworkOwnedValidatorRewardRouting>,
     pub reliability_states: HashMap<String, ValidatorReliabilityState>,
     pub bonus_pool: ReliabilityBonusPool,
     pub audit_events: Vec<RewardAuditEvent>,
@@ -947,13 +953,13 @@ impl RewardLedger {
         Ok(settlements)
     }
 
-    pub fn record_genesis_routing(
+    pub fn record_network_owned_routing(
         &mut self,
-        routing: GenesisValidatorRewardRouting,
+        routing: NetworkOwnedValidatorRewardRouting,
     ) -> Result<(), String> {
         let key = (routing.epoch_id, routing.validator_id.clone());
-        if self.genesis_routings.contains_key(&key) {
-            return Err("genesis validator routing already executed".to_string());
+        if self.network_owned_routings.contains_key(&key) {
+            return Err("network-owned validator routing already executed".to_string());
         }
         self.bonus_pool.fund(routing.bonus_pool_share_nwei)?;
         self.audit_events
@@ -962,10 +968,10 @@ impl RewardLedger {
                 amount_nwei: routing.bonus_pool_share_nwei,
             });
         self.audit_events
-            .push(RewardAuditEvent::GenesisValidatorRewardRouted(
+            .push(RewardAuditEvent::NetworkOwnedValidatorRewardRouted(
                 routing.clone(),
             ));
-        self.genesis_routings.insert(key, routing);
+        self.network_owned_routings.insert(key, routing);
         Ok(())
     }
 
@@ -1018,8 +1024,8 @@ impl RewardLedger {
             .unwrap_or_else(|| ValidatorReliabilityState::new(validator_id));
         let next_tier = next_bonus_tier(reliability.current_streak_epochs);
         let config = RewardConfig::default();
-        let genesis_validator_routing = self
-            .genesis_routings
+        let network_owned_validator_routing = self
+            .network_owned_routings
             .values()
             .filter(|routing| routing.validator_id == validator_id)
             .cloned()
@@ -1058,7 +1064,7 @@ impl RewardLedger {
             ),
             pending_settlements: pending,
             completed_settlements: completed,
-            genesis_validator_routing,
+            network_owned_validator_routing,
         }
     }
 }
@@ -1265,14 +1271,14 @@ mod tests {
     }
 
     #[test]
-    fn genesis_validator_rewards_route_70_30() {
+    fn network_owned_validator_rewards_route_70_30() {
         let validator = ValidatorMetadata {
             validator_id: "genesis-1".to_string(),
             reward_payout_address: "synw1payout".to_string(),
-            is_network_owned_genesis_validator: true,
+            is_network_owned_validator: true,
         };
         let routing =
-            route_genesis_validator_reward(1, &validator, 101, 77, &RewardConfig::default())
+            route_network_owned_validator_reward(1, &validator, 101, 77, &RewardConfig::default())
                 .unwrap();
         assert_eq!(routing.treasury_share_nwei, 71);
         assert_eq!(routing.bonus_pool_share_nwei, 30);
@@ -1280,16 +1286,20 @@ mod tests {
     }
 
     #[test]
-    fn normal_validator_cannot_use_genesis_routing() {
+    fn normal_validator_cannot_use_network_owned_routing() {
         let validator = ValidatorMetadata {
             validator_id: "normal".to_string(),
             reward_payout_address: "synw1payout".to_string(),
-            is_network_owned_genesis_validator: false,
+            is_network_owned_validator: false,
         };
-        assert!(
-            route_genesis_validator_reward(1, &validator, 100, 77, &RewardConfig::default(),)
-                .is_err()
-        );
+        assert!(route_network_owned_validator_reward(
+            1,
+            &validator,
+            100,
+            77,
+            &RewardConfig::default(),
+        )
+        .is_err());
     }
 
     #[test]

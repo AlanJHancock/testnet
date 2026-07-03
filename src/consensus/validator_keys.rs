@@ -49,7 +49,7 @@ pub fn expected_validator_public_key_for_height(
         Ok(Some(fork_key)) => return Ok(fork_key),
         Ok(None) => {}
         Err(error) if is_missing_from_checkpoint_fork(&error, validator_address) => {
-            if is_canonical_genesis_validator(validator_address)? {
+            if is_canonical_initial_validator(validator_address)? {
                 return Err(error);
             }
         }
@@ -70,7 +70,7 @@ fn is_missing_from_checkpoint_fork(error: &str, validator_address: &str) -> bool
         && error.contains(validator_address)
 }
 
-fn is_canonical_genesis_validator(validator_address: &str) -> Result<bool, String> {
+fn is_canonical_initial_validator(validator_address: &str) -> Result<bool, String> {
     let genesis = canonical_genesis().map_err(|error| {
         format!("load canonical genesis for checkpoint validator lookup: {error}")
     })?;
@@ -92,7 +92,7 @@ fn expected_validator_public_key_from_registry_at_height(
         if !error.contains("missing consensus key algorithm prefix") {
             return Err(error);
         }
-        if is_canonical_genesis_validator(validator_address)? {
+        if is_canonical_initial_validator(validator_address)? {
             return parse_legacy_registry_public_key_with_genesis_algorithm(
                 validator_address,
                 &validator.public_key,
@@ -104,7 +104,7 @@ fn expected_validator_public_key_from_registry_at_height(
                 &validator.public_key,
             );
         };
-        parse_post_genesis_untyped_registry_public_key_for_height(
+        parse_onboarded_untyped_registry_public_key_for_height(
             height,
             validator_address,
             &validator.public_key,
@@ -112,19 +112,19 @@ fn expected_validator_public_key_from_registry_at_height(
     })
 }
 
-fn parse_post_genesis_untyped_registry_public_key_for_height(
+fn parse_onboarded_untyped_registry_public_key_for_height(
     height: u64,
     validator_address: &str,
     encoded: &str,
 ) -> Result<PQCPublicKey, String> {
     let Some(migration) = consensus_fork::active_consensus_fork_migration()? else {
         return Err(format!(
-            "validator {validator_address} has an untyped post-genesis consensus key without an active consensus fork"
+            "validator {validator_address} has an untyped onboarded consensus key without an active consensus fork"
         ));
     };
     if !migration.applies_to_height(height) {
         return Err(format!(
-            "validator {validator_address} has an untyped post-genesis consensus key before consensus fork {}",
+            "validator {validator_address} has an untyped onboarded consensus key before consensus fork {}",
             migration.fork_height
         ));
     }
@@ -169,7 +169,7 @@ fn parse_legacy_registry_public_key_with_genesis_algorithm(
 ) -> Result<PQCPublicKey, String> {
     let genesis = canonical_genesis()
         .map_err(|error| format!("load canonical genesis for legacy validator key: {error}"))?;
-    let Some(genesis_validator) = genesis
+    let Some(initial_validator) = genesis
         .validators()
         .iter()
         .find(|validator| validator.operator_address == validator_address)
@@ -182,12 +182,12 @@ fn parse_legacy_registry_public_key_with_genesis_algorithm(
     let registry_key = parse_validator_public_key_with_declared_algorithm(
         validator_address,
         encoded,
-        &genesis_validator.consensus_key_type,
+        &initial_validator.consensus_key_type,
     )?;
     let canonical_key = parse_validator_public_key_with_declared_algorithm(
         validator_address,
-        &genesis_validator.consensus_public_key,
-        &genesis_validator.consensus_key_type,
+        &initial_validator.consensus_public_key,
+        &initial_validator.consensus_key_type,
     )?;
     if registry_key.key_data != canonical_key.key_data
         || registry_key.algorithm != canonical_key.algorithm
@@ -942,6 +942,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_live_ml_dsa_declared_genesis_public_key_as_fndsa() {
+        let encoded = general_purpose::STANDARD.encode([1, 2, 3, 4]);
+        let key = parse_validator_public_key_with_declared_algorithm(
+            "synval1test",
+            &encoded,
+            "ml-dsa-65",
+        )
+        .unwrap();
+
+        assert_eq!(key.algorithm, PQCAlgorithm::FNDSA);
+        assert_eq!(key.key_data, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
     fn rejects_mismatched_prefixed_and_declared_validator_algorithms() {
         let encoded = format!("slh-dsa:{}", general_purpose::STANDARD.encode([1, 2, 3, 4]));
         let error =
@@ -976,7 +990,7 @@ mod tests {
     }
 
     #[test]
-    fn post_genesis_validator_key_falls_back_to_finalized_registry_after_checkpoint_fork() {
+    fn onboarded_validator_key_falls_back_to_finalized_registry_after_checkpoint_fork() {
         let _fork_env = install_test_consensus_fork(vec![fork_entry(
             "synv1checkpointvalidator0000000000000000",
             7,
@@ -989,10 +1003,10 @@ mod tests {
             .register_validator(crate::validator::ValidatorRegistration {
                 address: validator_address.to_string(),
                 public_key,
-                name: "post genesis validator".to_string(),
+                name: "onboarded validator".to_string(),
                 stake_amount: crate::validator::TESTNET_MIN_VALIDATOR_STAKE_NWEI,
                 submitted_at: 1,
-                registration_tx_hash: "syntxn-post-genesis-key-test".to_string(),
+                registration_tx_hash: "syntxn-onboarded-key-test".to_string(),
             })
             .expect("register validator");
         manager
@@ -1001,14 +1015,14 @@ mod tests {
 
         let resolved =
             expected_validator_public_key_for_height(204_300, validator_address, &manager)
-                .expect("post-genesis validator should resolve from finalized registry");
+                .expect("onboarded validator should resolve from finalized registry");
 
         assert_eq!(resolved.algorithm, PQCAlgorithm::FNDSA);
         assert_eq!(resolved.key_data, key_bytes);
     }
 
     #[test]
-    fn post_genesis_untyped_validator_key_uses_fndsa_after_checkpoint_fork() {
+    fn onboarded_untyped_validator_key_uses_fndsa_after_checkpoint_fork() {
         let _fork_env = install_test_consensus_fork(vec![fork_entry(
             "synv1checkpointvalidator0000000000000000",
             7,
@@ -1020,10 +1034,10 @@ mod tests {
             .register_validator(crate::validator::ValidatorRegistration {
                 address: validator_address.to_string(),
                 public_key: general_purpose::STANDARD.encode(&key_bytes),
-                name: "post genesis untyped validator".to_string(),
+                name: "onboarded untyped validator".to_string(),
                 stake_amount: crate::validator::TESTNET_MIN_VALIDATOR_STAKE_NWEI,
                 submitted_at: 1,
-                registration_tx_hash: "syntxn-post-genesis-untyped-key-test".to_string(),
+                registration_tx_hash: "syntxn-onboarded-untyped-key-test".to_string(),
             })
             .expect("register validator");
         manager
@@ -1032,19 +1046,19 @@ mod tests {
 
         let resolved =
             expected_validator_public_key_for_height(204_300, validator_address, &manager)
-                .expect("post-genesis untyped validator should resolve as FN-DSA");
+                .expect("onboarded untyped validator should resolve as FN-DSA");
 
         assert_eq!(resolved.algorithm, PQCAlgorithm::FNDSA);
         assert_eq!(resolved.key_data, key_bytes);
     }
 
     #[test]
-    fn missing_genesis_validator_in_checkpoint_fork_still_fails_closed() {
+    fn missing_initial_validator_in_checkpoint_fork_still_fails_closed() {
         let genesis = canonical_genesis().expect("canonical genesis should load");
         let missing_validator = genesis
             .validators()
             .first()
-            .expect("genesis validator should exist")
+            .expect("initial validator should exist")
             .operator_address
             .clone();
         let _fork_env = install_test_consensus_fork(vec![fork_entry(

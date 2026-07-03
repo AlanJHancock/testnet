@@ -256,6 +256,9 @@ plan = json.loads((evidence / "val5-recovery-plan.json").read_text())
 verify = json.loads((evidence / "val5-recovery-plan.verify.json").read_text())
 summary = json.loads((evidence / "source-snapshot-summary.json").read_text())
 
+def _active_validator_set_meets_baseline(plan):
+    return plan.get("active_validator_set_meets_baseline", False)
+
 out = {
     "spreadsheet_row_used": True,
     "access_path": "workbook_exact",
@@ -275,7 +278,7 @@ out = {
     "source_qc_signers": summary.get("derived_committed_qc_signers"),
     "source_qc_aegis_pqc_verified": plan.get("source_qc_aegis_pqc_verified"),
     "duplicate_signer_check_passed": plan.get("duplicate_signer_check_passed"),
-    "active_validator_set_is_genesis_5": plan.get("active_validator_set_is_genesis_5"),
+    "active_validator_set_meets_baseline": _active_validator_set_meets_baseline(plan),
     "relayers_rpc_support_counted_toward_quorum": False,
     "evidence_path": str(evidence),
     "rollback_path": str(rollback),

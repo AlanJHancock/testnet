@@ -126,13 +126,14 @@ pub fn recover_chain_from_committed_block_log_at(
         if trimmed.is_empty() {
             continue;
         }
-        let entry = serde_json::from_str::<CommittedBlockLogEntry>(trimmed).map_err(|error| {
-            format!(
-                "failed to parse committed block log {} line {}: {error}",
-                path.display(),
-                line_number + 1
-            )
-        })?;
+        let entry = match serde_json::from_str::<CommittedBlockLogEntry>(trimmed) {
+            Ok(entry) => entry,
+            Err(_) => {
+                // Older runtimes could leave torn append-log lines after abrupt
+                // stops. Valid entries still fail closed on conflicting data.
+                continue;
+            }
+        };
         if entry.height != entry.block.block_index || entry.hash != entry.block.hash {
             return Err(format!(
                 "committed block log entry at line {} has inconsistent height/hash",
@@ -295,6 +296,43 @@ mod tests {
         assert_eq!(recovered, 2);
         assert_eq!(chain.last().map(|block| block.block_index), Some(2));
         assert_eq!(chain.last().map(|block| block.hash.clone()), Some(two.hash));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn committed_block_log_recovery_skips_malformed_lines() {
+        let root = std::env::temp_dir().join(format!(
+            "synergy-chain-durability-malformed-log-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let log_path = root.join("committed_blocks.jsonl");
+
+        let genesis = block(0, "genesis".to_string());
+        let one = block(1, genesis.hash.clone());
+        fs::write(
+            &log_path,
+            format!(
+                "{{\"height\":1,\"hash\"\n{}\n",
+                serde_json::to_string(&CommittedBlockLogEntry {
+                    height: one.block_index,
+                    hash: one.hash.clone(),
+                    previous_hash: one.previous_hash.clone(),
+                    block: one.clone(),
+                })
+                .unwrap()
+            ),
+        )
+        .unwrap();
+
+        let mut chain = BlockChain {
+            chain: vec![genesis],
+        };
+        let recovered = recover_chain_from_committed_block_log_at(&mut chain, &log_path).unwrap();
+        assert_eq!(recovered, 1);
+        assert_eq!(chain.last().map(|block| block.block_index), Some(1));
+        assert_eq!(chain.last().map(|block| block.hash.clone()), Some(one.hash));
         let _ = fs::remove_dir_all(&root);
     }
 

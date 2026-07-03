@@ -15,7 +15,7 @@ fail_closed_on_verification_error = true
 
 [snapshots]
 enabled = true
-snapshot_interval_blocks = 5000
+snapshot_interval_blocks = 15000
 compression = "zstd"
 chunk_size_bytes = 536870912
 retain_verified_snapshots_per_class = 2
@@ -34,15 +34,38 @@ snapshot_signing_key_role = "ARCHIVE_SNAPSHOT_SIGNER"
 [api]
 enabled = true
 bind = "0.0.0.0:48640"
-public_url = ""
+public_url = "http://73.79.66.255:48640"
 enable_resumable_downloads = true
 rate_limit_enabled = true
 
 [p2p]
 enabled = true
 bind = "0.0.0.0:5622"
+listen_address = "0.0.0.0:5622"
+public_address = "archive.synergynode.xyz:5615"
 bootnodes = []
-persistent_peers = ["195.26.241.95:5622", "94.72.117.108:5622"]
+additional_dial_targets = [
+  "relay1.synergynode.xyz:5622",
+  "relay2.synergynode.xyz:5622",
+  "rpc.synergynode.xyz:5623",
+  "62.146.182.207:5622",
+  "62.146.182.208:5622",
+  "62.146.182.209:5622",
+  "73.79.66.255:5622",
+  "194.163.183.166:5622",
+  "157.173.192.45:5622",
+]
+persistent_peers = [
+  "relay1.synergynode.xyz:5622",
+  "relay2.synergynode.xyz:5622",
+  "rpc.synergynode.xyz:5623",
+  "62.146.182.207:5622",
+  "62.146.182.208:5622",
+  "62.146.182.209:5622",
+  "73.79.66.255:5622",
+  "194.163.183.166:5622",
+  "157.173.192.45:5622",
+]
 
 [metrics]
 enabled = true

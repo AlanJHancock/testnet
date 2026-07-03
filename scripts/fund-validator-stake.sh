@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Fund a post-genesis validator with the required stake amount, then submit a
+# Fund a validator with the required stake amount, then submit a
 # staking transaction from the validator's local wallet RPC when available.
 #
 # Usage:

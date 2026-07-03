@@ -16,11 +16,11 @@ p2p_port = 5622
 rpc_port = 5640
 ws_port = 5660
 max_peers = 100
-bootnodes = ["snr://bootstrap@bootnode1.synergy-network.io:5620", "snr://bootstrap@bootnode2.synergy-network.io:5620", "snr://bootstrap@bootnode3.synergy-network.io:5620"]
-seed_servers = ["http://seed1.synergy-network.io:5621", "http://seed2.synergy-network.io:5621", "http://seed3.synergy-network.io:5621"]
-bootstrap_dns_records = ["_dnsaddr.bootstrap.synergy-network.io"]
-additional_dial_targets = []
-persistent_peers = []
+bootnodes = ["snr://bootstrap@bootnode1.synergynode.xyz:5620", "snr://bootstrap@bootnode2.synergynode.xyz:5620", "snr://bootstrap@bootnode3.synergynode.xyz:5620"]
+seed_servers = ["http://seed1.synergynode.xyz:5621", "http://seed2.synergynode.xyz:5621", "http://seed3.synergynode.xyz:5621"]
+bootstrap_dns_records = ["_dnsaddr.bootstrap.synergynode.xyz"]
+additional_dial_targets = ["relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622", "rpc.synergynode.xyz:5623", "62.146.182.207:5622", "62.146.182.208:5622", "62.146.182.209:5622", "73.79.66.255:5622", "194.163.183.166:5622", "157.173.192.45:5622"]
+persistent_peers = ["relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622", "rpc.synergynode.xyz:5623", "62.146.182.207:5622", "62.146.182.208:5622", "62.146.182.209:5622", "73.79.66.255:5622", "194.163.183.166:5622", "157.173.192.45:5622"]
 
 [blockchain]
 block_time = 2
@@ -31,10 +31,15 @@ chain_id = 1264
 algorithm = "Proof of Synergy"
 block_time_secs = 2
 epoch_length = 1000
-min_validators = 3
+emergency_stable_committee_mode = true
+freeze_validator_set = true
+freeze_score_weighted_proposer_order = true
+vote_only_rejoin_enabled = true
+vote_only_probation_blocks = 1000
+min_validators = 4
 validator_cluster_size = 6
 validator_vote_threshold = 0
-max_validators = 6
+max_validators = 0
 status_ready_gate_enabled = true
 status_ready_min_validators = 4
 status_ready_genesis_grace_secs = 0
@@ -75,12 +80,12 @@ cors_origins = []
 
 [p2p]
 listen_address = "0.0.0.0:5622"
-public_address = "replace-with-public-host:5622"
+public_address = "archive.synergynode.xyz:5615"
 node_name = "archive-validator-01"
 enable_discovery = true
 discovery_port = 5680
 discovery_listen_address = "0.0.0.0:5680"
-discovery_public_address = "replace-with-public-host:5680"
+discovery_public_address = "archive.synergynode.xyz:5680"
 heartbeat_interval = 10
 bootstrap_refresh_secs = 60
 

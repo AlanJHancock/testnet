@@ -754,7 +754,7 @@ impl LivenessContinuationPolicy {
 }
 
 pub fn emergency_liveness_recommendation() -> &'static str {
-    "Validator quorum is dynamic: ceil(active_validator_count * 67 / 100). If too many validators are offline, partitioned, or quarantined simultaneously, finality may pause by design to preserve safety. Do not lower quorum below the dynamic validator threshold."
+    "Validator quorum is dynamic: ceil(active_validator_count * 2 / 3). If too many validators are offline, partitioned, or quarantined simultaneously, finality may pause by design to preserve safety. Do not lower quorum below the dynamic validator threshold."
 }
 
 #[cfg(test)]

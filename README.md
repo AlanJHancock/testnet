@@ -141,7 +141,7 @@ algorithm = "proof_of_synergy"
 block_time = 5
 min_validators = 4
 validator_vote_threshold = 0
-max_validators = 100
+max_validators = 0
 ```
 
 ### Node Configuration

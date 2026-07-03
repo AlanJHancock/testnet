@@ -12,9 +12,11 @@ Usage:
   autonomous-validator-realignment-controller.sh abort
   autonomous-validator-realignment-controller.sh export-evidence
 
-The controller owns the quarantined-validator lifecycle: preflight, snapshot
-discovery/verification/restore when configured, head match, quarantined runtime
-observation, shadow epochs, rejoin, and post-rejoin soak evidence.
+The controller owns the quarantined-validator lifecycle:
+ACTIVE -> SUSPECT -> QUARANTINED -> HEALING -> SYNCING -> VOTE_ONLY -> ACTIVE.
+It restores from a verified snapshot when configured, proves a QC-backed head
+match, rejoins immediately as vote-only, and restores proposer duties only after
+a finalized-block probation window.
 
 Required:
   SYNERGY_EXPECTED_RUNTIME_SHA=<trusted sha256>
@@ -30,7 +32,7 @@ Common environment:
 
 Catch-up behavior:
   CATCHING_UP and HEAD_MATCH_PENDING are retry states. The controller must not
-  run shadow-status or request rejoin until local qRPC, listeners, runtime
+  request rejoin until local qRPC, listeners, runtime
   process, fork/key safety gates, near-head lag, and fixed-height hash agreement
   are all proven.
 USAGE
@@ -89,6 +91,8 @@ SHADOW_START_TIMEOUT = int(os.environ.get("SYNERGY_SHADOW_START_TIMEOUT_SECS", "
 REJOIN_ELIGIBILITY_TIMEOUT = int(os.environ.get("SYNERGY_REJOIN_ELIGIBILITY_TIMEOUT_SECS", "150"))
 REQUEST_REJOIN_TIMEOUT = int(os.environ.get("SYNERGY_REQUEST_REJOIN_TIMEOUT_SECS", "150"))
 POST_REJOIN_SOAK_SECS = int(os.environ.get("SYNERGY_POST_REJOIN_SOAK_SECS", "1800"))
+VOTE_ONLY_REJOIN_ENABLED = os.environ.get("SYNERGY_VOTE_ONLY_REJOIN_ENABLED", "true").lower() == "true"
+VOTE_ONLY_PROBATION_BLOCKS = int(os.environ.get("SYNERGY_VOTE_ONLY_PROBATION_BLOCKS", "1000"))
 AUTO_START_RUNTIME = os.environ.get("SYNERGY_AUTONOMOUS_START_RUNTIME", "true").lower() == "true"
 SNAPSHOT_DISTRIBUTION = os.environ.get("SYNERGY_SNAPSHOT_DISTRIBUTION", "").strip()
 SNAPSHOT_RECEIVER = Path(os.environ.get("SYNERGY_SNAPSHOT_RECEIVER", str(EVIDENCE_ROOT / "manual-snapshot-receiver.sh")))
@@ -376,8 +380,10 @@ def key_candidates(kind):
 
 def initial_state():
     return {
-        "schema": "synergy-validator-realignment-controller-v1",
+        "schema": "synergy-validator-realignment-controller-v2",
         "state": "QUARANTINED",
+        "lifecycle_state": "QUARANTINED",
+        "lifecycle": ["ACTIVE", "SUSPECT", "QUARANTINED", "HEALING", "SYNCING", "VOTE_ONLY", "ACTIVE"],
         "paused": False,
         "retry_count": 0,
         "shadow_epoch": 1,
@@ -435,6 +441,7 @@ def set_check(state, name, ok, detail, terminal=True):
 
 def fail_closed(state, name, detail):
     set_check(state, name, False, detail, terminal=True)
+    state["lifecycle_state"] = "QUARANTINED"
     state["state"] = "FAILED_REALIGNMENT"
 
 
@@ -473,6 +480,7 @@ def load_fork_metadata(state):
 
 def preflight(state):
     state["state"] = "PREFLIGHT"
+    state["lifecycle_state"] = "SUSPECT"
     state["failure_reasons"] = []
     state["retryable_reasons"] = []
     state["terminal_failure_reasons"] = []
@@ -508,8 +516,10 @@ def preflight(state):
         set_check(state, "fndsa_private_key_strict_permissions", False, "private key missing")
     if state.get("terminal_failure_reasons"):
         state["state"] = "QUARANTINED"
+        state["lifecycle_state"] = "QUARANTINED"
     else:
         state["state"] = "RUNTIME_START_QUARANTINED"
+        state["lifecycle_state"] = "SYNCING"
 
 
 def common_head(state):
@@ -804,6 +814,7 @@ def start_runtime_if_missing(state):
 
 def head_match(state):
     state["state"] = "HEAD_MATCH_PENDING"
+    state["lifecycle_state"] = "SYNCING"
     processes = start_runtime_if_missing(state)
     health = refresh_runtime_health(state)
     local = health.get("local")
@@ -859,12 +870,17 @@ def head_match(state):
         return
     state["state"] = "RUNTIME_START_QUARANTINED"
     state["head_match_eligible"] = True
-    state["next_automatic_action"] = "start_shadow_epoch_1_after_quarantine_duty_gate_check"
+    state["next_automatic_action"] = (
+        "request_vote_only_rejoin_after_quarantine_duty_gate_check"
+        if VOTE_ONLY_REJOIN_ENABLED
+        else "start_shadow_epoch_1_after_quarantine_duty_gate_check"
+    )
     set_check(state, "head_matched", True, f"local={local_height} common={common['height']} lag={lag_to_common}")
 
 
 def ensure_runtime_observing(state):
     state["state"] = "RUNTIME_START_QUARANTINED"
+    state["lifecycle_state"] = "SYNCING"
     health = refresh_runtime_health(state)
     local = health.get("local")
     if not state.get("head_match_eligible"):
@@ -881,6 +897,11 @@ def ensure_runtime_observing(state):
         return
     materialize_head_match_status(state)
     if state.get("state") == "FAILED_REALIGNMENT":
+        return
+    if VOTE_ONLY_REJOIN_ENABLED:
+        state["state"] = "ELIGIBLE_FOR_REJOIN"
+        state["next_automatic_action"] = "request_vote_only_rejoin"
+        eligible_and_rejoin(state)
         return
     start_shadow_observe(state)
 
@@ -1002,7 +1023,11 @@ def materialize_head_match_status(state):
         "chain_state_mutated": False,
         "controller_evidence_path": str(STATE_PATH),
         "preserved_previous_runtime_status": preserved,
-        "next_required_action": "start_shadow_observe",
+        "next_required_action": (
+            "request_vote_only_rejoin"
+            if VOTE_ONLY_REJOIN_ENABLED
+            else "start_shadow_observe"
+        ),
         "updated_at": now(),
     }
     json_write(status_path, payload)
@@ -1166,6 +1191,7 @@ def shadow_epoch(state):
 
 def eligible_and_rejoin(state):
     state["state"] = "ELIGIBLE_FOR_REJOIN"
+    state["lifecycle_state"] = "SYNCING"
     shadow = state.get("shadow_status") or {}
     shadow_passed = bool(
         shadow.get("full_epoch_shadow_completed")
@@ -1177,7 +1203,8 @@ def eligible_and_rejoin(state):
             and int(state.get("missed_block_count", 0) or 0) == 0
         )
     )
-    if shadow and not shadow_passed:
+    vote_only_fast_path = VOTE_ONLY_REJOIN_ENABLED and not shadow_passed
+    if shadow and not shadow_passed and not vote_only_fast_path:
         state["state"] = "SHADOW_EPOCH_1" if int(state.get("shadow_epoch", 1) or 1) == 1 else "SHADOW_EPOCH_2"
         retry_later(
             state,
@@ -1189,7 +1216,14 @@ def eligible_and_rejoin(state):
     if shadow_passed:
         eligibility = {
             "controller_enforced": True,
-            "detail": "full shadow pass is already proven; controller waits for an exact epoch boundary and request-rejoin performs final fail-closed validation",
+            "detail": "full shadow pass is already proven; request-rejoin performs final fail-closed validation",
+            "shadow": shadow,
+        }
+    elif vote_only_fast_path:
+        eligibility = {
+            "controller_enforced": True,
+            "vote_only_rejoin": True,
+            "detail": "exact QC-backed head match permits immediate vote-only rejoin before a full shadow epoch",
             "shadow": shadow,
         }
     else:
@@ -1212,59 +1246,69 @@ def eligible_and_rejoin(state):
     common_height = int(common["height"])
     state["common_height"] = common_height
     state["common_hash"] = common.get("hash")
-    if earliest_activation is not None and common_height < int(earliest_activation):
-        retry_later(
+    if vote_only_fast_path:
+        state["rejoin_target_boundary"] = common_height
+        state["next_automatic_action"] = "request_vote_only_rejoin"
+        set_check(
             state,
-            "activation_boundary_reached",
-            f"common_height={common_height} before earliest_activation_height={earliest_activation}",
-            "retry_rejoin_eligibility_at_next_boundary",
+            "vote_only_rejoin_proof_ready",
+            True,
+            f"common_height={common_height} common_hash={common.get('hash')}",
         )
-        return
-    requested_boundary = requested_rejoin_boundary(state, common_height)
-    boundary = boundary_from_common_height(common_height)
-    entry_window_boundary = None
-    if boundary is not None:
-        entry_window_boundary = boundary
-    elif EPOCH_SIZE > 0:
-        current_epoch_boundary = (common_height // EPOCH_SIZE) * EPOCH_SIZE
-        if current_epoch_boundary > 0 and common_height <= epoch_entry_window_end(current_epoch_boundary):
-            entry_window_boundary = current_epoch_boundary
+    else:
+        if earliest_activation is not None and common_height < int(earliest_activation):
+            retry_later(
+                state,
+                "activation_boundary_reached",
+                f"common_height={common_height} before earliest_activation_height={earliest_activation}",
+                "retry_rejoin_eligibility_at_next_boundary",
+            )
+            return
+        requested_boundary = requested_rejoin_boundary(state, common_height)
+        boundary = boundary_from_common_height(common_height)
+        entry_window_boundary = None
+        if boundary is not None:
+            entry_window_boundary = boundary
+        elif EPOCH_SIZE > 0:
+            current_epoch_boundary = (common_height // EPOCH_SIZE) * EPOCH_SIZE
+            if current_epoch_boundary > 0 and common_height <= epoch_entry_window_end(current_epoch_boundary):
+                entry_window_boundary = current_epoch_boundary
 
-    target_boundary = requested_boundary or entry_window_boundary or next_epoch_boundary_after(common_height)
-    if target_boundary is None:
-        fail_closed(state, "activation_boundary_reached", f"invalid epoch size {EPOCH_SIZE}")
-        return
-    if earliest_activation is not None and int(target_boundary) < int(earliest_activation):
-        target_boundary = next_epoch_boundary_after(int(earliest_activation) - 1)
-    lag_to_boundary = int(target_boundary) - common_height
-    state["rejoin_target_boundary"] = int(target_boundary)
-    state["rejoin_entry_window_end"] = epoch_entry_window_end(target_boundary)
-    state["next_automatic_action"] = f"wait_for_epoch_entry_window_{target_boundary}_{epoch_entry_window_end(target_boundary)}"
-    write_outputs(state)
-    if lag_to_boundary > EPOCH_BOUNDARY_ARM_WINDOW:
-        retry_later(
-            state,
-            "activation_boundary_reached",
-            f"common_height={common_height} is armed for epoch entry window {target_boundary}-{epoch_entry_window_end(target_boundary)}",
-            f"wait_for_epoch_boundary_{target_boundary}",
-        )
-        return
-    if lag_to_boundary > EPOCH_BOUNDARY_BLOCKING_WINDOW:
-        retry_later(
-            state,
-            "activation_boundary_reached",
-            f"common_height={common_height} is armed for epoch entry window {target_boundary}-{epoch_entry_window_end(target_boundary)}; blocking wait starts within {EPOCH_BOUNDARY_BLOCKING_WINDOW} blocks",
-            f"wait_for_epoch_entry_window_{target_boundary}_{epoch_entry_window_end(target_boundary)}",
-        )
-        return
-    boundary_common = wait_for_epoch_entry_window(state, int(target_boundary))
-    if not boundary_common:
-        return
-    common = boundary_common
-    set_check(state, "activation_boundary_reached", True, json.dumps(eligibility, sort_keys=True))
+        target_boundary = requested_boundary or entry_window_boundary or next_epoch_boundary_after(common_height)
+        if target_boundary is None:
+            fail_closed(state, "activation_boundary_reached", f"invalid epoch size {EPOCH_SIZE}")
+            return
+        if earliest_activation is not None and int(target_boundary) < int(earliest_activation):
+            target_boundary = next_epoch_boundary_after(int(earliest_activation) - 1)
+        lag_to_boundary = int(target_boundary) - common_height
+        state["rejoin_target_boundary"] = int(target_boundary)
+        state["rejoin_entry_window_end"] = epoch_entry_window_end(target_boundary)
+        state["next_automatic_action"] = f"wait_for_epoch_entry_window_{target_boundary}_{epoch_entry_window_end(target_boundary)}"
+        write_outputs(state)
+        if lag_to_boundary > EPOCH_BOUNDARY_ARM_WINDOW:
+            retry_later(
+                state,
+                "activation_boundary_reached",
+                f"common_height={common_height} is armed for epoch entry window {target_boundary}-{epoch_entry_window_end(target_boundary)}",
+                f"wait_for_epoch_boundary_{target_boundary}",
+            )
+            return
+        if lag_to_boundary > EPOCH_BOUNDARY_BLOCKING_WINDOW:
+            retry_later(
+                state,
+                "activation_boundary_reached",
+                f"common_height={common_height} is armed for epoch entry window {target_boundary}-{epoch_entry_window_end(target_boundary)}; blocking wait starts within {EPOCH_BOUNDARY_BLOCKING_WINDOW} blocks",
+                f"wait_for_epoch_entry_window_{target_boundary}_{epoch_entry_window_end(target_boundary)}",
+            )
+            return
+        boundary_common = wait_for_epoch_entry_window(state, int(target_boundary))
+        if not boundary_common:
+            return
+        common = boundary_common
+        set_check(state, "activation_boundary_reached", True, json.dumps(eligibility, sort_keys=True))
     state["state"] = "AUTONOMOUS_REJOIN"
-    result = runtime_phase(
-        "request-rejoin",
+    state["lifecycle_state"] = "SYNCING"
+    request_args = [
         "--common-height",
         str(common["height"]),
         "--common-hash",
@@ -1274,9 +1318,10 @@ def eligible_and_rejoin(state):
         "--state-root-matches",
         "--rejoin-at-finalized-safe-boundary",
         "--cluster-marks-pending-reactivation",
-        "--operator-approved-reactivation",
-        timeout=REQUEST_REJOIN_TIMEOUT,
-    )
+    ]
+    if not vote_only_fast_path:
+        request_args.append("--operator-approved-reactivation")
+    result = runtime_phase("request-rejoin", *request_args, timeout=REQUEST_REJOIN_TIMEOUT)
     state["rejoin_result"] = result
     if result.get("typed_status") == "RETRYABLE_TIMEOUT":
         state["state"] = "ELIGIBLE_FOR_REJOIN"
@@ -1292,18 +1337,56 @@ def eligible_and_rejoin(state):
     json_write(REJOIN_PATH, {"common_head": common, "eligibility": eligibility, "rejoin_result": result, "state": state})
     state.setdefault("evidence_paths", {})["validator-rejoin-proof.json"] = str(REJOIN_PATH)
     if ok:
-        state["state"] = "ACTIVE_POST_REJOIN_MONITOR"
+        typed_status = result.get("typed_status") or result.get("new_state")
+        if VOTE_ONLY_REJOIN_ENABLED and typed_status != "VOTE_ONLY":
+            fail_closed(state, "vote_only_rejoin_returned_vote_only", json.dumps(result, sort_keys=True)[:1000])
+            return
+        state["state"] = "VOTE_ONLY"
+        state["lifecycle_state"] = "VOTE_ONLY"
         state["post_rejoin_started_at"] = now()
+        state["vote_only_started_at"] = state["post_rejoin_started_at"]
+        state["vote_only_started_height"] = int(common["height"])
+        state["vote_only_probation_required_blocks"] = VOTE_ONLY_PROBATION_BLOCKS
+        state["next_automatic_action"] = "monitor_vote_only_probation"
 
 
 def post_rejoin_monitor(state):
-    state["state"] = "ACTIVE_POST_REJOIN_MONITOR"
+    state["state"] = "VOTE_ONLY"
+    state["lifecycle_state"] = "VOTE_ONLY"
     common = common_head(state)
     local = None
     try:
         local = local_latest()
     except Exception as exc:
         state.setdefault("failure_reasons", []).append(str(exc))
+    started_height = int(state.get("vote_only_started_height") or state.get("common_height") or 0)
+    current_common_height = int(common.get("height") or 0) if common else 0
+    probation_blocks = max(current_common_height - started_height, 0) if started_height else 0
+    if common and local:
+        try:
+            local_common = local_block(int(common["height"]))
+            if local_common.get("hash") != common.get("hash"):
+                fail_closed(
+                    state,
+                    "vote_only_probation_no_divergence",
+                    f"height={common['height']} local={local_common.get('hash')} common={common.get('hash')}",
+                )
+                return
+            set_check(
+                state,
+                "vote_only_probation_no_divergence",
+                True,
+                f"height={common['height']} hash={common.get('hash')}",
+                terminal=False,
+            )
+        except Exception as exc:
+            retry_later(
+                state,
+                "vote_only_probation_no_divergence",
+                str(exc),
+                "retry_vote_only_probation_local_block_probe",
+            )
+            return
     soak = {
         "started_at": state.get("post_rejoin_started_at", now()),
         "now": now(),
@@ -1311,17 +1394,39 @@ def post_rejoin_monitor(state):
         "common_head": common,
         "processes": process_table(),
         "listeners": {str(port): listener(port) for port in (5622, 5640, 5660, 6030)},
+        "vote_only_started_height": started_height,
+        "vote_only_probation_required_blocks": VOTE_ONLY_PROBATION_BLOCKS,
+        "vote_only_probation_observed_blocks": probation_blocks,
     }
     soak["elapsed_secs"] = soak["now"] - soak["started_at"]
-    soak["complete"] = soak["elapsed_secs"] >= POST_REJOIN_SOAK_SECS
+    soak["complete"] = (
+        probation_blocks >= VOTE_ONLY_PROBATION_BLOCKS
+        and soak["elapsed_secs"] >= min(POST_REJOIN_SOAK_SECS, 60)
+    )
     json_write(SOAK_PATH, soak)
     state.setdefault("evidence_paths", {})["validator-post-rejoin-soak.json"] = str(SOAK_PATH)
     if soak["complete"]:
-        state["state"] = "ACTIVE"
+        promotion = runtime_phase("promote-vote-only-to-active", timeout=REQUEST_REJOIN_TIMEOUT)
+        state["vote_only_promotion_result"] = promotion
+        if promotion.get("typed_status") == "PROBATION_ACTIVE":
+            retry_later(
+                state,
+                "vote_only_probation_complete",
+                json.dumps(promotion, sort_keys=True)[:1000],
+                "continue_vote_only_probation",
+            )
+            return
+        ok = promotion.get("success") is True or promotion.get("typed_status") == "ACTIVE"
+        set_check(state, "vote_only_probation_complete", ok, json.dumps(promotion, sort_keys=True)[:1000])
+        if ok:
+            state["state"] = "ACTIVE"
+            state["lifecycle_state"] = "ACTIVE"
+            state["next_automatic_action"] = "normal_validator_operation"
 
 
 def snapshot_discovery(state):
     state["state"] = "REALIGNMENT_SNAPSHOT_DISCOVERY"
+    state["lifecycle_state"] = "HEALING"
     if SNAPSHOT_DISTRIBUTION and Path(SNAPSHOT_DISTRIBUTION).is_dir():
         state["snapshot_source"] = SNAPSHOT_DISTRIBUTION
         set_check(state, "snapshot_discovered", True, SNAPSHOT_DISTRIBUTION)
@@ -1342,6 +1447,7 @@ def snapshot_discovery(state):
             if int(latest.get("block_index") or 0) >= EXPECTED["fork_height"]:
                 set_check(state, "snapshot_restore_not_needed", True, f"local height={latest.get('block_index')}")
                 state["state"] = "HEAD_MATCH"
+                state["lifecycle_state"] = "SYNCING"
                 return
         except Exception:
             pass
@@ -1350,6 +1456,7 @@ def snapshot_discovery(state):
 
 def snapshot_verify_restore(state):
     state["state"] = "SNAPSHOT_VERIFY"
+    state["lifecycle_state"] = "HEALING"
     if not SNAPSHOT_DISTRIBUTION or not Path(SNAPSHOT_DISTRIBUTION).is_dir():
         set_check(state, "snapshot_discovered", False, "SYNERGY_SNAPSHOT_DISTRIBUTION not configured or not a directory")
         return
@@ -1468,6 +1575,7 @@ def snapshot_verify_restore(state):
         clear_check(state, check_name)
     set_check(state, "snapshot_self_heal_restored", True, f"snapshot_height={self_heal_json.get('verification', {}).get('snapshot_height')}")
     state["state"] = "RUNTIME_START_QUARANTINED"
+    state["lifecycle_state"] = "SYNCING"
     state["next_automatic_action"] = "restart_quarantined_runtime_after_snapshot_restore"
 
 
@@ -1479,6 +1587,7 @@ def write_outputs(state):
         "# Validator Realignment Summary",
         "",
         f"- state: `{state.get('state')}`",
+        f"- lifecycle_state: `{state.get('lifecycle_state', '')}`",
         f"- paused: `{state.get('paused')}`",
         f"- retry_count: `{state.get('retry_count', 0)}`",
         f"- next_automatic_action: `{state.get('next_automatic_action', '')}`",
@@ -1537,13 +1646,14 @@ def step(state):
             shadow_epoch(state)
         elif current == "ELIGIBLE_FOR_REJOIN":
             eligible_and_rejoin(state)
-        elif current in {"AUTONOMOUS_REJOIN", "ACTIVE_POST_REJOIN_MONITOR"}:
+        elif current in {"AUTONOMOUS_REJOIN", "ACTIVE_POST_REJOIN_MONITOR", "VOTE_ONLY"}:
             post_rejoin_monitor(state)
         else:
             state["state"] = "FAILED_REALIGNMENT"
             state.setdefault("failure_reasons", []).append(f"unknown controller state {current}")
     except Exception as exc:
         state["state"] = "FAILED_REALIGNMENT"
+        state["lifecycle_state"] = "QUARANTINED"
         state.setdefault("failure_reasons", []).append(f"{type(exc).__name__}: {exc}")
     return state
 

@@ -826,6 +826,7 @@ fn candidate_testnet_local_identity_paths() -> Vec<PathBuf> {
     if let Ok(project_root) = std::env::var("SYNERGY_PROJECT_ROOT") {
         let root = PathBuf::from(project_root.trim());
         if !root.as_os_str().is_empty() {
+            candidates.push(root.join("identity").join("identity.json"));
             candidates.push(root.join("keys").join("identity.json"));
         }
     }
@@ -833,11 +834,13 @@ fn candidate_testnet_local_identity_paths() -> Vec<PathBuf> {
     if let Ok(config_path) = std::env::var("SYNERGY_CONFIG_PATH") {
         let path = PathBuf::from(config_path.trim());
         if let Some(workspace_root) = path.parent().and_then(|config_dir| config_dir.parent()) {
+            candidates.push(workspace_root.join("identity").join("identity.json"));
             candidates.push(workspace_root.join("keys").join("identity.json"));
         }
     }
 
     if let Ok(current_dir) = std::env::current_dir() {
+        candidates.push(current_dir.join("identity").join("identity.json"));
         candidates.push(current_dir.join("keys").join("identity.json"));
     }
 
@@ -1032,6 +1035,43 @@ mod tests {
             .expect("local identity should load from identity.json plus private.key");
 
         assert_eq!(material.address, "synv1localidentity");
+        assert_eq!(material.public_key, "public-from-json");
+        assert_eq!(material.private_key, "private-from-file");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn local_identity_candidates_include_validator_appliance_identity_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "synergy-wallet-appliance-candidate-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time should be valid")
+                .as_nanos()
+        ));
+        let identity = root.join("identity");
+        fs::create_dir_all(&identity).expect("identity directory should be created");
+        let identity_path = identity.join("identity.json");
+        fs::write(
+            &identity_path,
+            r#"{"address":"synv1applianceidentity","public_key":"public-from-json"}"#,
+        )
+        .expect("identity should write");
+        fs::write(identity.join("private.key"), "private-from-file")
+            .expect("private key should write");
+
+        std::env::set_var("SYNERGY_PROJECT_ROOT", &root);
+        let candidates = candidate_testnet_local_identity_paths();
+        std::env::remove_var("SYNERGY_PROJECT_ROOT");
+
+        assert!(
+            candidates.contains(&identity_path),
+            "new validator appliance layout must be scanned before legacy keys/"
+        );
+        let material = read_testnet_identity_wallet_material(&identity_path)
+            .expect("validator appliance identity should load from identity/ plus private.key");
+        assert_eq!(material.address, "synv1applianceidentity");
         assert_eq!(material.public_key, "public-from-json");
         assert_eq!(material.private_key, "private-from-file");
 

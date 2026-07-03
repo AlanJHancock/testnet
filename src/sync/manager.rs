@@ -12,7 +12,7 @@ use crate::sync::validation;
 
 const SYNC_RECONCILIATION_LOOKBACK: u64 = 8;
 const SYNC_PROGRESS_OVERLAP: u64 = 2;
-const MAX_SYNC_BATCH_BLOCKS: u64 = 128;
+const MAX_SYNC_BATCH_BLOCKS: u64 = 48;
 
 fn resolve_local_genesis_hash(blockchain: &Arc<Mutex<BlockChain>>) -> String {
     let canonical = canonical_genesis()
@@ -115,12 +115,14 @@ impl fmt::Display for SyncError {
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
     pub address: String,
+    pub node_id: Option<String>,
     pub validator_address: Option<String>,
     pub block_height: u64,
     pub best_block_hash: String,
     pub genesis_hash: String,
     pub quarantined: bool,
     pub consensus_duties_disabled: bool,
+    pub recovery_state: Option<String>,
 }
 
 /// Represents a requested range that should be downloaded/applied.
@@ -189,14 +191,44 @@ impl SyncManager {
             .into_iter()
             .map(|snap| PeerInfo {
                 address: snap.address,
+                node_id: snap.node_id,
                 validator_address: snap.validator_address,
                 block_height: snap.block_height,
                 best_block_hash: snap.best_block_hash,
                 genesis_hash: snap.genesis_hash,
                 quarantined: snap.quarantined,
                 consensus_duties_disabled: snap.consensus_duties_disabled,
+                recovery_state: snap.recovery_state,
             })
             .collect();
+    }
+
+    fn peer_is_support_sync_source(&self, peer: &PeerInfo) -> bool {
+        let node_id = peer
+            .node_id
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let recovery_state = peer
+            .recovery_state
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let address = peer.address.trim();
+
+        node_id.starts_with("sentry")
+            || node_id.starts_with("relayer")
+            || node_id.starts_with("relay")
+            || node_id.contains("rpc")
+            || node_id.contains("gateway")
+            || node_id.contains("archive")
+            || address == "167.86.83.83:5623"
+            || address == "73.79.66.255:5622"
+            || recovery_state.contains("support")
+            || recovery_state.contains("sentry")
+            || recovery_state.contains("relay")
     }
 
     fn peer_is_eligible_sync_source(&self, peer: &PeerInfo, local_genesis: &str) -> bool {
@@ -207,7 +239,8 @@ impl SyncManager {
                     .as_deref()
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
-                    .is_none())
+                    .is_none()
+                || self.peer_is_support_sync_source(peer))
             && (local_genesis.is_empty() || peer.genesis_hash == local_genesis)
     }
 
@@ -251,12 +284,25 @@ impl SyncManager {
 
     fn select_sync_peer(&self) -> Option<String> {
         let local_genesis = resolve_local_genesis_hash(&self.blockchain);
+        let remaining = self.network_height.saturating_sub(self.local_height);
         let mut candidates: Vec<&PeerInfo> = self
             .peers
             .iter()
             .filter(|peer| self.peer_is_eligible_sync_source(peer, &local_genesis))
             .collect();
-        candidates.sort_by(|a, b| b.block_height.cmp(&a.block_height));
+        candidates.sort_by(|a, b| {
+            let a_score = sync_peer_history_score(a, remaining);
+            let b_score = sync_peer_history_score(b, remaining);
+            let a_key = (
+                sync_peer_effective_height(a, remaining, self.network_height),
+                a_score,
+            );
+            let b_key = (
+                sync_peer_effective_height(b, remaining, self.network_height),
+                b_score,
+            );
+            b_key.cmp(&a_key)
+        });
         candidates.first().map(|peer| peer.address.clone())
     }
 
@@ -301,12 +347,13 @@ impl SyncManager {
             let batch_size = if remaining > 5000 {
                 MAX_SYNC_BATCH_BLOCKS
             } else if remaining > 1000 {
-                96
+                MAX_SYNC_BATCH_BLOCKS
             } else {
                 std::cmp::min(remaining, 64)
             };
             let target_height = std::cmp::min(self.network_height, sync_tip + batch_size);
-            let request_start = sync_tip.saturating_sub(sync_progress_overlap(batch_size));
+            let request_overlap = self.sync_request_overlap(batch_size, sync_tip);
+            let request_start = sync_tip.saturating_sub(request_overlap);
             let request_count = target_height
                 .saturating_sub(request_start)
                 .saturating_add(1)
@@ -409,6 +456,22 @@ impl SyncManager {
         false
     }
 
+    fn sync_request_overlap(&self, batch_size: u64, local_height: u64) -> u64 {
+        let overlap = sync_progress_overlap(batch_size);
+        if overlap == 0 {
+            return 0;
+        }
+
+        let Ok(chain) = self.blockchain.lock() else {
+            return 0;
+        };
+        if !chain_has_reconciliation_window(&chain, local_height, overlap) {
+            return 0;
+        }
+
+        overlap
+    }
+
     fn get_block_hash(&self, height: u64) -> Result<String, SyncError> {
         let chain = self
             .blockchain
@@ -449,12 +512,60 @@ fn sync_progress_overlap(batch_size: u64) -> u64 {
         .min(batch_size - 1)
 }
 
+fn chain_has_reconciliation_window(chain: &BlockChain, local_height: u64, overlap: u64) -> bool {
+    if overlap == 0 {
+        return true;
+    }
+
+    let start = local_height.saturating_sub(overlap);
+    (start..=local_height).all(|height| chain.block_at_height(height).is_some())
+}
+
+fn sync_peer_history_score(peer: &PeerInfo, remaining: u64) -> u8 {
+    if remaining <= 5_000 {
+        return 0;
+    }
+
+    let node_id = peer
+        .node_id
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let address = peer.address.trim();
+
+    if node_id.contains("rpc")
+        || node_id.contains("gateway")
+        || node_id.contains("archive")
+        || address == "167.86.83.83:5623"
+        || address == "73.79.66.255:5622"
+    {
+        2
+    } else if node_id.starts_with("sentry")
+        || node_id.starts_with("relayer")
+        || node_id.starts_with("relay")
+    {
+        1
+    } else {
+        0
+    }
+}
+
+fn sync_peer_effective_height(peer: &PeerInfo, remaining: u64, network_height: u64) -> u64 {
+    if peer.block_height == 0 && sync_peer_history_score(peer, remaining) >= 2 {
+        network_height
+    } else {
+        peer.block_height
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn peer(
         address: &str,
+        node_id: Option<&str>,
         validator_address: Option<&str>,
         height: u64,
         quarantined: bool,
@@ -462,12 +573,14 @@ mod tests {
     ) -> PeerInfo {
         PeerInfo {
             address: address.to_string(),
+            node_id: node_id.map(str::to_string),
             validator_address: validator_address.map(str::to_string),
             block_height: height,
             best_block_hash: format!("hash-{height}"),
             genesis_hash: String::new(),
             quarantined,
             consensus_duties_disabled: duty_disabled,
+            recovery_state: None,
         }
     }
 
@@ -486,13 +599,61 @@ mod tests {
     }
 
     #[test]
+    fn compact_snapshot_chain_disables_sync_overlap() {
+        let mut chain = BlockChain::new();
+        let mut retained = Block::new_with_timestamp(
+            743_026,
+            Vec::new(),
+            "parent".to_string(),
+            "validator".to_string(),
+            0,
+            2,
+        );
+        retained.hash = "retained-tip".to_string();
+        chain.add_block(retained);
+
+        let blockchain = Arc::new(Mutex::new(chain));
+        let manager = SyncManager::new(blockchain);
+
+        assert_eq!(manager.sync_request_overlap(96, 743_026), 0);
+    }
+
+    #[test]
+    fn contiguous_hot_chain_keeps_sync_overlap() {
+        let mut chain = BlockChain::new();
+        for height in 100..=102 {
+            let mut block = Block::new_with_timestamp(
+                height,
+                Vec::new(),
+                format!("parent-{height}"),
+                "validator".to_string(),
+                height,
+                height,
+            );
+            block.hash = format!("hash-{height}");
+            chain.add_block(block);
+        }
+        let blockchain = Arc::new(Mutex::new(chain));
+        let manager = SyncManager::new(blockchain);
+
+        assert_eq!(manager.sync_request_overlap(96, 102), SYNC_PROGRESS_OVERLAP);
+    }
+
+    #[test]
     fn sync_peer_selection_rejects_quarantined_and_duty_disabled_validators() {
         let blockchain = Arc::new(Mutex::new(BlockChain::new()));
         let mut manager = SyncManager::new(blockchain);
         manager.peers = vec![
-            peer("quarantined", Some("synv1quarantined"), 200, true, true),
-            peer("duty-disabled", Some("synv1shadow"), 180, false, true),
-            peer("active", Some("synv1active"), 100, false, false),
+            peer(
+                "quarantined",
+                None,
+                Some("synv1quarantined"),
+                200,
+                true,
+                true,
+            ),
+            peer("duty-disabled", None, Some("synv1shadow"), 180, false, true),
+            peer("active", None, Some("synv1active"), 100, false, false),
         ];
         let local_genesis = resolve_local_genesis_hash(&manager.blockchain);
         assign_peer_genesis(&mut manager.peers, &local_genesis);
@@ -506,14 +667,69 @@ mod tests {
         let blockchain = Arc::new(Mutex::new(BlockChain::new()));
         let mut manager = SyncManager::new(blockchain);
         manager.peers = vec![
-            peer("active-validator", Some("synv1active"), 100, false, false),
-            peer("relayer", None, 195_000, false, true),
+            peer(
+                "active-validator",
+                None,
+                Some("synv1active"),
+                100,
+                false,
+                false,
+            ),
+            peer(
+                "relayer",
+                Some("sentry1"),
+                Some("synv21ga3nsdjagzt9pmks4mzjq4vdjyngdwq6jst632"),
+                195_000,
+                false,
+                true,
+            ),
         ];
         let local_genesis = resolve_local_genesis_hash(&manager.blockchain);
         assign_peer_genesis(&mut manager.peers, &local_genesis);
 
         assert_eq!(manager.select_sync_peer(), Some("relayer".to_string()));
         assert_eq!(manager.eligible_network_height(""), 195_000);
+    }
+
+    #[test]
+    fn deep_sync_peer_selection_prefers_history_gateway_over_relayers() {
+        let blockchain = Arc::new(Mutex::new(BlockChain::new()));
+        let mut manager = SyncManager::new(blockchain);
+        manager.local_height = 748_937;
+        manager.network_height = 760_908;
+        manager.peers = vec![
+            peer(
+                "195.26.241.95:5622",
+                Some("sentry1"),
+                Some("synv21ga3nsdjagzt9pmks4mzjq4vdjyngdwq6jst632"),
+                760_908,
+                false,
+                true,
+            ),
+            peer(
+                "167.86.83.83:5623",
+                Some("genesisrpc"),
+                Some("synv5d2b6a255a574438fd8bdcb194a782acbdcf2"),
+                0,
+                false,
+                true,
+            ),
+            peer(
+                "94.72.117.108:5622",
+                Some("sentry2"),
+                Some("synv21xaqlq808sunuchd0jwr4m324h85fza2ps3s4k7"),
+                760_908,
+                false,
+                true,
+            ),
+        ];
+        let local_genesis = resolve_local_genesis_hash(&manager.blockchain);
+        assign_peer_genesis(&mut manager.peers, &local_genesis);
+
+        assert_eq!(
+            manager.select_sync_peer(),
+            Some("167.86.83.83:5623".to_string())
+        );
     }
 
     #[test]
@@ -542,9 +758,9 @@ mod tests {
 
         let blockchain = Arc::new(Mutex::new(chain));
         let mut manager = SyncManager::new(blockchain);
-        let mut canonical_peer = peer("canonical", Some("synv1active"), 100, false, false);
+        let mut canonical_peer = peer("canonical", None, Some("synv1active"), 100, false, false);
         canonical_peer.genesis_hash = canonical_hash.clone();
-        let mut retained_hash_peer = peer("retained", Some("synv1stale"), 200, false, false);
+        let mut retained_hash_peer = peer("retained", None, Some("synv1stale"), 200, false, false);
         retained_hash_peer.genesis_hash = "retained-block-hash".to_string();
         manager.peers = vec![retained_hash_peer, canonical_peer];
 

@@ -29,7 +29,7 @@ root_dir, inventory_file, addresses_file, output_file = sys.argv[1:5]
 chain_id = int(os.environ.get("TESTNET_CHAIN_ID", "1264"))
 genesis_time = os.environ.get("TESTNET_GENESIS_TIME", "2026-01-01T00:00:00Z")
 validator_stake = int(os.environ.get("TESTNET_VALIDATOR_STAKE", "50000000000000"))
-validator_limit = int(os.environ.get("TESTNET_GENESIS_VALIDATOR_LIMIT", "4"))
+validator_limit = int(os.environ.get("TESTNET_INITIAL_VALIDATOR_LIMIT", "4"))
 minimum_stake_amount = int(os.environ.get("TESTNET_MIN_STAKE_AMOUNT", "5000000000000"))
 burn_address = os.environ.get("TESTNET_BURN_ADDRESS", "synergy000000000000000000000000000000burn")
 
@@ -229,7 +229,7 @@ genesis = {
         "proposal_deposit": "10000",
         "voting_period": 100,
         "execution_delay": 10,
-        "quorum_percentage": 33.4,
+        "quorum_percentage": 66.7,
         "pass_threshold": 51.0,
     },
     "cryptography": {

@@ -228,12 +228,12 @@ def public_validator(path: Path, index: int) -> dict[str, Any]:
             "metadata_hash": metadata_hash,
             "self_stake_nwei": str(VALIDATOR_SELF_STAKE_NWEI),
             "stake_nwei": str(VALIDATOR_SELF_STAKE_NWEI),
-            "is_network_owned_genesis_validator": True,
+            "is_network_owned_validator": True,
             "voting_power": 100,
             "status": "active",
             "activation_height": 0,
             "commission": {"rate_bps": 500, "max_rate_bps": 1000, "max_change_bps": 100},
-            "moniker": f"Synergy Genesis Validator {index}",
+            "moniker": f"Synergy Validator {index}",
         }
     )
     for preserved_field in ["validator_id_hash", "key_bundle_hash", "metadata_hash", "moniker"]:
@@ -418,13 +418,13 @@ def scaled_allocations(wallets: dict[str, dict[str, Any]], validators: list[dict
     validator_pool = next(entry for entry in allocations if entry["category"] == "validators_staking_network_security")
     validator_pool["split_note"] = (
         "The 22.00% validator/security allocation is split into the Validator Security Pool plus "
-        "five explicit genesis validator self-stake allocations."
+        "five explicit baseline validator self-stake allocations."
     )
     for validator in validators:
         allocations.append(
             {
                 "name": f"{validator['moniker']} Self-Stake",
-                "category": "genesis_validator_self_stake",
+                "category": "validator_self_stake",
                 "address": validator["operator_address"],
                 "amount_nwei": VALIDATOR_SELF_STAKE_NWEI,
                 "locked": True,
@@ -452,7 +452,7 @@ def scaled_allocations(wallets: dict[str, dict[str, Any]], validators: list[dict
         "rounding_policy": "exact integer nWei allocation; no rounding required for screenshot token counts",
         "validator_self_stake_policy": (
             "Replace the legacy single validator sponsor allocation with five explicit "
-            "50,000 SNRG genesis validator self-stake allocations, funded from the "
+            "50,000 SNRG baseline validator self-stake allocations, funded from the "
             "scaled validator macro bucket."
         ),
         "rounding_remainder_nwei": "0",
@@ -498,7 +498,7 @@ def registry_validator(validator: dict[str, Any]) -> dict[str, Any]:
         "voting_power": validator["voting_power"],
         "commission": validator["commission"],
         "validator_label": validator["moniker"],
-        "is_network_owned_genesis_validator": validator.get("is_network_owned_genesis_validator", True),
+        "is_network_owned_validator": validator.get("is_network_owned_validator", True),
     }
 
 
@@ -777,7 +777,7 @@ def build_genesis(key_dir: Path, template_path: Path) -> tuple[dict[str, Any], d
     for cluster in public_inputs.get("clusters", []):
         genesis["accounts"].append({"address": cluster["cluster_address"], "account_type": "ValidatorCluster"})
     for validator in validators:
-        genesis["accounts"].append({"address": validator["operator_address"], "account_type": "GenesisValidator"})
+        genesis["accounts"].append({"address": validator["operator_address"], "account_type": "Validator"})
     genesis["accounts"] = sorted(genesis["accounts"], key=lambda entry: (entry["account_type"], entry["address"]))
 
     genesis.setdefault("header", {})
@@ -852,7 +852,7 @@ def build_genesis(key_dir: Path, template_path: Path) -> tuple[dict[str, Any], d
     )
     genesis["contracts"]["validator_registry"]["init_params"].update(
         {
-            "genesis_validator_count": VALIDATOR_COUNT,
+            "initial_validator_count": VALIDATOR_COUNT,
             "min_validator_count": 4,
             "min_self_stake_nwei": str(VALIDATOR_SELF_STAKE_NWEI),
             "validators": registry_validators,
@@ -877,8 +877,8 @@ def build_genesis(key_dir: Path, template_path: Path) -> tuple[dict[str, Any], d
         "validator_fee_share_bps": 6500,
         "treasury_fee_share_bps": 2500,
         "burn_fee_share_bps": 1000,
-        "genesis_validator_treasury_share_bps": 7000,
-        "genesis_validator_bonus_pool_share_bps": 3000,
+        "network_owned_validator_treasury_share_bps": 7000,
+        "network_owned_validator_bonus_pool_share_bps": 3000,
         "phase1_consensus_participation_weight_bps": 3500,
         "phase1_block_proposal_weight_bps": 2000,
         "phase1_validation_accuracy_weight_bps": 2000,
@@ -1123,7 +1123,7 @@ def annotated_text(genesis: dict[str, Any], data_len: int) -> str:
             "dag_posy_consensus_metadata:",
             json.dumps(genesis["consensus"]["dag_data_plane"], indent=2, sort_keys=True),
             "",
-            "genesis_validator_registry:",
+            "validator_registry:",
             json.dumps(genesis["contracts"]["validator_registry"]["init_params"]["validators"], indent=2, sort_keys=True),
             "",
             "token_metadata:",
@@ -1480,7 +1480,7 @@ def normalized_consensus_key_type(value: str | None) -> str:
     return str(value or "").strip().upper().replace("_", "-")
 
 
-def genesis_validator_addresses(genesis: dict[str, Any]) -> set[str]:
+def initial_validator_addresses(genesis: dict[str, Any]) -> set[str]:
     addresses: set[str] = set()
     validator_sources = [
         genesis.get("validators", []),
@@ -1585,12 +1585,12 @@ def command_onboarding_dry_run(args: argparse.Namespace) -> None:
         expected="synv1 + 36 lower-case alphanumeric characters",
         actual=candidate_address,
     )
-    existing_addresses = genesis_validator_addresses(genesis)
+    existing_addresses = initial_validator_addresses(genesis)
     add_onboarding_check(
         checks,
         "validator_not_in_genesis",
         candidate_address not in existing_addresses,
-        "post-genesis validator onboarding must not modify or reuse genesis validator entries",
+        "post-baseline validator onboarding must not modify or reuse baseline validator entries",
         actual=candidate_address,
     )
 
@@ -1738,11 +1738,11 @@ def command_onboarding_dry_run(args: argparse.Namespace) -> None:
             "validator_cluster_size": 7,
             "max_validators_min": 100,
         },
-        "checkpoint_fork_registry_policy": {
-            "purpose": "checkpointed fork key registry for validators active at the fork height",
-            "must_not_be_used_as": "the ongoing post-genesis validator admission registry",
-            "post_genesis_key_source": "finalized validator registry/admission state after activation",
-        },
+            "checkpoint_fork_registry_policy": {
+                "purpose": "checkpointed fork key registry for validators active at the fork height",
+                "must_not_be_used_as": "the ongoing post-baseline validator admission registry",
+                "onboarded_key_source": "finalized validator registry/admission state after activation",
+            },
         "required_service_env": [
             "SYNERGY_PROJECT_ROOT points at the deployed node root",
             "SYNERGY_CONFIG_PATH points at the deployed node.toml",

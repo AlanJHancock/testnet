@@ -48,6 +48,7 @@ FORK_VALIDATOR_COUNT = 6
 SNAPSHOT_CADENCE_BLOCKS = 5_000
 ARCHIVE_SNAPSHOT_CADENCE_BLOCKS = 15_000
 SNAPSHOT_RETAIN_PER_CLASS = 2
+SUPPORTED_RECEIVER_OPERATING_SYSTEMS = ["macos", "linux", "windows"]
 
 CLASS_POLICY = {
     "validator-pruned": {
@@ -101,6 +102,14 @@ DEFAULT_WORKER_CLASSES = [
     "archive-full",
 ]
 
+KNOWN_NONCANONICAL_ARCHIVE_HASH_PREFIXES = {
+    602_192: "0d1c124f",
+}
+
+KNOWN_PUBLIC_CANONICAL_HASH_PREFIXES = {
+    602_192: "649b76bf",
+}
+
 ALLOWED_STATE_FILES = {
     "chain.json",
     "committed_blocks.jsonl",
@@ -112,6 +121,15 @@ ALLOWED_STATE_FILES = {
     "token_state.json",
     "account_state.json",
     "state_checkpoint.json",
+}
+
+RECEIVER_FORMAT = {
+    "archive_container": "tar",
+    "compression": "zstd",
+    "chunk_size": CHUNK_SIZE,
+    "path_style": "relative-state-files",
+    "state_files": sorted(ALLOWED_STATE_FILES),
+    "requires_runtime_snapshot_verification": True,
 }
 
 FORBIDDEN_FRAGMENTS = {
@@ -146,6 +164,17 @@ def json_dump(path: Path, value: Any, mode: int = 0o644) -> None:
 
 def json_load(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def reject_known_noncanonical_archive_state(height: int, block_hash: str) -> None:
+    observed = str(block_hash or "").strip().lower()
+    denied_prefix = KNOWN_NONCANONICAL_ARCHIVE_HASH_PREFIXES.get(int(height))
+    if denied_prefix and observed.startswith(denied_prefix):
+        expected = KNOWN_PUBLIC_CANONICAL_HASH_PREFIXES.get(int(height), "unknown")
+        raise RuntimeError(
+            f"archive-contained: h{height} hash {block_hash} matches known noncanonical "
+            f"archive branch; expected public canonical hash prefix {expected}"
+        )
 
 
 def fork_metadata_path(root: Path) -> Path:
@@ -197,6 +226,47 @@ def read_consensus_fork_metadata(root: Path, *, required: bool = False) -> dict[
             raise RuntimeError(f"consensus fork metadata missing: {path}")
         return None
     return validate_consensus_fork_metadata(json_load(path))
+
+
+def consensus_fork_from_catalog_entries(catalog: dict[str, Any]) -> dict[str, Any] | None:
+    forks: list[dict[str, Any]] = []
+    for entry in catalog.get("snapshots", []):
+        if entry.get("status") == "deleted":
+            continue
+        snapshot_height = int(entry.get("height", 0))
+        entry_fork = entry.get("consensus_fork")
+        if snapshot_height >= FORK_HEIGHT:
+            forks.append(validate_consensus_fork_metadata(entry_fork))
+        elif entry_fork is not None:
+            forks.append(validate_consensus_fork_metadata(entry_fork))
+    if not forks:
+        return None
+    first = forks[0]
+    if any(fork != first for fork in forks[1:]):
+        raise RuntimeError("snapshot catalog contains mismatched consensus fork metadata")
+    return first
+
+
+def publication_consensus_fork_metadata(
+    root: Path,
+    source_manifest_body: dict[str, Any],
+    snapshot_height: int,
+) -> dict[str, Any] | None:
+    manifest_fork = source_manifest_body.get("consensus_fork")
+    validated_manifest_fork = None
+    if snapshot_height >= FORK_HEIGHT:
+        validated_manifest_fork = validate_consensus_fork_metadata(manifest_fork)
+    elif manifest_fork is not None:
+        validated_manifest_fork = validate_consensus_fork_metadata(manifest_fork)
+
+    try:
+        root_fork = read_consensus_fork_metadata(root)
+    except RuntimeError:
+        root_fork = None
+
+    if root_fork is not None and validated_manifest_fork is not None and root_fork != validated_manifest_fork:
+        raise RuntimeError("root consensus fork metadata does not match signed snapshot manifest")
+    return validated_manifest_fork or root_fork
 
 
 def sha256_file(path: Path) -> str:
@@ -442,8 +512,15 @@ def qc_height_hash(value: dict[str, Any]) -> tuple[int | None, str | None]:
 def source_safety_report(snapshot_root: Path, source_manifest: Path, fixture_mode: bool) -> dict[str, Any]:
     signed = json_load(source_manifest)
     manifest = signed.get("manifest", signed)
-    if manifest.get("conflict_height_hash"):
-        raise RuntimeError("snapshot manifest contains unresolved conflict_height_hash")
+    resolved_conflict_hash = manifest.get("conflict_height_hash")
+    if resolved_conflict_hash:
+        if manifest.get("source_node_majority_branch") is not True:
+            raise RuntimeError("snapshot manifest contains unresolved conflict_height_hash")
+        snapshot_hash = str(manifest.get("snapshot_block_hash", "")).strip()
+        if not snapshot_hash:
+            raise RuntimeError("snapshot manifest with conflict evidence is missing snapshot_block_hash")
+        if str(resolved_conflict_hash).strip().lower() == snapshot_hash.lower():
+            raise RuntimeError("snapshot manifest conflict_height_hash matches snapshot_block_hash")
     for path in snapshot_root.rglob("*"):
         if not path.is_file():
             continue
@@ -525,6 +602,8 @@ def source_safety_report(snapshot_root: Path, source_manifest: Path, fixture_mod
         "h175518_canonical_lock_pruned": h175518_canonical_lock_pruned,
         "fixture_mode": fixture_mode,
         "keys_configs_genesis_quorum_excluded": True,
+        "resolved_conflict_height_hash": resolved_conflict_hash,
+        "resolved_conflict_source_majority_branch": bool(resolved_conflict_hash),
     }
 
 
@@ -621,10 +700,21 @@ def read_catalog(publish_root: Path) -> dict[str, Any]:
 
 def write_signed_catalog(aegis: Path, root: Path, publish_root: Path, catalog: dict[str, Any]) -> None:
     catalog["updated_at"] = now()
-    consensus_fork = read_consensus_fork_metadata(root)
+    try:
+        root_fork = read_consensus_fork_metadata(root)
+    except RuntimeError:
+        root_fork = None
+    entry_fork = consensus_fork_from_catalog_entries(catalog)
+    if root_fork is not None and entry_fork is not None and root_fork != entry_fork:
+        raise RuntimeError("snapshot catalog consensus fork metadata mismatch")
+    consensus_fork = entry_fork or root_fork
     if consensus_fork is not None:
         catalog["consensus_fork"] = consensus_fork
     for entry in catalog.get("snapshots", []):
+        if entry.get("status") == "deleted":
+            continue
+        entry.setdefault("supported_receiver_operating_systems", SUPPORTED_RECEIVER_OPERATING_SYSTEMS)
+        entry.setdefault("receiver_format", RECEIVER_FORMAT)
         snapshot_height = int(entry.get("height", 0))
         entry_fork = entry.get("consensus_fork")
         if snapshot_height >= FORK_HEIGHT:
@@ -652,6 +742,7 @@ def update_catalog(
         if existing.get("snapshot_id") != entry["snapshot_id"]
         or existing.get("snapshot_class") != entry["snapshot_class"]
     ]
+    snapshots = retire_invalid_consensus_fork_entries(snapshots, entry)
     snapshots.append(entry)
     catalog["snapshots"] = snapshots
     enforce_latest_two_snapshot_retention(catalog)
@@ -659,6 +750,47 @@ def update_catalog(
     snapshots.sort(key=lambda value: (value["snapshot_class"], int(value["height"])))
     catalog["snapshots"] = snapshots
     write_signed_catalog(aegis, root, publish_root, catalog)
+
+
+def entry_has_valid_consensus_fork(entry: dict[str, Any]) -> bool:
+    if entry.get("status") == "deleted":
+        return True
+    try:
+        snapshot_height = int(entry.get("height", 0))
+    except (TypeError, ValueError):
+        return False
+    entry_fork = entry.get("consensus_fork")
+    try:
+        if snapshot_height >= FORK_HEIGHT:
+            validate_consensus_fork_metadata(entry_fork)
+        elif entry_fork is not None:
+            validate_consensus_fork_metadata(entry_fork)
+    except RuntimeError:
+        return False
+    return True
+
+
+def retire_invalid_consensus_fork_entries(
+    snapshots: list[dict[str, Any]],
+    replacement: dict[str, Any],
+) -> list[dict[str, Any]]:
+    timestamp = now()
+    replacement_id = replacement.get("snapshot_id")
+    cleaned: list[dict[str, Any]] = []
+    for entry in snapshots:
+        if entry_has_valid_consensus_fork(entry):
+            cleaned.append(entry)
+            continue
+        retired = dict(entry)
+        retired["status"] = "deleted"
+        retired["deleted_at"] = timestamp
+        retired["superseded_by"] = replacement_id
+        retired["verification_status"] = "red"
+        notes = list(retired.get("notes", []))
+        notes.append("retired during publication because consensus fork metadata is invalid or stale")
+        retired["notes"] = notes
+        cleaned.append(retired)
+    return cleaned
 
 
 def enforce_latest_two_snapshot_retention(catalog: dict[str, Any]) -> None:
@@ -721,14 +853,21 @@ def package_publish(args: argparse.Namespace, report: dict[str, Any]) -> dict[st
     primary_role = allowed_roles[0]
     snapshot_root = Path(report["snapshot_path"])
     source_manifest = Path(report["manifest_path"])
+    signed_source_manifest = json_load(source_manifest)
+    source_manifest_body = signed_source_manifest.get("manifest", signed_source_manifest)
     runtime_verify = verify_source_snapshot(
         runtime, workspace, source_node, source_manifest, snapshot_root, snapshot_class, primary_role
     )
     safety = source_safety_report(snapshot_root, source_manifest, args.fixture_mode)
+    canonical_public_proof = enforce_snapshot_publication_gate(args, report)
     uncompressed_size = directory_size(snapshot_root)
     enforce_free_space(args.publish_root, uncompressed_size, args.fixture_mode)
     snapshot_height = int(report["snapshot_height"])
-    consensus_fork = read_consensus_fork_metadata(args.root, required=snapshot_height >= FORK_HEIGHT)
+    consensus_fork = publication_consensus_fork_metadata(
+        args.root,
+        source_manifest_body,
+        snapshot_height,
+    )
     snapshot_id = f"snapshot-{snapshot_height:09d}"
     snapshot_dir = args.publish_root / "testnet-1264" / snapshot_class / snapshot_id
     if snapshot_dir.exists():
@@ -752,6 +891,8 @@ def package_publish(args: argparse.Namespace, report: dict[str, Any]) -> dict[st
         "snapshot_id": snapshot_id,
         "snapshot_class": snapshot_class,
         "allowed_roles": allowed_roles,
+        "supported_receiver_operating_systems": SUPPORTED_RECEIVER_OPERATING_SYSTEMS,
+        "receiver_format": RECEIVER_FORMAT,
         "chain_id": CHAIN_ID,
         "network_id": NETWORK_ID,
         "genesis_hash": GENESIS_HASH,
@@ -774,6 +915,7 @@ def package_publish(args: argparse.Namespace, report: dict[str, Any]) -> dict[st
         "source_manifest": source_manifest.name,
         "source_manifest_sha256": sha256_file(stage / "source-snapshot-manifest.json"),
         "safety": safety,
+        "canonical_public_proof": canonical_public_proof,
         "consensus_fork": consensus_fork,
         "retention_class": "launch-stabilization",
         "status": "verified-local",
@@ -853,10 +995,13 @@ def package_publish(args: argparse.Namespace, report: dict[str, Any]) -> dict[st
         "chunk_count": len(chunks),
         "chunk_size": CHUNK_SIZE,
         "archive_sha256": distribution["archive_sha256"],
+        "supported_receiver_operating_systems": distribution["supported_receiver_operating_systems"],
+        "receiver_format": distribution["receiver_format"],
         "manifest_sha256": sha256_file(snapshot_dir / "distribution-manifest.json"),
         "manifest_signature_status": "AEGIS_PQC_VERIFIED",
         "qc_vote_count": report["qc_vote_count"],
         "qc_signers": report["qc_signers"],
+        "canonical_public_proof": canonical_public_proof,
         "consensus_fork": consensus_fork,
         "status": "published",
         "retention_class": "launch-stabilization",
@@ -875,7 +1020,7 @@ def package_publish(args: argparse.Namespace, report: dict[str, Any]) -> dict[st
     return {"ok": True, "snapshot": entry, "snapshot_path": str(snapshot_dir)}
 
 
-def proof_marker_ok(path: Path) -> None:
+def proof_marker_ok(path: Path) -> dict[str, Any]:
     value = json_load(path)
     if value.get("source_node_majority_branch_proven") is not True:
         raise RuntimeError("majority-branch proof marker does not assert source proof")
@@ -883,6 +1028,35 @@ def proof_marker_ok(path: Path) -> None:
         raise RuntimeError("majority-branch proof marker chain/network mismatch")
     if value.get("genesis_hash") != GENESIS_HASH:
         raise RuntimeError("majority-branch proof marker genesis mismatch")
+    if not isinstance(value.get("height"), int):
+        raise RuntimeError("majority-branch proof marker missing integer height")
+    if not isinstance(value.get("hash"), str) or not value["hash"].strip():
+        raise RuntimeError("majority-branch proof marker missing block hash")
+    reject_known_noncanonical_archive_state(int(value["height"]), value["hash"])
+    return value
+
+
+def enforce_snapshot_publication_gate(args: argparse.Namespace, report: dict[str, Any]) -> dict[str, Any] | None:
+    snapshot_height = int(report["snapshot_height"])
+    snapshot_hash = str(report["snapshot_hash"])
+    reject_known_noncanonical_archive_state(snapshot_height, snapshot_hash)
+    if args.fixture_mode:
+        return None
+    marker = proof_marker_ok(args.majority_proof_marker)
+    marker_height = int(marker["height"])
+    marker_hash = str(marker["hash"])
+    if marker_height != snapshot_height or marker_hash.lower() != snapshot_hash.lower():
+        raise RuntimeError(
+            "snapshot publication refused: majority/public proof marker does not match "
+            f"candidate snapshot h{snapshot_height} {snapshot_hash}"
+        )
+    return {
+        "height": marker_height,
+        "hash": marker_hash,
+        "source_node_majority_branch_proven": True,
+        "evidence_path": marker.get("evidence_path") or marker.get("source_evidence_path"),
+        "recorded_at": marker.get("recorded_at"),
+    }
 
 
 def create_snapshot(args: argparse.Namespace) -> dict[str, Any]:
@@ -944,23 +1118,80 @@ def publish_existing_snapshot(args: argparse.Namespace) -> dict[str, Any]:
     return package_publish(args, report)
 
 
-def latest_local_canonical_height(workspace: Path) -> int | None:
+def canonical_lock_hash(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ["block_hash", "hash", "blockHash", "canonical_hash"]:
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    return None
+
+
+def latest_local_canonical_record(workspace: Path) -> dict[str, Any] | None:
     path = workspace / "data" / "canonical_locks.json"
     if not path.exists():
         return None
     value = json_load(path)
     if not isinstance(value, dict) or not value:
         return None
-    return max(int(height) for height in value)
+    height = max(int(height) for height in value)
+    block_hash = canonical_lock_hash(value.get(str(height)))
+    return {"height": height, "hash": block_hash}
+
+
+def latest_local_canonical_height(workspace: Path) -> int | None:
+    record = latest_local_canonical_record(workspace)
+    return int(record["height"]) if record else None
+
+
+def archive_canonical_status(workspace: Path) -> dict[str, Any]:
+    record = latest_local_canonical_record(workspace)
+    if record is None:
+        return {
+            "state": "archive-contained",
+            "publication_eligible": False,
+            "reason": "archive workspace has no canonical lock height",
+        }
+    height = int(record["height"])
+    block_hash = record.get("hash")
+    if not block_hash:
+        return {
+            "state": "archive-contained",
+            "publication_eligible": False,
+            "height": height,
+            "hash": block_hash,
+            "reason": "latest archive canonical lock has no block hash",
+        }
+    try:
+        reject_known_noncanonical_archive_state(height, str(block_hash or ""))
+    except RuntimeError as error:
+        return {
+            "state": "archive-contained",
+            "publication_eligible": False,
+            "height": height,
+            "hash": block_hash,
+            "reason": str(error),
+        }
+    return {
+        "state": "requires-quorum-public-proof",
+        "publication_eligible": False,
+        "height": height,
+        "hash": block_hash,
+        "reason": "local archive canonical locks are not enough to publish snapshots",
+    }
 
 
 def worker(args: argparse.Namespace) -> None:
     while True:
         try:
             proof_marker_ok(args.majority_proof_marker)
-            local_height = latest_local_canonical_height(args.workspace)
-            if local_height is None:
+            local_record = latest_local_canonical_record(args.workspace)
+            if local_record is None:
                 raise RuntimeError("archive workspace has no canonical lock height")
+            local_height = int(local_record["height"])
+            reject_known_noncanonical_archive_state(local_height, str(local_record.get("hash") or ""))
             catalog = read_catalog(args.publish_root)
             snapshot_classes = args.snapshot_class or DEFAULT_WORKER_CLASSES
             for snapshot_class in snapshot_classes:
@@ -1003,6 +1234,7 @@ def status(args: argparse.Namespace) -> dict[str, Any]:
             raise RuntimeError("catalog JSON/signature pair is incomplete")
         catalog_signature = verify_json(aegis, CATALOG_DOMAIN, catalog_path, sig_path)
     fork_metadata = read_consensus_fork_metadata(args.root)
+    canonical_status = archive_canonical_status(args.root / "workspace")
     return {
         "ok": True,
         "chain_id": CHAIN_ID,
@@ -1010,7 +1242,10 @@ def status(args: argparse.Namespace) -> dict[str, Any]:
         "genesis_hash": GENESIS_HASH,
         "runtime_root": str(args.root),
         "publish_root": str(args.publish_root),
-        "current_height": latest_local_canonical_height(args.root / "workspace"),
+        "current_height": canonical_status.get("height"),
+        "current_hash": canonical_status.get("hash"),
+        "archive_canonical_verification": canonical_status,
+        "snapshot_publication_eligible": canonical_status.get("publication_eligible", False),
         "fork_height": fork_metadata.get("fork_height") if fork_metadata else None,
         "current_consensus_algorithm": fork_metadata.get("new_consensus_algorithm") if fork_metadata else None,
         "parser_mode": fork_metadata.get("parser_mode") if fork_metadata else None,
@@ -1025,6 +1260,8 @@ def status(args: argparse.Namespace) -> dict[str, Any]:
         "catalog_signature": catalog_signature,
         "catalog_entries": len(catalog["snapshots"]),
         "snapshot_classes": CLASS_POLICY,
+        "supported_receiver_operating_systems": SUPPORTED_RECEIVER_OPERATING_SYSTEMS,
+        "receiver_format": RECEIVER_FORMAT,
         "free_bytes": free_bytes(args.publish_root),
     }
 
@@ -1042,6 +1279,9 @@ def verify_distribution(args: argparse.Namespace) -> dict[str, Any]:
         raise RuntimeError("snapshot distribution chain/network mismatch")
     if distribution.get("genesis_hash") != GENESIS_HASH:
         raise RuntimeError("snapshot distribution genesis mismatch")
+    supported_receivers = distribution.get("supported_receiver_operating_systems")
+    if supported_receivers is not None and "windows" not in supported_receivers:
+        raise RuntimeError("snapshot distribution does not declare Windows receiver support")
     snapshot_height = int(distribution.get("height", 0))
     distribution_fork = distribution.get("consensus_fork")
     if snapshot_height >= FORK_HEIGHT:
@@ -1179,53 +1419,67 @@ class PublishedRangeHandler(http.server.SimpleHTTPRequestHandler):
     def list_directory(self, path: str) -> None:
         self.send_error(403, "directory listing disabled")
 
-    def send_head(self):  # type: ignore[override]
+    def do_HEAD(self) -> None:  # type: ignore[override]
+        self.send_published_file(include_body=False)
+
+    def do_GET(self) -> None:  # type: ignore[override]
+        self.send_published_file(include_body=True)
+
+    def send_published_file(self, *, include_body: bool) -> None:
         requested = self.path.split("?", 1)[0].lstrip("/")
-        if requested not in {"catalog.json", "catalog.json.sig"} and not requested.startswith(
-            "testnet-1264/"
-        ):
+        allowed_static_roots = ("testnet-1264/", "receivers/")
+        if requested not in {"catalog.json", "catalog.json.sig"} and not requested.startswith(allowed_static_roots):
             self.send_error(404, "published artifact not found")
-            return None
-        translated = Path(self.translate_path(self.path))
+            return
+        publish_root = Path(self.directory).resolve()
+        translated = (publish_root / requested).resolve()
+        try:
+            translated.relative_to(publish_root)
+        except ValueError:
+            self.send_error(404, "published artifact not found")
+            return
         if not translated.is_file():
             self.send_error(404, "published artifact not found")
-            return None
+            return
         size = translated.stat().st_size
         start, end = 0, size - 1
         range_header = self.headers.get("Range")
+        status = 200
         if range_header:
             if not range_header.startswith("bytes=") or "," in range_header:
                 self.send_error(416, "invalid range")
-                return None
+                return
             first, _, last = range_header[6:].partition("-")
             start = int(first) if first else 0
             end = int(last) if last else size - 1
             if start < 0 or end < start or end >= size:
                 self.send_error(416, "range not satisfiable")
-                return None
-            self.send_response(206)
-            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-        else:
-            self.send_response(200)
-        self.send_header("Accept-Ranges", "bytes")
-        self.send_header("Content-Length", str(end - start + 1))
-        self.send_header("Content-Type", "application/octet-stream")
-        self.end_headers()
-        handle = translated.open("rb")
-        handle.seek(start)
-        self._range_remaining = end - start + 1
-        return handle
-
-    def copyfile(self, source, outputfile):  # type: ignore[override]
-        remaining = getattr(self, "_range_remaining", None)
-        if remaining is None:
-            return super().copyfile(source, outputfile)
-        while remaining > 0:
-            chunk = source.read(min(1024 * 1024, remaining))
-            if not chunk:
-                break
-            outputfile.write(chunk)
-            remaining -= len(chunk)
+                return
+            status = 206
+        try:
+            handle = translated.open("rb")
+        except OSError:
+            self.send_error(404, "published artifact not found")
+            return
+        with handle:
+            self.send_response(status)
+            if status == 206:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(end - start + 1))
+            self.send_header("Content-Type", "application/octet-stream")
+            self.end_headers()
+            if not include_body:
+                return
+            handle.seek(start)
+            remaining = end - start + 1
+            while remaining > 0:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+            self.wfile.flush()
 
 
 def serve(args: argparse.Namespace) -> None:
@@ -1243,8 +1497,11 @@ def serve(args: argparse.Namespace) -> None:
 def record_majority_proof(args: argparse.Namespace) -> dict[str, Any]:
     if not args.evidence_path.exists():
         raise RuntimeError(f"majority proof evidence path does not exist: {args.evidence_path}")
+    reject_known_noncanonical_archive_state(int(args.height), str(args.hash))
     marker = {
         "source_node_majority_branch_proven": True,
+        "canonical_verification_state": "quorum_public_canonical_verified",
+        "archive_containment_override": False,
         "chain_id": CHAIN_ID,
         "network_id": NETWORK_ID,
         "genesis_hash": GENESIS_HASH,

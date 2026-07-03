@@ -14,6 +14,8 @@ expected_validator_sha="${EXPECTED_VALIDATOR_SHA:-50f95442de06b15193e8d77bff6c8e
 expected_val5_sha="${EXPECTED_VAL5_SHA:-$expected_validator_sha}"
 expected_rpc_sha="${EXPECTED_RPC_SHA:-115233b08a3d25f340c3c6bd2edef4b17ba972e6d4ba440b65c9d6ff964471ed}"
 max_support_lag_blocks="${MAX_SUPPORT_LAG_BLOCKS:-5}"
+validator_rows_raw="${SOAK_VALIDATOR_ROWS:-Val1 Val2 Val3 Val4 Val5 Val6}"
+relayer_rows_raw="${SOAK_RELAYER_ROWS:-Relayer-1 Relayer-2}"
 spreadsheet_workbook="${SPREADSHEET_WORKBOOK:-/Users/devpup/Desktop/node machine credentials.xlsx}"
 if [[ ! -f "$spreadsheet_workbook" && -f "/Users/devpup/Desktop/node-machine-credentials.xlsx" ]]; then
   spreadsheet_workbook="/Users/devpup/Desktop/node-machine-credentials.xlsx"
@@ -37,19 +39,22 @@ host_access=("$python_bin" scripts/testnet/spreadsheet_host_access.py --workbook
 # Auth args and fallback auth must stay empty: the host helper invokes only the
 # exact workbook SSH command and supplies workbook credentials via ephemeral
 # askpass if the command prompts.
-nodes=(
-  "Val1|||"
-  "Val2|||"
-  "Val3|||"
-  "Val4|||"
-  "Val5|||"
-  "Relayer-1|||SYNERGY_WORKSPACE=/opt/synergy/testnet/relayer"
-  "Relayer-2|||SYNERGY_WORKSPACE=/opt/synergy/testnet/relayer"
-  "RPC Gateway|||SYNERGY_WORKSPACE=/opt/synergy/Node-RPC"
-)
-
-validators=(Val1 Val2 Val3 Val4 Val5)
-relayers=(Relayer-1 Relayer-2)
+read -r -a validators <<< "${validator_rows_raw//,/ }"
+read -r -a relayers <<< "${relayer_rows_raw//,/ }"
+if [[ "${#validators[@]}" -eq 0 ]]; then
+  echo "SOAK_VALIDATOR_ROWS resolved to an empty validator list" >&2
+  exit 2
+fi
+nodes=()
+for validator in "${validators[@]}"; do
+  nodes+=("$validator|||")
+done
+for relayer in "${relayers[@]}"; do
+  nodes+=("$relayer|||SYNERGY_WORKSPACE=/opt/synergy/testnet/relayer")
+done
+nodes+=("RPC Gateway|||SYNERGY_WORKSPACE=/opt/synergy/Node-RPC")
+validator_rows_csv="$(IFS=,; echo "${validators[*]}")"
+relayer_rows_csv="$(IFS=,; echo "${relayers[*]}")"
 
 echo "soak_dir=$out_dir"
 {
@@ -66,6 +71,9 @@ echo "soak_dir=$out_dir"
   echo "expected_validator_sha=$expected_validator_sha"
   echo "expected_val5_sha=$expected_val5_sha"
   echo "expected_rpc_sha=$expected_rpc_sha"
+  echo "validator_rows=$validator_rows_csv"
+  echo "relayer_rows=$relayer_rows_csv"
+  echo "expected_validator_count=${#validators[@]}"
 } > "$out_dir/manifest.txt"
 
 run_host_file() {
@@ -275,7 +283,7 @@ PY
 
 summarize_sample() {
   local sample="$1"
-  "$python_bin" - "$out_dir" "$sample" "$soak_scope" "$max_rpc_lag_blocks" "$max_support_lag_blocks" "$max_atlas_lag_blocks" "$expected_validator_sha" "$expected_rpc_sha" "$expected_val5_sha" <<'PY'
+  "$python_bin" - "$out_dir" "$sample" "$soak_scope" "$max_rpc_lag_blocks" "$max_support_lag_blocks" "$max_atlas_lag_blocks" "$expected_validator_sha" "$expected_rpc_sha" "$expected_val5_sha" "$validator_rows_csv" "$relayer_rows_csv" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -289,8 +297,8 @@ max_atlas_lag = int(sys.argv[6])
 expected_validator_sha = sys.argv[7]
 expected_rpc_sha = sys.argv[8]
 expected_val5_sha = sys.argv[9]
-validators = {"Val1", "Val2", "Val3", "Val4", "Val5"}
-relayers = {"Relayer-1", "Relayer-2"}
+validators = {item for item in sys.argv[10].split(",") if item}
+relayers = {item for item in sys.argv[11].split(",") if item}
 expected_validator_shas = {node: expected_validator_sha for node in validators}
 expected_validator_shas["Val5"] = expected_val5_sha
 failures = []
@@ -349,7 +357,7 @@ for node in validators:
     if isinstance(locks_above, int) and locks_above > 0:
         failures.append(f"{node}: vote locks above canonical={locks_above}")
 
-if len(validator_heights) == 5:
+if len(validator_heights) == len(validators):
     max_height = max(validator_heights.values())
     min_height = min(validator_heights.values())
     if previous_validator_height is not None and max_height <= previous_validator_height:

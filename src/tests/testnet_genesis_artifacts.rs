@@ -225,7 +225,7 @@ fn public_artifacts_do_not_serialize_secret_fields() {
 }
 
 #[test]
-fn five_genesis_validators_are_active_and_consistent() {
+fn five_initial_validators_are_active_and_consistent() {
     let genesis = genesis();
     let validators = genesis["validators"].as_array().unwrap();
     assert_eq!(validators.len(), 5);

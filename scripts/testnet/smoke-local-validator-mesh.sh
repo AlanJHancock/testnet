@@ -29,7 +29,7 @@ WORKSPACES=()
 CONSENSUS_PRIVATE_KEY_FILES=()
 LOCAL_CONFIG_DIR=""
 LOCAL_GENESIS_FILE=""
-LOCAL_GENESIS_VALIDATORS_DIR=""
+LOCAL_INITIAL_VALIDATORS_DIR=""
 RUNTIME_SHA256=""
 
 usage() {
@@ -182,11 +182,11 @@ prepare_test_consensus_material() {
 
   LOCAL_CONFIG_DIR="${WORKDIR}/local-test-config"
   LOCAL_GENESIS_FILE="${LOCAL_CONFIG_DIR}/genesis.json"
-  LOCAL_GENESIS_VALIDATORS_DIR="${LOCAL_CONFIG_DIR}/genesis-validators"
+  LOCAL_INITIAL_VALIDATORS_DIR="${LOCAL_CONFIG_DIR}/genesis-validators"
 
   mkdir -p "$key_root" "$LOCAL_CONFIG_DIR"
   cp "$ROOT_DIR/config/genesis.json" "$LOCAL_GENESIS_FILE"
-  cp -R "$ROOT_DIR/config/genesis-validators" "$LOCAL_GENESIS_VALIDATORS_DIR"
+  cp -R "$ROOT_DIR/config/genesis-validators" "$LOCAL_INITIAL_VALIDATORS_DIR"
   : > "$public_keys_tsv"
 
   for index in $(seq 1 "$START_VALIDATOR_COUNT"); do
@@ -203,7 +203,7 @@ prepare_test_consensus_material() {
     CONSENSUS_PRIVATE_KEY_FILES[$((index - 1))]="$private_key_file"
   done
 
-  python3 - "$LOCAL_GENESIS_FILE" "$LOCAL_GENESIS_VALIDATORS_DIR" "$public_keys_tsv" <<'PY'
+  python3 - "$LOCAL_GENESIS_FILE" "$LOCAL_INITIAL_VALIDATORS_DIR" "$public_keys_tsv" <<'PY'
 import json
 import pathlib
 import sys
@@ -494,7 +494,7 @@ create_workspace() {
 
   mkdir -p "$workspace/config/validator" "$workspace/data" "$workspace/logs"
   cp "$LOCAL_GENESIS_FILE" "$workspace/config/genesis.json"
-  cp -R "$LOCAL_GENESIS_VALIDATORS_DIR" "$workspace/config/"
+  cp -R "$LOCAL_INITIAL_VALIDATORS_DIR" "$workspace/config/"
   cp "$consensus_private_key" "$workspace/config/validator/consensus.private.key"
   chmod 600 "$workspace/config/validator/consensus.private.key"
 
@@ -544,12 +544,17 @@ chain_id = 1264
 algorithm = "Proof of Synergy"
 block_time_secs = 2
 epoch_length = 1000
-min_validators = 3
+emergency_stable_committee_mode = true
+freeze_validator_set = true
+freeze_score_weighted_proposer_order = true
+vote_only_rejoin_enabled = true
+vote_only_probation_blocks = 1000
+min_validators = 4
 validator_cluster_size = 5
 validator_vote_threshold = 0
 max_validators = ${START_VALIDATOR_COUNT}
 status_ready_gate_enabled = true
-status_ready_min_validators = 2
+status_ready_min_validators = 4
 status_ready_genesis_grace_secs = 60
 allow_genesis_status_bypass = false
 mesh_settle_secs = 3

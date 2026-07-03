@@ -5,6 +5,7 @@ use crate::transaction::Transaction;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -418,6 +419,52 @@ impl ValidatorRegistry {
         }
     }
 
+    pub fn restart_shadow_activation_for_existing(
+        &mut self,
+        address: &str,
+        public_key: String,
+        name: String,
+        stake_amount: u64,
+        activation_tx_hash: String,
+        activation_block_height: u64,
+    ) -> Result<(), String> {
+        let Some(validator) = self.validators.get_mut(address) else {
+            return Err("Validator not found".to_string());
+        };
+
+        match validator.status.clone() {
+            ValidatorStatus::Active => {
+                return Ok(());
+            }
+            ValidatorStatus::Shadow => {
+                validator.stake_amount = stake_amount;
+                validator.min_stake_required = stake_amount;
+                return Ok(());
+            }
+            ValidatorStatus::Jailed | ValidatorStatus::Slashed => {
+                return Err(format!(
+                    "Validator {address} is disciplined and cannot be activation-replayed"
+                ));
+            }
+            ValidatorStatus::Inactive | ValidatorStatus::Pending => {}
+        }
+
+        let activation_recorded_height =
+            activation_block_height.saturating_add(VALIDATOR_SHADOW_PHASE_BLOCKS);
+        validator.public_key = public_key;
+        validator.name = name;
+        validator.status = ValidatorStatus::Shadow;
+        validator.stake_amount = stake_amount;
+        validator.min_stake_required = stake_amount;
+        validator.activation_tx_hash = Some(activation_tx_hash);
+        validator.shadow_started_at_height = Some(activation_block_height);
+        validator.activation_recorded_height = Some(activation_recorded_height);
+        validator.activation_effective_height = Some(activation_recorded_height.saturating_add(1));
+        validator.synergy_score = INITIAL_VALIDATOR_SYNERGY_SCORE;
+        validator.uptime_percentage = 100.0;
+        Ok(())
+    }
+
     pub fn apply_pending_shadow_activations(&mut self, finalized_height: u64) -> Vec<String> {
         let mut activated = Vec::new();
         for validator in self.validators.values_mut() {
@@ -720,13 +767,13 @@ impl ValidatorRegistry {
         rewards
     }
 
-    pub fn save_to_file(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
         let json = serde_json::to_string_pretty(self)?;
         std::fs::write(path, json)?;
         Ok(())
     }
 
-    pub fn load_from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
         let registry: ValidatorRegistry = serde_json::from_str(&content)?;
         Ok(registry)
@@ -802,6 +849,29 @@ impl ValidatorManager {
     ) -> Result<(), String> {
         if let Ok(mut registry) = self.registry.lock() {
             registry.start_shadow_activation(address, activation_block_height)
+        } else {
+            Err("Failed to acquire registry lock".to_string())
+        }
+    }
+
+    pub fn restart_shadow_activation_for_existing(
+        &self,
+        address: &str,
+        public_key: String,
+        name: String,
+        stake_amount: u64,
+        activation_tx_hash: String,
+        activation_block_height: u64,
+    ) -> Result<(), String> {
+        if let Ok(mut registry) = self.registry.lock() {
+            registry.restart_shadow_activation_for_existing(
+                address,
+                public_key,
+                name,
+                stake_amount,
+                activation_tx_hash,
+                activation_block_height,
+            )
         } else {
             Err("Failed to acquire registry lock".to_string())
         }
@@ -969,14 +1039,16 @@ impl ValidatorManager {
 
     pub fn save_registry(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         if let Ok(registry) = self.registry.lock() {
-            registry.save_to_file(path)
+            let resolved = crate::utils::resolve_data_path(path);
+            registry.save_to_file(resolved)
         } else {
             Err("Failed to acquire registry lock".into())
         }
     }
 
     pub fn load_registry(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let registry = ValidatorRegistry::load_from_file(path)?;
+        let resolved = crate::utils::resolve_data_path(path);
+        let registry = ValidatorRegistry::load_from_file(resolved)?;
         if let Ok(mut current_registry) = self.registry.lock() {
             *current_registry = registry;
         }
@@ -1122,14 +1194,39 @@ pub fn apply_validator_activation_transaction(
 
     if let Some(existing) = validator_manager.get_validator(&validator) {
         validator_manager.update_validator_stake(&validator, bonded_stake);
-        if existing.status == ValidatorStatus::Shadow {
-            return Ok(format!(
-                "Validator {validator} already shadowing; stake refreshed."
-            ));
+        let existing_status = existing.status.clone();
+        match existing_status.clone() {
+            ValidatorStatus::Active => {
+                return Ok(format!(
+                    "Validator {validator} already active; stake refreshed."
+                ));
+            }
+            ValidatorStatus::Shadow => {
+                return Ok(format!(
+                    "Validator {validator} already shadowing; stake refreshed."
+                ));
+            }
+            ValidatorStatus::Inactive | ValidatorStatus::Pending => {
+                validator_manager.restart_shadow_activation_for_existing(
+                    &validator,
+                    public_key,
+                    name,
+                    bonded_stake,
+                    tx.hash(),
+                    block_height,
+                )?;
+                return Ok(format!(
+                    "Validator {validator} re-entered shadow activation from existing {:?} registry state.",
+                    existing_status
+                ));
+            }
+            ValidatorStatus::Jailed | ValidatorStatus::Slashed => {
+                return Err(format!(
+                    "Validator {validator} is {:?}; activation replay will not revive disciplined validators.",
+                    existing_status
+                ));
+            }
         }
-        return Ok(format!(
-            "Validator {validator} already active; stake refreshed."
-        ));
     }
 
     let registration = ValidatorRegistration {
@@ -1329,6 +1426,54 @@ mod tests {
     }
 
     #[test]
+    fn validator_manager_resolves_legacy_registry_path_to_runtime_data_root() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("synergy-validator-registry-{unique}"));
+        let state_dir = temp_dir.join("state-store");
+        let legacy_dir = temp_dir.join("data");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+
+        let stale_registry = active_registry(5);
+        std::fs::write(
+            legacy_dir.join("validator_registry.json"),
+            serde_json::to_string_pretty(&stale_registry).unwrap(),
+        )
+        .unwrap();
+
+        let restored_registry = active_registry(6);
+        std::fs::write(
+            state_dir.join("validator_registry.json"),
+            serde_json::to_string_pretty(&restored_registry).unwrap(),
+        )
+        .unwrap();
+
+        let _data_path = EnvVarGuard::set("SYNERGY_DATA_PATH", &state_dir.to_string_lossy());
+        let manager = ValidatorManager::new();
+        manager
+            .load_registry("data/validator_registry.json")
+            .expect("legacy registry path should resolve to SYNERGY_DATA_PATH");
+
+        assert_eq!(
+            manager.get_active_validators().len(),
+            6,
+            "runtime validator registry must load the restored snapshot registry, not stale workspace/data"
+        );
+
+        manager
+            .save_registry("data/validator_registry.json")
+            .expect("legacy registry save should resolve to SYNERGY_DATA_PATH");
+        let saved = ValidatorRegistry::load_from_file(state_dir.join("validator_registry.json"))
+            .expect("saved runtime registry should be readable");
+        assert_eq!(saved.get_active_validators().len(), 6);
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
     fn approved_validators_start_at_full_synergy_score() {
         let mut registry = ValidatorRegistry::new();
         let registration = pending_registration(1);
@@ -1375,7 +1520,7 @@ mod tests {
     }
 
     #[test]
-    fn activated_non_genesis_validator_expands_consensus_membership_when_allowlist_disabled() {
+    fn activated_validator_expands_consensus_membership_when_allowlist_disabled() {
         let previous_strict = std::env::var("SYNERGY_STRICT_VALIDATOR_ALLOWLIST").ok();
         std::env::set_var("SYNERGY_STRICT_VALIDATOR_ALLOWLIST", "0");
 
@@ -1618,6 +1763,80 @@ mod tests {
             Some(activation_hash.as_str())
         );
         assert_eq!(activated.shadow_started_at_height, Some(1));
+    }
+
+    #[test]
+    fn replay_validator_activation_restores_existing_inactive_validator() {
+        let public_key = "inactive-replay-public-key";
+        let (token_manager, validator_address, activation_tx) =
+            funded_activation_fixture(public_key, vec![13, 14, 15]);
+        let activation_hash = activation_tx.hash();
+        let activation_height = 42;
+        let recorded_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS;
+        let effective_height = recorded_height + 1;
+        let validator_manager = Arc::new(ValidatorManager::new());
+
+        {
+            let mut registry = validator_manager
+                .registry
+                .lock()
+                .expect("test registry lock should be available");
+            let mut inactive = Validator::new(
+                validator_address.clone(),
+                "stale-public-key".to_string(),
+                "Stale Validator".to_string(),
+                TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+            );
+            inactive.status = ValidatorStatus::Inactive;
+            inactive.activation_tx_hash = Some("stale-activation".to_string());
+            registry
+                .validators
+                .insert(validator_address.clone(), inactive);
+        }
+
+        let mut chain = BlockChain::new();
+        chain.add_block(Block::new_with_timestamp(
+            activation_height,
+            vec![activation_tx],
+            "genesis".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            1,
+        ));
+        chain.add_block(Block::new_with_timestamp(
+            recorded_height,
+            Vec::new(),
+            "activation-record-block".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            2,
+        ));
+        chain.add_block(Block::new_with_timestamp(
+            effective_height,
+            Vec::new(),
+            "activation-effective-block".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            3,
+        ));
+
+        let (applied, failed) =
+            replay_validator_activation_transactions(&chain, &token_manager, &validator_manager);
+
+        assert_eq!((applied, failed), (1, 0));
+        let restored = validator_manager
+            .get_validator(&validator_address)
+            .expect("inactive validator should be restored by replayed activation");
+        assert_eq!(restored.status, ValidatorStatus::Active);
+        assert_eq!(restored.public_key, public_key);
+        assert_eq!(restored.name, "Outside Validator");
+        assert_eq!(
+            restored.activation_tx_hash.as_deref(),
+            Some(activation_hash.as_str())
+        );
+        assert_eq!(restored.shadow_started_at_height, Some(activation_height));
+        assert_eq!(restored.activation_recorded_height, Some(recorded_height));
+        assert_eq!(restored.activation_effective_height, Some(effective_height));
     }
 
     #[test]

@@ -18,10 +18,15 @@ fn run() -> Result<(), String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let command = args.first().map(String::as_str).unwrap_or("help");
     match command {
+        "--version" | "version" => print_version(),
         "tx" => run_tx_command(&args)?,
         "dag" => run_dag_command(&args)?,
         "synq" => run_synq_command(&args)?,
         "recovery" => run_recovery_command(&args)?,
+        "validator" => run_validator_command(&args)?,
+        "fleet" => run_fleet_command(&args)?,
+        "archive" => run_archive_command(&args)?,
+        "chaos" => run_chaos_command(&args)?,
         "diagnose-sync-target" => {
             require_testnet_args(&args)?;
             let rpc_url = arg_value(&args, "--rpc-url")
@@ -213,6 +218,45 @@ fn run() -> Result<(), String> {
                 Err(error) => return Err(error),
             }
         }
+        "promote-vote-only-to-active" => {
+            require_testnet_args(&args)?;
+            match synergy_testnet::consensus::diagnostics::promote_vote_only_to_active() {
+                Ok(report) => print_json(report)?,
+                Err(error) => return Err(error),
+            }
+        }
+        "emergency-promote-leader-stall-to-active" => {
+            require_testnet_args(&args)?;
+            let options =
+                synergy_testnet::consensus::diagnostics::EmergencyLeaderStallPromotionOptions {
+                    common_height: optional_u64_arg(&args, "--common-height")?,
+                    common_hash: arg_value(&args, "--common-hash"),
+                    exact_common_height_match: arg_flag(&args, "--exact-common-height-match"),
+                    latest_finalized_qc_aegis_pqc_verified: arg_flag(
+                        &args,
+                        "--latest-finalized-qc-aegis-pqc-verified",
+                    ),
+                    state_root_matches: arg_flag(&args, "--state-root-matches"),
+                    rejoin_at_finalized_safe_boundary: arg_flag(
+                        &args,
+                        "--rejoin-at-finalized-safe-boundary",
+                    ),
+                    cluster_marks_pending_reactivation: arg_flag(
+                        &args,
+                        "--cluster-marks-pending-reactivation",
+                    ),
+                    operator_approved_emergency_leader_stall_recovery: arg_flag(
+                        &args,
+                        "--operator-approved-emergency-leader-stall-recovery",
+                    ),
+                };
+            match synergy_testnet::consensus::diagnostics::
+                emergency_promote_leader_stall_to_active_with_options(options)
+            {
+                Ok(report) => print_json(report)?,
+                Err(error) => return Err(error),
+            }
+        }
         "sync-from-archive" | "self-heal-from-archive" => {
             require_testnet_args(&args)?;
             let archive_url = arg_value(&args, "--archive-url")
@@ -242,6 +286,36 @@ fn run() -> Result<(), String> {
             println!("  synergy-node recovery build-plan --target-node-id <id> --target-role validator|relayer|rpc|archive --target-data-dir <dir> --source-state-dir <dir> --source-node <validator-id>... --evidence-path <dir> --rollback-path <dir> --output <plan.json> --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node recovery verify-plan --plan <plan.json> --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node recovery apply-plan --plan <plan.json> --confirm-target-stopped --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator inspect-state --state-root <runtime-root-or-data-dir> --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator verify-state --state-root <runtime-root-or-data-dir> [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator verify-live-state --state-root <runtime-root-or-data-dir> [--expected-height <height> --expected-hash <hash>] [--max-expected-lag <blocks>] [--max-qc-ahead <blocks>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator adopt-compacted-checkpoint --state-root <runtime-root-or-data-dir> --source-validator <source-validator> --source-bundle-path <path> --source-bundle-sha256 <sha256> --source-state-dir <path> --operator-approval-id <id> --recovery-reason <text> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator migrate-state --state-root <runtime-root-or-data-dir> --dry-run|--force --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator rebuild-derived-indexes --state-root <runtime-root-or-data-dir> [--dry-run] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator state-sync-plan --request <request.json> --source-proof <proof.json> --transfer-proof <transfer.json> [--state-root <runtime-root-or-data-dir>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator classify-supervisor-state --evidence <evidence.json> --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator supervisor-transition --evidence <evidence.json> [--previous-state <state.json>] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator supervisor-write --transition <transition.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator onboarding-preflight --input <candidate.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator onboarding-bundle --input <bundle-input.json> [--output <manifest.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator onboarding-dry-run-join --input <join-input.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator enrollment-token verify --input <token.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator package verify --manifest <package.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator identity-bundle verify --input <identity.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator cluster-assignment preview --input <assignment.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator activation-eligibility --input <activation.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator export-compat-json --state-root <runtime-root-or-data-dir> [--output <state.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node fleet status --snapshot <fleet-status.json> [--strict] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node archive status --archive-services-disabled --snapshot-api-disabled --snapshot-worker-disabled --archive-publication-disabled --unsafe-inventory-reviewed --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node archive verify-canonical --manifest <signed-manifest.json> --snapshot-root <dir> --expected-height <height> --expected-block-hash <hash> --expected-snapshot-class <class> --source-canonical [--allow-validator-pruned-support-snapshot] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node archive reseed-plan --manifest <signed-manifest.json> --snapshot-root <dir> --archive-services-disabled --archive-publication-disabled --unsafe-inventory-reviewed [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node archive reseed --dry-run --plan <plan.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node archive publish-snapshot --dry-run --manifest <signed-manifest.json> --snapshot-root <dir> --snapshot-api-disabled --snapshot-worker-disabled --source-canonical [--unsafe-snapshot] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node archive list-unsafe-snapshots [--inventory <inventory.json>] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node archive mark-unsafe-snapshot --snapshot-id <id> --height <height> --snapshot-class <class> --block-hash <hash> --reason <reason> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node archive quarantine-snapshot --snapshot-id <id> --height <height> --snapshot-class <class> --block-hash <hash> --reason <reason> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node chaos run --input <scenario.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node diagnose-sync-target --rpc-url <url> --chain-id 1264 --network-id synergy-testnet-v2 [--expected-genesis-hash <hash>]");
             println!("  synergy-node diagnose-consensus-stall --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node diagnose-vote-locks --chain-id 1264 --network-id synergy-testnet-v2 [--finalized-height <height>]");
@@ -257,7 +331,7 @@ fn run() -> Result<(), String> {
             println!("  synergy-node recover-transient-vote-locks --chain-id 1264 --network-id synergy-testnet-v2 [--finalized-height <height>] [--min-age-secs <seconds>]");
             println!("  synergy-node self-heal --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node sync-from-canonical-peer --chain-id 1264 --network-id synergy-testnet-v2 --canonical-height <height> --canonical-hash <hash> --source-qc-aegis-pqc-verified --parent-continuity-verified --state-root-matches --source-peer-not-quarantined [--source-peer <id>]");
-            println!("  synergy-node create-snapshot --chain-id 1264 --network-id synergy-testnet-v2 --source-node-majority-branch-proven [--source-role GENESIS_VALIDATOR] [--snapshot-class validator-pruned|support-relayer|support-rpc|support-observer|indexer-replay|indexer-full|archive-full|archive-bootstrap] [--allowed-role <role> ...] [--conflict-height-hash <hash>]");
+            println!("  synergy-node create-snapshot --chain-id 1264 --network-id synergy-testnet-v2 --source-node-majority-branch-proven [--source-role VALIDATOR] [--snapshot-class validator-pruned|support-relayer|support-rpc|support-observer|indexer-replay|indexer-full|archive-full|archive-bootstrap] [--allowed-role <role> ...] [--conflict-height-hash <hash>]");
             println!(
                 "  synergy-node list-snapshots --chain-id 1264 --network-id synergy-testnet-v2"
             );
@@ -272,10 +346,912 @@ fn run() -> Result<(), String> {
                 "  synergy-node rejoin-eligibility --chain-id 1264 --network-id synergy-testnet-v2"
             );
             println!(
-                "  synergy-node request-rejoin --chain-id 1264 --network-id synergy-testnet-v2 --common-height <height> --common-hash <hash> --exact-common-height-match --latest-finalized-qc-aegis-pqc-verified --state-root-matches --rejoin-at-finalized-safe-boundary --cluster-marks-pending-reactivation --operator-approved-reactivation [--operator-approved-emergency-leader-stall-recovery]"
+                "  synergy-node request-rejoin --chain-id 1264 --network-id synergy-testnet-v2 --common-height <height> --common-hash <hash> --exact-common-height-match --latest-finalized-qc-aegis-pqc-verified --state-root-matches --rejoin-at-finalized-safe-boundary --cluster-marks-pending-reactivation [--operator-approved-emergency-leader-stall-recovery]"
             );
+            println!("  synergy-node promote-vote-only-to-active --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node emergency-promote-leader-stall-to-active --chain-id 1264 --network-id synergy-testnet-v2 --common-height <height> --common-hash <hash> --exact-common-height-match --latest-finalized-qc-aegis-pqc-verified --state-root-matches --rejoin-at-finalized-safe-boundary --cluster-marks-pending-reactivation --operator-approved-emergency-leader-stall-recovery");
             println!("  synergy-node sync-from-archive --archive-url <url> --chain-id 1264 --network-id synergy-testnet-v2 --expected-genesis-hash <hash>");
             println!("  synergy-node self-heal-from-archive --archive-url <url> --divergence-height <height> --chain-id 1264 --network-id synergy-testnet-v2 --expected-genesis-hash <hash>");
+        }
+    }
+    Ok(())
+}
+
+fn run_validator_command(args: &[String]) -> Result<(), String> {
+    let subcommand = args.get(1).map(String::as_str).unwrap_or("help");
+    if wants_help(args) {
+        print_validator_command_help(args);
+        return Ok(());
+    }
+    match subcommand {
+        "inspect-state" => {
+            require_testnet_args(args)?;
+            let state_root = validator_state_root_from_args(args);
+            let report = synergy_testnet::consensus_state::inspect_state(&state_root);
+            print_json(
+                serde_json::to_value(report)
+                    .map_err(|error| format!("serialize validator state report: {error}"))?,
+            )?;
+        }
+        "verify-state" => {
+            require_testnet_args(args)?;
+            let state_root = validator_state_root_from_args(args);
+            let report = synergy_testnet::consensus_state::verify_state_with_options(
+                &state_root,
+                synergy_testnet::consensus_state::ConsensusStateVerificationOptions {
+                    allow_testnet_recovery_checkpoint: arg_flag(
+                        args,
+                        "--allow-testnet-recovery-checkpoint",
+                    ),
+                },
+            );
+            let ok = report.ok;
+            print_json(
+                serde_json::to_value(report)
+                    .map_err(|error| format!("serialize validator state verification: {error}"))?,
+            )?;
+            if !ok {
+                return Err("validator state verification failed closed".to_string());
+            }
+        }
+        "verify-live-state" => {
+            require_testnet_args(args)?;
+            let state_root = validator_state_root_from_args(args);
+            let report = synergy_testnet::consensus_state::verify_live_state_with_options(
+                &state_root,
+                synergy_testnet::consensus_state::LiveStateVerificationOptions {
+                    expected_height: optional_u64_arg(args, "--expected-height")?,
+                    expected_hash: arg_value(args, "--expected-hash"),
+                    max_expected_lag: optional_u64_arg(args, "--max-expected-lag")?.unwrap_or(32),
+                    max_qc_ahead: optional_u64_arg(args, "--max-qc-ahead")?.unwrap_or(128),
+                },
+            );
+            let ok = report.ok;
+            print_json(serde_json::to_value(report).map_err(|error| {
+                format!("serialize live validator state verification: {error}")
+            })?)?;
+            if !ok {
+                return Err("validator live state verification failed closed".to_string());
+            }
+        }
+        "adopt-compacted-checkpoint" => {
+            require_testnet_args(args)?;
+            let state_root = validator_state_root_from_args(args);
+            let report = synergy_testnet::consensus_state::adopt_compacted_recovery_checkpoint(
+                &state_root,
+                synergy_testnet::consensus_state::CompactedRecoveryCheckpointOptions {
+                    dry_run: arg_flag(args, "--dry-run"),
+                    apply: arg_flag(args, "--apply"),
+                    force: arg_flag(args, "--force"),
+                    source_validator: arg_value(args, "--source-validator").ok_or_else(|| {
+                        "validator adopt-compacted-checkpoint requires --source-validator <name>"
+                            .to_string()
+                    })?,
+                    source_bundle_path: arg_value(args, "--source-bundle-path").ok_or_else(|| {
+                        "validator adopt-compacted-checkpoint requires --source-bundle-path <path>"
+                            .to_string()
+                    })?,
+                    source_bundle_sha256: arg_value(args, "--source-bundle-sha256")
+                        .ok_or_else(|| {
+                            "validator adopt-compacted-checkpoint requires --source-bundle-sha256 <sha256>"
+                                .to_string()
+                        })?,
+                    source_state_dir: arg_value(args, "--source-state-dir").ok_or_else(|| {
+                        "validator adopt-compacted-checkpoint requires --source-state-dir <path>"
+                            .to_string()
+                    })?,
+                    operator_approval_id: arg_value(args, "--operator-approval-id").ok_or_else(
+                        || {
+                            "validator adopt-compacted-checkpoint requires --operator-approval-id <id>"
+                                .to_string()
+                        },
+                    )?,
+                    recovery_reason: arg_value(args, "--recovery-reason").ok_or_else(|| {
+                        "validator adopt-compacted-checkpoint requires --recovery-reason <text>"
+                            .to_string()
+                    })?,
+                },
+            )?;
+            let ok = report.ok;
+            print_json(serde_json::to_value(report).map_err(|error| {
+                format!("serialize compacted recovery checkpoint adoption: {error}")
+            })?)?;
+            if !ok {
+                return Err(
+                    "validator compacted recovery checkpoint adoption failed closed".to_string(),
+                );
+            }
+        }
+        "export-compat-json" => {
+            require_testnet_args(args)?;
+            let state_root = validator_state_root_from_args(args);
+            let export = synergy_testnet::consensus_state::export_compat_json(&state_root)?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&export)
+                    .map_err(|error| format!("serialize compat export: {error}"))?;
+                fs::write(&output, bytes)
+                    .map_err(|error| format!("write compat export {output}: {error}"))?;
+                print_json(serde_json::json!({
+                    "command": "validator export-compat-json",
+                    "output": output,
+                    "state_root": state_root.display().to_string(),
+                    "wrote": true,
+                    "fail_closed": true,
+                }))?;
+            } else {
+                print_json(export)?;
+            }
+        }
+        "migrate-state" => {
+            require_testnet_args(args)?;
+            let state_root = validator_state_root_from_args(args);
+            let report = synergy_testnet::consensus_state::migrate_state(
+                &state_root,
+                synergy_testnet::consensus_state::ConsensusStateMigrationOptions {
+                    dry_run: arg_flag(args, "--dry-run"),
+                    force: arg_flag(args, "--force"),
+                },
+            )?;
+            let ok = report.ok;
+            print_json(
+                serde_json::to_value(report)
+                    .map_err(|error| format!("serialize validator state migration: {error}"))?,
+            )?;
+            if !ok {
+                return Err("validator state migration failed closed".to_string());
+            }
+        }
+        "rebuild-derived-indexes" => {
+            require_testnet_args(args)?;
+            let state_root = validator_state_root_from_args(args);
+            let report = synergy_testnet::consensus_state::rebuild_derived_indexes(
+                &state_root,
+                synergy_testnet::consensus_state::DerivedIndexRebuildOptions {
+                    dry_run: arg_flag(args, "--dry-run"),
+                },
+            )?;
+            let ok = report.ok;
+            print_json(
+                serde_json::to_value(report)
+                    .map_err(|error| format!("serialize derived-index rebuild: {error}"))?,
+            )?;
+            if !ok {
+                return Err("validator derived-index rebuild failed closed".to_string());
+            }
+        }
+        "state-sync-plan" => {
+            require_testnet_args(args)?;
+            let request_path = arg_value(args, "--request")
+                .ok_or_else(|| "validator state-sync-plan requires --request <json>".to_string())?;
+            let source_path = arg_value(args, "--source-proof").ok_or_else(|| {
+                "validator state-sync-plan requires --source-proof <json>".to_string()
+            })?;
+            let transfer_path = arg_value(args, "--transfer-proof").ok_or_else(|| {
+                "validator state-sync-plan requires --transfer-proof <json>".to_string()
+            })?;
+            let request: synergy_testnet::sync::state_sync::StateSyncRequest =
+                read_json_file(&request_path)?;
+            let source: synergy_testnet::sync::state_sync::StateSyncSourceProof =
+                read_json_file(&source_path)?;
+            let transfer: synergy_testnet::sync::state_sync::StateSyncTransferProof =
+                read_json_file(&transfer_path)?;
+            let local_state = if arg_value(args, "--state-root").is_some()
+                || arg_value(args, "--data-dir").is_some()
+            {
+                Some(synergy_testnet::consensus_state::verify_state(
+                    &validator_state_root_from_args(args),
+                ))
+            } else {
+                None
+            };
+            let plan = synergy_testnet::sync::state_sync::build_state_sync_repair_plan(
+                &request,
+                &source,
+                &transfer,
+                local_state.as_ref(),
+            );
+            let ok = plan.ok;
+            let value = serde_json::to_value(&plan)
+                .map_err(|error| format!("serialize state-sync plan: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value)
+                    .map_err(|error| format!("serialize state-sync plan output: {error}"))?;
+                fs::write(&output, bytes)
+                    .map_err(|error| format!("write state-sync plan {output}: {error}"))?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("validator state-sync plan failed closed".to_string());
+            }
+        }
+        "state-sync" => {
+            require_testnet_args(args)?;
+            let nested = args.get(2).map(String::as_str).unwrap_or("help");
+            match nested {
+                "repair" => {
+                    let plan_path = arg_value(args, "--plan").ok_or_else(|| {
+                        "validator state-sync repair requires --plan <json>".to_string()
+                    })?;
+                    let workspace = arg_value(args, "--workspace").ok_or_else(|| {
+                        "validator state-sync repair requires --workspace <path>".to_string()
+                    })?;
+                    let plan: synergy_testnet::sync::state_sync::StateSyncRepairPlan =
+                        read_json_file(&plan_path)?;
+                    let report = synergy_testnet::sync::state_sync::apply_state_sync_repair(
+                        &plan,
+                        &std::path::PathBuf::from(&workspace),
+                        synergy_testnet::sync::state_sync::StateSyncRepairApplyOptions {
+                            dry_run: arg_flag(args, "--dry-run"),
+                            apply: arg_flag(args, "--apply"),
+                        },
+                    )?;
+                    let ok = report.ok;
+                    print_json(serde_json::to_value(report).map_err(|error| {
+                        format!("serialize state-sync repair report: {error}")
+                    })?)?;
+                    if !ok {
+                        return Err("validator state-sync repair failed closed".to_string());
+                    }
+                }
+                _ => {
+                    println!("Validator state-sync commands:");
+                    println!("  synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
+                }
+            }
+        }
+        "classify-supervisor-state" => {
+            require_testnet_args(args)?;
+            let evidence_path = arg_value(args, "--evidence").ok_or_else(|| {
+                "validator classify-supervisor-state requires --evidence <json>".to_string()
+            })?;
+            let evidence: synergy_testnet::validator_lifecycle::ValidatorSupervisorEvidence =
+                read_json_file(&evidence_path)?;
+            let decision =
+                synergy_testnet::validator_lifecycle::classify_validator_supervisor_state(
+                    &evidence,
+                );
+            let fail_closed = decision.fail_closed;
+            print_json(
+                serde_json::to_value(&decision)
+                    .map_err(|error| format!("serialize validator supervisor decision: {error}"))?,
+            )?;
+            if fail_closed {
+                return Err("validator supervisor classified fail-closed".to_string());
+            }
+        }
+        "supervisor-transition" => {
+            require_testnet_args(args)?;
+            let evidence_path = arg_value(args, "--evidence").ok_or_else(|| {
+                "validator supervisor-transition requires --evidence <json>".to_string()
+            })?;
+            let evidence: synergy_testnet::validator_lifecycle::ValidatorSupervisorEvidence =
+                read_json_file(&evidence_path)?;
+            let previous = arg_value(args, "--previous-state")
+                .or_else(|| arg_value(args, "--previous"))
+                .map(|path| {
+                    read_json_file::<
+                        synergy_testnet::validator_lifecycle::ValidatorSupervisorPersistentState,
+                    >(&path)
+                })
+                .transpose()?;
+            let mut report =
+                synergy_testnet::validator_lifecycle::plan_validator_supervisor_transition(
+                    &synergy_testnet::validator_lifecycle::ValidatorSupervisorTransitionInput {
+                        previous,
+                        evidence,
+                    },
+                );
+            report.persistent_state.evidence_path = Some(evidence_path.clone());
+            let ok = report.ok;
+            let value = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize validator supervisor transition: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value).map_err(|error| {
+                    format!("serialize validator supervisor transition output: {error}")
+                })?;
+                fs::write(&output, bytes).map_err(|error| {
+                    format!("write validator supervisor transition {output}: {error}")
+                })?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("validator supervisor transition failed closed".to_string());
+            }
+        }
+        "supervisor-write" => {
+            require_testnet_args(args)?;
+            let transition_path = arg_value(args, "--transition").ok_or_else(|| {
+                "validator supervisor-write requires --transition <json>".to_string()
+            })?;
+            let workspace = arg_value(args, "--workspace").ok_or_else(|| {
+                "validator supervisor-write requires --workspace <path>".to_string()
+            })?;
+            let transition: synergy_testnet::validator_lifecycle::ValidatorSupervisorTransitionReport =
+                read_json_file(&transition_path)?;
+            let report = synergy_testnet::validator_lifecycle::write_validator_supervisor_state(
+                &transition,
+                &std::path::PathBuf::from(&workspace),
+                synergy_testnet::validator_lifecycle::ValidatorSupervisorWriteOptions {
+                    dry_run: arg_flag(args, "--dry-run"),
+                    apply: arg_flag(args, "--apply"),
+                },
+            )?;
+            let ok = report.ok;
+            print_json(serde_json::to_value(report).map_err(|error| {
+                format!("serialize validator supervisor write report: {error}")
+            })?)?;
+            if !ok {
+                return Err("validator supervisor write failed closed".to_string());
+            }
+        }
+        "onboarding-preflight" => {
+            require_testnet_args(args)?;
+            let input_path = arg_value(args, "--input").ok_or_else(|| {
+                "validator onboarding-preflight requires --input <json>".to_string()
+            })?;
+            let input: synergy_testnet::community_onboarding::CommunityValidatorPreflightInput =
+                read_json_file(&input_path)?;
+            let report =
+                synergy_testnet::community_onboarding::evaluate_community_validator_preflight(
+                    &input,
+                );
+            let ok = report.ok;
+            let value = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize onboarding preflight report: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value).map_err(|error| {
+                    format!("serialize onboarding preflight report output: {error}")
+                })?;
+                fs::write(&output, bytes).map_err(|error| {
+                    format!("write onboarding preflight report {output}: {error}")
+                })?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("validator onboarding preflight failed closed".to_string());
+            }
+        }
+        "onboarding-bundle" => {
+            require_testnet_args(args)?;
+            let input_path = arg_value(args, "--input")
+                .ok_or_else(|| "validator onboarding-bundle requires --input <json>".to_string())?;
+            let input: synergy_testnet::community_onboarding::CommunityValidatorBundleInput =
+                read_json_file(&input_path)?;
+            let manifest =
+                synergy_testnet::community_onboarding::build_community_validator_bundle_manifest(
+                    &input,
+                );
+            let ok = manifest.ok;
+            let value = serde_json::to_value(&manifest)
+                .map_err(|error| format!("serialize onboarding bundle manifest: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value).map_err(|error| {
+                    format!("serialize onboarding bundle manifest output: {error}")
+                })?;
+                fs::write(&output, bytes).map_err(|error| {
+                    format!("write onboarding bundle manifest {output}: {error}")
+                })?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("validator onboarding bundle failed closed".to_string());
+            }
+        }
+        "onboarding-dry-run-join" => {
+            require_testnet_args(args)?;
+            let input_path = arg_value(args, "--input").ok_or_else(|| {
+                "validator onboarding-dry-run-join requires --input <json>".to_string()
+            })?;
+            let input: synergy_testnet::community_onboarding::CommunityValidatorDryRunJoinInput =
+                read_json_file(&input_path)?;
+            let report =
+                synergy_testnet::community_onboarding::evaluate_community_validator_dry_run_join(
+                    &input,
+                );
+            let ok = report.ok;
+            let value = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize onboarding dry-run join report: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value).map_err(|error| {
+                    format!("serialize onboarding dry-run join report output: {error}")
+                })?;
+                fs::write(&output, bytes).map_err(|error| {
+                    format!("write onboarding dry-run join report {output}: {error}")
+                })?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("validator onboarding dry-run join failed closed".to_string());
+            }
+        }
+        "enrollment-token" => {
+            require_testnet_args(args)?;
+            if args.get(2).map(String::as_str) != Some("verify") {
+                return Err("validator enrollment-token requires verify --input <json>".to_string());
+            }
+            let input_path = arg_value(args, "--input").ok_or_else(|| {
+                "validator enrollment-token verify requires --input <json>".to_string()
+            })?;
+            let input: synergy_testnet::community_onboarding::CommunityEnrollmentTokenInput =
+                read_json_file(&input_path)?;
+            let report =
+                synergy_testnet::community_onboarding::verify_community_enrollment_token(&input);
+            let ok = report.ok;
+            let value = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize enrollment token report: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value).map_err(|error| {
+                    format!("serialize enrollment token report output: {error}")
+                })?;
+                fs::write(&output, bytes)
+                    .map_err(|error| format!("write enrollment token report {output}: {error}"))?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("validator enrollment token verification failed closed".to_string());
+            }
+        }
+        "package" => {
+            require_testnet_args(args)?;
+            if args.get(2).map(String::as_str) != Some("verify") {
+                return Err("validator package requires verify --manifest <json>".to_string());
+            }
+            let manifest_path = arg_value(args, "--manifest")
+                .ok_or_else(|| "validator package verify requires --manifest <json>".to_string())?;
+            let input: synergy_testnet::community_onboarding::CommunityPackageCompatibilityManifest =
+                read_json_file(&manifest_path)?;
+            let report =
+                synergy_testnet::community_onboarding::verify_community_package_manifest(&input);
+            let ok = report.ok;
+            let value = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize package verification report: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value).map_err(|error| {
+                    format!("serialize package verification report output: {error}")
+                })?;
+                fs::write(&output, bytes).map_err(|error| {
+                    format!("write package verification report {output}: {error}")
+                })?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("validator package verification failed closed".to_string());
+            }
+        }
+        "identity-bundle" => {
+            require_testnet_args(args)?;
+            if args.get(2).map(String::as_str) != Some("verify") {
+                return Err("validator identity-bundle requires verify --input <json>".to_string());
+            }
+            let input_path = arg_value(args, "--input").ok_or_else(|| {
+                "validator identity-bundle verify requires --input <json>".to_string()
+            })?;
+            let input: synergy_testnet::community_onboarding::CommunityIdentityBundleInput =
+                read_json_file(&input_path)?;
+            let report =
+                synergy_testnet::community_onboarding::verify_community_identity_bundle(&input);
+            let ok = report.ok;
+            let value = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize identity bundle report: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value)
+                    .map_err(|error| format!("serialize identity bundle report output: {error}"))?;
+                fs::write(&output, bytes)
+                    .map_err(|error| format!("write identity bundle report {output}: {error}"))?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("validator identity bundle verification failed closed".to_string());
+            }
+        }
+        "cluster-assignment" => {
+            require_testnet_args(args)?;
+            if args.get(2).map(String::as_str) != Some("preview") {
+                return Err(
+                    "validator cluster-assignment requires preview --input <json>".to_string(),
+                );
+            }
+            let input_path = arg_value(args, "--input").ok_or_else(|| {
+                "validator cluster-assignment preview requires --input <json>".to_string()
+            })?;
+            let input: synergy_testnet::community_onboarding::CommunityClusterAssignmentPreviewInput =
+                read_json_file(&input_path)?;
+            let report =
+                synergy_testnet::community_onboarding::preview_community_cluster_assignment(&input);
+            let ok = report.ok;
+            let value = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize cluster assignment preview: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value).map_err(|error| {
+                    format!("serialize cluster assignment preview output: {error}")
+                })?;
+                fs::write(&output, bytes).map_err(|error| {
+                    format!("write cluster assignment preview {output}: {error}")
+                })?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("validator cluster assignment preview failed closed".to_string());
+            }
+        }
+        "activation-eligibility" => {
+            require_testnet_args(args)?;
+            let input_path = arg_value(args, "--input").ok_or_else(|| {
+                "validator activation-eligibility requires --input <json>".to_string()
+            })?;
+            let input: synergy_testnet::community_onboarding::CommunityActivationEligibilityInput =
+                read_json_file(&input_path)?;
+            let report =
+                synergy_testnet::community_onboarding::evaluate_community_activation_eligibility(
+                    &input,
+                );
+            let ok = report.ok;
+            let value = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize activation eligibility report: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value).map_err(|error| {
+                    format!("serialize activation eligibility report output: {error}")
+                })?;
+                fs::write(&output, bytes).map_err(|error| {
+                    format!("write activation eligibility report {output}: {error}")
+                })?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("validator activation eligibility failed closed".to_string());
+            }
+        }
+        _ => {
+            println!("Validator commands:");
+            println!("  synergy-node validator inspect-state --state-root <runtime-root-or-data-dir> --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator verify-state --state-root <runtime-root-or-data-dir> [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator verify-live-state --state-root <runtime-root-or-data-dir> [--expected-height <height> --expected-hash <hash>] [--max-expected-lag <blocks>] [--max-qc-ahead <blocks>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator adopt-compacted-checkpoint --state-root <runtime-root-or-data-dir> --source-validator <source-validator> --source-bundle-path <path> --source-bundle-sha256 <sha256> --source-state-dir <path> --operator-approval-id <id> --recovery-reason <text> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator migrate-state --state-root <runtime-root-or-data-dir> --dry-run|--force --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator rebuild-derived-indexes --state-root <runtime-root-or-data-dir> [--dry-run] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator state-sync-plan --request <request.json> --source-proof <proof.json> --transfer-proof <transfer.json> [--state-root <runtime-root-or-data-dir>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator classify-supervisor-state --evidence <evidence.json> --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator supervisor-transition --evidence <evidence.json> [--previous-state <state.json>] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator supervisor-write --transition <transition.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator onboarding-preflight --input <candidate.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator onboarding-bundle --input <bundle-input.json> [--output <manifest.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator onboarding-dry-run-join --input <join-input.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator enrollment-token verify --input <token.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator package verify --manifest <package.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator identity-bundle verify --input <identity.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator cluster-assignment preview --input <assignment.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator activation-eligibility --input <activation.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator export-compat-json --state-root <runtime-root-or-data-dir> [--output <state.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+        }
+    }
+    Ok(())
+}
+
+fn validator_state_root_from_args(args: &[String]) -> std::path::PathBuf {
+    arg_value(args, "--state-root")
+        .or_else(|| arg_value(args, "--data-dir"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+fn run_fleet_command(args: &[String]) -> Result<(), String> {
+    let subcommand = args.get(1).map(String::as_str).unwrap_or("help");
+    if wants_help(args) {
+        print_fleet_command_help(subcommand);
+        return Ok(());
+    }
+    match subcommand {
+        "status" => {
+            require_testnet_args(args)?;
+            let snapshot_path = arg_value(args, "--snapshot")
+                .ok_or_else(|| "fleet status requires --snapshot <json>".to_string())?;
+            let snapshot: synergy_testnet::fleet_status::FleetStatusSnapshot =
+                read_json_file(&snapshot_path)?;
+            let report = synergy_testnet::fleet_status::evaluate_fleet_status(
+                &snapshot,
+                arg_flag(args, "--strict"),
+            );
+            let ok = report.ok;
+            print_json(
+                serde_json::to_value(report)
+                    .map_err(|error| format!("serialize fleet status report: {error}"))?,
+            )?;
+            if !ok {
+                return Err("fleet status failed closed".to_string());
+            }
+        }
+        _ => {
+            println!("Fleet commands:");
+            println!("  synergy-node fleet status --snapshot <fleet-status.json> [--strict] --chain-id 1264 --network-id synergy-testnet-v2");
+        }
+    }
+    Ok(())
+}
+
+fn run_archive_command(args: &[String]) -> Result<(), String> {
+    let subcommand = args.get(1).map(String::as_str).unwrap_or("help");
+    if wants_help(args) {
+        print_archive_command_help(subcommand);
+        return Ok(());
+    }
+    match subcommand {
+        "status" => {
+            require_testnet_args(args)?;
+            let report = synergy_testnet::archive_validator::archive_status(
+                &synergy_testnet::archive_validator::ArchiveStatusInput {
+                    archive_services_disabled: arg_flag(args, "--archive-services-disabled"),
+                    snapshot_api_disabled: arg_flag(args, "--snapshot-api-disabled"),
+                    snapshot_worker_disabled: arg_flag(args, "--snapshot-worker-disabled"),
+                    archive_publication_disabled: arg_flag(args, "--archive-publication-disabled"),
+                    unsafe_inventory_reviewed: arg_flag(args, "--unsafe-inventory-reviewed"),
+                },
+            );
+            let ok = report.ok;
+            let value = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize archive status: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value)
+                    .map_err(|error| format!("serialize archive status output: {error}"))?;
+                fs::write(&output, bytes)
+                    .map_err(|error| format!("write archive status {output}: {error}"))?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("archive status failed closed".to_string());
+            }
+        }
+        "verify-canonical" => {
+            require_testnet_args(args)?;
+            let manifest_path = arg_value(args, "--manifest")
+                .ok_or_else(|| "archive verify-canonical requires --manifest <json>".to_string())?;
+            let signed_manifest: synergy_testnet::consensus::self_realign::SignedSnapshotManifest =
+                read_json_file(&manifest_path)?;
+            let expected_height =
+                optional_u64_arg(args, "--expected-height")?.ok_or_else(|| {
+                    "archive verify-canonical requires --expected-height <height>".to_string()
+                })?;
+            let expected_block_hash =
+                arg_value(args, "--expected-block-hash").ok_or_else(|| {
+                    "archive verify-canonical requires --expected-block-hash <hash>".to_string()
+                })?;
+            let expected_snapshot_class =
+                arg_value(args, "--expected-snapshot-class").ok_or_else(|| {
+                    "archive verify-canonical requires --expected-snapshot-class <class>"
+                        .to_string()
+                })?;
+            let report = synergy_testnet::archive_validator::verify_archive_canonical_snapshot(
+                &synergy_testnet::archive_validator::ArchiveCanonicalVerificationInput {
+                    signed_manifest,
+                    snapshot_root: arg_value(args, "--snapshot-root").map(std::path::PathBuf::from),
+                    expected_height,
+                    expected_block_hash,
+                    expected_snapshot_class,
+                    source_canonical: arg_flag(args, "--source-canonical"),
+                    allow_validator_pruned_support_snapshot: arg_flag(
+                        args,
+                        "--allow-validator-pruned-support-snapshot",
+                    ),
+                    current_finalized_height: optional_u64_arg(args, "--current-finalized-height")?,
+                },
+            );
+            let ok = report.ok;
+            let value = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize archive canonical verification: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value).map_err(|error| {
+                    format!("serialize archive canonical verification output: {error}")
+                })?;
+                fs::write(&output, bytes).map_err(|error| {
+                    format!("write archive canonical verification {output}: {error}")
+                })?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("archive canonical verification failed closed".to_string());
+            }
+        }
+        "reseed-plan" => {
+            require_testnet_args(args)?;
+            let manifest_path = arg_value(args, "--manifest")
+                .ok_or_else(|| "archive reseed-plan requires --manifest <json>".to_string())?;
+            let signed_manifest: synergy_testnet::consensus::self_realign::SignedSnapshotManifest =
+                read_json_file(&manifest_path)?;
+            let input = synergy_testnet::archive_validator::ArchiveReseedPlanInput {
+                signed_manifest,
+                snapshot_root: arg_value(args, "--snapshot-root").map(std::path::PathBuf::from),
+                archive_services_disabled: arg_flag(args, "--archive-services-disabled"),
+                archive_publication_disabled: arg_flag(args, "--archive-publication-disabled"),
+                unsafe_inventory_reviewed: arg_flag(args, "--unsafe-inventory-reviewed"),
+                current_finalized_height: optional_u64_arg(args, "--current-finalized-height")?,
+            };
+            let report = synergy_testnet::archive_validator::build_archive_reseed_plan(&input);
+            let ok = report.ok;
+            let value = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize archive reseed plan: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value)
+                    .map_err(|error| format!("serialize archive reseed plan output: {error}"))?;
+                fs::write(&output, bytes)
+                    .map_err(|error| format!("write archive reseed plan {output}: {error}"))?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("archive reseed plan failed closed".to_string());
+            }
+        }
+        "reseed" => {
+            require_testnet_args(args)?;
+            let plan_path = arg_value(args, "--plan")
+                .ok_or_else(|| "archive reseed requires --plan <json>".to_string())?;
+            let plan: synergy_testnet::archive_validator::ArchiveReseedPlanReport =
+                read_json_file(&plan_path)?;
+            let report = synergy_testnet::archive_validator::dry_run_archive_reseed(
+                &synergy_testnet::archive_validator::ArchiveReseedDryRunInput {
+                    plan,
+                    dry_run: arg_flag(args, "--dry-run"),
+                },
+            );
+            let ok = report.ok;
+            let value = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize archive reseed dry-run: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value)
+                    .map_err(|error| format!("serialize archive reseed dry-run output: {error}"))?;
+                fs::write(&output, bytes)
+                    .map_err(|error| format!("write archive reseed dry-run {output}: {error}"))?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("archive reseed dry-run failed closed".to_string());
+            }
+        }
+        "publish-snapshot" => {
+            require_testnet_args(args)?;
+            let manifest_path = arg_value(args, "--manifest")
+                .ok_or_else(|| "archive publish-snapshot requires --manifest <json>".to_string())?;
+            let signed_manifest: synergy_testnet::consensus::self_realign::SignedSnapshotManifest =
+                read_json_file(&manifest_path)?;
+            let report = synergy_testnet::archive_validator::dry_run_publish_snapshot(
+                &synergy_testnet::archive_validator::ArchivePublishSnapshotInput {
+                    signed_manifest,
+                    snapshot_root: arg_value(args, "--snapshot-root").map(std::path::PathBuf::from),
+                    dry_run: arg_flag(args, "--dry-run"),
+                    snapshot_api_disabled: arg_flag(args, "--snapshot-api-disabled"),
+                    snapshot_worker_disabled: arg_flag(args, "--snapshot-worker-disabled"),
+                    source_canonical: arg_flag(args, "--source-canonical"),
+                    unsafe_snapshot: arg_flag(args, "--unsafe-snapshot"),
+                    current_finalized_height: optional_u64_arg(args, "--current-finalized-height")?,
+                },
+            );
+            let ok = report.ok;
+            let value = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize archive publish dry-run: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value).map_err(|error| {
+                    format!("serialize archive publish dry-run output: {error}")
+                })?;
+                fs::write(&output, bytes)
+                    .map_err(|error| format!("write archive publish dry-run {output}: {error}"))?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("archive publish dry-run failed closed".to_string());
+            }
+        }
+        "list-unsafe-snapshots" => {
+            require_testnet_args(args)?;
+            let inventory = if let Some(path) = arg_value(args, "--inventory") {
+                read_json_file::<synergy_testnet::archive_validator::ArchiveUnsafeSnapshotInventory>(
+                    &path,
+                )?
+            } else {
+                synergy_testnet::archive_validator::ArchiveUnsafeSnapshotInventory {
+                    snapshots: Vec::new(),
+                }
+            };
+            let report = synergy_testnet::archive_validator::list_unsafe_snapshots(&inventory);
+            let value = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize unsafe snapshot list: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value)
+                    .map_err(|error| format!("serialize unsafe snapshot list output: {error}"))?;
+                fs::write(&output, bytes)
+                    .map_err(|error| format!("write unsafe snapshot list {output}: {error}"))?;
+            }
+            print_json(value)?;
+        }
+        "mark-unsafe-snapshot" | "quarantine-snapshot" => {
+            require_testnet_args(args)?;
+            let snapshot = archive_snapshot_record_from_args(args)?;
+            let report = if subcommand == "mark-unsafe-snapshot" {
+                synergy_testnet::archive_validator::mark_unsafe_snapshot(snapshot)
+            } else {
+                synergy_testnet::archive_validator::quarantine_snapshot(snapshot)
+            };
+            let ok = report.ok;
+            let value = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize archive snapshot marker: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value).map_err(|error| {
+                    format!("serialize archive snapshot marker output: {error}")
+                })?;
+                fs::write(&output, bytes)
+                    .map_err(|error| format!("write archive snapshot marker {output}: {error}"))?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("archive snapshot marker failed closed".to_string());
+            }
+        }
+        _ => {
+            println!("Archive commands:");
+            println!("  synergy-node archive status --archive-services-disabled --snapshot-api-disabled --snapshot-worker-disabled --archive-publication-disabled --unsafe-inventory-reviewed --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node archive verify-canonical --manifest <signed-manifest.json> --snapshot-root <dir> --expected-height <height> --expected-block-hash <hash> --expected-snapshot-class <class> --source-canonical [--allow-validator-pruned-support-snapshot] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node archive reseed-plan --manifest <signed-manifest.json> --snapshot-root <dir> --archive-services-disabled --archive-publication-disabled --unsafe-inventory-reviewed [--current-finalized-height <height>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node archive reseed --dry-run --plan <plan.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node archive publish-snapshot --dry-run --manifest <signed-manifest.json> --snapshot-root <dir> --snapshot-api-disabled --snapshot-worker-disabled --source-canonical [--unsafe-snapshot] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node archive list-unsafe-snapshots [--inventory <inventory.json>] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node archive mark-unsafe-snapshot --snapshot-id <id> --height <height> --snapshot-class <class> --block-hash <hash> --reason <reason> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node archive quarantine-snapshot --snapshot-id <id> --height <height> --snapshot-class <class> --block-hash <hash> --reason <reason> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+        }
+    }
+    Ok(())
+}
+
+fn archive_snapshot_record_from_args(
+    args: &[String],
+) -> Result<synergy_testnet::archive_validator::ArchiveUnsafeSnapshotRecord, String> {
+    let snapshot_id = arg_value(args, "--snapshot-id")
+        .or_else(|| arg_value(args, "--snapshot"))
+        .ok_or_else(|| "archive snapshot marker requires --snapshot-id <id>".to_string())?;
+    let height = optional_u64_arg(args, "--height")?
+        .ok_or_else(|| "archive snapshot marker requires --height <height>".to_string())?;
+    let snapshot_class = arg_value(args, "--snapshot-class")
+        .ok_or_else(|| "archive snapshot marker requires --snapshot-class <class>".to_string())?;
+    let block_hash = arg_value(args, "--block-hash")
+        .ok_or_else(|| "archive snapshot marker requires --block-hash <hash>".to_string())?;
+    Ok(
+        synergy_testnet::archive_validator::ArchiveUnsafeSnapshotRecord {
+            snapshot_id,
+            height,
+            snapshot_class,
+            block_hash,
+            canonical_verified: arg_flag(args, "--canonical-verified"),
+            unsafe_marked: arg_flag(args, "--unsafe-marked"),
+            quarantined: arg_flag(args, "--quarantined"),
+            reason: arg_value(args, "--reason"),
+        },
+    )
+}
+
+fn run_chaos_command(args: &[String]) -> Result<(), String> {
+    let subcommand = args.get(1).map(String::as_str).unwrap_or("help");
+    match subcommand {
+        "run" => {
+            require_testnet_args(args)?;
+            let input_path = arg_value(args, "--input")
+                .ok_or_else(|| "chaos run requires --input <scenario.json>".to_string())?;
+            let input: synergy_testnet::chaos_harness::ChaosHarnessInput =
+                read_json_file(&input_path)?;
+            let report = synergy_testnet::chaos_harness::run_chaos_harness(&input);
+            let ok = report.ok;
+            let value = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize chaos report: {error}"))?;
+            if let Some(output) = arg_value(args, "--output") {
+                let bytes = serde_json::to_vec_pretty(&value)
+                    .map_err(|error| format!("serialize chaos report output: {error}"))?;
+                fs::write(&output, bytes)
+                    .map_err(|error| format!("write chaos report {output}: {error}"))?;
+            }
+            print_json(value)?;
+            if !ok {
+                return Err("chaos harness failed closed".to_string());
+            }
+        }
+        _ => {
+            println!("Chaos commands:");
+            println!("  synergy-node chaos run --input <scenario.json> [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
         }
     }
     Ok(())
@@ -835,6 +1811,11 @@ fn print_json(value: serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
+fn read_json_file<T: serde::de::DeserializeOwned>(path: &str) -> Result<T, String> {
+    let content = fs::read_to_string(path).map_err(|error| format!("read {path}: {error}"))?;
+    serde_json::from_str(&content).map_err(|error| format!("parse {path}: {error}"))
+}
+
 fn submit_aegis_transaction(
     rpc_url: &str,
     method: &str,
@@ -1212,6 +2193,99 @@ fn parse_u64ish(value: &serde_json::Value) -> Option<u64> {
         u64::from_str_radix(hex, 16).ok()
     } else {
         text.parse::<u64>().ok()
+    }
+}
+
+fn print_version() {
+    println!("synergy-node {}", env!("CARGO_PKG_VERSION"));
+}
+
+fn wants_help(args: &[String]) -> bool {
+    arg_flag(args, "--help")
+        || arg_flag(args, "-h")
+        || matches!(args.get(1).map(String::as_str), Some("help"))
+}
+
+fn print_validator_command_help(args: &[String]) {
+    let subcommand = args.get(1).map(String::as_str).unwrap_or("help");
+    let nested = args.get(2).map(String::as_str).unwrap_or("");
+    match (subcommand, nested) {
+        ("inspect-state", _) => {
+            println!("Usage: synergy-node validator inspect-state --state-root <runtime-root-or-data-dir> --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("Read-only validator state inventory and digest report.");
+        }
+        ("verify-state", _) => {
+            println!("Usage: synergy-node validator verify-state --state-root <runtime-root-or-data-dir> [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!(
+                "Read-only validator state verifier. Exits nonzero when safety checks fail closed."
+            );
+        }
+        ("verify-live-state", _) => {
+            println!("Usage: synergy-node validator verify-live-state --state-root <runtime-root-or-data-dir> [--expected-height <height> --expected-hash <hash>] [--max-expected-lag <blocks>] [--max-qc-ahead <blocks>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!(
+                "Read-only bounded-edge validator state verifier for live restart preflight. Exits nonzero when durable state is too stale or inconsistent."
+            );
+        }
+        ("state-sync-plan", _) => {
+            println!("Usage: synergy-node validator state-sync-plan --request <request.json> --source-proof <proof.json> --transfer-proof <transfer.json> [--state-root <runtime-root-or-data-dir>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("Build a protocol-native state-sync repair plan from verified request, source, and transfer proofs.");
+        }
+        ("state-sync", "repair") => {
+            println!("Usage: synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
+            println!(
+                "Apply a verified state-sync repair plan to a marker-gated offline workspace."
+            );
+        }
+        ("supervisor-transition", _) => {
+            println!("Usage: synergy-node validator supervisor-transition --evidence <evidence.json> [--previous-state <state.json>] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("Plan the next validator supervisor state from explicit evidence without writing it.");
+        }
+        ("supervisor-write", _) => {
+            println!("Usage: synergy-node validator supervisor-write --transition <transition.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
+            println!(
+                "Write a validated supervisor transition into a marker-gated offline workspace."
+            );
+        }
+        _ => {
+            println!("Validator commands:");
+            println!("  synergy-node validator inspect-state --state-root <runtime-root-or-data-dir> --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator verify-state --state-root <runtime-root-or-data-dir> [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator verify-live-state --state-root <runtime-root-or-data-dir> [--expected-height <height> --expected-hash <hash>] [--max-expected-lag <blocks>] [--max-qc-ahead <blocks>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator state-sync-plan --request <request.json> --source-proof <proof.json> --transfer-proof <transfer.json> [--state-root <runtime-root-or-data-dir>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator supervisor-transition --evidence <evidence.json> [--previous-state <state.json>] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator supervisor-write --transition <transition.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
+        }
+    }
+}
+
+fn print_fleet_command_help(subcommand: &str) {
+    match subcommand {
+        "status" => {
+            println!("Usage: synergy-node fleet status --snapshot <fleet-status.json> [--strict] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("Evaluate validator, public RPC, and Atlas evidence. Strict mode fails closed on stale, minority, synthetic, or mismatched surfaces.");
+        }
+        _ => {
+            println!("Fleet commands:");
+            println!("  synergy-node fleet status --snapshot <fleet-status.json> [--strict] --chain-id 1264 --network-id synergy-testnet-v2");
+        }
+    }
+}
+
+fn print_archive_command_help(subcommand: &str) {
+    match subcommand {
+        "reseed-plan" => {
+            println!("Usage: synergy-node archive reseed-plan --manifest <signed-manifest.json> --snapshot-root <dir> --archive-services-disabled --archive-publication-disabled --unsafe-inventory-reviewed [--current-finalized-height <height>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("Build a dry-run canonical archive reseed plan from a signed, verified archive-bootstrap or archive-full manifest.");
+        }
+        "status" => {
+            println!("Usage: synergy-node archive status --archive-services-disabled --snapshot-api-disabled --snapshot-worker-disabled --archive-publication-disabled --unsafe-inventory-reviewed --chain-id 1264 --network-id synergy-testnet-v2");
+        }
+        _ => {
+            println!("Archive commands:");
+            println!("  synergy-node archive status --archive-services-disabled --snapshot-api-disabled --snapshot-worker-disabled --archive-publication-disabled --unsafe-inventory-reviewed --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node archive reseed-plan --manifest <signed-manifest.json> --snapshot-root <dir> --archive-services-disabled --archive-publication-disabled --unsafe-inventory-reviewed [--current-finalized-height <height>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v2");
+        }
     }
 }
 

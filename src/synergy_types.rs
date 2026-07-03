@@ -529,7 +529,7 @@ impl ValidatorSet {
             .iter()
             .map(|record| record.voting_weight)
             .sum();
-        (total * 67).div_ceil(100)
+        (total * 2).div_ceil(3)
     }
 
     pub fn active_for_cluster(&self, cluster_id: ClusterId) -> Vec<ValidatorRecord> {

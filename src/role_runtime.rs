@@ -209,6 +209,7 @@ fn offline_snapshot_command_uses_large_stack(command: &str) -> bool {
             | "verify-snapshot"
             | "list-snapshots"
             | "snapshot-catalog"
+            | "preflight-upgrade"
             | "self-heal-from-snapshot"
             | "quarantine-stopped-validator"
             | "sync-from-canonical-peer"
@@ -262,7 +263,19 @@ fn require_testnet_v2_operator_args(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn workspace_appliance_state_store_dir(workspace_path: &Path) -> PathBuf {
+    workspace_path.join("state").join("store")
+}
+
 fn configure_offline_source_workspace(args: &[String]) -> Result<(), String> {
+    configure_offline_source_workspace_inner(args)
+}
+
+fn configure_snapshot_verify_source_workspace(args: &[String]) -> Result<(), String> {
+    configure_offline_source_workspace_inner(args)
+}
+
+fn configure_offline_source_workspace_inner(args: &[String]) -> Result<(), String> {
     let workspace =
         arg_value(args, "--source-workspace").or_else(|| arg_value(args, "--workspace"));
     let Some(workspace) = workspace else {
@@ -284,16 +297,17 @@ fn configure_offline_source_workspace(args: &[String]) -> Result<(), String> {
             workspace_path.display()
         ));
     }
-    if !workspace_path.join("data").is_dir() {
+    let appliance_state_store_dir = workspace_appliance_state_store_dir(&workspace_path);
+    if !appliance_state_store_dir.is_dir() {
         return Err(format!(
-            "source workspace is missing data directory: {}",
+            "source workspace is missing validator appliance state/store directory: {}",
             workspace_path.display()
         ));
     }
-    fs::read_dir(workspace_path.join("data")).map_err(|error| {
+    fs::read_dir(&appliance_state_store_dir).map_err(|error| {
         format!(
-            "source workspace data directory is not readable: {}: {error}",
-            workspace_path.join("data").display()
+            "source workspace validator appliance state/store directory is not readable: {}: {error}",
+            appliance_state_store_dir.display()
         )
     })?;
     env::set_var("SYNERGY_PROJECT_ROOT", &workspace_path);
@@ -362,7 +376,7 @@ fn run_offline_snapshot_command(args: &[String], command: &str) -> Result<bool, 
         }
         "verify-snapshot" => {
             require_testnet_v2_operator_args(args)?;
-            configure_offline_source_workspace(args)?;
+            configure_snapshot_verify_source_workspace(args)?;
             let manifest = arg_value(args, "--manifest")
                 .or_else(|| arg_value(args, "--manifest-path"))
                 .ok_or_else(|| "verify-snapshot requires --manifest <path>".to_string())?;
@@ -382,6 +396,45 @@ fn run_offline_snapshot_command(args: &[String], command: &str) -> Result<bool, 
             require_testnet_v2_operator_args(args)?;
             configure_offline_source_workspace(args)?;
             print_json_value(crate::consensus::diagnostics::snapshot_catalog());
+            Ok(true)
+        }
+        "preflight-upgrade" => {
+            require_testnet_v2_operator_args(args)?;
+            configure_offline_source_workspace(args)?;
+            let source_workspace =
+                PathBuf::from(arg_value(args, "--source-workspace").ok_or_else(|| {
+                    "preflight-upgrade requires --source-workspace <PATH>".to_string()
+                })?);
+            let options = crate::recovery::ValidatorUpgradePreflightOptions {
+                allow_derived_index_rebuild: arg_flag(args, "--allow-derived-index-rebuild"),
+                artifact_path: arg_value(args, "--artifact")
+                    .or_else(|| arg_value(args, "--upgrade-artifact"))
+                    .map(PathBuf::from),
+                current_binary_path: arg_value(args, "--current-binary").map(PathBuf::from),
+                rollback_binary_path: arg_value(args, "--rollback-binary").map(PathBuf::from),
+                config_path: arg_value(args, "--config").map(PathBuf::from),
+                validator_set_path: arg_value(args, "--validator-set").map(PathBuf::from),
+                archive_status_path: arg_value(args, "--archive-status").map(PathBuf::from),
+            };
+            let report = crate::recovery::preflight_validator_upgrade(&source_workspace, options)?;
+            let ok = report.ok;
+            let codes = report
+                .findings
+                .iter()
+                .filter(|finding| {
+                    finding.severity == crate::recovery::ValidatorUpgradePreflightSeverity::Error
+                })
+                .map(|finding| format!("{:?}", finding.code))
+                .collect::<Vec<_>>();
+            print_json_value(serde_json::to_value(&report).map_err(|error| {
+                format!("serialize validator upgrade preflight report: {error}")
+            })?);
+            if !ok {
+                return Err(format!(
+                    "validator upgrade preflight refused rollout: {}",
+                    codes.join(", ")
+                ));
+            }
             Ok(true)
         }
         "self-heal-from-snapshot" => {
@@ -481,6 +534,45 @@ fn run_offline_snapshot_command(args: &[String], command: &str) -> Result<bool, 
                 ),
             };
             let report = crate::consensus::diagnostics::request_rejoin_with_options(options)?;
+            print_json_value(report);
+            Ok(true)
+        }
+        "promote-vote-only-to-active" => {
+            require_testnet_v2_operator_args(args)?;
+            configure_offline_source_workspace(args)?;
+            let report = crate::consensus::diagnostics::promote_vote_only_to_active()?;
+            print_json_value(report);
+            Ok(true)
+        }
+        "emergency-promote-leader-stall-to-active" => {
+            require_testnet_v2_operator_args(args)?;
+            configure_offline_source_workspace(args)?;
+            let options = crate::consensus::diagnostics::EmergencyLeaderStallPromotionOptions {
+                common_height: optional_u64_arg(args, "--common-height")?,
+                common_hash: arg_value(args, "--common-hash"),
+                exact_common_height_match: arg_flag(args, "--exact-common-height-match"),
+                latest_finalized_qc_aegis_pqc_verified: arg_flag(
+                    args,
+                    "--latest-finalized-qc-aegis-pqc-verified",
+                ),
+                state_root_matches: arg_flag(args, "--state-root-matches"),
+                rejoin_at_finalized_safe_boundary: arg_flag(
+                    args,
+                    "--rejoin-at-finalized-safe-boundary",
+                ),
+                cluster_marks_pending_reactivation: arg_flag(
+                    args,
+                    "--cluster-marks-pending-reactivation",
+                ),
+                operator_approved_emergency_leader_stall_recovery: arg_flag(
+                    args,
+                    "--operator-approved-emergency-leader-stall-recovery",
+                ),
+            };
+            let report =
+                crate::consensus::diagnostics::emergency_promote_leader_stall_to_active_with_options(
+                    options,
+                )?;
             print_json_value(report);
             Ok(true)
         }
@@ -858,7 +950,7 @@ fn ensure_local_validator_record_available(validator_address: &str) -> Result<()
     let genesis = canonical_genesis().map_err(|error| {
         format!("failed to load canonical genesis for validator preflight: {error}")
     })?;
-    let Some(genesis_validator) = genesis
+    let Some(initial_validator) = genesis
         .validators()
         .iter()
         .find(|validator| validator.operator_address == validator_address)
@@ -869,35 +961,35 @@ fn ensure_local_validator_record_available(validator_address: &str) -> Result<()
     };
 
     let consensus_public_key = validator_public_key_with_declared_algorithm(
-        &genesis_validator.operator_address,
-        &genesis_validator.consensus_public_key,
-        &genesis_validator.consensus_key_type,
+        &initial_validator.operator_address,
+        &initial_validator.consensus_public_key,
+        &initial_validator.consensus_key_type,
     )
     .map_err(|error| {
         format!(
-            "canonical genesis validator {} has invalid consensus public key: {error}",
-            genesis_validator.operator_address
+            "canonical validator {} has invalid consensus public key: {error}",
+            initial_validator.operator_address
         )
     })?;
 
     VALIDATOR_MANAGER
         .register_validator(ValidatorRegistration {
-            address: genesis_validator.operator_address.clone(),
+            address: initial_validator.operator_address.clone(),
             public_key: consensus_public_key,
-            name: genesis_validator.moniker.clone(),
-            stake_amount: genesis_validator.stake_nwei,
+            name: initial_validator.moniker.clone(),
+            stake_amount: initial_validator.stake_nwei,
             submitted_at: now_ts(),
             registration_tx_hash: "genesis".to_string(),
         })
         .map_err(|error| {
-            format!("failed to register canonical genesis validator {validator_address}: {error}")
+            format!("failed to register canonical validator {validator_address}: {error}")
         })?;
     VALIDATOR_MANAGER
         .approve_validator(validator_address)
         .map_err(|error| {
-            format!("failed to activate canonical genesis validator {validator_address}: {error}")
+            format!("failed to activate canonical validator {validator_address}: {error}")
         })?;
-    VALIDATOR_MANAGER.update_validator_stake(validator_address, genesis_validator.stake_nwei);
+    VALIDATOR_MANAGER.update_validator_stake(validator_address, initial_validator.stake_nwei);
     Ok(())
 }
 
@@ -956,6 +1048,7 @@ fn print_usage(binary_name: &str, expected_profile: Option<&RoleProfile>) {
     eprintln!("    create-snapshot       Create signed snapshot offline from source workspace");
     eprintln!("    verify-snapshot       Verify signed snapshot manifest and files");
     eprintln!("    list-snapshots        List signed snapshot catalog for source workspace");
+    eprintln!("    preflight-upgrade     Refuse unsafe validator binary rollout from local state invariants");
     eprintln!("    self-heal-from-snapshot");
     eprintln!(
         "                          Restore a quarantined node from a verified signed snapshot"
@@ -971,7 +1064,15 @@ fn print_usage(binary_name: &str, expected_profile: Option<&RoleProfile>) {
     eprintln!("    start-shadow-observe Start shadow observation after verified head match");
     eprintln!("    shadow-status        Report shadow observation status");
     eprintln!("    rejoin-eligibility   Report rejoin eligibility gates");
-    eprintln!("    request-rejoin       Request ACTIVE rejoin after shadow and safety proofs");
+    eprintln!(
+        "    request-rejoin       Request vote-only rejoin after exact QC-backed safety proofs"
+    );
+    eprintln!("    promote-vote-only-to-active");
+    eprintln!("                          Restore proposer duties after vote-only probation");
+    eprintln!("    emergency-promote-leader-stall-to-active");
+    eprintln!(
+        "                          Restore proposer duties after all-validator leader-stall proof"
+    );
     eprintln!("    list-templates        List all available node templates");
     eprintln!("    version               Display version information");
     eprintln!();
@@ -982,15 +1083,16 @@ fn print_usage(binary_name: &str, expected_profile: Option<&RoleProfile>) {
     );
     eprintln!("    --source-workspace <PATH>  Source workspace for offline create/list/verify");
     eprintln!("    --source-node-majority-branch-proven");
-    eprintln!("    --source-role GENESIS_VALIDATOR");
+    eprintln!("    --source-role VALIDATOR");
     eprintln!("    --snapshot-class validator-pruned|support-relayer|support-rpc|support-observer|indexer-replay|indexer-full|archive-full|archive-bootstrap");
     eprintln!("    --allowed-role <role> [--allowed-role <role> ...]");
     eprintln!("    --target-role <role>");
     eprintln!("    --manifest <PATH> [--snapshot-root <DIR>]");
+    eprintln!("    --artifact <PATH> --current-binary <PATH> --rollback-binary <PATH> --validator-set <PATH> --archive-status <PATH> [--allow-derived-index-rebuild]");
     eprintln!("    --target-stopped --operator-approved-containment --quorum-majority-height <H> --quorum-majority-hash <HASH>");
     eprintln!("    --canonical-height <H> --canonical-hash <HASH> --source-qc-aegis-pqc-verified --parent-continuity-verified --state-root-matches --source-peer-not-quarantined");
     eprintln!("    --required-blocks <N>");
-    eprintln!("    --common-height <H> --common-hash <HASH> --exact-common-height-match --latest-finalized-qc-aegis-pqc-verified --state-root-matches --rejoin-at-finalized-safe-boundary --cluster-marks-pending-reactivation --operator-approved-reactivation [--operator-approved-emergency-leader-stall-recovery]");
+    eprintln!("    --common-height <H> --common-hash <HASH> --exact-common-height-match --latest-finalized-qc-aegis-pqc-verified --state-root-matches --rejoin-at-finalized-safe-boundary --cluster-marks-pending-reactivation [--operator-approved-emergency-leader-stall-recovery]");
     eprintln!();
     eprintln!("START OPTIONS:");
     eprintln!("    --node-type <TYPE>    Specify the node type (uses templates/<TYPE>.toml)");
@@ -1158,15 +1260,15 @@ fn run_node_script(
     }
 }
 
-fn resolve_explorer_root(runtime_root: &Path) -> Option<PathBuf> {
-    let local = runtime_root.join("explorer-app");
+fn resolve_synergy_atlas_root(runtime_root: &Path) -> Option<PathBuf> {
+    let local = runtime_root.join("synergy-atlas");
     if local.exists() {
         return Some(local);
     }
 
     runtime_root
         .parent()
-        .map(|parent| parent.join("explorer-app"))
+        .map(|parent| parent.join("synergy-atlas"))
         .filter(|candidate| candidate.exists())
 }
 
@@ -1186,8 +1288,8 @@ fn resolve_node_entrypoint(package_root: &Path) -> Option<PathBuf> {
 
 fn infer_synergy_env(config: &NodeConfig) -> &'static str {
     let name = config.network.name.to_ascii_lowercase();
-    if name.contains("devnet") {
-        "devnet"
+    if name.contains("testnet") {
+        "testnet"
     } else if name.contains("testnet") {
         "testnet"
     } else {
@@ -1455,7 +1557,7 @@ mod launch_block1_tests {
 
     #[test]
     fn launch_block1_envelope_is_ignored_after_genesis() {
-        let project_root = temp_project_root("post-genesis-envelope");
+        let project_root = temp_project_root("post-launch-envelope");
         write_launch_envelope(&project_root, &signed_transaction_json(1));
         let mut chain = BlockChain::new();
         chain.add_block(Block::new(
@@ -1616,14 +1718,14 @@ fn start_role_local_services(
             let runtime_root = utils::get_runtime_root();
             let Some(runtime_root) = runtime_root else {
                 eprintln!(
-                    "Indexer/Explorer role requires a runtime root with config/ and bundled explorer-app assets."
+                    "Indexer/Explorer role requires a runtime root with config/ and bundled synergy-atlas assets."
                 );
                 return active;
             };
 
-            let Some(explorer_root) = resolve_explorer_root(&runtime_root) else {
+            let Some(atlas_root) = resolve_synergy_atlas_root(&runtime_root) else {
                 eprintln!(
-                    "Indexer/Explorer role requires explorer-app directory near the node runtime."
+                    "Indexer/Explorer role requires synergy-atlas directory near the node runtime."
                 );
                 return active;
             };
@@ -1642,8 +1744,8 @@ fn start_role_local_services(
             };
 
             let synergy_env = infer_synergy_env(config).to_string();
-            let indexer_dir = explorer_root.join("indexer");
-            let backend_dir = explorer_root.join("backend");
+            let indexer_dir = atlas_root.join("indexer");
+            let backend_dir = atlas_root.join("backend");
             let Some(indexer_script) = resolve_node_entrypoint(&indexer_dir) else {
                 eprintln!("Indexer/Explorer role could not find an Atlas indexer entrypoint.");
                 return active;
@@ -2953,6 +3055,7 @@ mod tests {
             "verify-snapshot",
             "list-snapshots",
             "snapshot-catalog",
+            "preflight-upgrade",
             "self-heal-from-snapshot",
             "quarantine-stopped-validator",
             "sync-from-canonical-peer",
@@ -2997,6 +3100,7 @@ mod tests {
     #[test]
     fn role_runtime_exposes_recovery_lifecycle_commands_with_workspace_guard() {
         for command in [
+            "preflight-upgrade",
             "sync-from-canonical-peer",
             "start-shadow-observe",
             "shadow-status",
@@ -3014,8 +3118,8 @@ mod tests {
     }
 
     #[test]
-    fn operator_quarantine_rejects_workspace_without_validator_structure() {
-        let workspace = unique_test_workspace("operator-quarantine-missing-data");
+    fn operator_quarantine_rejects_workspace_without_validator_state_store() {
+        let workspace = unique_test_workspace("operator-quarantine-missing-state-store");
         let config_dir = workspace.join("config");
         fs::create_dir_all(&config_dir).expect("config directory should be created");
         fs::write(config_dir.join("node.toml"), b"[node]\n")
@@ -3032,15 +3136,15 @@ mod tests {
         ]);
 
         let error = run_offline_snapshot_command(&args, "quarantine-stopped-validator")
-            .expect_err("workspace without data directory must fail closed");
+            .expect_err("workspace without appliance state/store directory must fail closed");
 
-        assert!(error.contains("missing data directory"));
+        assert!(error.contains("missing validator appliance state/store directory"));
         fs::remove_dir_all(&workspace).expect("test workspace should clean up");
     }
 
     #[test]
-    fn snapshot_source_workspace_requires_config_and_data() {
-        let workspace = unique_test_workspace("missing-data");
+    fn snapshot_source_workspace_requires_config_and_state_store() {
+        let workspace = unique_test_workspace("missing-state-store");
         let config_dir = workspace.join("config");
         fs::create_dir_all(&config_dir).expect("config directory should be created");
         fs::write(config_dir.join("node.toml"), b"[node]\n")
@@ -3050,8 +3154,9 @@ mod tests {
             "--source-workspace",
             workspace.to_str().expect("workspace path should be UTF-8"),
         ]);
-        let error = configure_offline_source_workspace(&args).expect_err("missing data must fail");
-        assert!(error.contains("missing data directory"));
+        let error = configure_offline_source_workspace(&args)
+            .expect_err("missing appliance state/store must fail");
+        assert!(error.contains("missing validator appliance state/store directory"));
 
         fs::remove_dir_all(&workspace).expect("test workspace should clean up");
     }
@@ -3060,7 +3165,8 @@ mod tests {
     fn snapshot_source_workspace_requires_concrete_config() {
         let workspace = unique_test_workspace("missing-config-file");
         fs::create_dir_all(workspace.join("config")).expect("config directory should be created");
-        fs::create_dir_all(workspace.join("data")).expect("data directory should be created");
+        fs::create_dir_all(workspace.join("state").join("store"))
+            .expect("validator appliance state store should be created");
 
         let args = snapshot_args(&[
             "--source-workspace",
@@ -3083,7 +3189,8 @@ mod tests {
         let workspace = unique_test_workspace("valid");
         let config_dir = workspace.join("config");
         fs::create_dir_all(&config_dir).expect("config directory should be created");
-        fs::create_dir_all(workspace.join("data")).expect("data directory should be created");
+        fs::create_dir_all(workspace.join("state").join("store"))
+            .expect("validator appliance state store should be created");
         let config_path = config_dir.join("node.toml");
         fs::write(&config_path, b"[node]\n").expect("node config should be written");
 
@@ -3092,6 +3199,40 @@ mod tests {
             workspace.to_str().expect("workspace path should be UTF-8"),
         ]);
         configure_offline_source_workspace(&args).expect("valid workspace should configure");
+
+        assert_eq!(
+            env::var("SYNERGY_PROJECT_ROOT").expect("project root env should be set"),
+            workspace.to_string_lossy()
+        );
+        assert_eq!(
+            env::var("SYNERGY_CONFIG_PATH").expect("config env should be set"),
+            config_path.to_string_lossy()
+        );
+
+        fs::remove_dir_all(&workspace).expect("test workspace should clean up");
+    }
+
+    #[test]
+    fn snapshot_verify_accepts_validator_appliance_state_store() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock should not be poisoned");
+        let _restore = EnvRestore::capture();
+        let workspace = unique_test_workspace("validator-appliance-state-store");
+        let config_dir = workspace.join("config");
+        fs::create_dir_all(&config_dir).expect("config directory should be created");
+        fs::create_dir_all(workspace.join("state").join("store"))
+            .expect("validator appliance state store should be created");
+        let config_path = config_dir.join("node.toml");
+        fs::write(&config_path, b"[node]\n").expect("node config should be written");
+
+        let args = snapshot_args(&[
+            "--source-workspace",
+            workspace.to_str().expect("workspace path should be UTF-8"),
+        ]);
+        configure_snapshot_verify_source_workspace(&args)
+            .expect("snapshot verification should accept validator appliance state/store");
 
         assert_eq!(
             env::var("SYNERGY_PROJECT_ROOT").expect("project root env should be set"),
@@ -3165,7 +3306,7 @@ mod tests {
     }
 
     #[test]
-    fn public_non_genesis_validator_requires_state_sync_before_join() {
+    fn public_validator_requires_state_sync_before_join() {
         let mut config = NodeConfig::default();
         config.validator.state_sync_before_join = true;
         config.node.auto_register_validator = false;
@@ -3180,7 +3321,7 @@ mod tests {
     }
 
     #[test]
-    fn public_non_genesis_validator_does_not_start_consensus_before_activation() {
+    fn public_validator_does_not_start_consensus_before_activation() {
         let mut config = NodeConfig::default();
         config.node.validator_address = "synv1candidate".to_string();
         config.node.strict_validator_allowlist = true;
@@ -3193,7 +3334,7 @@ mod tests {
     }
 
     #[test]
-    fn allowlisted_genesis_validator_starts_consensus() {
+    fn allowlisted_validator_starts_consensus() {
         let mut config = NodeConfig::default();
         config.node.validator_address = "synv1genesis".to_string();
         config.node.strict_validator_allowlist = true;
@@ -3240,7 +3381,7 @@ mod tests {
     }
 
     #[test]
-    fn static_genesis_validator_does_not_block_on_public_join_sync_gate() {
+    fn static_validator_does_not_block_on_public_join_sync_gate() {
         let mut config = NodeConfig::default();
         config.validator.state_sync_before_join = true;
         config.node.auto_register_validator = false;
@@ -3255,7 +3396,7 @@ mod tests {
     }
 
     #[test]
-    fn non_genesis_validator_waits_for_activation_before_consensus() {
+    fn validator_waits_for_activation_before_consensus() {
         let mut config = NodeConfig::default();
         config.node.validator_address = "synv1candidate".to_string();
         config.node.strict_validator_allowlist = true;

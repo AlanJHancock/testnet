@@ -61,6 +61,16 @@ pub struct ConsensusConfig {
     pub algorithm: String,
     pub block_time_secs: u64,
     pub epoch_length: u64,
+    #[serde(default = "default_emergency_stable_committee_mode")]
+    pub emergency_stable_committee_mode: bool,
+    #[serde(default = "default_freeze_validator_set")]
+    pub freeze_validator_set: bool,
+    #[serde(default = "default_freeze_score_weighted_proposer_order")]
+    pub freeze_score_weighted_proposer_order: bool,
+    #[serde(default = "default_vote_only_rejoin_enabled")]
+    pub vote_only_rejoin_enabled: bool,
+    #[serde(default = "default_vote_only_probation_blocks")]
+    pub vote_only_probation_blocks: u64,
     #[serde(default = "default_min_validators")]
     pub min_validators: usize,
     pub validator_cluster_size: usize,
@@ -96,6 +106,26 @@ pub struct ConsensusConfig {
 
 fn default_min_validators() -> usize {
     4
+}
+
+fn default_emergency_stable_committee_mode() -> bool {
+    true
+}
+
+fn default_freeze_validator_set() -> bool {
+    true
+}
+
+fn default_freeze_score_weighted_proposer_order() -> bool {
+    true
+}
+
+fn default_vote_only_rejoin_enabled() -> bool {
+    true
+}
+
+fn default_vote_only_probation_blocks() -> u64 {
+    1_000
 }
 
 fn default_validator_vote_threshold() -> usize {
@@ -299,6 +329,12 @@ impl Default for NodeConfig {
                 algorithm: "Proof of Synergy".to_string(),
                 block_time_secs: 2,
                 epoch_length: 1000,
+                emergency_stable_committee_mode: default_emergency_stable_committee_mode(),
+                freeze_validator_set: default_freeze_validator_set(),
+                freeze_score_weighted_proposer_order: default_freeze_score_weighted_proposer_order(
+                ),
+                vote_only_rejoin_enabled: default_vote_only_rejoin_enabled(),
+                vote_only_probation_blocks: default_vote_only_probation_blocks(),
                 min_validators: default_min_validators(),
                 validator_cluster_size: 6,
                 validator_vote_threshold: default_validator_vote_threshold(),
@@ -1493,13 +1529,13 @@ additional_dial_targets = ["62.146.182.208:39638"]
     }
 
     #[test]
-    fn preserves_explicit_p2p_public_address_for_genesis_validator_configs() {
+    fn preserves_explicit_p2p_public_address_for_initial_validator_configs() {
         let content = r#"
 [identity]
 node_id = "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re"
 role = "validator"
 address = "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re"
-label = "Genesis Validator 3 Node"
+label = "Validator 3 Node"
 
 [network]
 chain_name = "synergy-testnet"
@@ -1659,6 +1695,69 @@ state_sync_before_join = true
         assert_eq!(config.consensus.block_timeout_secs, 9);
         assert!(!config.consensus.penalization_enabled);
         assert_eq!(config.p2p.bootstrap_refresh_secs, 61);
+    }
+
+    #[test]
+    fn stable_committee_templates_keep_four_validator_safety_floor_without_growth_cap() {
+        let templates_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates");
+        let entries = fs::read_dir(&templates_dir).expect("templates directory should be readable");
+        let mut checked = 0usize;
+
+        for entry in entries {
+            let path = entry.expect("template entry should be readable").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+                continue;
+            }
+            let content = fs::read_to_string(&path).expect("template should be readable");
+            let value = content
+                .parse::<toml::Value>()
+                .expect("template should be valid TOML");
+            let consensus = value
+                .get("consensus")
+                .and_then(toml::Value::as_table)
+                .expect("template should define consensus section");
+            let cluster_size = consensus
+                .get("validator_cluster_size")
+                .and_then(toml::Value::as_integer)
+                .expect("template should define validator_cluster_size");
+
+            if cluster_size == 6 {
+                let min_validators = consensus
+                    .get("min_validators")
+                    .and_then(toml::Value::as_integer)
+                    .expect("stable committee template should define min_validators");
+                let ready_min = consensus
+                    .get("status_ready_min_validators")
+                    .and_then(toml::Value::as_integer)
+                    .expect("stable committee template should define status_ready_min_validators");
+                let max_validators = consensus
+                    .get("max_validators")
+                    .and_then(toml::Value::as_integer)
+                    .expect("stable committee template should define max_validators");
+                assert!(
+                    min_validators >= 4,
+                    "{} regressed min_validators below 4",
+                    path.display()
+                );
+                assert!(
+                    ready_min >= 4,
+                    "{} regressed status_ready_min_validators below 4",
+                    path.display()
+                );
+                assert_eq!(
+                    max_validators,
+                    0,
+                    "{} must keep max_validators dynamic instead of capping the network at 6",
+                    path.display()
+                );
+                checked += 1;
+            }
+        }
+
+        assert!(
+            checked > 0,
+            "expected at least one stable committee template"
+        );
     }
 
     #[test]

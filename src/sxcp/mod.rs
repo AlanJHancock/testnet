@@ -74,7 +74,7 @@ lazy_static! {
         attestations: Vec::new(),
         events: HashMap::new(),
         slashing_events: Vec::new(),
-        // Default to dynamic 67% threshold once n is known. Until then, treat as 0.
+        // Default to dynamic two-thirds threshold once n is known. Until then, treat as 0.
         threshold_t: 0,
         total_n: 0,
         heartbeat_timeout_secs: DEFAULT_HEARTBEAT_TIMEOUT_SECS,
@@ -114,7 +114,7 @@ fn recompute_quorum(state: &mut SxcpState) {
         return;
     }
 
-    state.threshold_t = (state.total_n * 67).div_ceil(100);
+    state.threshold_t = (state.total_n * 2).div_ceil(3);
 }
 
 fn eligible_supporters(state: &SxcpState, event_hash: &str, ts: u64) -> Vec<String> {
@@ -748,6 +748,7 @@ mod tests {
         let r1 = register_test_relayer("r1");
         let r2 = register_test_relayer("r2");
         let r3 = register_test_relayer("r3");
+        let _r4 = register_test_relayer("r4");
 
         let event_hash = "event-a";
         let first = submit_attestation(
@@ -826,7 +827,7 @@ mod tests {
 
         let after = get_sxcp_status();
         assert_eq!(after["quorum"]["n"], 3);
-        assert_eq!(after["quorum"]["t"], 3);
+        assert_eq!(after["quorum"]["t"], 2);
     }
 
     #[test]

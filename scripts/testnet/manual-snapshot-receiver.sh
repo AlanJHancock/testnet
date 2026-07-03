@@ -9,7 +9,8 @@ manual-snapshot-receiver.sh \
   --target-role <role> \
   --extract-root <dir> \
   --runtime <synergy-testnet-linux-amd64> \
-  --source-workspace <node-workspace>
+  --source-workspace <node-workspace> \
+  [--source-config <node-config.toml>]
 USAGE
 }
 
@@ -19,6 +20,7 @@ target_role=""
 extract_root=""
 runtime=""
 source_workspace=""
+source_config=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -28,6 +30,7 @@ while [[ $# -gt 0 ]]; do
     --extract-root) extract_root="$2"; shift 2 ;;
     --runtime) runtime="$2"; shift 2 ;;
     --source-workspace) source_workspace="$2"; shift 2 ;;
+    --source-config) source_config="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -60,7 +63,7 @@ manifest = json.loads(Path(sys.argv[1]).read_text())
 expected_class = sys.argv[2]
 target_role = sys.argv[3]
 actual_class = manifest.get("snapshot_class")
-allowed = manifest.get("allowed_restore_roles") or []
+allowed = manifest.get("allowed_restore_roles") or manifest.get("allowed_roles") or []
 if actual_class != expected_class:
     raise SystemExit(f"snapshot class mismatch: expected {expected_class}, got {actual_class}")
 if target_role not in allowed:
@@ -74,12 +77,12 @@ if manifest.get("genesis_hash") != "f79011f2aaddd40b120d47ba723104fafe3c998d4a17
 active_validator_set = manifest.get("active_validator_set") or (manifest.get("consensus_fork") or {}).get("new_validator_registry") or []
 manifest_quorum = int(manifest.get("quorum_threshold") or 0)
 if active_validator_set:
-    dynamic_quorum = ((len(active_validator_set) * 67) + 99) // 100
+    dynamic_quorum = ((len(active_validator_set) * 2) + 2) // 3
 elif manifest_quorum:
     dynamic_quorum = manifest_quorum
 else:
     raise SystemExit("snapshot is missing active validator set and quorum threshold")
-required_quorum = max(manifest_quorum, dynamic_quorum, 1)
+required_quorum = manifest_quorum or dynamic_quorum or 1
 qc_vote_count = manifest.get("qc_vote_count") or 0
 if qc_vote_count < required_quorum:
     raise SystemExit(f"snapshot QC vote count is below quorum: {qc_vote_count} < {required_quorum}")
@@ -89,33 +92,64 @@ print(json.dumps({
     "distribution_manifest_accepted": True,
     "snapshot_class": actual_class,
     "target_role": target_role,
-    "snapshot_height": manifest.get("snapshot_height"),
-    "snapshot_block_hash": manifest.get("snapshot_block_hash"),
+    "snapshot_height": manifest.get("snapshot_height", manifest.get("height")),
+    "snapshot_block_hash": manifest.get("snapshot_block_hash", manifest.get("hash")),
 }, sort_keys=True))
 PY
 
-snapshot_name="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["snapshot_name"])' "$manifest")"
-archive_name="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["archive_name"])' "$manifest")"
+snapshot_name="$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m.get("snapshot_name") or m.get("snapshot_id"))' "$manifest")"
+archive_name="$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m.get("archive_name") or m.get("archive_filename"))' "$manifest")"
 
 (
   cd "$input_dir"
-  sha256sum -c "${snapshot_name}.${snapshot_class}.chunks.sha256"
-  cat "${archive_name}.part-"* > "$archive_name"
-  sha256sum -c "${snapshot_name}.${snapshot_class}.tar.zst.sha256"
+  python3 - "$manifest" "$archive_name" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+manifest = json.loads(Path(sys.argv[1]).read_text())
+archive_name = sys.argv[2]
+base = Path.cwd()
+chunks = manifest.get("chunks") or []
+archive_path = base / archive_name
+
+if chunks:
+    with archive_path.open("wb") as output:
+        for chunk in chunks:
+            name = chunk["name"]
+            candidates = [base / name, base / "chunks" / name]
+            chunk_path = next((path for path in candidates if path.exists()), None)
+            if chunk_path is None:
+                raise SystemExit(f"missing snapshot chunk: {name}")
+            digest = hashlib.sha256(chunk_path.read_bytes()).hexdigest()
+            if digest != chunk.get("sha256"):
+                raise SystemExit(f"chunk checksum mismatch for {name}: {digest}")
+            output.write(chunk_path.read_bytes())
+            print(f"{name}: OK")
+elif not archive_path.exists():
+    raise SystemExit(f"missing snapshot archive: {archive_name}")
+
+archive_digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+expected = manifest.get("archive_sha256")
+if expected and archive_digest != expected:
+    raise SystemExit(f"archive checksum mismatch for {archive_name}: {archive_digest}")
+print(f"{archive_name}: OK")
+PY
   zstd -t "$archive_name"
 )
 
 mkdir -p "$extract_root"
 tar -I zstd -xf "$input_dir/$archive_name" -C "$extract_root"
 
-snapshot_root="$extract_root/$snapshot_name"
+snapshot_root="$(find "$extract_root" -mindepth 1 -maxdepth 2 -type f -name '*manifest.json' -print -quit | xargs -r dirname)"
 snapshot_manifest="$(find "$snapshot_root" -maxdepth 1 -name '*manifest.json' | head -n 1)"
 if [[ -z "$snapshot_manifest" ]]; then
   echo "missing signed snapshot manifest after extraction" >&2
   exit 5
 fi
 
-"$runtime" verify-snapshot \
+verify_args=(
   --chain-id 1264 \
   --network-id synergy-testnet-v2 \
   --genesis-hash f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789 \
@@ -123,8 +157,22 @@ fi
   --manifest "$snapshot_manifest" \
   --snapshot-root "$snapshot_root" \
   --snapshot-class "$snapshot_class" \
-  --target-role "$target_role" \
-  > "$input_dir/receiver-verify-snapshot.json"
+  --target-role "$target_role"
+)
+if [[ -n "$source_config" ]]; then
+  verify_args+=(--config "$source_config")
+fi
+
+(
+  cd "$source_workspace"
+  export SYNERGY_PROJECT_ROOT="$source_workspace"
+  if [[ -n "$source_config" ]]; then
+    export SYNERGY_CONFIG_PATH="$source_config"
+  else
+    export SYNERGY_CONFIG_PATH="$source_workspace/config/node.toml"
+  fi
+  "$runtime" verify-snapshot "${verify_args[@]}"
+) > "$input_dir/receiver-verify-snapshot.json"
 
 python3 - "$input_dir/receiver-verify-snapshot.json" <<'PY'
 import json

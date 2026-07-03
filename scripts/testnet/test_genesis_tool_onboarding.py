@@ -94,7 +94,7 @@ class OnboardingDryRunTests(unittest.TestCase):
         self.assertEqual(len(matches), 1, name)
         return matches[0]
 
-    def test_accepts_clean_post_genesis_validator_dry_run(self) -> None:
+    def test_accepts_clean_onboarded_validator_dry_run(self) -> None:
         process, payload = self.run_dry_run()
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertTrue(payload["ok"])
@@ -108,11 +108,11 @@ class OnboardingDryRunTests(unittest.TestCase):
         self.assertTrue(support_plan["required_before_activation"])
         self.assertIn("rpc_gateway", support_plan["support_roles"])
         self.assertEqual(
-            support_plan["checkpoint_fork_registry_policy"]["post_genesis_key_source"],
+            support_plan["checkpoint_fork_registry_policy"]["onboarded_key_source"],
             "finalized validator registry/admission state after activation",
         )
 
-    def test_rejects_reusing_genesis_validator_address(self) -> None:
+    def test_rejects_reusing_initial_validator_address(self) -> None:
         genesis = json.loads(GENESIS.read_text(encoding="utf-8"))
         existing_validator = genesis["validators"][0]["operator_address"]
         process, payload = self.run_dry_run(validator_address=existing_validator)

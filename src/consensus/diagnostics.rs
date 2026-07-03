@@ -12,7 +12,7 @@ use crate::consensus::self_realign::{
     verify_signed_snapshot_manifest, QuarantineMarker, RealignmentState, ShadowDecisionRecord,
     ShadowObservation, SignedSnapshotManifest, SnapshotBuildInput, SnapshotQcEvidence,
     SnapshotSchedule, SnapshotVerificationPolicy, ValidatorDutyGate, WipeApplyPreconditions,
-    DEFAULT_SHADOW_OBSERVATION_BLOCKS, SNAPSHOT_CLASS_VALIDATOR_PRUNED,
+    BASELINE_VALIDATOR_COUNT, DEFAULT_SHADOW_OBSERVATION_BLOCKS, SNAPSHOT_CLASS_VALIDATOR_PRUNED,
 };
 use crate::crypto::aegis_pqvm::AegisPqvmSigner;
 use crate::synergy_types::{AegisPqKeyRole, Epoch};
@@ -111,6 +111,18 @@ pub struct RejoinRequestOptions {
     pub rejoin_at_finalized_safe_boundary: bool,
     pub cluster_marks_pending_reactivation: bool,
     pub operator_approved_reactivation: bool,
+    pub operator_approved_emergency_leader_stall_recovery: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EmergencyLeaderStallPromotionOptions {
+    pub common_height: Option<u64>,
+    pub common_hash: Option<String>,
+    pub exact_common_height_match: bool,
+    pub latest_finalized_qc_aegis_pqc_verified: bool,
+    pub state_root_matches: bool,
+    pub rejoin_at_finalized_safe_boundary: bool,
+    pub cluster_marks_pending_reactivation: bool,
     pub operator_approved_emergency_leader_stall_recovery: bool,
 }
 
@@ -441,6 +453,7 @@ fn marker_recovery_state(marker_paths: &[String]) -> RealignmentState {
                 "SHADOW_OBSERVING" | "Shadow" => return RealignmentState::ShadowObserving,
                 "SHADOW_PASSED" => return RealignmentState::ShadowPassed,
                 "READY_TO_REJOIN" => return RealignmentState::ReadyToRejoin,
+                "VOTE_ONLY" | "VoteOnly" | "vote_only" => return RealignmentState::VoteOnly,
                 "PENDING_REACTIVATION" => return RealignmentState::PendingReactivation,
                 "FAILED_CLOSED" => return RealignmentState::FailedClosed,
                 _ => return RealignmentState::Quarantined,
@@ -542,12 +555,6 @@ fn find_block_at_height(value: &Value, height: u64) -> Option<BlockSummary> {
 }
 
 fn read_block_at_height(height: u64) -> Result<BlockSummary, String> {
-    let mut committed_log_blocks = BTreeMap::<u64, BlockSummary>::new();
-    fill_blocks_from_committed_log(height, height, &mut committed_log_blocks)?;
-    if let Some(block) = committed_log_blocks.remove(&height) {
-        return Ok(block);
-    }
-
     let path = crate::utils::resolve_data_path("data/chain.json");
     let mut found = None;
     stream_chain_blocks(&path, |value| {
@@ -558,7 +565,15 @@ fn read_block_at_height(height: u64) -> Result<BlockSummary, String> {
             Ok(false)
         }
     })?;
-    found.ok_or_else(|| format!("chain state does not contain finalized block height {height}"))
+    if let Some(block) = found {
+        return Ok(block);
+    }
+
+    let mut committed_log_blocks = BTreeMap::<u64, BlockSummary>::new();
+    fill_blocks_from_committed_log(height, height, &mut committed_log_blocks)?;
+    committed_log_blocks
+        .remove(&height)
+        .ok_or_else(|| format!("chain state does not contain finalized block height {height}"))
 }
 
 fn read_blocks_in_height_range(
@@ -640,13 +655,15 @@ fn fill_blocks_from_committed_log(
         if trimmed.is_empty() {
             continue;
         }
-        let entry = serde_json::from_str::<CommittedBlockLogEntry>(trimmed).map_err(|error| {
-            format!(
-                "parse committed block log {} line {}: {error}",
-                path.display(),
-                line_number + 1
-            )
-        })?;
+        let entry = match serde_json::from_str::<CommittedBlockLogEntry>(trimmed) {
+            Ok(entry) => entry,
+            Err(_) => {
+                // Recovery diagnostics can safely ignore torn append-log lines:
+                // parseable entries still fail closed on height/hash conflicts,
+                // and missing target blocks fall back to chain.json or fail.
+                continue;
+            }
+        };
         if entry.height < start_height || entry.height > end_height {
             continue;
         }
@@ -756,13 +773,15 @@ fn latest_block_from_committed_log() -> Result<Option<BlockSummary>, String> {
         if trimmed.is_empty() {
             continue;
         }
-        let entry = serde_json::from_str::<CommittedBlockLogEntry>(trimmed).map_err(|error| {
-            format!(
-                "parse committed block log {} line {}: {error}",
-                path.display(),
-                line_number + 1
-            )
-        })?;
+        let entry = match serde_json::from_str::<CommittedBlockLogEntry>(trimmed) {
+            Ok(entry) => entry,
+            Err(_) => {
+                // The committed block log is append-only and can retain torn
+                // historical lines from older runtimes. Promotion diagnostics
+                // use the newest valid entry and keep consistency checks strict.
+                continue;
+            }
+        };
         if entry.height != entry.block.block_index || entry.hash != entry.block.hash {
             return Err(format!(
                 "committed block log entry at line {} has inconsistent height/hash",
@@ -933,7 +952,7 @@ where
     ))
 }
 
-fn active_genesis_validator_addresses() -> Result<Vec<String>, String> {
+fn active_validator_addresses() -> Result<Vec<String>, String> {
     let genesis = crate::genesis::load_canonical_genesis_for_runtime()?;
     let expected_count = genesis.validators().len();
     let validators = genesis
@@ -949,7 +968,7 @@ fn active_genesis_validator_addresses() -> Result<Vec<String>, String> {
         .collect::<Vec<_>>();
     if validators.len() != expected_count {
         return Err(format!(
-            "active genesis validator set has {} validator(s); expected {expected_count}",
+            "active validator set has {} validator(s); expected {expected_count}",
             validators.len(),
         ));
     }
@@ -1014,7 +1033,7 @@ fn active_validator_addresses_for_snapshot_height(
             return Ok(validators);
         }
     }
-    active_genesis_validator_addresses()
+    active_validator_addresses()
 }
 
 fn env_truthy(name: &str) -> bool {
@@ -1067,19 +1086,49 @@ fn copy_snapshot_state_files(
         )
     })?;
     let mut copied = 0usize;
+    let pruned_history = snapshot_class_uses_pruned_history(snapshot_class);
     for file_name in launch_snapshot_allowed_files() {
         let source = data_dir.join(file_name);
         if !source.is_file() {
             continue;
         }
         let target = snapshot_dir.join(file_name);
-        fs::copy(&source, &target).map_err(|error| {
-            format!(
-                "copy launch-approved snapshot state {} -> {}: {error}",
-                source.display(),
-                target.display()
-            )
-        })?;
+        match (pruned_history, *file_name) {
+            (true, "chain.json") => {
+                write_pruned_chain_json(&source, &target, snapshot_height, snapshot_block)?;
+            }
+            (true, "committed_qcs.jsonl") => {
+                write_jsonl_state_to_snapshot_height(
+                    &source,
+                    &target,
+                    snapshot_height,
+                    true,
+                    qc_height_from_json,
+                    true,
+                    "committed_qcs.jsonl",
+                )?;
+            }
+            (true, "committed_blocks.jsonl") => {
+                write_jsonl_state_to_snapshot_height(
+                    &source,
+                    &target,
+                    snapshot_height,
+                    true,
+                    block_height_from_json,
+                    false,
+                    "committed_blocks.jsonl",
+                )?;
+            }
+            _ => {
+                fs::copy(&source, &target).map_err(|error| {
+                    format!(
+                        "copy launch-approved snapshot state {} -> {}: {error}",
+                        source.display(),
+                        target.display()
+                    )
+                })?;
+            }
+        }
         copied += 1;
     }
     if copied == 0 {
@@ -1212,18 +1261,15 @@ impl<'de> Visitor<'de> for PrunedChainJsonVisitor<'_> {
     }
 }
 
-fn constrain_snapshot_chain_json_to_pruned_window(
-    snapshot_dir: &Path,
+fn write_pruned_chain_json(
+    source_path: &Path,
+    target_path: &Path,
     snapshot_height: u64,
     snapshot_block: &BlockSummary,
 ) -> Result<(), String> {
-    let chain_path = snapshot_dir.join("chain.json");
-    if !chain_path.is_file() {
-        return Ok(());
-    }
-    let source = fs::File::open(&chain_path)
-        .map_err(|error| format!("open {}: {error}", chain_path.display()))?;
-    let tmp_path = chain_path.with_extension("json.tmp");
+    let source = fs::File::open(source_path)
+        .map_err(|error| format!("open {}: {error}", source_path.display()))?;
+    let tmp_path = target_path.with_extension("json.tmp");
     let mut tmp = fs::File::create(&tmp_path)
         .map_err(|error| format!("create {}: {error}", tmp_path.display()))?;
     let mut kept = 0usize;
@@ -1242,12 +1288,13 @@ fn constrain_snapshot_chain_json_to_pruned_window(
     .map_err(|error| {
         format!(
             "prune {} to validator window: {error}",
-            chain_path.display()
+            source_path.display()
         )
     })?;
     deserializer
         .end()
-        .map_err(|error| format!("{} has trailing data: {error}", chain_path.display()))?;
+        .map_err(|error| format!("{} has trailing data: {error}", source_path.display()))?;
+    drop(deserializer);
     tmp.flush()
         .map_err(|error| format!("flush {}: {error}", tmp_path.display()))?;
     if kept == 0 || !found_snapshot_height {
@@ -1255,13 +1302,25 @@ fn constrain_snapshot_chain_json_to_pruned_window(
             "chain.json has no block at snapshot height {snapshot_height}"
         ));
     }
-    fs::rename(&tmp_path, &chain_path).map_err(|error| {
+    fs::rename(&tmp_path, target_path).map_err(|error| {
         format!(
             "replace pruned {} with {}: {error}",
-            chain_path.display(),
+            target_path.display(),
             tmp_path.display()
         )
     })
+}
+
+fn constrain_snapshot_chain_json_to_pruned_window(
+    snapshot_dir: &Path,
+    snapshot_height: u64,
+    snapshot_block: &BlockSummary,
+) -> Result<(), String> {
+    let chain_path = snapshot_dir.join("chain.json");
+    if !chain_path.is_file() {
+        return Ok(());
+    }
+    write_pruned_chain_json(&chain_path, &chain_path, snapshot_height, snapshot_block)
 }
 
 fn compact_chain_boundary_from_snapshot(
@@ -1353,22 +1412,45 @@ fn constrain_jsonl_state_to_snapshot_height(
     if !path.is_file() {
         return Ok(());
     }
-    let source =
-        fs::File::open(path).map_err(|error| format!("open {}: {error}", path.display()))?;
-    let tmp_path = path.with_extension("jsonl.tmp");
+    write_jsonl_state_to_snapshot_height(
+        path,
+        path,
+        snapshot_height,
+        pruned_history,
+        height_from_json,
+        require_snapshot_height,
+        label,
+    )
+}
+
+fn write_jsonl_state_to_snapshot_height(
+    source_path: &Path,
+    target_path: &Path,
+    snapshot_height: u64,
+    pruned_history: bool,
+    height_from_json: fn(&Value) -> Option<u64>,
+    require_snapshot_height: bool,
+    label: &str,
+) -> Result<(), String> {
+    let source = fs::File::open(source_path)
+        .map_err(|error| format!("open {}: {error}", source_path.display()))?;
+    let tmp_path = target_path.with_extension("jsonl.tmp");
     let mut tmp = fs::File::create(&tmp_path)
         .map_err(|error| format!("create {}: {error}", tmp_path.display()))?;
     let mut found_snapshot_height = false;
     let mut kept = 0usize;
     for line in BufReader::new(source).lines() {
-        let line = line.map_err(|error| format!("read {}: {error}", path.display()))?;
+        let line = line.map_err(|error| format!("read {}: {error}", source_path.display()))?;
         if line.trim().is_empty() {
             continue;
         }
         let value = serde_json::from_str::<Value>(&line)
-            .map_err(|error| format!("parse {label} in {}: {error}", path.display()))?;
+            .map_err(|error| format!("parse {label} in {}: {error}", source_path.display()))?;
         let Some(height) = height_from_json(&value) else {
-            return Err(format!("{label} entry in {} has no height", path.display()));
+            return Err(format!(
+                "{label} entry in {} has no height",
+                source_path.display()
+            ));
         };
         if height > snapshot_height {
             continue;
@@ -1390,10 +1472,10 @@ fn constrain_jsonl_state_to_snapshot_height(
             "{label} has no entry at snapshot height {snapshot_height}"
         ));
     }
-    fs::rename(&tmp_path, path).map_err(|error| {
+    fs::rename(&tmp_path, target_path).map_err(|error| {
         format!(
             "replace constrained {} with {}: {error}",
-            path.display(),
+            target_path.display(),
             tmp_path.display()
         )
     })
@@ -1841,13 +1923,36 @@ fn latest_verified_qc_summary() -> Result<crate::recovery::QcProofSummary, Strin
 
 fn vote_locks_clean(finalized_height: u64) -> Result<Value, String> {
     let report = diagnose_vote_locks(Some(finalized_height));
-    let locks_above = report
-        .get("locks_above_finalized")
+    if report
+        .get("parse_error")
+        .map(|value| !value.is_null())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "vote lock diagnostics failed to parse {}",
+            report
+                .get("vote_lock_path")
+                .and_then(Value::as_str)
+                .unwrap_or("consensus_vote_locks.json")
+        ));
+    }
+    let stale_locks_above = report
+        .get("stale_locks_above_finalized")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    if locks_above != 0 {
+    if stale_locks_above != 0 {
         return Err(format!(
-            "vote locks remain above finalized height {finalized_height}: {locks_above}"
+            "stale vote locks remain above finalized height {finalized_height}: {stale_locks_above}"
+        ));
+    }
+    let conflicting_heights = report
+        .get("conflicting_heights_above_finalized")
+        .and_then(Value::as_array)
+        .map(|items| items.len())
+        .unwrap_or(0);
+    if conflicting_heights != 0 {
+        return Err(format!(
+            "conflicting vote locks remain above finalized height {finalized_height}: {conflicting_heights}"
         ));
     }
     Ok(report)
@@ -2226,23 +2331,14 @@ pub fn self_heal_status() -> Value {
             "ACTIVE",
             "SUSPECT",
             "QUARANTINED",
-            "EVIDENCE_PRESERVED",
-            "CHAIN_DATA_WIPE_READY",
-            "CHAIN_DATA_WIPED",
-            "SNAPSHOT_DISCOVERY",
-            "SNAPSHOT_DOWNLOADING",
-            "SNAPSHOT_VERIFIED",
-            "SNAPSHOT_RESTORED",
-            "SPEED_SYNCING",
-            "CAUGHT_UP",
-            "SHADOW_OBSERVING",
-            "SHADOW_PASSED",
-            "READY_TO_REJOIN",
-            "PENDING_REACTIVATION",
+            "HEALING",
+            "SYNCING",
+            "VOTE_ONLY",
             "ACTIVE"
         ],
         "snapshot_schedule": SnapshotSchedule::launch_default(),
-        "shadow_observation_required_blocks": DEFAULT_SHADOW_OBSERVATION_BLOCKS,
+        "vote_only_rejoin_enabled": true,
+        "vote_only_probation_blocks": vote_only_probation_blocks(),
         "quarantine": quarantine,
         "manual_state_surgery_allowed": false,
         "fail_closed": true,
@@ -2722,14 +2818,15 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
             aegis_pqc_verified: qc.verified,
             duplicate_signer_check_passed: signer_set_unique,
             active_validator_count: active_validator_set.len(),
-            active_validator_set_is_genesis_5: active_validator_set.len() >= 5,
+            active_validator_set_meets_baseline: active_validator_set.len()
+                >= BASELINE_VALIDATOR_COUNT,
             relayers_rpc_support_counted_toward_quorum: false,
         },
         active_validator_set: active_validator_set.clone(),
         source_node_id,
         source_role: options
             .source_role
-            .unwrap_or_else(|| "GENESIS_VALIDATOR".to_string()),
+            .unwrap_or_else(|| "VALIDATOR".to_string()),
         runtime_checksum: current_runtime_checksum()?,
         source_node_quarantined: false,
         source_node_majority_branch: true,
@@ -3307,7 +3404,7 @@ pub fn start_shadow_observe_with_options(
         "keys_or_configs_copied": false,
         "genesis_mutated": false,
         "quorum_mutated": false,
-        "next_required_action": "complete process proof, continue through full required epoch, then request rejoin at earliest epoch boundary only",
+        "next_required_action": "collect fresh exact common-height, QC, validator-set, and state-root proofs; request vote-only rejoin when proofs match",
     });
     write_json_pretty(&shadow_observation_path(), &observation)?;
     write_json_pretty(&self_heal_status_path(), &observation)?;
@@ -3323,8 +3420,7 @@ pub fn rejoin_eligibility() -> Value {
     let mut blocked_reasons = Vec::new();
     if process_proof_only {
         blocked_reasons.push(
-            "500-block process proof is not rejoin eligibility; full epoch shadow is required"
-                .to_string(),
+            "500-block process proof is only optional evidence; vote-only rejoin requires fresh exact common-height and verified QC proofs".to_string(),
         );
     }
     if shadow
@@ -3332,15 +3428,16 @@ pub fn rejoin_eligibility() -> Value {
         .and_then(Value::as_bool)
         != Some(true)
     {
-        blocked_reasons
-            .push("rejoin requires a continuously observed full shadow epoch".to_string());
+        blocked_reasons.push(
+            "vote-only rejoin requires fresh exact common-height, verified QC, validator-set, and state-root proofs".to_string(),
+        );
     }
     if let Some(earliest) = shadow
         .get("earliest_activation_height")
         .and_then(Value::as_u64)
     {
         blocked_reasons.push(format!(
-            "earliest activation height is {earliest}; rejoin must be requested at that epoch boundary or a later epoch boundary"
+            "shadow proposer activation height is {earliest}; vote-only rejoin is not gated by this epoch boundary"
         ));
     }
     if shadow
@@ -3375,15 +3472,15 @@ pub fn rejoin_eligibility() -> Value {
                 "request-rejoin requires fresh exact common-height match proof",
                 "request-rejoin requires latest finalized QC verified through Aegis/PQC",
                 "request-rejoin requires finalized safe boundary proof",
-                "request-rejoin requires explicit operator-approved reactivation"
+                "request-rejoin enters VOTE_ONLY before proposer probation"
             ],
         });
     }
     blocked_reasons.extend([
-        "rejoin requires SHADOW_PASSED".to_string(),
-        "rejoin requires exact common-height hash match".to_string(),
-        "rejoin requires latest finalized QC verified through Aegis/PQC".to_string(),
-        "rejoin requires finalized safe boundary".to_string(),
+        "vote-only rejoin requires exact common-height hash match".to_string(),
+        "vote-only rejoin requires latest finalized QC verified through Aegis/PQC".to_string(),
+        "vote-only rejoin requires finalized safe boundary".to_string(),
+        "vote-only rejoin requires cluster pending-reactivation proof".to_string(),
     ]);
     json!({
         "chain": chain_identity(),
@@ -3398,6 +3495,13 @@ pub fn rejoin_eligibility() -> Value {
 
 pub fn request_rejoin() -> Result<Value, String> {
     request_rejoin_with_options(RejoinRequestOptions::default())
+}
+
+fn vote_only_probation_blocks() -> u64 {
+    crate::config::load_node_config(None)
+        .ok()
+        .map(|config| config.consensus.vote_only_probation_blocks)
+        .unwrap_or(1_000)
 }
 
 pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Value, String> {
@@ -3482,7 +3586,21 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
             "request-rejoin refused: 500-block process proof is not SHADOW_PASSED".to_string(),
         );
     }
-    if !epoch_blockers.is_empty() && !options.operator_approved_emergency_leader_stall_recovery {
+    let local_common_match = read_block_at_height(common_height)
+        .map(|local_block| local_block.hash == common_hash)
+        .unwrap_or(false);
+    let qc = latest_verified_qc_summary()?;
+    let vote_only_proof_ready = options.exact_common_height_match
+        && local_common_match
+        && options.latest_finalized_qc_aegis_pqc_verified
+        && qc.verified
+        && qc.vote_count >= qc.required_quorum as u64
+        && options.state_root_matches
+        && options.cluster_marks_pending_reactivation;
+    if !epoch_blockers.is_empty()
+        && !options.operator_approved_emergency_leader_stall_recovery
+        && !vote_only_proof_ready
+    {
         return Ok(fail_closed_rejoin_response(
             &validator_id,
             if shadow_passed {
@@ -3494,9 +3612,6 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
             shadow,
         ));
     }
-    let local_block = read_block_at_height(common_height)?;
-    let local_common_match = local_block.hash == common_hash;
-    let qc = latest_verified_qc_summary()?;
     if options.operator_approved_emergency_leader_stall_recovery && qc.height != common_height {
         return Ok(fail_closed_rejoin_response(
             &validator_id,
@@ -3517,6 +3632,8 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
             validator_id: validator_id.clone(),
             state: if effective_shadow_passed {
                 RealignmentState::ShadowPassed
+            } else if vote_only_proof_ready {
+                RealignmentState::CaughtUp
             } else {
                 RealignmentState::Quarantined
             },
@@ -3538,9 +3655,12 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
             cluster_marks_pending_reactivation: options.cluster_marks_pending_reactivation,
         },
     );
-    if !options.operator_approved_reactivation {
+    if report.new_state != RealignmentState::VoteOnly && !options.operator_approved_reactivation {
         let mut blocked = report.blocked_reasons.clone();
-        blocked.push("operator-approved reactivation flag is required".to_string());
+        blocked.push(
+            "direct proposer reactivation is disabled; rejoin as VOTE_ONLY and promote after probation"
+                .to_string(),
+        );
         return Ok(json!({
             "success": false,
             "typed_status": "FAILED_CLOSED",
@@ -3578,17 +3698,24 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
     let evidence_path =
         crate::utils::resolve_data_path(&format!("data/self-heal-evidence/{}-rejoin", now_secs()));
     let preserved_quarantine_markers = preserve_and_remove_quarantine_markers(&evidence_path)?;
+    let new_state = if report.new_state == RealignmentState::VoteOnly {
+        "VOTE_ONLY"
+    } else {
+        "ACTIVE"
+    };
     let status = json!({
         "success": true,
-        "typed_status": "ACTIVE",
+        "typed_status": new_state,
         "chain": chain_identity(),
         "validator_id": validator_id,
         "previous_state": if options.operator_approved_emergency_leader_stall_recovery {
             "EMERGENCY_HEAD_MATCHED"
+        } else if report.new_state == RealignmentState::VoteOnly && !shadow_passed {
+            "CAUGHT_UP"
         } else {
             "SHADOW_PASSED"
         },
-        "new_state": "ACTIVE",
+        "new_state": new_state,
         "common_height": common_height,
         "common_hash": common_hash,
         "latest_committed_qc_height": qc.height,
@@ -3606,30 +3733,352 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
         "aegis_pqc_verification_result": true,
         "emergency_leader_stall_recovery":
             options.operator_approved_emergency_leader_stall_recovery,
-        "next_required_action": "verify_five_validator_common_height_alignment",
+        "vote_only_rejoin": report.new_state == RealignmentState::VoteOnly,
+        "proposer_duties_disabled": report.new_state == RealignmentState::VoteOnly,
+        "probation_required_blocks": vote_only_probation_blocks(),
+        "next_required_action": if report.new_state == RealignmentState::VoteOnly {
+            "continue_vote_only_probation_then_promote_to_proposer_after_no_divergence"
+        } else {
+            "verify_five_validator_common_height_alignment"
+        },
     });
     write_json_pretty(&self_heal_status_path(), &status)?;
     Ok(status)
+}
+
+pub fn promote_vote_only_to_active() -> Result<Value, String> {
+    require_local_testnet_v2()?;
+    let validator_id = current_validator_id();
+    let status = read_self_heal_status_file()
+        .ok_or_else(|| "missing self_heal_status.json; refusing proposer promotion".to_string())?;
+    let status_state = status
+        .get("new_state")
+        .or_else(|| status.get("typed_status"))
+        .or_else(|| status.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !matches!(status_state, "VOTE_ONLY" | "VoteOnly" | "vote_only") {
+        return Ok(json!({
+            "success": false,
+            "typed_status": "FAILED_CLOSED",
+            "chain": chain_identity(),
+            "validator_id": validator_id,
+            "previous_state": status_state,
+            "new_state": "VOTE_ONLY",
+            "blocked_reasons": [
+                "proposer promotion is only valid from VOTE_ONLY"
+            ],
+            "genesis_mutated": false,
+            "quorum_mutated": false,
+        }));
+    }
+    let rejoin_height = status
+        .get("common_height")
+        .or_else(|| status.get("vote_only_started_height"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "VOTE_ONLY status is missing common_height".to_string())?;
+    let probation_required = status
+        .get("probation_required_blocks")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(vote_only_probation_blocks);
+    let qc = latest_verified_qc_summary()?;
+    if qc.height < rejoin_height.saturating_add(probation_required) {
+        return Ok(json!({
+            "success": false,
+            "typed_status": "PROBATION_ACTIVE",
+            "chain": chain_identity(),
+            "validator_id": validator_id,
+            "previous_state": "VOTE_ONLY",
+            "new_state": "VOTE_ONLY",
+            "rejoin_height": rejoin_height,
+            "latest_committed_qc_height": qc.height,
+            "probation_required_blocks": probation_required,
+            "probation_remaining_blocks": rejoin_height
+                .saturating_add(probation_required)
+                .saturating_sub(qc.height),
+            "next_required_action": "continue_vote_only_probation",
+            "genesis_mutated": false,
+            "quorum_mutated": false,
+        }));
+    }
+    let block = read_block_at_height(qc.height)?;
+    if block.hash != qc.hash {
+        return Ok(json!({
+            "success": false,
+            "typed_status": "FAILED_CLOSED",
+            "chain": chain_identity(),
+            "validator_id": validator_id,
+            "previous_state": "VOTE_ONLY",
+            "new_state": "VOTE_ONLY",
+            "blocked_reasons": [
+                format!(
+                    "latest committed QC hash {} does not match local block hash {} at height {}",
+                    qc.hash, block.hash, qc.height
+                )
+            ],
+            "genesis_mutated": false,
+            "quorum_mutated": false,
+        }));
+    }
+    let vote_lock_recovery =
+        DualQuorumConsensus::recover_transient_vote_locks_above_finalized_height(
+            qc.height,
+            DIAGNOSTIC_STALE_TRANSIENT_VOTE_LOCK_SECS,
+            "promote_vote_only_to_active_prune_stale_transient_vote_locks",
+        )?;
+    let proposal_cache_recovery =
+        ProofOfSynergy::recover_cached_block_proposals_above_finalized_height(
+            qc.height,
+            "promote_vote_only_to_active_prune_stale_transient_vote_locks",
+        )?;
+    let vote_lock_report = vote_locks_clean(qc.height)?;
+    let promoted = json!({
+        "success": true,
+        "typed_status": "ACTIVE",
+        "chain": chain_identity(),
+        "validator_id": validator_id,
+        "previous_state": "VOTE_ONLY",
+        "new_state": "ACTIVE",
+        "vote_only_rejoin": false,
+        "proposer_duties_disabled": false,
+        "promoted_after_probation": true,
+        "rejoin_height": rejoin_height,
+        "latest_committed_qc_height": qc.height,
+        "latest_committed_qc_hash": qc.hash,
+        "latest_committed_qc_vote_count": qc.vote_count,
+        "latest_committed_qc_signers": qc.signers,
+        "vote_lock_recovery": vote_lock_recovery,
+        "proposal_cache_recovery": proposal_cache_recovery,
+        "vote_lock_report": vote_lock_report,
+        "probation_required_blocks": probation_required,
+        "genesis_mutated": false,
+        "quorum_mutated": false,
+        "canonical_locks_mutated": false,
+        "committed_qcs_mutated": false,
+        "chain_state_mutated": false,
+        "updated_at": now_secs(),
+    });
+    write_json_pretty(&self_heal_status_path(), &promoted)?;
+    Ok(promoted)
+}
+
+pub fn emergency_promote_leader_stall_to_active_with_options(
+    options: EmergencyLeaderStallPromotionOptions,
+) -> Result<Value, String> {
+    require_local_testnet_v2()?;
+    let validator_id = current_validator_id();
+    if !options.operator_approved_emergency_leader_stall_recovery {
+        return Ok(json!(fail_closed_mutation_response(
+            validator_id,
+            RealignmentState::VoteOnly,
+            "emergency leader-stall active promotion requires explicit operator approval",
+            "data/self-heal-evidence"
+        )));
+    }
+    let status = read_self_heal_status_file().ok_or_else(|| {
+        "missing self_heal_status.json; refusing emergency leader-stall promotion".to_string()
+    })?;
+    let status_state = status
+        .get("new_state")
+        .or_else(|| status.get("typed_status"))
+        .or_else(|| status.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !matches!(status_state, "VOTE_ONLY" | "VoteOnly" | "vote_only") {
+        return Ok(json!({
+            "success": false,
+            "typed_status": "FAILED_CLOSED",
+            "chain": chain_identity(),
+            "validator_id": validator_id,
+            "previous_state": status_state,
+            "new_state": status_state,
+            "blocked_reasons": [
+                "emergency leader-stall active promotion is only valid from VOTE_ONLY"
+            ],
+            "genesis_mutated": false,
+            "quorum_mutated": false,
+        }));
+    }
+    if !status
+        .get("emergency_leader_stall_recovery")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(json!({
+            "success": false,
+            "typed_status": "FAILED_CLOSED",
+            "chain": chain_identity(),
+            "validator_id": validator_id,
+            "previous_state": status_state,
+            "new_state": "VOTE_ONLY",
+            "blocked_reasons": [
+                "emergency leader-stall active promotion requires an emergency leader-stall VOTE_ONLY rejoin record"
+            ],
+            "genesis_mutated": false,
+            "quorum_mutated": false,
+        }));
+    }
+    let quarantine = quarantine_status();
+    if quarantine
+        .get("quarantined")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Ok(json!(fail_closed_mutation_response(
+            validator_id,
+            RealignmentState::VoteOnly,
+            "emergency leader-stall active promotion requires quarantine markers to be cleared by request-rejoin first",
+            "data/self-heal-evidence"
+        )));
+    }
+    let common_height = options
+        .common_height
+        .or_else(|| status.get("common_height").and_then(Value::as_u64))
+        .ok_or_else(|| "emergency promotion requires common_height".to_string())?;
+    let common_hash = options
+        .common_hash
+        .clone()
+        .filter(|hash| !hash.trim().is_empty())
+        .or_else(|| {
+            status
+                .get("common_hash")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .ok_or_else(|| "emergency promotion requires common_hash".to_string())?;
+    let status_height = status.get("common_height").and_then(Value::as_u64);
+    let status_hash = status.get("common_hash").and_then(Value::as_str);
+    let mut blocked = Vec::new();
+    if status_height != Some(common_height) {
+        blocked.push(format!(
+            "requested common_height {common_height} does not match VOTE_ONLY rejoin height {:?}",
+            status_height
+        ));
+    }
+    if status_hash != Some(common_hash.as_str()) {
+        blocked.push(format!(
+            "requested common_hash {common_hash} does not match VOTE_ONLY rejoin hash {:?}",
+            status_hash
+        ));
+    }
+    if !options.exact_common_height_match {
+        blocked.push("exact common-height match proof is required".to_string());
+    }
+    if !options.latest_finalized_qc_aegis_pqc_verified {
+        blocked.push("latest finalized QC Aegis/PQC proof is required".to_string());
+    }
+    if !options.state_root_matches {
+        blocked.push("state root/checkpoint match proof is required".to_string());
+    }
+    if !options.rejoin_at_finalized_safe_boundary {
+        blocked.push("finalized safe boundary proof is required".to_string());
+    }
+    if !options.cluster_marks_pending_reactivation {
+        blocked.push("cluster pending-reactivation proof is required".to_string());
+    }
+    let local_block = read_block_at_height(common_height)?;
+    if local_block.hash != common_hash {
+        blocked.push(format!(
+            "local block hash {} at height {} does not match requested common hash {}",
+            local_block.hash, common_height, common_hash
+        ));
+    }
+    let qc = latest_verified_qc_summary()?;
+    if !qc.verified || qc.vote_count < qc.required_quorum as u64 {
+        blocked.push("latest committed QC is not verified through Aegis/PQC quorum".to_string());
+    }
+    if qc.height != common_height {
+        blocked.push(format!(
+            "emergency leader-stall promotion requires common_height {common_height} to equal latest finalized QC height {}",
+            qc.height
+        ));
+    }
+    if qc.hash != common_hash {
+        blocked.push(format!(
+            "emergency leader-stall promotion requires common_hash {common_hash} to equal latest finalized QC hash {}",
+            qc.hash
+        ));
+    }
+    if !blocked.is_empty() {
+        return Ok(json!({
+            "success": false,
+            "typed_status": "FAILED_CLOSED",
+            "chain": chain_identity(),
+            "validator_id": validator_id,
+            "previous_state": "VOTE_ONLY",
+            "new_state": "VOTE_ONLY",
+            "blocked_reasons": blocked,
+            "genesis_mutated": false,
+            "quorum_mutated": false,
+        }));
+    }
+    let vote_lock_recovery =
+        DualQuorumConsensus::recover_transient_vote_locks_above_finalized_height(
+            qc.height,
+            DIAGNOSTIC_STALE_TRANSIENT_VOTE_LOCK_SECS,
+            "emergency_leader_stall_active_promotion_prune_stale_transient_vote_locks",
+        )?;
+    let proposal_cache_recovery =
+        ProofOfSynergy::recover_cached_block_proposals_above_finalized_height(
+            qc.height,
+            "emergency_leader_stall_active_promotion_prune_stale_transient_vote_locks",
+        )?;
+    let vote_lock_report = vote_locks_clean(qc.height)?;
+    let promoted = json!({
+        "success": true,
+        "typed_status": "ACTIVE",
+        "chain": chain_identity(),
+        "validator_id": validator_id,
+        "previous_state": "VOTE_ONLY",
+        "new_state": "ACTIVE",
+        "vote_only_rejoin": false,
+        "proposer_duties_disabled": false,
+        "promoted_after_probation": false,
+        "emergency_leader_stall_recovery": true,
+        "emergency_quorum_restart": true,
+        "probation_bypassed_reason": "all_validators_quarantined_leader_stall_exact_finalized_qc_match",
+        "common_height": common_height,
+        "common_hash": common_hash,
+        "latest_committed_qc_height": qc.height,
+        "latest_committed_qc_hash": qc.hash,
+        "latest_committed_qc_vote_count": qc.vote_count,
+        "latest_committed_qc_signers": qc.signers,
+        "vote_lock_recovery": vote_lock_recovery,
+        "proposal_cache_recovery": proposal_cache_recovery,
+        "vote_lock_report": vote_lock_report,
+        "genesis_mutated": false,
+        "quorum_mutated": false,
+        "canonical_locks_mutated": false,
+        "committed_qcs_mutated": false,
+        "chain_state_mutated": false,
+        "updated_at": now_secs(),
+        "next_required_action": "verify_live_quorum_and_chain_advancement",
+    });
+    write_json_pretty(&self_heal_status_path(), &promoted)?;
+    Ok(promoted)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         active_validator_addresses_for_snapshot_height, copy_snapshot_state_files,
-        create_snapshot_with_options, diagnose_consensus_stall, enforce_snapshot_retention,
-        quarantine_status, quarantine_stopped_validator_with_options, read_block_at_height,
-        read_latest_block_summary, rejoin_eligibility, request_rejoin_with_options,
-        self_heal_from_snapshot, shadow_status, snapshot_metadata_consistency_report,
-        snapshot_source_node_id, start_shadow_observe_with_options,
-        sync_from_canonical_peer_with_options, BlockSummary, CommittedBlockLogEntry,
-        CreateSnapshotOptions, OperatorQuarantineOptions, RejoinRequestOptions,
-        SnapshotCanonicalLockMaterialization, StartShadowObserveOptions,
-        SyncFromCanonicalPeerOptions, DIAGNOSTIC_STALE_TRANSIENT_VOTE_LOCK_SECS, EXPECTED_CHAIN_ID,
-        EXPECTED_NETWORK_ID, SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT,
+        create_snapshot_with_options, diagnose_consensus_stall,
+        emergency_promote_leader_stall_to_active_with_options, enforce_snapshot_retention,
+        promote_vote_only_to_active, quarantine_status, quarantine_stopped_validator_with_options,
+        read_block_at_height, read_latest_block_summary, rejoin_eligibility,
+        request_rejoin_with_options, self_heal_from_snapshot, shadow_status,
+        snapshot_metadata_consistency_report, snapshot_source_node_id,
+        start_shadow_observe_with_options, sync_from_canonical_peer_with_options, BlockSummary,
+        CommittedBlockLogEntry, CreateSnapshotOptions, EmergencyLeaderStallPromotionOptions,
+        OperatorQuarantineOptions, RejoinRequestOptions, SnapshotCanonicalLockMaterialization,
+        StartShadowObserveOptions, SyncFromCanonicalPeerOptions,
+        DIAGNOSTIC_STALE_TRANSIENT_VOTE_LOCK_SECS, EXPECTED_CHAIN_ID, EXPECTED_NETWORK_ID,
+        SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT,
     };
     use crate::block::{Block, BlockChain};
     use crate::config::NodeConfig;
     use crate::consensus::consensus_fork;
+    use crate::consensus::dual_quorum::DualQuorumConsensus;
     use crate::consensus::self_realign::{
         create_snapshot_manifest, required_snapshot_quorum_for_validator_count,
         sign_snapshot_manifest, QuarantineMarker, SnapshotBuildInput, SnapshotQcEvidence,
@@ -3852,7 +4301,7 @@ mod tests {
             aegis_pqc_verified: true,
             duplicate_signer_check_passed: true,
             active_validator_count: 5,
-            active_validator_set_is_genesis_5: true,
+            active_validator_set_meets_baseline: true,
             relayers_rpc_support_counted_toward_quorum: false,
         };
         let manifest = create_snapshot_manifest(SnapshotBuildInput {
@@ -3868,7 +4317,7 @@ mod tests {
             qc_evidence,
             active_validator_set: (1..=5).map(|index| format!("validator-{index}")).collect(),
             source_node_id: "validator-3".to_string(),
-            source_role: "GENESIS_VALIDATOR".to_string(),
+            source_role: "VALIDATOR".to_string(),
             runtime_checksum: "runtime-sha256".to_string(),
             source_node_quarantined: false,
             source_node_majority_branch: true,
@@ -3892,13 +4341,22 @@ mod tests {
     }
 
     fn write_vote_lock(root: &Path, updated_at: u64, second_hash: Option<&str>) {
+        write_vote_lock_at_height(root, 101, updated_at, second_hash);
+    }
+
+    fn write_vote_lock_at_height(
+        root: &Path,
+        height: u64,
+        updated_at: u64,
+        second_hash: Option<&str>,
+    ) {
         let mut locks = serde_json::Map::new();
         locks.insert(
-            "synv1a:101".to_string(),
+            format!("synv1a:{height}"),
             json!({
                 "validator_address": "synv1a",
                 "block_hash": "hash-a",
-                "block_index": 101,
+                "block_index": height,
                 "epoch_number": 0,
                 "first_round_number": 1,
                 "latest_round_number": 1,
@@ -3909,11 +4367,11 @@ mod tests {
         );
         if let Some(hash) = second_hash {
             locks.insert(
-                "synv1b:101".to_string(),
+                format!("synv1b:{height}"),
                 json!({
                     "validator_address": "synv1b",
                     "block_hash": hash,
-                    "block_index": 101,
+                    "block_index": height,
                     "epoch_number": 0,
                     "first_round_number": 1,
                     "latest_round_number": 1,
@@ -4331,6 +4789,133 @@ mod tests {
         assert_eq!(
             boundary_lock.get("parent_hash").and_then(Value::as_str),
             Some("h175517")
+        );
+    }
+
+    #[test]
+    fn validator_pruned_snapshot_rebuilds_missing_compact_boundary_lock() {
+        let root = test_runtime_root("snapshot-copy-rebuilds-compact-boundary-lock");
+        let data_dir = root.join("data");
+        fs::write(
+            data_dir.join("chain.json"),
+            json!([
+                {"block_index": SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT, "hash": "h175518", "previous_hash": "h175517"},
+                {"block_index": 195_000, "hash": "h195000", "previous_hash": "h194999"},
+                {"block_index": 200_000, "hash": "h200000", "previous_hash": "h199999"}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            data_dir.join("canonical_locks.json"),
+            json!({"200000": {"height": 200000, "hash": "h200000", "block_hash": "h200000", "parent_hash": "h199999"}})
+                .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            data_dir.join("committed_qcs.jsonl"),
+            [
+                json!({"qc": {"votes": [{"block_index": SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT}], "block_hash": "h175518"}}).to_string(),
+                json!({"qc": {"votes": [{"block_index": 195_000}], "block_hash": "h195000"}}).to_string(),
+                json!({"qc": {"votes": [{"block_index": 200_000}], "block_hash": "h200000"}}).to_string(),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        let snapshot_dir = root.join("snapshot");
+
+        copy_snapshot_state_files(
+            &data_dir,
+            &snapshot_dir,
+            200_000,
+            SNAPSHOT_CLASS_VALIDATOR_PRUNED,
+            &test_block_summary(200_000, "h200000"),
+            None,
+        )
+        .unwrap();
+
+        let locks: Value =
+            serde_json::from_slice(&fs::read(snapshot_dir.join("canonical_locks.json")).unwrap())
+                .unwrap();
+        let boundary_key = SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT.to_string();
+        let boundary_lock = locks
+            .get(boundary_key.as_str())
+            .expect("missing compact boundary lock should be rebuilt in snapshot");
+        assert_eq!(
+            boundary_lock.get("block_hash").and_then(Value::as_str),
+            Some("h175518")
+        );
+        assert_eq!(
+            boundary_lock.get("parent_hash").and_then(Value::as_str),
+            Some("h175517")
+        );
+        assert_eq!(
+            boundary_lock.get("finality_source").and_then(Value::as_str),
+            Some("snapshot_compact_chain_boundary")
+        );
+        assert_eq!(
+            boundary_lock
+                .get("snapshot_only_materialized")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn validator_pruned_snapshot_rejects_mismatched_compact_boundary_lock() {
+        let root = test_runtime_root("snapshot-copy-rejects-bad-compact-boundary-lock");
+        let data_dir = root.join("data");
+        fs::write(
+            data_dir.join("chain.json"),
+            json!([
+                {"block_index": SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT, "hash": "h175518", "previous_hash": "h175517"},
+                {"block_index": 200_000, "hash": "h200000", "previous_hash": "h199999"}
+            ])
+            .to_string(),
+        )
+        .unwrap();
+        let mut locks = serde_json::Map::new();
+        locks.insert(
+            SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT.to_string(),
+            json!({
+                "height": SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT,
+                "hash": "wrong-boundary",
+                "block_hash": "wrong-boundary",
+                "parent_hash": "wrong-parent"
+            }),
+        );
+        locks.insert(
+            "200000".to_string(),
+            json!({"height": 200000, "hash": "h200000", "block_hash": "h200000", "parent_hash": "h199999"}),
+        );
+        fs::write(
+            data_dir.join("canonical_locks.json"),
+            Value::Object(locks).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            data_dir.join("committed_qcs.jsonl"),
+            json!({"qc": {"votes": [{"block_index": 200_000}], "block_hash": "h200000"}})
+                .to_string()
+                + "\n",
+        )
+        .unwrap();
+        let snapshot_dir = root.join("snapshot");
+
+        let error = copy_snapshot_state_files(
+            &data_dir,
+            &snapshot_dir,
+            200_000,
+            SNAPSHOT_CLASS_VALIDATOR_PRUNED,
+            &test_block_summary(200_000, "h200000"),
+            None,
+        )
+        .expect_err("mismatched compact boundary lock must fail closed");
+
+        assert!(
+            error.contains("snapshot compact chain boundary"),
+            "unexpected error: {error}"
         );
     }
 
@@ -5128,7 +5713,7 @@ mod tests {
             reason
                 .as_str()
                 .unwrap_or_default()
-                .contains("SHADOW_PASSED")
+                .contains("vote-only rejoin requires exact common-height")
         }));
     }
 
@@ -5248,6 +5833,99 @@ mod tests {
         assert_eq!(block.height, 12);
         assert_eq!(block.hash, "hash-12");
         assert_eq!(block.parent_hash, "hash-11");
+    }
+
+    #[test]
+    fn committed_block_log_diagnostics_skip_malformed_lines() {
+        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
+            .lock()
+            .expect("diagnostics env lock should succeed");
+        let root = test_runtime_root("committed-log-malformed-line");
+        write_chain_range(&root, 0, 10);
+        let committed_log_path = root.join("data/committed_blocks.jsonl");
+        let block = Block {
+            block_index: 12,
+            timestamp: 1,
+            transactions: Vec::new(),
+            previous_hash: test_hash(11),
+            validator_id: "validator-1".to_string(),
+            nonce: 12,
+            hash: test_hash(12),
+            transactions_root: String::new(),
+            proposer_public_key: Vec::new(),
+            block_signature: Vec::new(),
+            block_signature_algorithm: "fn-dsa".to_string(),
+        };
+        let entry = CommittedBlockLogEntry {
+            height: block.block_index,
+            hash: block.hash.clone(),
+            previous_hash: block.previous_hash.clone(),
+            block,
+        };
+        fs::write(
+            &committed_log_path,
+            format!(
+                "{{\"height\":11,\"hash\"\n{}\n",
+                serde_json::to_string(&entry).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let previous_committed_log = std::env::var("SYNERGY_COMMITTED_BLOCK_LOG_FILE").ok();
+        std::env::set_var("SYNERGY_COMMITTED_BLOCK_LOG_FILE", &committed_log_path);
+        let exact = with_runtime_root(&root, || read_block_at_height(12).unwrap());
+        let latest = with_runtime_root(&root, || read_latest_block_summary().unwrap());
+        match previous_committed_log {
+            Some(value) => std::env::set_var("SYNERGY_COMMITTED_BLOCK_LOG_FILE", value),
+            None => std::env::remove_var("SYNERGY_COMMITTED_BLOCK_LOG_FILE"),
+        }
+
+        assert_eq!(exact.height, 12);
+        assert_eq!(exact.hash, test_hash(12));
+        assert_eq!(latest.height, 12);
+        assert_eq!(latest.hash, test_hash(12));
+    }
+
+    #[test]
+    fn committed_block_log_diagnostics_fail_on_inconsistent_entries() {
+        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
+            .lock()
+            .expect("diagnostics env lock should succeed");
+        let root = test_runtime_root("committed-log-inconsistent-entry");
+        write_chain_range(&root, 0, 11);
+        let committed_log_path = root.join("data/committed_blocks.jsonl");
+        let block = Block {
+            block_index: 12,
+            timestamp: 1,
+            transactions: Vec::new(),
+            previous_hash: test_hash(11),
+            validator_id: "validator-1".to_string(),
+            nonce: 12,
+            hash: "conflicting-hash".to_string(),
+            transactions_root: String::new(),
+            proposer_public_key: Vec::new(),
+            block_signature: Vec::new(),
+            block_signature_algorithm: "fn-dsa".to_string(),
+        };
+        let entry = CommittedBlockLogEntry {
+            height: 12,
+            hash: test_hash(12),
+            previous_hash: test_hash(11),
+            block,
+        };
+        fs::write(&committed_log_path, serde_json::to_string(&entry).unwrap()).unwrap();
+
+        let previous_committed_log = std::env::var("SYNERGY_COMMITTED_BLOCK_LOG_FILE").ok();
+        std::env::set_var("SYNERGY_COMMITTED_BLOCK_LOG_FILE", &committed_log_path);
+        let exact_error = with_runtime_root(&root, || read_block_at_height(12).unwrap_err());
+        let latest_error = with_runtime_root(&root, || read_latest_block_summary().unwrap_err());
+        match previous_committed_log {
+            Some(value) => std::env::set_var("SYNERGY_COMMITTED_BLOCK_LOG_FILE", value),
+            None => std::env::remove_var("SYNERGY_COMMITTED_BLOCK_LOG_FILE"),
+        }
+
+        assert!(exact_error.contains("inconsistent height/hash"));
+        assert!(latest_error.contains("inconsistent height/hash"));
     }
 
     #[test]
@@ -5603,7 +6281,7 @@ mod tests {
     }
 
     #[test]
-    fn request_rejoin_rejects_process_proof_without_full_epoch() {
+    fn request_rejoin_allows_vote_only_before_full_shadow_epoch_with_exact_proof() {
         let _guard = DIAGNOSTICS_TEST_ENV_LOCK
             .lock()
             .expect("diagnostics env lock should succeed");
@@ -5632,21 +6310,128 @@ mod tests {
             .expect("rejoin diagnostics should return typed body")
         });
 
+        assert_eq!(report.get("success").and_then(Value::as_bool), Some(true));
         assert_eq!(
             report.get("typed_status").and_then(Value::as_str),
-            Some("FAILED_CLOSED")
+            Some("VOTE_ONLY")
         );
-        let blocked = report
-            .get("blocked_reasons")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        assert!(blocked.iter().any(|reason| {
-            reason
-                .as_str()
-                .unwrap_or_default()
-                .contains("500-block process proof")
-        }));
+        assert_eq!(
+            report.get("vote_only_rejoin").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            report
+                .get("proposer_duties_disabled")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            report.get("next_required_action").and_then(Value::as_str),
+            Some("continue_vote_only_probation_then_promote_to_proposer_after_no_divergence")
+        );
+    }
+
+    #[test]
+    fn promote_vote_only_allows_fresh_live_vote_locks_above_finalized() {
+        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
+            .lock()
+            .expect("diagnostics env lock should succeed");
+        let root = test_runtime_root("promote-fresh-live-locks");
+        install_test_genesis(&root);
+        install_test_config(&root, 1264, "synergy-testnet-v2");
+        write_chain_range(&root, 100, 101);
+        write_canonical_lock_at_height(&root, 101);
+        write_legacy_qc_fixture_at_height(&root, 101);
+        write_vote_lock_at_height(&root, 102, now_secs_for_test(), None);
+        fs::write(
+            root.join("data/self_heal_status.json"),
+            json!({
+                "success": true,
+                "typed_status": "VOTE_ONLY",
+                "new_state": "VOTE_ONLY",
+                "common_height": 100,
+                "probation_required_blocks": 1,
+                "vote_only_rejoin": true,
+            })
+            .to_string(),
+        )
+        .expect("test vote-only status should be written");
+
+        let report = with_runtime_root(&root, || {
+            promote_vote_only_to_active().expect("fresh live vote locks should not block promotion")
+        });
+
+        assert_eq!(report.get("success").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            report.get("typed_status").and_then(Value::as_str),
+            Some("ACTIVE")
+        );
+        let status = serde_json::from_slice::<Value>(
+            &fs::read(root.join("data/self_heal_status.json"))
+                .expect("promoted status should be readable"),
+        )
+        .expect("promoted status should parse");
+        assert_eq!(
+            status.get("vote_only_rejoin").and_then(Value::as_bool),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn promote_vote_only_recovers_stale_vote_locks_above_finalized() {
+        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
+            .lock()
+            .expect("diagnostics env lock should succeed");
+        let root = test_runtime_root("promote-stale-locks");
+        install_test_genesis(&root);
+        install_test_config(&root, 1264, "synergy-testnet-v2");
+        write_chain_range(&root, 100, 101);
+        write_canonical_lock_at_height(&root, 101);
+        write_legacy_qc_fixture_at_height(&root, 101);
+        write_vote_lock_at_height(
+            &root,
+            102,
+            now_secs_for_test().saturating_sub(DIAGNOSTIC_STALE_TRANSIENT_VOTE_LOCK_SECS + 5),
+            None,
+        );
+        fs::write(
+            root.join("data/self_heal_status.json"),
+            json!({
+                "success": true,
+                "typed_status": "VOTE_ONLY",
+                "new_state": "VOTE_ONLY",
+                "common_height": 100,
+                "probation_required_blocks": 1,
+                "vote_only_rejoin": true,
+            })
+            .to_string(),
+        )
+        .expect("test vote-only status should be written");
+
+        DualQuorumConsensus::set_test_local_vote_lock_path(Some(
+            root.join("data/consensus_vote_locks.json"),
+        ));
+        let report = with_runtime_root(&root, || {
+            promote_vote_only_to_active()
+                .expect("stale transient vote locks should be recovered during promotion")
+        });
+        DualQuorumConsensus::set_test_local_vote_lock_path(None);
+
+        assert_eq!(report.get("success").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            report
+                .get("vote_lock_recovery")
+                .and_then(|value| value.get("removed_count"))
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            report
+                .get("vote_lock_report")
+                .and_then(|value| value.get("stale_locks_above_finalized"))
+                .and_then(Value::as_u64),
+            Some(0)
+        );
     }
 
     #[test]
@@ -5682,7 +6467,13 @@ mod tests {
         assert_eq!(report.get("success").and_then(Value::as_bool), Some(true));
         assert_eq!(
             report.get("typed_status").and_then(Value::as_str),
-            Some("ACTIVE")
+            Some("VOTE_ONLY")
+        );
+        assert_eq!(
+            report
+                .get("proposer_duties_disabled")
+                .and_then(Value::as_bool),
+            Some(true)
         );
         assert_eq!(
             report
@@ -5695,6 +6486,102 @@ mod tests {
             Some("EMERGENCY_HEAD_MATCHED")
         );
         assert!(!root.join("data/validator_quarantine.json").exists());
+    }
+
+    #[test]
+    fn emergency_leader_stall_promotion_requires_exact_finalized_vote_only_proof() {
+        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
+            .lock()
+            .expect("diagnostics env lock should succeed");
+        let root = test_runtime_root("emergency-promote-leader-stall");
+        install_test_genesis(&root);
+        install_test_config(&root, 1264, "synergy-testnet-v2");
+        write_quarantine_marker(&root);
+        write_empty_vote_locks(&root);
+        write_shadow_observation(&root, 89957, 500);
+        write_chain_range(&root, 89958, 90457);
+        write_canonical_lock_at_height(&root, 90457);
+        write_legacy_qc_fixture_at_height(&root, 90457);
+
+        let report = with_runtime_root(&root, || {
+            request_rejoin_with_options(RejoinRequestOptions {
+                common_height: Some(90457),
+                common_hash: Some(test_hash(90457)),
+                exact_common_height_match: true,
+                latest_finalized_qc_aegis_pqc_verified: true,
+                state_root_matches: true,
+                rejoin_at_finalized_safe_boundary: true,
+                cluster_marks_pending_reactivation: true,
+                operator_approved_reactivation: true,
+                operator_approved_emergency_leader_stall_recovery: true,
+            })
+            .expect("emergency rejoin diagnostics should return typed body")
+        });
+        assert_eq!(
+            report.get("typed_status").and_then(Value::as_str),
+            Some("VOTE_ONLY")
+        );
+
+        let blocked = with_runtime_root(&root, || {
+            emergency_promote_leader_stall_to_active_with_options(
+                EmergencyLeaderStallPromotionOptions {
+                    common_height: Some(90457),
+                    common_hash: Some(test_hash(90457)),
+                    exact_common_height_match: true,
+                    latest_finalized_qc_aegis_pqc_verified: true,
+                    state_root_matches: true,
+                    rejoin_at_finalized_safe_boundary: true,
+                    cluster_marks_pending_reactivation: true,
+                    operator_approved_emergency_leader_stall_recovery: false,
+                },
+            )
+            .expect("blocked promotion should return typed body")
+        });
+        assert_eq!(
+            blocked.get("typed_status").and_then(Value::as_str),
+            Some("FAILED_CLOSED")
+        );
+
+        let promoted = with_runtime_root(&root, || {
+            emergency_promote_leader_stall_to_active_with_options(
+                EmergencyLeaderStallPromotionOptions {
+                    common_height: Some(90457),
+                    common_hash: Some(test_hash(90457)),
+                    exact_common_height_match: true,
+                    latest_finalized_qc_aegis_pqc_verified: true,
+                    state_root_matches: true,
+                    rejoin_at_finalized_safe_boundary: true,
+                    cluster_marks_pending_reactivation: true,
+                    operator_approved_emergency_leader_stall_recovery: true,
+                },
+            )
+            .expect("emergency promotion should return typed body")
+        });
+        assert_eq!(
+            promoted.get("typed_status").and_then(Value::as_str),
+            Some("ACTIVE")
+        );
+        assert_eq!(
+            promoted
+                .get("emergency_quorum_restart")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        let status = serde_json::from_slice::<Value>(
+            &fs::read(root.join("data/self_heal_status.json"))
+                .expect("promoted status should be readable"),
+        )
+        .expect("promoted status should parse");
+        assert_eq!(
+            status.get("vote_only_rejoin").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            status
+                .get("proposer_duties_disabled")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
     }
 
     #[test]

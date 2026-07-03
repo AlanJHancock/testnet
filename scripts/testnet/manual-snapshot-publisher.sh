@@ -6,13 +6,14 @@ usage() {
 manual-snapshot-publisher.sh \
   --snapshot-root <dir> \
   --snapshot-manifest <manifest.json> \
-  --snapshot-class <validator-pruned|support-relayer|support-rpc|indexer-full|indexer-replay|archive-full|archive-bootstrap> \
+  --snapshot-class <validator-pruned|support-relayer|support-rpc|support-observer|indexer-full|indexer-replay|archive-full|archive-bootstrap> \
   --allowed-role <role> [--allowed-role <role> ...] \
   --out <dir> \
   --source-node <node-id> \
   --runtime <synergy-testnet-linux-amd64> \
   --runtime-sha <sha256> \
   [--source-workspace <node-workspace>] \
+  [--source-config <node-config.toml>] \
   [--min-runtime-version <version>] \
   [--chunk-size 512M]
 USAGE
@@ -26,6 +27,7 @@ source_node=""
 runtime=""
 runtime_sha=""
 source_workspace=""
+source_config=""
 min_runtime_version=""
 chunk_size="512M"
 allowed_roles=()
@@ -41,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --runtime) runtime="$2"; shift 2 ;;
     --runtime-sha) runtime_sha="$2"; shift 2 ;;
     --source-workspace) source_workspace="$2"; shift 2 ;;
+    --source-config) source_config="$2"; shift 2 ;;
     --min-runtime-version) min_runtime_version="$2"; shift 2 ;;
     --chunk-size) chunk_size="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -49,7 +52,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$snapshot_class" in
-  validator-pruned|support-relayer|support-rpc|indexer-full|indexer-replay|archive-full|archive-bootstrap|archive-validator-bootstrap) ;;
+  validator-pruned|support-relayer|support-rpc|support-observer|indexer-full|indexer-replay|archive-full|archive-bootstrap|archive-validator-bootstrap) ;;
   *) echo "invalid or missing --snapshot-class" >&2; exit 2 ;;
 esac
 
@@ -88,10 +91,26 @@ verify_args=(
 if [[ -n "$source_workspace" ]]; then
   verify_args+=(--source-workspace "$source_workspace")
 fi
+if [[ -n "$source_config" ]]; then
+  verify_args+=(--config "$source_config")
+fi
 verify_args+=(--manifest "$snapshot_manifest" --snapshot-root "$snapshot_root")
 verify_args+=(--snapshot-class "$snapshot_class" --target-role "${allowed_roles[0]}")
 
-"$runtime" verify-snapshot "${verify_args[@]}" > "$out_dir/source-verify-snapshot.json"
+(
+  if [[ -n "$source_workspace" ]]; then
+    cd "$source_workspace"
+  fi
+  if [[ -n "$source_config" ]]; then
+    export SYNERGY_CONFIG_PATH="$source_config"
+  elif [[ -n "$source_workspace" ]]; then
+    export SYNERGY_CONFIG_PATH="$source_workspace/config/node.toml"
+  fi
+  if [[ -n "$source_workspace" ]]; then
+    export SYNERGY_PROJECT_ROOT="$source_workspace"
+  fi
+  "$runtime" verify-snapshot "${verify_args[@]}"
+) > "$out_dir/source-verify-snapshot.json"
 python3 - "$out_dir/source-verify-snapshot.json" <<'PY'
 import json
 import sys
@@ -154,6 +173,8 @@ distribution = {
     "committed_qc_hash": manifest.get("qc_evidence", {}).get("committed_qc_hash"),
     "qc_vote_count": manifest.get("qc_evidence", {}).get("vote_count"),
     "qc_signers": manifest.get("qc_evidence", {}).get("signer_set"),
+    "active_validator_set": manifest.get("active_validator_set"),
+    "quorum_threshold": manifest.get("quorum_threshold"),
     "chain_id": manifest.get("chain_id"),
     "network_id": manifest.get("network_id"),
     "genesis_hash": manifest.get("genesis_hash"),
