@@ -87,6 +87,7 @@ const BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS: u64 = 1;
 const VALIDATOR_SUPPORT_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS: u64 = 2;
 const SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS: u64 = 1;
 const CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS: u64 = 500;
+const CONSENSUS_DIRECT_VOTE_DIAL_TIMEOUT_MILLIS: u64 = 1_200;
 const VOTE_REQUEST_PARENT_SYNC_WAIT_MILLIS: u64 = 900;
 const VOTE_REQUEST_PARENT_SYNC_POLL_MILLIS: u64 = 25;
 const MAX_PENDING_BLOCK_HEIGHTS: usize = 256;
@@ -3505,6 +3506,7 @@ fn request_blocks_from_connected_peer(
 
 fn send_vote_to_requester(
     peers: &mut PeerMap,
+    config: &NodeConfig,
     request_peer_address: &str,
     proposer_validator_address: &str,
     response: &NetworkMessage,
@@ -3549,6 +3551,30 @@ fn send_vote_to_requester(
         }
     }
 
+    if let Some(proposer_public_address) =
+        configured_public_address_for_validator(config, proposer_validator_address)
+    {
+        match dial_with_timeout(
+            &proposer_public_address,
+            Duration::from_millis(CONSENSUS_DIRECT_VOTE_DIAL_TIMEOUT_MILLIS),
+        ) {
+            Ok(mut stream) => match send_consensus_message(&mut stream, response) {
+                Ok(()) => {
+                    info!(
+                        "p2p",
+                        "Vote sent over direct proposer fallback",
+                        "request_peer" => request_peer_address.to_string(),
+                        "response_peer" => proposer_public_address.clone(),
+                        "proposer" => proposer_validator_address.to_string()
+                    );
+                    return Ok(proposer_public_address);
+                }
+                Err(error) => failed_peers.push((proposer_public_address, error.to_string())),
+            },
+            Err(error) => failed_peers.push((proposer_public_address, error.to_string())),
+        }
+    }
+
     if let Some((failed_peer, error)) = failed_peers.into_iter().next() {
         return Err(format!("failed to write vote to {failed_peer}: {error}"));
     }
@@ -3557,6 +3583,34 @@ fn send_vote_to_requester(
         "no writable connection for proposer {} (request peer {})",
         proposer_validator_address, request_peer_address
     ))
+}
+
+fn configured_public_address_for_validator(
+    config: &NodeConfig,
+    validator_address: &str,
+) -> Option<String> {
+    let validator_address = validator_address.trim();
+    if validator_address.is_empty() {
+        return None;
+    }
+
+    let active_validator_addresses = if config.node.allowed_validator_addresses.is_empty() {
+        consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
+            .into_iter()
+            .map(|validator| validator.address)
+            .collect::<HashSet<_>>()
+    } else {
+        config
+            .node
+            .allowed_validator_addresses
+            .iter()
+            .map(|address| address.trim().to_string())
+            .filter(|address| !address.is_empty())
+            .collect::<HashSet<_>>()
+    };
+
+    configured_validator_public_address_map(config, &active_validator_addresses)
+        .remove(validator_address)
 }
 
 fn handle_vote_request_message(
@@ -3746,6 +3800,7 @@ fn handle_vote_request_message(
             let mut peers = connected_peers.lock().unwrap();
             match send_vote_to_requester(
                 &mut peers,
+                config,
                 peer_address,
                 block_data.validator_id.as_str(),
                 &response,
