@@ -770,8 +770,17 @@ impl DualQuorumConsensus {
             return;
         }
 
-        if Self::register_vote_observation(&vote).is_some() {
-            return;
+        if let Some(evidence) = Self::register_vote_observation(&vote) {
+            warn!(
+                "consensus",
+                "Network vote conflicts with prior observation; retaining evidence and storing for recovery evaluation",
+                "validator" => evidence.validator_address,
+                "height" => evidence.block_index,
+                "epoch" => evidence.epoch_number,
+                "round" => evidence.round_number,
+                "first_block_hash" => evidence.first_vote.block_hash,
+                "conflicting_block_hash" => evidence.conflicting_vote.block_hash
+            );
         }
         timing_trace::emit(
             "vote_response_received_by_proposer",
@@ -1299,12 +1308,25 @@ impl DualQuorumConsensus {
             {
                 continue;
             }
-            if Self::has_equivocation_evidence(
+            let accepted_prior_round_recovery_vote = if Self::has_equivocation_evidence(
                 &vote.validator_address,
                 vote.epoch_number,
                 vote.block_index,
                 vote.round_number,
             ) {
+                if vote.round_number < round_number {
+                    warn!(
+                        "consensus",
+                        "Accepting prior-round same-block recovery vote despite retained equivocation evidence",
+                        "validator" => vote.validator_address.clone(),
+                        "block_hash" => vote.block_hash.clone(),
+                        "height" => vote.block_index,
+                        "epoch" => vote.epoch_number,
+                        "vote_round" => vote.round_number,
+                        "collection_round" => round_number
+                    );
+                    true
+                } else {
                 warn!(
                     "consensus",
                     "Discarding equivocating vote",
@@ -1315,11 +1337,18 @@ impl DualQuorumConsensus {
                     "round" => vote.round_number
                 );
                 continue;
-            }
+                }
+            } else {
+                false
+            };
             if !expected_validators.contains(&vote.validator_address) {
                 continue;
             }
-            if !self.vote_is_eligible(&vote) {
+            if accepted_prior_round_recovery_vote {
+                if !self.vote_validator_is_active(&vote) {
+                    continue;
+                }
+            } else if !self.vote_is_eligible(&vote) {
                 continue;
             }
             if !seen_validators.insert(vote.validator_address.clone()) {
@@ -2821,6 +2850,10 @@ impl DualQuorumConsensus {
             return false;
         }
 
+        self.vote_validator_is_active(vote)
+    }
+
+    fn vote_validator_is_active(&self, vote: &Vote) -> bool {
         consensus_membership_validators(self.validator_manager.get_active_validators())
             .into_iter()
             .any(|validator| validator.address == vote.validator_address)
@@ -4164,6 +4197,20 @@ mod tests {
         let prior_round_vote =
             DualQuorumConsensus::create_vote_for_validator("validator2", &block, 12, 2)
                 .expect("prior round vote should be created");
+        let conflicting_block = signed_block(10, 1, "validator3");
+        let conflicting_prior_round_vote =
+            DualQuorumConsensus::create_vote_for_validator(
+                "validator2",
+                &conflicting_block,
+                12,
+                2,
+            )
+            .expect("conflicting prior round vote should be created");
+        assert!(DualQuorumConsensus::register_vote_observation(
+            &conflicting_prior_round_vote
+        )
+        .is_none());
+        assert!(DualQuorumConsensus::register_vote_observation(&prior_round_vote).is_some());
 
         let expected_validators = ["validator1", "validator2", "validator3"]
             .into_iter()
