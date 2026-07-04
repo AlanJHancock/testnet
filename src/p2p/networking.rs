@@ -469,6 +469,13 @@ fn parse_handshake_pqc_algorithm(value: &str) -> Result<PQCAlgorithm, String> {
 }
 
 fn build_local_handshake(config: &NodeConfig) -> Result<NetworkMessage, String> {
+    build_local_handshake_with_extra_capabilities(config, &[])
+}
+
+fn build_local_handshake_with_extra_capabilities(
+    config: &NodeConfig,
+    extra_capabilities: &[&str],
+) -> Result<NetworkMessage, String> {
     let mut signer = AegisPqvmSigner::initialize_required()
         .map_err(|error| format!("aegis-pqvm P2P signer initialization failed: {error}"))?;
     let peer_uma = config
@@ -484,10 +491,17 @@ fn build_local_handshake(config: &NodeConfig) -> Result<NetworkMessage, String> 
     let public_key = signer
         .public_key_record(&key_id)
         .map_err(|error| format!("aegis-pqvm P2P public key loading failed: {error}"))?;
+    let mut capabilities = vec!["blocks".to_string(), "transactions".to_string()];
+    for capability in extra_capabilities {
+        let capability = capability.trim();
+        if !capability.is_empty() && !capabilities.iter().any(|value| value == capability) {
+            capabilities.push(capability.to_string());
+        }
+    }
     let mut handshake = NetworkMessage::Handshake {
         node_id: config.p2p.node_name.clone(),
         version: "1.0.0".to_string(),
-        capabilities: vec!["blocks".to_string(), "transactions".to_string()],
+        capabilities,
         chain_id: Some(local_chain_id(config)),
         network_id: Some(local_network_id(config)),
         network_id_text: Some(TESTNET_NETWORK_ID_TEXT.to_string()),
@@ -3681,8 +3695,8 @@ fn send_direct_vote_to_configured_proposer(
     )
     .map_err(|error| error.to_string())?;
 
-    let handshake =
-        build_local_handshake(config).map_err(|error| format!("build direct vote handshake: {error}"))?;
+    let handshake = build_local_handshake_with_extra_capabilities(config, &["direct-vote"])
+        .map_err(|error| format!("build direct vote handshake: {error}"))?;
     send_consensus_message(&mut stream, &handshake)
         .map_err(|error| format!("send direct vote handshake: {error}"))?;
     send_consensus_message(&mut stream, response)
@@ -5176,6 +5190,8 @@ fn handle_messages(
                         let peer_identity =
                             peer_identity_key(&node_id, announced_validator_address.as_deref());
                         let local_identity = local_peer_identity(&config);
+                        let direct_vote_session =
+                            capabilities.iter().any(|capability| capability == "direct-vote");
 
                         info!(
                             "p2p",
@@ -5297,6 +5313,31 @@ fn handle_messages(
                                                     &mut peers,
                                                     &existing_key,
                                                 );
+                                                if direct_vote_session {
+                                                    if let Some(peer) = peers.get_mut(&peer_address)
+                                                    {
+                                                        peer.node_id = Some(node_id.clone());
+                                                        peer.version = Some(version.clone());
+                                                        peer.capabilities = capabilities.clone();
+                                                        peer.public_address =
+                                                            normalized_public_address.clone();
+                                                        peer.validator_address =
+                                                            announced_validator_address.clone();
+                                                        if !genesis_hash.trim().is_empty() {
+                                                            peer.genesis_hash =
+                                                                genesis_hash.clone();
+                                                        }
+                                                    }
+                                                    info!(
+                                                        "p2p",
+                                                        "Duplicate direct vote session allowed to drain",
+                                                        "node_id" => node_id.clone(),
+                                                        "kept_address" => existing_key.clone(),
+                                                        "direct_vote_peer" => peer_address.clone(),
+                                                        "validator_address" => announced_validator_address.clone().unwrap_or_default()
+                                                    );
+                                                    continue;
+                                                }
                                                 warn!(
                                                     "p2p",
                                                     "Duplicate peer session detected; keeping stable connection",
@@ -7061,7 +7102,8 @@ mod tests {
         apply_block_batch, apply_block_if_new, background_poll_interval,
         best_connected_validator_height, block_sync_min_serve_interval_secs,
         block_sync_request_range, block_sync_request_range_with_overlap,
-        block_sync_response_policy, build_local_handshake, build_local_status_message,
+        block_sync_response_policy, build_local_handshake,
+        build_local_handshake_with_extra_capabilities, build_local_status_message,
         bypasses_shared_message_queue, cache_peer_state, cache_pending_block,
         canonical_genesis_hash, canonical_validator_public_address, chain_has_block_sync_overlap,
         chain_snapshot_clone_allowed, collect_known_peer_addresses,
@@ -7527,6 +7569,24 @@ mod tests {
         let handshake = build_local_handshake(&config).expect("handshake should sign");
 
         verify_handshake_pq_signature(&handshake).expect("handshake signature should verify");
+    }
+
+    #[test]
+    fn direct_vote_handshake_capability_is_signed_and_verifiable() {
+        configure_canonical_genesis_path_for_tests();
+        let mut config = NodeConfig::default();
+        config.p2p.node_name = "genesisval1".to_string();
+        config.node.validator_address = "synv1local".to_string();
+
+        let handshake = build_local_handshake_with_extra_capabilities(&config, &["direct-vote"])
+            .expect("direct vote handshake should sign");
+
+        verify_handshake_pq_signature(&handshake).expect("direct vote handshake should verify");
+        if let NetworkMessage::Handshake { capabilities, .. } = handshake {
+            assert!(capabilities.iter().any(|capability| capability == "direct-vote"));
+        } else {
+            panic!("expected handshake");
+        }
     }
 
     #[test]
