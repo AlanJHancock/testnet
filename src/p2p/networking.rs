@@ -1021,6 +1021,85 @@ fn configured_validator_public_address_map(
     }
 
     let dials = configured_validator_p2p_dials(config);
+    let active_filter = validators.iter().cloned().collect::<HashSet<_>>();
+    let configured_validators = config
+        .node
+        .allowed_validator_addresses
+        .iter()
+        .map(|address| address.trim().to_string())
+        .filter(|address| !address.is_empty())
+        .collect::<Vec<_>>();
+    let genesis_validators = if configured_validators.is_empty() {
+        canonical_genesis()
+            .ok()
+            .map(|genesis| {
+                genesis
+                    .validators()
+                    .iter()
+                    .map(|validator| validator.operator_address.trim().to_string())
+                    .filter(|address| !address.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let ordered_validators = if configured_validators.is_empty() {
+        genesis_validators
+    } else {
+        configured_validators
+    };
+    let ordered_mapped_pairs = if !ordered_validators.is_empty()
+        && dials.len() == ordered_validators.len()
+    {
+        dials
+            .iter()
+            .cloned()
+            .zip(ordered_validators.iter().cloned())
+            .filter(|(_, validator)| active_filter.contains(validator))
+            .collect::<Vec<_>>()
+    } else if !ordered_validators.is_empty() && dials.len() + 1 == ordered_validators.len() {
+        let local_validator = announced_validator_address(config)
+            .map(|address| address.trim().to_string())
+            .filter(|address| !address.is_empty())
+            .filter(|address| ordered_validators.iter().any(|validator| validator == address));
+        if let Some(local_validator) = local_validator {
+            let peer_validators = ordered_validators
+                .iter()
+                .filter(|validator| *validator != &local_validator)
+                .cloned()
+                .collect::<Vec<_>>();
+            if peer_validators.len() == dials.len() {
+                dials
+                    .iter()
+                    .cloned()
+                    .zip(peer_validators)
+                    .filter(|(_, validator)| active_filter.contains(validator))
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    if !ordered_mapped_pairs.is_empty() {
+        return ordered_mapped_pairs
+            .into_iter()
+            .flat_map(|(dial, validator)| {
+                let mut entries = Vec::new();
+                entries.push((dial.clone(), validator.clone()));
+                let host = peer_socket_host(&dial);
+                if !host.trim().is_empty() {
+                    entries.push((format!("{host}:{VALIDATOR_P2P_PORT}"), validator));
+                }
+                entries
+            })
+            .collect();
+    }
+
     let mapped_pairs = if dials.len() == validators.len() {
         dials.into_iter().zip(validators).collect::<Vec<_>>()
     } else if dials.len() + 1 == validators.len() {
@@ -7821,6 +7900,24 @@ mod tests {
             Some(&"synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx".to_string())
         );
         assert!(!address_map.contains_key("62.146.182.209:5622"));
+
+        let active_without_val4_val5 = [
+            "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
+            "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt",
+            "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re",
+            "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+        let active_address_map =
+            configured_validator_public_address_map(&config, &active_without_val4_val5);
+        assert_eq!(
+            active_address_map.get("157.173.192.45:5622"),
+            Some(&"synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx".to_string())
+        );
+        assert!(!active_address_map.contains_key("73.79.66.255:5622"));
+        assert!(!active_address_map.contains_key("194.163.183.166:5622"));
 
         let peer = PeerConnection {
             address: "73.79.66.255:5622".to_string(),
