@@ -3779,7 +3779,10 @@ fn configured_public_address_for_validator(
     };
 
     configured_validator_public_address_map(config, &active_validator_addresses)
-        .remove(validator_address)
+        .into_iter()
+        .find_map(|(public_address, mapped_validator)| {
+            (mapped_validator == validator_address).then_some(public_address)
+        })
 }
 
 fn handle_vote_request_message(
@@ -7107,8 +7110,9 @@ mod tests {
         bypasses_shared_message_queue, cache_peer_state, cache_pending_block,
         canonical_genesis_hash, canonical_validator_public_address, chain_has_block_sync_overlap,
         chain_snapshot_clone_allowed, collect_known_peer_addresses,
-        configured_validator_public_address_map, connected_validator_participants,
-        current_bootstrap_refresh_interval, current_timestamp, dial_with_timeout,
+        configured_public_address_for_validator, configured_validator_public_address_map,
+        connected_validator_participants, current_bootstrap_refresh_interval, current_timestamp,
+        dial_with_timeout,
         disconnect_peer_after_poisoned_write, dispatch_peer_message,
         ensure_peer_status_allows_chain_data, handle_status_message, hydrate_peer_from_cache,
         local_node_runs_validator_consensus, local_peer_identity, merge_peer_state_from_existing,
@@ -8054,6 +8058,20 @@ mod tests {
         assert_eq!(
             active_subset_address_map.get("157.173.192.45:5622"),
             Some(&"synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx".to_string())
+        );
+        assert_eq!(
+            configured_public_address_for_validator(
+                &active_subset_config,
+                "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx"
+            ),
+            Some("157.173.192.45:5622".to_string())
+        );
+        assert_eq!(
+            configured_public_address_for_validator(
+                &active_subset_config,
+                "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
+            ),
+            None
         );
         assert!(!active_subset_address_map.contains_key("73.79.66.255:5622"));
         assert!(!active_subset_address_map.contains_key("194.163.183.166:5622"));
