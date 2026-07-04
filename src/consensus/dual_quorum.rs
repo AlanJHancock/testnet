@@ -545,7 +545,14 @@ impl DualQuorumConsensus {
         let mut qc_threshold_reported = false;
         while Instant::now() < deadline {
             self.apply_recorded_equivocations();
-            votes.retain(|vote| self.vote_is_eligible(vote));
+            votes.retain(|vote| {
+                self.vote_is_eligible_for_collection(
+                    vote,
+                    block_hash,
+                    epoch_number,
+                    round_number,
+                )
+            });
 
             let pending_votes =
                 Self::snapshot_network_votes(block_hash, epoch_number, round_number);
@@ -595,7 +602,9 @@ impl DualQuorumConsensus {
         );
 
         self.apply_recorded_equivocations();
-        votes.retain(|vote| self.vote_is_eligible(vote));
+        votes.retain(|vote| {
+            self.vote_is_eligible_for_collection(vote, block_hash, epoch_number, round_number)
+        });
         let final_quorum_met = self.has_commit_quorum(&active_validators, &votes);
         if final_quorum_met && !qc_threshold_reported {
             timing_trace::emit(
@@ -1308,7 +1317,7 @@ impl DualQuorumConsensus {
             {
                 continue;
             }
-            let accepted_prior_round_recovery_vote = if Self::has_equivocation_evidence(
+            if Self::has_equivocation_evidence(
                 &vote.validator_address,
                 vote.epoch_number,
                 vote.block_index,
@@ -1325,7 +1334,6 @@ impl DualQuorumConsensus {
                         "vote_round" => vote.round_number,
                         "collection_round" => round_number
                     );
-                    true
                 } else {
                 warn!(
                     "consensus",
@@ -1338,17 +1346,16 @@ impl DualQuorumConsensus {
                 );
                 continue;
                 }
-            } else {
-                false
-            };
+            }
             if !expected_validators.contains(&vote.validator_address) {
                 continue;
             }
-            if accepted_prior_round_recovery_vote {
-                if !self.vote_validator_is_active(&vote) {
-                    continue;
-                }
-            } else if !self.vote_is_eligible(&vote) {
+            if !self.vote_is_eligible_for_collection(
+                &vote,
+                block_hash,
+                epoch_number,
+                round_number,
+            ) {
                 continue;
             }
             if !seen_validators.insert(vote.validator_address.clone()) {
@@ -2853,6 +2860,36 @@ impl DualQuorumConsensus {
         self.vote_validator_is_active(vote)
     }
 
+    fn vote_is_eligible_for_collection(
+        &self,
+        vote: &Vote,
+        block_hash: &str,
+        epoch_number: u64,
+        round_number: u64,
+    ) -> bool {
+        if vote.block_hash != block_hash
+            || vote.epoch_number != epoch_number
+            || vote.round_number > round_number
+        {
+            return false;
+        }
+
+        if !self.vote_validator_is_active(vote) {
+            return false;
+        }
+
+        if Self::has_equivocation_evidence(
+            &vote.validator_address,
+            vote.epoch_number,
+            vote.block_index,
+            vote.round_number,
+        ) {
+            return vote.round_number < round_number;
+        }
+
+        self.vote_is_eligible(vote)
+    }
+
     fn vote_validator_is_active(&self, vote: &Vote) -> bool {
         consensus_membership_validators(self.validator_manager.get_active_validators())
             .into_iter()
@@ -4227,6 +4264,8 @@ mod tests {
             vec![prior_round_vote],
         );
 
+        assert_eq!(votes.len(), 2);
+        votes.retain(|vote| consensus.vote_is_eligible_for_collection(&vote, &block.hash, 12, 4));
         assert_eq!(votes.len(), 2);
         assert!(votes.iter().any(|vote| {
             vote.validator_address == "validator2" && vote.round_number == 2
