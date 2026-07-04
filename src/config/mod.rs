@@ -47,6 +47,14 @@ pub struct NetworkConfig {
     pub persistent_peers: Vec<String>,
     #[serde(default)]
     pub additional_dial_targets: Vec<String>,
+    #[serde(default)]
+    pub validator_vpn_transports: Vec<ValidatorVpnTransportConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct ValidatorVpnTransportConfig {
+    pub validator_address: String,
+    pub dial_address: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -319,6 +327,7 @@ impl Default for NodeConfig {
                 bootstrap_dns_records: vec![],
                 persistent_peers: vec![],
                 additional_dial_targets: vec![],
+                validator_vpn_transports: vec![],
             },
             blockchain: BlockchainConfig {
                 block_time: 2,

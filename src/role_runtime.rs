@@ -829,8 +829,8 @@ fn is_validator_profile(profile: Option<&RoleProfile>) -> bool {
 
 fn local_validator_is_consensus_authorized(config: &NodeConfig) -> bool {
     let validator_address = resolve_local_validator_address(config);
-    if config.node.strict_validator_allowlist && is_validator_allowed(config, &validator_address) {
-        return true;
+    if config.node.strict_validator_allowlist && !is_validator_allowed(config, &validator_address) {
+        return false;
     }
 
     consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
@@ -865,8 +865,7 @@ fn should_require_state_sync_before_join(
         return false;
     }
 
-    let validator_address = resolve_local_validator_address(config);
-    if config.node.strict_validator_allowlist && is_validator_allowed(config, &validator_address) {
+    if local_validator_is_consensus_authorized(config) {
         return false;
     }
 
@@ -3334,13 +3333,68 @@ mod tests {
     }
 
     #[test]
-    fn allowlisted_validator_starts_consensus() {
+    fn allowlisted_validator_waits_for_active_membership_before_consensus() {
         let mut config = NodeConfig::default();
         config.node.validator_address = "synv1genesis".to_string();
         config.node.strict_validator_allowlist = true;
         config.node.allowed_validator_addresses = vec!["synv1genesis".to_string()];
 
+        assert!(!should_start_consensus(
+            &config,
+            Some(NodeRole::Validator.profile())
+        ));
+    }
+
+    #[test]
+    fn active_validator_starts_consensus() {
+        let address = "synv1activeconsensusgate";
+        let _ = VALIDATOR_MANAGER.register_validator(ValidatorRegistration {
+            address: address.to_string(),
+            public_key: "test-active-consensus-key".to_string(),
+            name: "active consensus gate".to_string(),
+            stake_amount: 50_000_000_000_000,
+            submitted_at: now_ts(),
+            registration_tx_hash: "test-active-consensus-gate".to_string(),
+        });
+        let _ = VALIDATOR_MANAGER.approve_validator(address);
+        VALIDATOR_MANAGER.update_validator_stake(address, 50_000_000_000_000);
+
+        let mut config = NodeConfig::default();
+        config.node.validator_address = address.to_string();
+        config.node.strict_validator_allowlist = true;
+        config.node.allowed_validator_addresses = vec![address.to_string()];
+
         assert!(should_start_consensus(
+            &config,
+            Some(NodeRole::Validator.profile())
+        ));
+    }
+
+    #[test]
+    fn active_validator_not_on_strict_allowlist_does_not_start_consensus() {
+        let address = "synv1activebutnotallowlisted";
+        let _ = VALIDATOR_MANAGER.register_validator(ValidatorRegistration {
+            address: address.to_string(),
+            public_key: "test-active-not-allowlisted-key".to_string(),
+            name: "active not allowlisted".to_string(),
+            stake_amount: 50_000_000_000_000,
+            submitted_at: now_ts(),
+            registration_tx_hash: "test-active-not-allowlisted".to_string(),
+        });
+        let _ = VALIDATOR_MANAGER.approve_validator(address);
+        VALIDATOR_MANAGER.update_validator_stake(address, 50_000_000_000_000);
+
+        let mut config = NodeConfig::default();
+        config.node.validator_address = address.to_string();
+        config.node.strict_validator_allowlist = true;
+        config.node.allowed_validator_addresses = vec!["synv1canonicalactive".to_string()];
+        config.validator.state_sync_before_join = true;
+
+        assert!(!should_start_consensus(
+            &config,
+            Some(NodeRole::Validator.profile())
+        ));
+        assert!(should_require_state_sync_before_join(
             &config,
             Some(NodeRole::Validator.profile())
         ));
@@ -3381,7 +3435,7 @@ mod tests {
     }
 
     #[test]
-    fn static_validator_does_not_block_on_public_join_sync_gate() {
+    fn allowlisted_non_active_validator_still_requires_join_sync_gate() {
         let mut config = NodeConfig::default();
         config.validator.state_sync_before_join = true;
         config.node.auto_register_validator = false;
@@ -3389,7 +3443,7 @@ mod tests {
         config.node.strict_validator_allowlist = true;
         config.node.allowed_validator_addresses = vec!["synv1genesis".to_string()];
 
-        assert!(!should_require_state_sync_before_join(
+        assert!(should_require_state_sync_before_join(
             &config,
             Some(NodeRole::Validator.profile())
         ));

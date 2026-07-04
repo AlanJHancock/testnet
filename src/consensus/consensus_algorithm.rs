@@ -48,8 +48,6 @@ fn get_chain_path() -> String {
 const VALIDATOR_REGISTRY_PATH: &str = "data/validator_registry.json";
 const VERBOSE_CONSENSUS_LOGS: bool = false;
 const POST_COMMIT_PARENT_PROPAGATION_GRACE_MILLIS: u64 = 250;
-const MAX_BLOCK_TIMESTAMP_CATCH_UP_STEP_SECS: u64 = 300;
-const MAX_BLOCK_TIMESTAMP_REANCHOR_DRIFT_SECS: u64 = 86_400;
 const SAFE_HEAD_CATCHUP_WITHOUT_MESH_RESET_BLOCKS: u64 = 1;
 const DEFAULT_MAX_CHAIN_SNAPSHOT_CLONE_HEIGHT: u64 = 50_000;
 const PROPOSAL_TRANSACTION_MAX_AGE_SECS: u64 = 3_600;
@@ -2178,22 +2176,14 @@ impl ProofOfSynergy {
         current_timestamp_secs: u64,
     ) -> u64 {
         let target_timestamp = previous_block_timestamp_secs.saturating_add(block_time_secs.max(1));
-        if current_timestamp_secs
-            > previous_block_timestamp_secs.saturating_add(MAX_BLOCK_TIMESTAMP_REANCHOR_DRIFT_SECS)
-        {
-            return current_timestamp_secs.max(target_timestamp);
-        }
-        let max_catch_up_timestamp = previous_block_timestamp_secs
-            .saturating_add(block_time_secs.max(MAX_BLOCK_TIMESTAMP_CATCH_UP_STEP_SECS));
 
         // The block timestamp is user-facing launch metadata as well as a
         // consensus input. Preserve normal cadence when production is healthy,
-        // but allow bounded wall-clock catch-up after stalls or recovery work.
-        // A cap equal to the target block interval keeps stale timestamps stale
-        // forever once drift exists.
-        target_timestamp
-            .max(current_timestamp_secs)
-            .min(max_catch_up_timestamp)
+        // but reanchor to wall time after stalls or recovery work. Stepping by
+        // a synthetic catch-up chunk (for example 300 seconds per block) makes
+        // wall-clock block production look broken even after consensus has
+        // recovered.
+        target_timestamp.max(current_timestamp_secs)
     }
 
     fn next_block_pacing_anchor(block_timestamp_secs: u64, block_time_secs: u64) -> SystemTime {
@@ -3940,15 +3930,22 @@ mod tests {
     }
 
     #[test]
-    fn bounded_consensus_timestamp_caps_large_wall_clock_catchup() {
+    fn bounded_consensus_timestamp_reanchors_large_wall_clock_gap() {
         let previous_timestamp = 1_000;
         let next_timestamp =
             ProofOfSynergy::bounded_consensus_timestamp(previous_timestamp, 4, 2_000);
 
-        assert_eq!(
-            next_timestamp.saturating_sub(previous_timestamp),
-            MAX_BLOCK_TIMESTAMP_CATCH_UP_STEP_SECS
-        );
+        assert_eq!(next_timestamp, 2_000);
+    }
+
+    #[test]
+    fn bounded_consensus_timestamp_does_not_repeat_synthetic_catchup_steps() {
+        let first_after_recovery = ProofOfSynergy::bounded_consensus_timestamp(1_000, 2, 2_000);
+        let next_block =
+            ProofOfSynergy::bounded_consensus_timestamp(first_after_recovery, 2, 2_002);
+
+        assert_eq!(first_after_recovery, 2_000);
+        assert_eq!(next_block.saturating_sub(first_after_recovery), 2);
     }
 
     #[test]

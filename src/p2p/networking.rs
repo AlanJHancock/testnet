@@ -1028,14 +1028,35 @@ fn configured_validator_public_address_map(
     config: &NodeConfig,
     active_validator_addresses: &HashSet<String>,
 ) -> HashMap<String, String> {
-    let validators =
-        configured_vote_target_validator_addresses(config, active_validator_addresses);
+    let validators = configured_vote_target_validator_addresses(config, active_validator_addresses);
     if validators.is_empty() {
         return HashMap::new();
     }
 
-    let dials = configured_validator_p2p_dials(config);
     let active_filter = validators.iter().cloned().collect::<HashSet<_>>();
+    let mut stable_validator_targets = config
+        .network
+        .persistent_peers
+        .iter()
+        .chain(config.network.additional_dial_targets.iter())
+        .filter_map(|target| normalize_validator_address_target(target))
+        .filter(|validator| active_filter.contains(validator))
+        .map(|validator| (validator.clone(), validator))
+        .collect::<HashMap<_, _>>();
+    for transport in &config.network.validator_vpn_transports {
+        if let Some(validator) = normalize_validator_address_target(&transport.validator_address) {
+            if active_filter.contains(&validator) {
+                stable_validator_targets
+                    .entry(validator.clone())
+                    .or_insert_with(|| validator);
+            }
+        }
+    }
+    if !stable_validator_targets.is_empty() {
+        return stable_validator_targets;
+    }
+
+    let dials = configured_validator_p2p_dials(config);
     let configured_validators = config
         .node
         .allowed_validator_addresses
@@ -1058,7 +1079,9 @@ fn configured_validator_public_address_map(
     if !configured_validators.is_empty() {
         ordered_validator_candidates.push(configured_validators.clone());
     }
-    if let Some(testnet_order) = configured_testnet_validator_dial_order(&configured_validators, &dials) {
+    if let Some(testnet_order) =
+        configured_testnet_validator_dial_order(&configured_validators, &dials)
+    {
         if !ordered_validator_candidates
             .iter()
             .any(|candidate| candidate == &testnet_order)
@@ -1086,7 +1109,11 @@ fn configured_validator_public_address_map(
             let local_validator = announced_validator_address(config)
                 .map(|address| address.trim().to_string())
                 .filter(|address| !address.is_empty())
-                .filter(|address| ordered_validators.iter().any(|validator| validator == address));
+                .filter(|address| {
+                    ordered_validators
+                        .iter()
+                        .any(|validator| validator == address)
+                });
             if let Some(local_validator) = local_validator {
                 let peer_validators = ordered_validators
                     .iter()
@@ -1213,6 +1240,13 @@ fn recover_peer_validator_address_for_vote_target(
         .into_iter()
         .flatten()
     {
+        if let Some(validator_address) = normalize_validator_address_target(candidate) {
+            if active_validator_addresses.is_empty()
+                || active_validator_addresses.contains(&validator_address)
+            {
+                return Some(validator_address);
+            }
+        }
         let Some(parsed) = parse_bootnode_dial_address(candidate) else {
             continue;
         };
@@ -2125,20 +2159,20 @@ fn resolve_bootstrap_dial_targets(config: &NodeConfig) -> Vec<String> {
 
     for bootnode in &config.network.bootnodes {
         if let Some(dial) = parse_bootnode_dial_address(bootnode) {
-            if is_assigned_synergy_dial_address(&dial) {
+            if peer_target_allowed_by_local_scope(config, &dial) {
                 targets.insert(dial);
             }
         }
     }
 
     for dial in resolve_dns_bootstrap_targets(&config.network.bootstrap_dns_records) {
-        if is_assigned_synergy_dial_address(&dial) {
+        if peer_target_allowed_by_local_scope(config, &dial) {
             targets.insert(dial);
         }
     }
 
     for dial in resolve_seed_server_targets(&config.network.seed_servers) {
-        if is_assigned_synergy_dial_address(&dial) {
+        if peer_target_allowed_by_local_scope(config, &dial) {
             targets.insert(dial);
         }
     }
@@ -2149,10 +2183,8 @@ fn resolve_bootstrap_dial_targets(config: &NodeConfig) -> Vec<String> {
         .iter()
         .chain(config.network.additional_dial_targets.iter())
     {
-        if let Some(parsed) = parse_bootnode_dial_address(dial) {
-            if is_assigned_synergy_dial_address(&parsed) {
-                targets.insert(parsed);
-            }
+        if let Some(target) = normalize_peer_target(config, dial) {
+            targets.insert(target);
         }
     }
 
@@ -2171,8 +2203,13 @@ fn self_dial_aliases(config: &NodeConfig) -> HashSet<String> {
 
     if let Some(address) = parse_bootnode_dial_address(&config.p2p.public_address) {
         aliases.insert(address);
+    } else if let Some(address) = normalize_validator_address_target(&config.p2p.public_address) {
+        aliases.insert(address);
     }
     if let Some(address) = parse_bootnode_dial_address(&config.p2p.listen_address) {
+        aliases.insert(address);
+    }
+    if let Some(address) = announced_validator_address(config) {
         aliases.insert(address);
     }
 
@@ -2187,6 +2224,9 @@ fn self_dial_aliases(config: &NodeConfig) -> HashSet<String> {
 }
 
 fn is_self_dial_target(config: &NodeConfig, dial: &str) -> bool {
+    if let Some(validator_address) = normalize_validator_address_target(dial) {
+        return self_dial_aliases(config).contains(&validator_address);
+    }
     let Some(normalized) = parse_bootnode_dial_address(dial) else {
         return false;
     };
@@ -2261,8 +2301,11 @@ fn status_ready_validator_addresses(
             if peer.quarantined || peer.consensus_duties_disabled {
                 continue;
             }
-            let recovered_validator =
-                recover_peer_validator_address_for_vote_target(config, peer, &active_validator_addresses);
+            let recovered_validator = recover_peer_validator_address_for_vote_target(
+                config,
+                peer,
+                &active_validator_addresses,
+            );
             let recently_seen_configured_validator = recovered_validator.is_some()
                 && now.saturating_sub(peer.last_seen) <= STALE_VALIDATOR_STATUS_SECS;
             if !peer_has_remote_status(peer) && !recently_seen_configured_validator {
@@ -2672,21 +2715,21 @@ fn fetch_seed_server_targets(
                         for bootnode in payload.bootnodes {
                             if bootnode.reachable.unwrap_or(true) {
                                 let dial = format!("{}:{}", bootnode.hostname, bootnode.port);
-                                if is_assigned_synergy_dial_address(&dial) {
+                                if is_assigned_or_validator_vpn_dial_address(&dial) {
                                     out.insert(dial);
                                 }
                             }
                         }
                         for value in payload.dnsaddr_bootstrap {
                             if let Some(dial) = parse_dnsaddr_multiaddr_to_dial_address(&value) {
-                                if is_assigned_synergy_dial_address(&dial) {
+                                if is_assigned_or_validator_vpn_dial_address(&dial) {
                                     out.insert(dial);
                                 }
                             }
                         }
                         for peer in payload.peers {
                             if let Some(dial) = parse_bootnode_dial_address(&peer) {
-                                if is_assigned_synergy_dial_address(&dial) {
+                                if is_assigned_or_validator_vpn_dial_address(&dial) {
                                     out.insert(dial);
                                 }
                             }
@@ -2945,7 +2988,17 @@ impl P2PNetwork {
     }
 
     pub fn connect_to_peer(&self, address: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let peer_address = address.to_string();
+        let peer_address = normalize_peer_target(&self.config, address)
+            .unwrap_or_else(|| address.trim().to_string());
+        let Some(transport_address) = resolve_peer_transport_address(&self.config, &peer_address)
+        else {
+            warn!(
+                "p2p",
+                "Failed to resolve peer transport address",
+                "peer" => peer_address.clone()
+            );
+            return Ok(());
+        };
         if !reserve_outbound_dial(
             &self.outbound_dial_registry,
             &self.connected_peers,
@@ -2964,7 +3017,7 @@ impl P2PNetwork {
         let cleanup_address = peer_address.clone();
 
         let spawned = spawn_named_thread("p2p-connect-peer", move || {
-            match dial_with_timeout(&peer_address, std::time::Duration::from_secs(5)) {
+            match dial_with_timeout(&transport_address, std::time::Duration::from_secs(5)) {
                 Ok(stream) => {
                     if let Err(e) = handle_outgoing_connection(
                         stream,
@@ -2979,7 +3032,13 @@ impl P2PNetwork {
                     }
                 }
                 Err(e) => {
-                    warn!("p2p", "Failed to dial peer", "peer" => peer_address, "error" => e.to_string());
+                    warn!(
+                        "p2p",
+                        "Failed to dial peer",
+                        "peer" => peer_address,
+                        "transport" => transport_address,
+                        "error" => e.to_string()
+                    );
                 }
             }
             release_outbound_dial(&dial_registry, &cleanup_address);
@@ -3699,8 +3758,10 @@ fn send_direct_vote_to_configured_proposer(
     proposer_public_address: &str,
     response: &NetworkMessage,
 ) -> Result<(), String> {
+    let transport_address = resolve_peer_transport_address(config, proposer_public_address)
+        .ok_or_else(|| format!("no transport route for {proposer_public_address}"))?;
     let mut stream = dial_with_timeout(
-        proposer_public_address,
+        &transport_address,
         Duration::from_millis(CONSENSUS_DIRECT_VOTE_DIAL_TIMEOUT_MILLIS),
     )
     .map_err(|error| error.to_string())?;
@@ -5203,8 +5264,9 @@ fn handle_messages(
                         let peer_identity =
                             peer_identity_key(&node_id, announced_validator_address.as_deref());
                         let local_identity = local_peer_identity(&config);
-                        let direct_vote_session =
-                            capabilities.iter().any(|capability| capability == "direct-vote");
+                        let direct_vote_session = capabilities
+                            .iter()
+                            .any(|capability| capability == "direct-vote");
 
                         info!(
                             "p2p",
@@ -5880,7 +5942,7 @@ fn handle_messages(
                         // Attempt to dial new peers (best-effort).
                         let max_peers = config.network.max_peers as usize;
                         for addr in peer_addresses {
-                            let Some(addr) = parse_bootnode_dial_address(&addr) else {
+                            let Some(addr) = normalize_peer_target(&config, &addr) else {
                                 debug!(
                                     "p2p",
                                     "Ignoring non-dialable peer discovery address",
@@ -5889,9 +5951,6 @@ fn handle_messages(
                                 );
                                 continue;
                             };
-                            if !is_assigned_synergy_dial_address(&addr) {
-                                continue;
-                            }
                             if is_self_dial_target(&config, &addr) {
                                 continue;
                             }
@@ -6129,6 +6188,66 @@ fn dial_with_timeout(peer: &str, timeout: std::time::Duration) -> io::Result<Tcp
     Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "No resolved addresses")))
 }
 
+fn normalize_validator_address_target(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.starts_with("synv1")
+        && !value.contains(':')
+        && value.len() >= 12
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        Some(value.to_string())
+    } else {
+        None
+    }
+}
+
+fn validator_vpn_transport_for_target(
+    config: &NodeConfig,
+    validator_address: &str,
+) -> Option<String> {
+    let validator_address = normalize_validator_address_target(validator_address)?;
+    config
+        .network
+        .validator_vpn_transports
+        .iter()
+        .find_map(|transport| {
+            let configured_validator =
+                normalize_validator_address_target(&transport.validator_address)?;
+            if configured_validator == validator_address {
+                parse_bootnode_dial_address(&transport.dial_address)
+            } else {
+                None
+            }
+        })
+}
+
+fn resolve_peer_transport_address(config: &NodeConfig, target: &str) -> Option<String> {
+    if let Some(validator_address) = normalize_validator_address_target(target) {
+        validator_vpn_transport_for_target(config, &validator_address)
+    } else {
+        parse_bootnode_dial_address(target)
+    }
+}
+
+fn normalize_peer_target(config: &NodeConfig, value: &str) -> Option<String> {
+    if let Some(validator_address) = normalize_validator_address_target(value) {
+        if self_dial_aliases(config).contains(&validator_address) {
+            return Some(validator_address);
+        }
+        if peer_target_allowed_by_local_scope(config, &validator_address)
+            && validator_vpn_transport_for_target(config, &validator_address).is_some()
+        {
+            return Some(validator_address);
+        }
+        return None;
+    }
+
+    let parsed = parse_bootnode_dial_address(value)?;
+    peer_target_allowed_by_local_scope(config, &parsed).then_some(parsed)
+}
+
 fn collect_known_peer_addresses(
     connected_peers: &PeersArc,
     discovered_dial_targets: &DialTargetsArc,
@@ -6136,10 +6255,8 @@ fn collect_known_peer_addresses(
 ) -> Vec<String> {
     let mut out = HashSet::<String>::new();
 
-    if is_assigned_synergy_dial_address(&config.p2p.public_address) {
-        if let Some(address) = parse_bootnode_dial_address(&config.p2p.public_address) {
-            out.insert(address);
-        }
+    if let Some(address) = normalize_peer_target(config, &config.p2p.public_address) {
+        out.insert(address);
     }
 
     for dial in config
@@ -6148,19 +6265,14 @@ fn collect_known_peer_addresses(
         .iter()
         .chain(config.network.additional_dial_targets.iter())
     {
-        if is_assigned_synergy_dial_address(dial) {
-            if let Some(address) = parse_bootnode_dial_address(dial) {
-                out.insert(address);
-            }
+        if let Some(address) = normalize_peer_target(config, dial) {
+            out.insert(address);
         }
     }
 
     if let Ok(discovered) = discovered_dial_targets.lock() {
         for dial in discovered.iter() {
-            if !is_assigned_synergy_dial_address(dial) {
-                continue;
-            }
-            if let Some(address) = parse_bootnode_dial_address(dial) {
+            if let Some(address) = normalize_peer_target(config, dial) {
                 out.insert(address);
             }
         }
@@ -6177,17 +6289,13 @@ fn collect_known_peer_addresses(
                 continue;
             }
             if let Some(pub_addr) = peer.public_address.as_ref() {
-                if is_assigned_synergy_dial_address(pub_addr) {
-                    if let Some(address) = parse_bootnode_dial_address(pub_addr) {
-                        out.insert(address);
-                        continue;
-                    }
+                if let Some(address) = normalize_peer_target(config, pub_addr) {
+                    out.insert(address);
+                    continue;
                 }
             }
-            if peer.direction == ConnectionDirection::Outgoing
-                && is_assigned_synergy_dial_address(&peer.address)
-            {
-                if let Some(address) = parse_bootnode_dial_address(&peer.address) {
+            if peer.direction == ConnectionDirection::Outgoing {
+                if let Some(address) = normalize_peer_target(config, &peer.address) {
                     out.insert(address);
                 }
             }
@@ -6212,6 +6320,48 @@ fn is_assigned_synergy_dial_address(value: &str) -> bool {
         .trim_end_matches(']')
         .to_ascii_lowercase();
     is_public_synergy_advertise_host(&host)
+}
+
+fn is_assigned_or_validator_vpn_dial_address(value: &str) -> bool {
+    is_assigned_synergy_dial_address(value) || is_validator_vpn_dial_address(value)
+}
+
+fn local_validator_vpn_peer_scope(config: &NodeConfig) -> bool {
+    local_node_runs_validator_consensus(config)
+        && !config.network.validator_vpn_transports.is_empty()
+}
+
+fn peer_target_allowed_by_local_scope(config: &NodeConfig, value: &str) -> bool {
+    if local_validator_vpn_peer_scope(config) {
+        normalize_validator_address_target(value).is_some()
+            || is_validator_vpn_relayer_dial_address(value)
+    } else {
+        normalize_validator_address_target(value).is_some()
+            || is_assigned_or_validator_vpn_dial_address(value)
+    }
+}
+
+fn is_validator_vpn_dial_address(value: &str) -> bool {
+    validator_vpn_dial_octets(value)
+        .map(|octets| octets[0] == 10 && octets[1] == 69)
+        .unwrap_or(false)
+}
+
+fn is_validator_vpn_relayer_dial_address(value: &str) -> bool {
+    validator_vpn_dial_octets(value)
+        .map(|octets| octets[0] == 10 && octets[1] == 69 && octets[2] == 0)
+        .unwrap_or(false)
+}
+
+fn validator_vpn_dial_octets(value: &str) -> Option<[u8; 4]> {
+    let normalized = parse_bootnode_dial_address(value)?;
+    let (host, _port) = normalized.rsplit_once(':')?;
+    host.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::Ipv4Addr>()
+        .ok()
+        .map(|addr| addr.octets())
 }
 
 fn is_public_synergy_advertise_host(host: &str) -> bool {
@@ -7068,6 +7218,16 @@ fn dial_peer_async(
     message_sender: mpsc::Sender<(String, NetworkMessage)>,
     config: NodeConfig,
 ) -> Result<(), ()> {
+    let peer_address = normalize_peer_target(&config, &peer_address)
+        .unwrap_or_else(|| peer_address.trim().to_string());
+    let Some(transport_address) = resolve_peer_transport_address(&config, &peer_address) else {
+        debug!(
+            "p2p",
+            "Skipping discovered peer without transport route",
+            "peer" => peer_address
+        );
+        return Ok(());
+    };
     if !reserve_outbound_dial(
         &dial_registry,
         &connected_peers,
@@ -7081,7 +7241,7 @@ fn dial_peer_async(
     let cleanup_address_for_thread = cleanup_address.clone();
     let dial_registry_for_thread = Arc::clone(&dial_registry);
     let spawned = spawn_named_thread("p2p-discovery-dial", move || {
-        match dial_with_timeout(&peer_address, std::time::Duration::from_secs(5)) {
+        match dial_with_timeout(&transport_address, std::time::Duration::from_secs(5)) {
             Ok(stream) => {
                 if let Err(e) = handle_outgoing_connection(
                     stream,
@@ -7096,7 +7256,13 @@ fn dial_peer_async(
                 }
             }
             Err(e) => {
-                debug!("p2p", "Discovered peer dial error", "error" => e.to_string());
+                debug!(
+                    "p2p",
+                    "Discovered peer dial error",
+                    "peer" => peer_address,
+                    "transport" => transport_address,
+                    "error" => e.to_string()
+                );
             }
         }
         release_outbound_dial(&dial_registry_for_thread, &cleanup_address_for_thread);
@@ -7118,9 +7284,9 @@ mod tests {
         bypasses_shared_message_queue, cache_peer_state, cache_pending_block,
         canonical_genesis_hash, canonical_validator_public_address, chain_has_block_sync_overlap,
         chain_snapshot_clone_allowed, collect_known_peer_addresses,
-        configured_public_address_for_validator, configured_validator_public_address_map,
-        connected_validator_participants, current_bootstrap_refresh_interval, current_timestamp,
-        dial_with_timeout,
+        configured_public_address_for_validator, configured_validator_p2p_dials,
+        configured_validator_public_address_map, connected_validator_participants,
+        current_bootstrap_refresh_interval, current_timestamp, dial_with_timeout,
         disconnect_peer_after_poisoned_write, dispatch_peer_message,
         ensure_peer_status_allows_chain_data, handle_status_message, hydrate_peer_from_cache,
         local_node_runs_validator_consensus, local_peer_identity, merge_peer_state_from_existing,
@@ -7133,9 +7299,8 @@ mod tests {
         should_disconnect_for_status_genesis_mismatch, should_prune_stale_peer,
         should_request_missing_blocks, status_ready_validator_addresses,
         status_ready_validator_addresses_with_local_duty_gate, status_ready_validator_participants,
-        status_sync_batch,
-        support_peer_sync_request_is_too_deep, validate_vote_request_extends_local_tip,
-        validator_status_genesis_grace_remaining_secs,
+        status_sync_batch, support_peer_sync_request_is_too_deep,
+        validate_vote_request_extends_local_tip, validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_handshake_pq_signature,
         vote_request_parent_sync_range, ConnectionDirection, DialTargetsArc, DuplicateResolution,
         PeerConnection, PeerEntryGuard, BACKGROUND_SYNC_POLL_MILLIS,
@@ -7148,7 +7313,7 @@ mod tests {
         VALIDATOR_SUPPORT_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS,
     };
     use crate::block::{Block, BlockChain};
-    use crate::config::NodeConfig;
+    use crate::config::{NodeConfig, ValidatorVpnTransportConfig};
     use crate::consensus::dual_quorum::{DualQuorumConsensus, QuorumCertificate, Vote};
     use crate::consensus::validator_keys::{
         consensus_algorithm_label, load_local_validator_keypair,
@@ -7595,7 +7760,9 @@ mod tests {
 
         verify_handshake_pq_signature(&handshake).expect("direct vote handshake should verify");
         if let NetworkMessage::Handshake { capabilities, .. } = handshake {
-            assert!(capabilities.iter().any(|capability| capability == "direct-vote"));
+            assert!(capabilities
+                .iter()
+                .any(|capability| capability == "direct-vote"));
         } else {
             panic!("expected handshake");
         }
@@ -7914,6 +8081,137 @@ mod tests {
     }
 
     #[test]
+    fn collect_known_peer_addresses_includes_validator_vpn_targets() {
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+        config.p2p.public_address = "synv1validator7".to_string();
+        config.network.additional_dial_targets = vec![
+            "synv1validator1".to_string(),
+            "10.69.0.1:5622".to_string(),
+            "10.69.10.1:5622".to_string(),
+            "192.168.1.2:5622".to_string(),
+        ];
+        config.network.validator_vpn_transports = vec![
+            ValidatorVpnTransportConfig {
+                validator_address: "synv1validator1".to_string(),
+                dial_address: "10.69.10.1:5622".to_string(),
+            },
+            ValidatorVpnTransportConfig {
+                validator_address: "synv1validator2".to_string(),
+                dial_address: "10.69.10.2:5622".to_string(),
+            },
+        ];
+        let connected_peers = Arc::new(Mutex::new(HashMap::new()));
+        let discovered_targets: DialTargetsArc = Arc::new(Mutex::new(vec![
+            "synv1validator2".to_string(),
+            "10.69.10.2:5622".to_string(),
+            "172.16.1.2:5622".to_string(),
+        ]));
+
+        let addresses =
+            collect_known_peer_addresses(&connected_peers, &discovered_targets, &config);
+
+        assert!(addresses.contains(&"synv1validator7".to_string()));
+        assert!(addresses.contains(&"synv1validator1".to_string()));
+        assert!(addresses.contains(&"synv1validator2".to_string()));
+        assert!(addresses.contains(&"10.69.0.1:5622".to_string()));
+        assert!(!addresses.contains(&"10.69.10.1:5622".to_string()));
+        assert!(!addresses.contains(&"10.69.10.2:5622".to_string()));
+        assert!(!addresses.contains(&"192.168.1.2:5622".to_string()));
+        assert!(!addresses.contains(&"172.16.1.2:5622".to_string()));
+    }
+
+    #[test]
+    fn collect_known_peer_addresses_excludes_public_targets_for_vpn_validator() {
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+        config.p2p.public_address = "synv1validator7".to_string();
+        config.network.additional_dial_targets = vec![
+            "genesisval1.synergy-network.io:5622".to_string(),
+            "synv1validator1".to_string(),
+            "10.69.10.1:5622".to_string(),
+            "10.69.0.1:5622".to_string(),
+        ];
+        config.network.validator_vpn_transports = vec![
+            ValidatorVpnTransportConfig {
+                validator_address: "synv1validator1".to_string(),
+                dial_address: "10.69.10.1:5622".to_string(),
+            },
+            ValidatorVpnTransportConfig {
+                validator_address: "synv1validator2".to_string(),
+                dial_address: "10.69.10.2:5622".to_string(),
+            },
+        ];
+
+        let mut peers = HashMap::new();
+        peers.insert(
+            "public-validator".to_string(),
+            PeerConnection {
+                address: "62.146.182.208:5622".to_string(),
+                direction: ConnectionDirection::Outgoing,
+                public_address: Some("genesisval2.synergy-network.io:5622".to_string()),
+                validator_address: Some("synv1public".to_string()),
+                connected_at: 0,
+                last_seen: 0,
+                blocks_sent: 0,
+                blocks_received: 0,
+                txs_sent: 0,
+                txs_received: 0,
+                stream: None,
+                node_id: Some("testnet-public".to_string()),
+                version: None,
+                capabilities: Vec::new(),
+                last_known_height: 0,
+                best_block_hash: String::new(),
+                genesis_hash: String::new(),
+                status_received_at: None,
+                quarantined: false,
+                consensus_duties_disabled: false,
+                recovery_state: None,
+            },
+        );
+        let connected_peers = Arc::new(Mutex::new(peers));
+        let discovered_targets: DialTargetsArc = Arc::new(Mutex::new(vec![
+            "genesisval3.synergy-network.io:5622".to_string(),
+            "synv1validator2".to_string(),
+            "10.69.10.2:5622".to_string(),
+        ]));
+
+        let addresses =
+            collect_known_peer_addresses(&connected_peers, &discovered_targets, &config);
+
+        assert!(addresses.contains(&"synv1validator7".to_string()));
+        assert!(addresses.contains(&"synv1validator1".to_string()));
+        assert!(addresses.contains(&"synv1validator2".to_string()));
+        assert!(addresses.contains(&"10.69.0.1:5622".to_string()));
+        assert!(!addresses.contains(&"10.69.10.1:5622".to_string()));
+        assert!(!addresses.contains(&"10.69.10.2:5622".to_string()));
+        assert!(!addresses.contains(&"genesisval1.synergy-network.io:5622".to_string()));
+        assert!(!addresses.contains(&"genesisval2.synergy-network.io:5622".to_string()));
+        assert!(!addresses.contains(&"genesisval3.synergy-network.io:5622".to_string()));
+    }
+
+    #[test]
+    fn configured_validator_dials_exclude_validator_vpn_transport_routes() {
+        let mut config = NodeConfig::default();
+        config.network.persistent_peers = vec![
+            "genesisval1.synergy-network.io:5622".to_string(),
+            "10.69.0.1:5622".to_string(),
+            "10.69.10.1:5622".to_string(),
+            "10.69.11.2:5622".to_string(),
+            "10.69.10.3:5623".to_string(),
+            "192.168.1.2:5622".to_string(),
+        ];
+
+        let dials = configured_validator_p2p_dials(&config);
+
+        assert_eq!(
+            dials,
+            vec!["genesisval1.synergy-network.io:5622".to_string()]
+        );
+    }
+
+    #[test]
     fn vote_target_identity_recovers_from_configured_validator_public_address() {
         let validators = vec![
             "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string(),
@@ -7994,8 +8292,7 @@ mod tests {
         let active_validator_addresses = validators.iter().cloned().collect::<HashSet<_>>();
         let mut config = NodeConfig::default();
         config.node.allowed_validator_addresses = validators;
-        config.node.validator_address =
-            "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string();
+        config.node.validator_address = "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string();
         config.p2p.public_address = "62.146.182.209:5622".to_string();
         config.network.persistent_peers = vec![
             "62.146.182.207:5622".to_string(),
@@ -8061,8 +8358,10 @@ mod tests {
             "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string();
         active_subset_config.p2p.public_address = "62.146.182.209:5622".to_string();
         active_subset_config.network.persistent_peers = config.network.persistent_peers.clone();
-        let active_subset_address_map =
-            configured_validator_public_address_map(&active_subset_config, &active_without_val4_val5);
+        let active_subset_address_map = configured_validator_public_address_map(
+            &active_subset_config,
+            &active_without_val4_val5,
+        );
         assert_eq!(
             active_subset_address_map.get("157.173.192.45:5622"),
             Some(&"synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx".to_string())
@@ -8121,8 +8420,7 @@ mod tests {
     #[test]
     fn vote_target_identity_recovers_from_genesis_validator_node_id() {
         configure_canonical_genesis_path_for_tests();
-        let validator =
-            "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f".to_string();
+        let validator = "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f".to_string();
         let active_validator_addresses = [validator.clone()].into_iter().collect::<HashSet<_>>();
         let config = NodeConfig::default();
         let peer = PeerConnection {
@@ -8221,6 +8519,46 @@ mod tests {
         assert!(targets.contains(&"genesisval5.synergy-network.io:5622".to_string()));
 
         let _ = fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn resolve_bootstrap_dial_targets_excludes_public_targets_for_vpn_validator() {
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+        config.node.validator_address = "synv1validator7".to_string();
+        config.p2p.public_address = "synv1validator7".to_string();
+        config.network.validator_vpn_transports = vec![
+            ValidatorVpnTransportConfig {
+                validator_address: "synv1validator1".to_string(),
+                dial_address: "10.69.10.1:5622".to_string(),
+            },
+            ValidatorVpnTransportConfig {
+                validator_address: "synv1validator2".to_string(),
+                dial_address: "10.69.10.2:5622".to_string(),
+            },
+        ];
+        config.network.bootnodes = vec![
+            "genesisval1.synergy-network.io:5622".to_string(),
+            "10.69.10.1:5622".to_string(),
+        ];
+        config.network.additional_dial_targets = vec![
+            "genesisval2.synergy-network.io:5622".to_string(),
+            "synv1validator1".to_string(),
+            "10.69.0.1:5622".to_string(),
+            "synv1validator7".to_string(),
+        ];
+        config.network.persistent_peers = vec!["synv1validator2".to_string()];
+
+        let targets = resolve_bootstrap_dial_targets(&config);
+
+        assert_eq!(
+            targets,
+            vec![
+                "10.69.0.1:5622".to_string(),
+                "synv1validator1".to_string(),
+                "synv1validator2".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -10151,8 +10489,7 @@ mod tests {
         let active_validator_addresses = validators.iter().cloned().collect::<HashSet<_>>();
         let mut config = NodeConfig::default();
         config.node.allowed_validator_addresses = validators;
-        config.node.validator_address =
-            "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string();
+        config.node.validator_address = "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string();
         config.network.persistent_peers = vec![
             "62.146.182.207:5622".to_string(),
             "62.146.182.208:5622".to_string(),
@@ -10191,12 +10528,8 @@ mod tests {
 
         let status_ready = status_ready_validator_addresses(&config, &connected_peers);
 
-        assert!(status_ready.contains(
-            &"synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string()
-        ));
-        assert!(status_ready.contains(
-            &"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string()
-        ));
+        assert!(status_ready.contains(&"synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string()));
+        assert!(status_ready.contains(&"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string()));
         let peers = connected_peers.lock().expect("peer map should lock");
         let peer = peers
             .get("73.79.66.255:5622")
