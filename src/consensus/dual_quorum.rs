@@ -1358,7 +1358,7 @@ impl DualQuorumConsensus {
             ) {
                 continue;
             }
-            if !seen_validators.insert(vote.validator_address.clone()) {
+            if seen_validators.contains(&vote.validator_address) {
                 continue;
             }
 
@@ -1370,7 +1370,11 @@ impl DualQuorumConsensus {
             }
         }
 
-        votes.extend(cached_votes);
+        for vote in cached_votes {
+            if seen_validators.insert(vote.validator_address.clone()) {
+                votes.push(vote);
+            }
+        }
 
         let mut handles = Vec::new();
         for (vote, cache_key) in uncached_votes {
@@ -1406,6 +1410,9 @@ impl DualQuorumConsensus {
                 continue;
             }
 
+            if !seen_validators.insert(vote.validator_address.clone()) {
+                continue;
+            }
             self.cache_verified_vote_signature(cache_key);
             votes.push(vote);
         }
@@ -4269,6 +4276,57 @@ mod tests {
         assert_eq!(votes.len(), 2);
         assert!(votes.iter().any(|vote| {
             vote.validator_address == "validator2" && vote.round_number == 2
+        }));
+    }
+
+    #[test]
+    fn merge_remote_votes_does_not_let_invalid_duplicate_block_valid_vote() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        let validator_manager =
+            approved_validator_manager(&["validator1", "validator2", "validator3"]);
+        let pqc_manager = Arc::new(Mutex::new(PQCManager::new()));
+        let consensus = DualQuorumConsensus::new(
+            Arc::clone(&validator_manager),
+            Arc::clone(&pqc_manager),
+            true,
+            1,
+            1,
+            8,
+            5,
+        );
+
+        let block = signed_block(10, 1, "validator1");
+        let local_vote =
+            DualQuorumConsensus::create_vote_for_validator("validator1", &block, 12, 4)
+                .expect("local vote should be created");
+        let mut invalid_vote =
+            DualQuorumConsensus::create_vote_for_validator("validator2", &block, 12, 2)
+                .expect("invalid candidate vote should be created");
+        invalid_vote.signature.signature_data = b"invalid".to_vec();
+        let valid_vote =
+            DualQuorumConsensus::create_vote_for_validator("validator2", &block, 12, 3)
+                .expect("valid duplicate candidate vote should be created");
+
+        let expected_validators = ["validator1", "validator2", "validator3"]
+            .into_iter()
+            .map(String::from)
+            .collect::<BTreeSet<_>>();
+        let mut votes = vec![local_vote];
+
+        consensus.merge_remote_votes(
+            &mut votes,
+            &expected_validators,
+            &block.hash,
+            12,
+            4,
+            vec![invalid_vote, valid_vote],
+        );
+
+        assert_eq!(votes.len(), 2);
+        assert!(votes.iter().any(|vote| {
+            vote.validator_address == "validator2" && vote.round_number == 3
         }));
     }
 
