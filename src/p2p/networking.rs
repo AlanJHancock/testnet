@@ -3631,7 +3631,17 @@ fn send_vote_to_requester(
                 );
                 return Ok(proposer_public_address);
             }
-            Err(error) => failed_peers.push((proposer_public_address, error)),
+            Err(error) => {
+                warn!(
+                    "p2p",
+                    "Direct proposer vote path failed; falling back",
+                    "request_peer" => request_peer_address.to_string(),
+                    "response_peer" => proposer_public_address.clone(),
+                    "proposer" => proposer_validator_address.to_string(),
+                    "error" => error.clone()
+                );
+                failed_peers.push((proposer_public_address, error));
+            }
         }
     }
 
@@ -5242,6 +5252,29 @@ fn handle_messages(
                                             build_cached_peer_state(peer).map(|(_, state)| state)
                                         });
 
+                                    if direct_vote_session {
+                                        if let Some(peer) = peers.get_mut(&peer_address) {
+                                            peer.node_id = Some(node_id.clone());
+                                            peer.version = Some(version.clone());
+                                            peer.capabilities = capabilities.clone();
+                                            peer.public_address = normalized_public_address.clone();
+                                            peer.validator_address =
+                                                announced_validator_address.clone();
+                                            if !genesis_hash.trim().is_empty() {
+                                                peer.genesis_hash = genesis_hash.clone();
+                                            }
+                                        }
+                                        info!(
+                                            "p2p",
+                                            "Duplicate direct vote session allowed to drain",
+                                            "node_id" => node_id.clone(),
+                                            "kept_address" => existing_key.clone(),
+                                            "direct_vote_peer" => peer_address.clone(),
+                                            "validator_address" => announced_validator_address.clone().unwrap_or_default()
+                                        );
+                                        continue;
+                                    }
+
                                     if let (
                                         Some((
                                             existing_direction,
@@ -5316,31 +5349,6 @@ fn handle_messages(
                                                     &mut peers,
                                                     &existing_key,
                                                 );
-                                                if direct_vote_session {
-                                                    if let Some(peer) = peers.get_mut(&peer_address)
-                                                    {
-                                                        peer.node_id = Some(node_id.clone());
-                                                        peer.version = Some(version.clone());
-                                                        peer.capabilities = capabilities.clone();
-                                                        peer.public_address =
-                                                            normalized_public_address.clone();
-                                                        peer.validator_address =
-                                                            announced_validator_address.clone();
-                                                        if !genesis_hash.trim().is_empty() {
-                                                            peer.genesis_hash =
-                                                                genesis_hash.clone();
-                                                        }
-                                                    }
-                                                    info!(
-                                                        "p2p",
-                                                        "Duplicate direct vote session allowed to drain",
-                                                        "node_id" => node_id.clone(),
-                                                        "kept_address" => existing_key.clone(),
-                                                        "direct_vote_peer" => peer_address.clone(),
-                                                        "validator_address" => announced_validator_address.clone().unwrap_or_default()
-                                                    );
-                                                    continue;
-                                                }
                                                 warn!(
                                                     "p2p",
                                                     "Duplicate peer session detected; keeping stable connection",
