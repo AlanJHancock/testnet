@@ -1295,7 +1295,7 @@ impl DualQuorumConsensus {
         for vote in pending_votes {
             if vote.block_hash != block_hash
                 || vote.epoch_number != epoch_number
-                || vote.round_number != round_number
+                || vote.round_number > round_number
             {
                 continue;
             }
@@ -1800,7 +1800,7 @@ impl DualQuorumConsensus {
             if vote.block_index != block.block_index {
                 return Err("QC vote signs a different block height".to_string());
             }
-            if vote.epoch_number != qc.epoch_number || vote.round_number != qc.round_number {
+            if vote.epoch_number != qc.epoch_number || vote.round_number > qc.round_number {
                 return Err("QC vote context does not match QC epoch/round".to_string());
             }
             if !seen.insert(vote.validator_address.clone()) {
@@ -2838,11 +2838,24 @@ impl DualQuorumConsensus {
     }
 
     fn snapshot_network_votes(block_hash: &str, epoch_number: u64, round_number: u64) -> Vec<Vote> {
-        let key = Self::vote_mailbox_key(block_hash, epoch_number, round_number);
+        let prefix = format!("{epoch_number}:");
+        let suffix = format!(":{block_hash}");
         NETWORK_VOTE_MAILBOX
             .lock()
             .ok()
-            .and_then(|mailbox| mailbox.get(&key).cloned())
+            .map(|mailbox| {
+                mailbox
+                    .iter()
+                    .filter_map(|(key, votes)| {
+                        let vote_round = key
+                            .strip_prefix(&prefix)
+                            .and_then(|round_and_hash| round_and_hash.strip_suffix(&suffix))
+                            .and_then(|round| round.parse::<u64>().ok())?;
+                        (vote_round <= round_number).then_some(votes.clone())
+                    })
+                    .flatten()
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -4124,6 +4137,53 @@ mod tests {
 
         assert_eq!(votes.len(), 3);
         assert!(consensus.vote_signature_cache_contains(&remote_cache_key));
+    }
+
+    #[test]
+    fn merge_remote_votes_accepts_prior_round_same_block_recovery_votes() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        let validator_manager =
+            approved_validator_manager(&["validator1", "validator2", "validator3"]);
+        let pqc_manager = Arc::new(Mutex::new(PQCManager::new()));
+        let consensus = DualQuorumConsensus::new(
+            Arc::clone(&validator_manager),
+            Arc::clone(&pqc_manager),
+            true,
+            1,
+            1,
+            8,
+            5,
+        );
+
+        let block = signed_block(10, 1, "validator1");
+        let local_vote =
+            DualQuorumConsensus::create_vote_for_validator("validator1", &block, 12, 4)
+                .expect("local vote should be created");
+        let prior_round_vote =
+            DualQuorumConsensus::create_vote_for_validator("validator2", &block, 12, 2)
+                .expect("prior round vote should be created");
+
+        let expected_validators = ["validator1", "validator2", "validator3"]
+            .into_iter()
+            .map(String::from)
+            .collect::<BTreeSet<_>>();
+        let mut votes = vec![local_vote];
+
+        consensus.merge_remote_votes(
+            &mut votes,
+            &expected_validators,
+            &block.hash,
+            12,
+            4,
+            vec![prior_round_vote],
+        );
+
+        assert_eq!(votes.len(), 2);
+        assert!(votes.iter().any(|vote| {
+            vote.validator_address == "validator2" && vote.round_number == 2
+        }));
     }
 
     #[test]
