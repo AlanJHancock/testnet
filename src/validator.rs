@@ -1,4 +1,8 @@
 use crate::address::generate_cluster_address;
+use crate::consensus::synergy_score::{
+    calculate_validator_epoch_score, ValidatorEpochEvidence, ValidatorSynergyScoreProfile,
+};
+use crate::consensus::validator_scoring_params::ValidatorScoringConfig;
 use crate::genesis::canonical_genesis;
 use crate::token::TokenManager;
 use crate::transaction::Transaction;
@@ -279,20 +283,27 @@ impl Validator {
     }
 
     pub fn calculate_synergy_score(&mut self) {
-        // Calculate synergy score based on multiple factors
-        let uptime_factor = self.uptime_percentage / 100.0;
-        let accuracy_factor = self.task_accuracy / 100.0;
-        let reputation_factor = self.reputation_score / 100.0;
-        let stake_factor = (self.stake_amount as f64 / self.min_stake_required as f64).min(2.0);
-        let slashing_factor = (1.0 - self.slashing_penalty.clamp(0.0, 1.0)).max(0.0);
+        let current_score_bps = percent_score_to_bps(self.synergy_score);
+        let timestamp = Self::current_timestamp();
+        let profile = ValidatorSynergyScoreProfile::existing(
+            self.address.clone(),
+            None,
+            self.cluster_address.clone(),
+            current_score_bps,
+            current_score_bps,
+            1,
+            0,
+            timestamp,
+        );
+        let evidence = ValidatorEpochEvidence::from_validator(self, 0);
 
-        // Weighted average of factors
-        self.synergy_score = (uptime_factor * 0.3
-            + accuracy_factor * 0.3
-            + reputation_factor * 0.2
-            + stake_factor * 0.2)
-            * 100.0
-            * slashing_factor;
+        if let Ok(computation) = calculate_validator_epoch_score(
+            &profile,
+            &evidence,
+            &ValidatorScoringConfig::default(),
+        ) {
+            self.synergy_score = computation.scorecard.score_after_bps as f64 / 100.0;
+        }
     }
 
     pub fn is_eligible(&self, min_stake: u64) -> bool {
@@ -778,6 +789,14 @@ impl ValidatorRegistry {
         let registry: ValidatorRegistry = serde_json::from_str(&content)?;
         Ok(registry)
     }
+}
+
+fn percent_score_to_bps(score: f64) -> u64 {
+    if !score.is_finite() {
+        return 0;
+    }
+    let clamped = score.clamp(0.0, 100.0);
+    (clamped * 100.0).round() as u64
 }
 
 fn epoch_cluster_rank(epoch: u64, address: &str) -> [u8; 32] {

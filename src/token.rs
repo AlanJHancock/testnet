@@ -11,9 +11,11 @@ use std::sync::{Arc, Mutex};
 pub const SNRG_SYMBOL: &str = "SNRG";
 pub const FEE_COLLECTOR_ADDRESS: &str = "synf1y42p7p6jrxrg472ts6jea5y34yg7tgj6qg2j";
 pub const DAO_TREASURY_ADDRESS: &str = "synw1pqwglyfjynrxt7ms9nvggntav6x3lx9c2l4r";
+pub const TREASURY_RECOVERY_WALLET_ADDRESS: &str = "synw1syv3tnu6r2y5e3u9f0wqmxhavylfxena0z92";
 pub const VALIDATOR_REWARDS_POOL_ADDRESS: &str = "synw1at607x35rkmsmvgz069nx0j3q5km93krrvge";
 pub const RELIABILITY_BONUS_POOL_ADDRESS: &str = "synw1mct6a33g7hyt6jzkjdwrvxzf644lc4vytqcz";
 pub const BURN_SINK_ADDRESS: &str = "synb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqjk5cn";
+pub const NETWORK_BURN_ADDRESS: &str = crate::address::NETWORK_BURN_ADDRESS;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Token {
@@ -48,6 +50,27 @@ pub struct TokenTransfer {
     pub timestamp: u64,
     pub tx_hash: String,
     pub block_height: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BurnRecordKind {
+    ExplicitBurn,
+    BurnAddressTransfer,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BurnRecord {
+    pub burner: String,
+    pub asset_id: String,
+    pub amount: u64,
+    pub burn_address: String,
+    pub fee_charged_nwei: u64,
+    pub supply_reduced: bool,
+    pub tx_hash: String,
+    pub block_height: u64,
+    pub kind: BurnRecordKind,
+    pub timestamp: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +113,8 @@ pub struct TokenManager {
     transfers: Arc<Mutex<Vec<TokenTransfer>>>,
     stakes: Arc<Mutex<HashMap<String, Vec<StakingInfo>>>>, // validator -> stakes
     total_supply: Arc<Mutex<HashMap<String, u128>>>,       // token_symbol -> total_supply
+    burn_ledger: Arc<Mutex<HashMap<String, u128>>>,        // token_symbol -> burned/locked amount
+    burn_records: Arc<Mutex<Vec<BurnRecord>>>,
 }
 
 impl Token {
@@ -148,6 +173,8 @@ impl TokenManager {
             transfers: Arc::new(Mutex::new(Vec::new())),
             stakes: Arc::new(Mutex::new(HashMap::new())),
             total_supply: Arc::new(Mutex::new(HashMap::new())),
+            burn_ledger: Arc::new(Mutex::new(HashMap::new())),
+            burn_records: Arc::new(Mutex::new(Vec::new())),
         };
 
         // Initialize with SNRG token
@@ -402,6 +429,21 @@ impl TokenManager {
         token_symbol: &str,
         amount: u64,
     ) -> Result<String, String> {
+        self.burn_tokens_with_metadata(from, token_symbol, amount, 0, None, 0)
+    }
+
+    pub fn burn_tokens_with_metadata(
+        &self,
+        from: &str,
+        token_symbol: &str,
+        amount: u64,
+        fee_charged_nwei: u64,
+        tx_hash: Option<String>,
+        block_height: u64,
+    ) -> Result<String, String> {
+        if crate::address::is_network_burn_address(from) {
+            return Err("Network burn address cannot initiate burns".to_string());
+        }
         if let Ok(mut tokens) = self.tokens.lock() {
             if let Some(token) = tokens.get(token_symbol) {
                 if !token.burnable {
@@ -438,6 +480,21 @@ impl TokenManager {
             if let Some(token) = tokens.get_mut(token_symbol) {
                 token.total_supply = new_total.to_string();
             }
+
+            self.record_burn(BurnRecord {
+                burner: from.to_string(),
+                asset_id: token_symbol.to_string(),
+                amount,
+                burn_address: NETWORK_BURN_ADDRESS.to_string(),
+                fee_charged_nwei,
+                supply_reduced: true,
+                tx_hash: tx_hash.unwrap_or_else(|| {
+                    Self::generate_tx_hash(from, NETWORK_BURN_ADDRESS, token_symbol, amount, fee_charged_nwei)
+                }),
+                block_height,
+                kind: BurnRecordKind::ExplicitBurn,
+                timestamp: Token::current_timestamp(),
+            })?;
 
             Ok(format!("Burned {} {} from {}", amount, token_symbol, from))
         } else {
@@ -490,6 +547,9 @@ impl TokenManager {
         tx_hash: Option<String>,
         block_height: u64,
     ) -> Result<String, String> {
+        if crate::address::is_network_burn_address(from) {
+            return Err("Network burn address cannot send funds".to_string());
+        }
         if let Some(existing_hash) = tx_hash.as_deref() {
             if self.transfer_hash_exists(existing_hash) {
                 return Ok(format!("Transfer {} already processed", existing_hash));
@@ -559,6 +619,24 @@ impl TokenManager {
             }
         }
 
+        let tx_hash = tx_hash
+            .unwrap_or_else(|| Self::generate_tx_hash(from, to, token_symbol, amount, fee));
+
+        if crate::address::is_network_burn_address(to) {
+            self.record_burn(BurnRecord {
+                burner: from.to_string(),
+                asset_id: token_symbol.to_string(),
+                amount,
+                burn_address: NETWORK_BURN_ADDRESS.to_string(),
+                fee_charged_nwei: fee,
+                supply_reduced: false,
+                tx_hash: tx_hash.clone(),
+                block_height,
+                kind: BurnRecordKind::BurnAddressTransfer,
+                timestamp: Token::current_timestamp(),
+            })?;
+        }
+
         // Record transfer
         let transfer = TokenTransfer {
             from: from.to_string(),
@@ -567,8 +645,7 @@ impl TokenManager {
             amount,
             fee,
             timestamp: Token::current_timestamp(),
-            tx_hash: tx_hash
-                .unwrap_or_else(|| Self::generate_tx_hash(from, to, token_symbol, amount, fee)),
+            tx_hash,
             block_height,
         };
 
@@ -638,6 +715,60 @@ impl TokenManager {
             .unwrap_or(false)
     }
 
+    fn record_burn(&self, record: BurnRecord) -> Result<(), String> {
+        if record.amount == 0 {
+            return Err("Burn amount must be greater than zero".to_string());
+        }
+        if self
+            .burn_records
+            .lock()
+            .map(|records| records.iter().any(|existing| existing.tx_hash == record.tx_hash))
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        if let Ok(mut ledger) = self.burn_ledger.lock() {
+            let total = ledger.entry(record.asset_id.clone()).or_insert(0);
+            *total = total
+                .checked_add(record.amount as u128)
+                .ok_or_else(|| "burn ledger overflow".to_string())?;
+        } else {
+            return Err("Failed to lock burn ledger".to_string());
+        }
+
+        if let Ok(mut records) = self.burn_records.lock() {
+            records.push(record);
+            Ok(())
+        } else {
+            Err("Failed to lock burn records".to_string())
+        }
+    }
+
+    pub fn get_burned_total(&self, token_symbol: &str) -> u128 {
+        self.burn_ledger
+            .lock()
+            .ok()
+            .and_then(|ledger| ledger.get(token_symbol).copied())
+            .unwrap_or(0)
+    }
+
+    pub fn get_burn_records(&self, token_symbol: Option<&str>) -> Vec<BurnRecord> {
+        self.burn_records
+            .lock()
+            .map(|records| {
+                records
+                    .iter()
+                    .filter(|record| {
+                        token_symbol
+                            .map(|symbol| record.asset_id == symbol)
+                            .unwrap_or(true)
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn get_balance(&self, address: &str, token_symbol: &str) -> u64 {
         if let Ok(balances) = self.balances.lock() {
             if let Some(address_balances) = balances.get(address) {
@@ -655,6 +786,39 @@ impl TokenManager {
         }
     }
 
+    fn charge_snrg_fee(&self, payer: &str, fee_nwei: u64) -> Result<(), String> {
+        if fee_nwei == 0 {
+            return Ok(());
+        }
+        if crate::address::is_network_burn_address(payer) {
+            return Err("Network burn address cannot pay transaction fees".to_string());
+        }
+        if let Ok(mut balances) = self.balances.lock() {
+            let payer_balances = balances
+                .get_mut(payer)
+                .ok_or_else(|| "Fee payer balance not found".to_string())?;
+            let current = payer_balances.get(SNRG_SYMBOL).copied().unwrap_or(0);
+            if current < fee_nwei {
+                return Err("Insufficient SNRG balance for fee".to_string());
+            }
+            payer_balances.insert(SNRG_SYMBOL.to_string(), current - fee_nwei);
+
+            let collector_balances = balances
+                .entry(FEE_COLLECTOR_ADDRESS.to_string())
+                .or_insert_with(HashMap::new);
+            let collector = collector_balances.get(SNRG_SYMBOL).copied().unwrap_or(0);
+            collector_balances.insert(
+                SNRG_SYMBOL.to_string(),
+                collector
+                    .checked_add(fee_nwei)
+                    .ok_or_else(|| "FeeCollector balance overflow".to_string())?,
+            );
+            Ok(())
+        } else {
+            Err("Failed to acquire lock".to_string())
+        }
+    }
+
     pub fn stake_tokens(
         &self,
         staker: &str,
@@ -662,6 +826,11 @@ impl TokenManager {
         token_symbol: &str,
         amount: u64,
     ) -> Result<String, String> {
+        if crate::address::is_network_burn_address(staker)
+            || crate::address::is_network_burn_address(validator)
+        {
+            return Err("Network burn address cannot stake or validate".to_string());
+        }
         if !crate::address::is_valid_address(staker) {
             return Err("Invalid staker Synergy address".to_string());
         }
@@ -1004,11 +1173,8 @@ impl TokenManager {
         validator: &str,
         reward_amount: u64,
     ) -> Result<String, String> {
-        // Rewards pool address from genesis.json
-        const REWARDS_POOL: &str = "synw1qjkshj3t6whfsckefry58z9wtpqv8nxnh4ze";
-
         // First, check if rewards pool has sufficient balance
-        let pool_balance = self.get_balance(REWARDS_POOL, "SNRG");
+        let pool_balance = self.get_balance(VALIDATOR_REWARDS_POOL_ADDRESS, "SNRG");
         if pool_balance < reward_amount {
             return Err(format!(
                 "Insufficient rewards pool balance: {} < {}",
@@ -1054,7 +1220,7 @@ impl TokenManager {
 
         // Deduct total reward amount from rewards pool
         if let Ok(mut balances) = self.balances.lock() {
-            if let Some(pool_balances) = balances.get_mut(REWARDS_POOL) {
+            if let Some(pool_balances) = balances.get_mut(VALIDATOR_REWARDS_POOL_ADDRESS) {
                 let current = pool_balances.get("SNRG").unwrap_or(&0);
                 if *current < reward_amount {
                     return Err(format!(
@@ -1119,7 +1285,7 @@ impl TokenManager {
                                 to,
                                 token_symbol,
                                 amount,
-                                tx.get_fee(),
+                                tx.get_total_network_fee_u64()?,
                             );
                         }
                     }
@@ -1141,7 +1307,40 @@ impl TokenManager {
                             stake_info.get("token").and_then(|v| v.as_str()),
                             stake_info.get("amount").and_then(|v| v.as_u64()),
                         ) {
+                            self.charge_snrg_fee(&tx.sender, tx.get_total_network_fee_u64()?)?;
                             return self.stake_tokens(&tx.sender, validator, token_symbol, amount);
+                        }
+                    }
+                }
+            }
+        }
+
+        if tx
+            .data
+            .as_ref()
+            .map_or(false, |data| data.starts_with("burn:"))
+        {
+            if let Some(data_str) = &tx.data {
+                if let Some(burn_data) = data_str.strip_prefix("burn:") {
+                    if let Ok(burn_info) = serde_json::from_str::<serde_json::Value>(burn_data) {
+                        if let (Some(token_symbol), Some(amount)) = (
+                            burn_info
+                                .get("asset")
+                                .or_else(|| burn_info.get("asset_id"))
+                                .or_else(|| burn_info.get("token"))
+                                .and_then(|v| v.as_str()),
+                            burn_info.get("amount").and_then(|v| v.as_u64()),
+                        ) {
+                            let fee = tx.get_total_network_fee_u64()?;
+                            self.charge_snrg_fee(&tx.sender, fee)?;
+                            return self.burn_tokens_with_metadata(
+                                &tx.sender,
+                                token_symbol,
+                                amount,
+                                fee,
+                                Some(tx.hash()),
+                                0,
+                            );
                         }
                     }
                 }
@@ -1153,7 +1352,13 @@ impl TokenManager {
         // amount in the canonical amount field and may not include the legacy
         // token_transfer data wrapper used by the local faucet helper.
         if tx.amount > 0 && !tx.receiver.trim().is_empty() {
-            return self.transfer_tokens(&tx.sender, &tx.receiver, "SNRG", tx.amount, tx.get_fee());
+            return self.transfer_tokens(
+                &tx.sender,
+                &tx.receiver,
+                "SNRG",
+                tx.amount,
+                tx.get_total_network_fee_u64()?,
+            );
         }
 
         if tx
@@ -1196,7 +1401,7 @@ impl TokenManager {
                                 to,
                                 token_symbol,
                                 amount,
-                                tx.get_fee(),
+                                tx.get_total_network_fee_u64()?,
                                 tx.hash(),
                                 block_height,
                             );
@@ -1220,7 +1425,40 @@ impl TokenManager {
                             stake_info.get("token").and_then(|v| v.as_str()),
                             stake_info.get("amount").and_then(|v| v.as_u64()),
                         ) {
+                            self.charge_snrg_fee(&tx.sender, tx.get_total_network_fee_u64()?)?;
                             return self.stake_tokens(&tx.sender, validator, token_symbol, amount);
+                        }
+                    }
+                }
+            }
+        }
+
+        if tx
+            .data
+            .as_ref()
+            .map_or(false, |data| data.starts_with("burn:"))
+        {
+            if let Some(data_str) = &tx.data {
+                if let Some(burn_data) = data_str.strip_prefix("burn:") {
+                    if let Ok(burn_info) = serde_json::from_str::<serde_json::Value>(burn_data) {
+                        if let (Some(token_symbol), Some(amount)) = (
+                            burn_info
+                                .get("asset")
+                                .or_else(|| burn_info.get("asset_id"))
+                                .or_else(|| burn_info.get("token"))
+                                .and_then(|v| v.as_str()),
+                            burn_info.get("amount").and_then(|v| v.as_u64()),
+                        ) {
+                            let fee = tx.get_total_network_fee_u64()?;
+                            self.charge_snrg_fee(&tx.sender, fee)?;
+                            return self.burn_tokens_with_metadata(
+                                &tx.sender,
+                                token_symbol,
+                                amount,
+                                fee,
+                                Some(tx.hash()),
+                                block_height,
+                            );
                         }
                     }
                 }
@@ -1233,7 +1471,7 @@ impl TokenManager {
                 &tx.receiver,
                 "SNRG",
                 tx.amount,
-                tx.get_fee(),
+                tx.get_total_network_fee_u64()?,
                 tx.hash(),
                 block_height,
             );
@@ -1333,11 +1571,10 @@ impl TokenManager {
     /// Ensure the rewards pool has sufficient balance for validator rewards
     /// This should be called on startup to verify the pool is funded
     pub fn ensure_rewards_pool_funded(&self) -> Result<(), String> {
-        const REWARDS_POOL: &str = "synw1qjkshj3t6whfsckefry58z9wtpqv8nxnh4ze";
         const MIN_POOL_BALANCE: u64 = 1_000_000_000_000_000_000u64; // 1B SNRG minimum
         const REFILL_AMOUNT: u64 = 2_000_000_000_000_000_000u64; // 2B SNRG refill
 
-        let pool_balance = self.get_balance(REWARDS_POOL, "SNRG");
+        let pool_balance = self.get_balance(VALIDATOR_REWARDS_POOL_ADDRESS, "SNRG");
 
         if pool_balance < MIN_POOL_BALANCE {
             println!(
@@ -1346,7 +1583,7 @@ impl TokenManager {
             );
 
             // Mint tokens to rewards pool if it's empty or low
-            match self.mint_tokens(REWARDS_POOL, "SNRG", REFILL_AMOUNT) {
+            match self.mint_tokens(VALIDATOR_REWARDS_POOL_ADDRESS, "SNRG", REFILL_AMOUNT) {
                 Ok(_) => {
                     let new_balance = self.get_balance(REWARDS_POOL, "SNRG");
                     println!(
@@ -1372,7 +1609,7 @@ impl TokenManager {
 
     /// Get the rewards pool address
     pub fn get_rewards_pool_address() -> &'static str {
-        "synw1qjkshj3t6whfsckefry58z9wtpqv8nxnh4ze"
+        VALIDATOR_REWARDS_POOL_ADDRESS
     }
 
     /// Get rewards pool balance
@@ -1410,6 +1647,8 @@ impl TokenManager {
             balances: self.balances.lock().unwrap().clone(),
             transfers: self.transfers.lock().unwrap().clone(),
             stakes: self.stakes.lock().unwrap().clone(),
+            burn_ledger: self.burn_ledger.lock().unwrap().clone(),
+            burn_records: self.burn_records.lock().unwrap().clone(),
         };
 
         let json = serde_json::to_string_pretty(&state)?;
@@ -1438,6 +1677,12 @@ impl TokenManager {
 
             if let Ok(mut stakes) = self.stakes.lock() {
                 *stakes = state.stakes;
+            }
+            if let Ok(mut burn_ledger) = self.burn_ledger.lock() {
+                *burn_ledger = state.burn_ledger;
+            }
+            if let Ok(mut burn_records) = self.burn_records.lock() {
+                *burn_records = state.burn_records;
             }
         }
 
@@ -1584,6 +1829,10 @@ struct TokenState {
     balances: HashMap<String, HashMap<String, u64>>,
     transfers: Vec<TokenTransfer>,
     stakes: HashMap<String, Vec<StakingInfo>>,
+    #[serde(default)]
+    burn_ledger: HashMap<String, u128>,
+    #[serde(default)]
+    burn_records: Vec<BurnRecord>,
 }
 
 // Global token manager instance

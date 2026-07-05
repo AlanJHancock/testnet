@@ -30,6 +30,7 @@ pub mod rpc;
 pub mod sxcp;
 pub mod sync;
 pub mod synergy_types;
+pub mod sts;
 pub mod synid;
 pub mod synq;
 pub mod synq_admission;

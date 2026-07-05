@@ -14,6 +14,8 @@ pub const TARGET_ADDRESS_LEN: usize = 41;
 const CHECKSUM_LEN: usize = 6;
 /// Separator character ('1') length.
 const SEPARATOR_LEN: usize = 1;
+/// Canonical protocol burn address from Synergy testnet genesis.
+pub const NETWORK_BURN_ADDRESS: &str = "syn00000000000000000000000000000000000000";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AddressKind {
@@ -147,6 +149,9 @@ pub fn generate_validator_cluster_address(seed: &str) -> String {
 /// Returns `true` if `address` is a structurally valid Synergy Bech32m address:
 /// exactly 41 characters, starts with `syn`, and passes Bech32m checksum validation.
 pub fn is_valid_address(address: &str) -> bool {
+    if address == NETWORK_BURN_ADDRESS {
+        return true;
+    }
     if address.len() != TARGET_ADDRESS_LEN {
         return false;
     }
@@ -167,7 +172,9 @@ pub fn is_valid_cluster_address(address: &str) -> bool {
 }
 
 pub fn address_kind(address: &str) -> AddressKind {
-    if address.starts_with("synf") {
+    if address == NETWORK_BURN_ADDRESS {
+        AddressKind::BurnAddress
+    } else if address.starts_with("synf") {
         AddressKind::FeeCollector
     } else if address.starts_with("syngrp1") {
         AddressKind::ValidatorCluster
@@ -211,6 +218,10 @@ pub fn is_protocol_controlled_address(address: &str) -> bool {
             | AddressKind::BurnAddress
             | AddressKind::System
     )
+}
+
+pub fn is_network_burn_address(address: &str) -> bool {
+    address == NETWORK_BURN_ADDRESS
 }
 
 pub fn is_spendable_user_address(address: &str) -> bool {
@@ -375,6 +386,15 @@ mod tests {
         assert!(fee_collector.starts_with("synf"));
         assert!(is_protocol_controlled_address(&fee_collector));
         assert!(!is_spendable_user_address(&fee_collector));
+    }
+
+    #[test]
+    fn canonical_network_burn_address_is_protocol_controlled() {
+        assert!(is_valid_address(NETWORK_BURN_ADDRESS));
+        assert_eq!(address_kind(NETWORK_BURN_ADDRESS), AddressKind::BurnAddress);
+        assert!(is_network_burn_address(NETWORK_BURN_ADDRESS));
+        assert!(is_protocol_controlled_address(NETWORK_BURN_ADDRESS));
+        assert!(!is_spendable_user_address(NETWORK_BURN_ADDRESS));
     }
 
     #[test]

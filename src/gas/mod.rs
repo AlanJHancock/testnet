@@ -18,6 +18,214 @@ pub mod constants {
     pub const BPS_DENOMINATOR: u64 = 10_000;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransactionFeeType {
+    NativeSnrgSend,
+    TokenSend,
+    Swap,
+    Burn,
+    Mint,
+    Stake,
+    Unstake,
+    ContractCall,
+    ContractDeploy,
+    AiJobPayment,
+    SxcpCrossChainValueAction,
+    Unknown,
+}
+
+impl TransactionFeeType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeSnrgSend => "native_snrg_send",
+            Self::TokenSend => "token_send",
+            Self::Swap => "swap",
+            Self::Burn => "burn",
+            Self::Mint => "mint",
+            Self::Stake => "stake",
+            Self::Unstake => "unstake",
+            Self::ContractCall => "contract_call",
+            Self::ContractDeploy => "contract_deploy",
+            Self::AiJobPayment => "ai_job_payment",
+            Self::SxcpCrossChainValueAction => "sxcp_cross_chain_value_action",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValuationStatus {
+    NativeSnrg,
+    FixedConfig,
+    Unavailable,
+    NotRequired,
+}
+
+impl ValuationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NativeSnrg => "native_snrg",
+            Self::FixedConfig => "fixed_config",
+            Self::Unavailable => "unavailable",
+            Self::NotRequired => "not_required",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeeScheduleEntry {
+    pub tx_type: TransactionFeeType,
+    pub amount_fee_bps: u64,
+    pub min_fee_nwei: u128,
+    pub max_fee_nwei: u128,
+    pub storage_fee_enabled: bool,
+    pub valuation_required: bool,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeeSchedule {
+    pub entries: Vec<FeeScheduleEntry>,
+}
+
+impl Default for FeeSchedule {
+    fn default() -> Self {
+        Self {
+            entries: vec![
+                FeeScheduleEntry::new(TransactionFeeType::NativeSnrgSend, 2, false),
+                FeeScheduleEntry::new(TransactionFeeType::TokenSend, 3, true),
+                FeeScheduleEntry::new(TransactionFeeType::Swap, 10, true),
+                FeeScheduleEntry::new(TransactionFeeType::Burn, 1, false),
+                FeeScheduleEntry::new(TransactionFeeType::Mint, 5, true),
+                FeeScheduleEntry::new(TransactionFeeType::Stake, 0, false),
+                FeeScheduleEntry::new(TransactionFeeType::Unstake, 0, false),
+                FeeScheduleEntry::new(TransactionFeeType::ContractCall, 2, false),
+                FeeScheduleEntry::new(TransactionFeeType::ContractDeploy, 0, false)
+                    .with_storage_fee(true),
+                FeeScheduleEntry::new(TransactionFeeType::AiJobPayment, 5, true),
+                FeeScheduleEntry::new(TransactionFeeType::SxcpCrossChainValueAction, 5, true),
+                FeeScheduleEntry::new(TransactionFeeType::Unknown, 0, false),
+            ],
+        }
+    }
+}
+
+impl FeeScheduleEntry {
+    pub fn new(tx_type: TransactionFeeType, amount_fee_bps: u64, valuation_required: bool) -> Self {
+        Self {
+            tx_type,
+            amount_fee_bps,
+            min_fee_nwei: 0,
+            max_fee_nwei: u128::MAX,
+            storage_fee_enabled: false,
+            valuation_required,
+            enabled: true,
+        }
+    }
+
+    pub fn with_storage_fee(mut self, enabled: bool) -> Self {
+        self.storage_fee_enabled = enabled;
+        self
+    }
+}
+
+impl FeeSchedule {
+    pub fn entry_for(&self, tx_type: TransactionFeeType) -> FeeScheduleEntry {
+        self.entries
+            .iter()
+            .find(|entry| entry.tx_type == tx_type)
+            .cloned()
+            .unwrap_or_else(|| FeeScheduleEntry::new(TransactionFeeType::Unknown, 0, false))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkFeeInput {
+    pub tx_type: TransactionFeeType,
+    pub asset_id: String,
+    pub amount_raw: u128,
+    pub amount_snrgequivalent_nwei: u128,
+    pub valuation_source: String,
+    pub valuation_status: ValuationStatus,
+    pub gas_used: u64,
+    pub base_fee_per_gas_nwei: u64,
+    pub gas_fee_nwei: u128,
+    pub storage_fee_nwei: u128,
+    pub priority_fee_nwei: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkFeeBreakdown {
+    pub tx_type: TransactionFeeType,
+    pub asset_id: String,
+    pub amount_raw: u128,
+    pub amount_snrgequivalent_nwei: u128,
+    pub valuation_source: String,
+    pub valuation_status: ValuationStatus,
+    pub gas_used: u64,
+    pub base_fee_per_gas_nwei: u64,
+    pub gas_fee_nwei: u128,
+    pub amount_fee_bps: u64,
+    pub amount_protocol_fee_nwei: u128,
+    pub storage_fee_nwei: u128,
+    pub priority_fee_nwei: u128,
+    pub total_network_fee_nwei: u128,
+}
+
+pub fn calculate_network_fee(
+    input: NetworkFeeInput,
+    schedule: &FeeSchedule,
+) -> Result<NetworkFeeBreakdown, String> {
+    let entry = schedule.entry_for(input.tx_type);
+    if !entry.enabled {
+        return Err(format!("fee schedule entry disabled for {}", input.tx_type.as_str()));
+    }
+    if entry.amount_fee_bps > constants::BPS_DENOMINATOR {
+        return Err("amount fee bps exceeds 10000".to_string());
+    }
+
+    let amount_protocol_fee_nwei = if entry.amount_fee_bps == 0 {
+        0
+    } else if input.amount_snrgequivalent_nwei == 0
+        && matches!(input.valuation_status, ValuationStatus::Unavailable)
+    {
+        entry.min_fee_nwei
+    } else {
+        let raw = input
+            .amount_snrgequivalent_nwei
+            .checked_mul(entry.amount_fee_bps as u128)
+            .ok_or_else(|| "amount protocol fee overflow".to_string())?
+            / (constants::BPS_DENOMINATOR as u128);
+        raw.max(entry.min_fee_nwei).min(entry.max_fee_nwei)
+    };
+
+    let total_network_fee_nwei = input
+        .gas_fee_nwei
+        .checked_add(amount_protocol_fee_nwei)
+        .and_then(|value| value.checked_add(input.storage_fee_nwei))
+        .and_then(|value| value.checked_add(input.priority_fee_nwei))
+        .ok_or_else(|| "total network fee overflow".to_string())?;
+
+    Ok(NetworkFeeBreakdown {
+        tx_type: input.tx_type,
+        asset_id: input.asset_id,
+        amount_raw: input.amount_raw,
+        amount_snrgequivalent_nwei: input.amount_snrgequivalent_nwei,
+        valuation_source: input.valuation_source,
+        valuation_status: input.valuation_status,
+        gas_used: input.gas_used,
+        base_fee_per_gas_nwei: input.base_fee_per_gas_nwei,
+        gas_fee_nwei: input.gas_fee_nwei,
+        amount_fee_bps: entry.amount_fee_bps,
+        amount_protocol_fee_nwei,
+        storage_fee_nwei: input.storage_fee_nwei,
+        priority_fee_nwei: input.priority_fee_nwei,
+        total_network_fee_nwei,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NWei(pub u128);
 

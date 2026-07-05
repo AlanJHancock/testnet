@@ -1,4 +1,5 @@
 use crate::crypto::aegis_pqvm::{SYNERGY_RECEIPT_ROOT_V1, SYNERGY_STATE_ROOT_V1};
+use crate::sts::{StsSignedPayload, StsState};
 use crate::synergy_types::{Block, CanonicalSerialize, Hash, Transaction, TxId};
 use crate::synq_admission::SynQVerificationSummary;
 use crate::synq_execution::{
@@ -8,9 +9,64 @@ use crate::synq_execution::{
 use aivm_core::state::ContractState;
 use std::collections::{BTreeMap, BTreeSet};
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FeeAccumulator {
+    pub epoch: u64,
+    pub total_collected_nwei: u128,
+    pub by_tx_type: BTreeMap<String, u128>,
+    pub opened_at_height: u64,
+    pub closed_at_height: Option<u64>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FeeChargedEvent {
+    pub tx_hash: String,
+    pub block_height: u64,
+    pub epoch: u64,
+    pub payer: String,
+    pub tx_type: String,
+    pub asset_id: String,
+    pub amount_raw: u128,
+    pub amount_snrgequivalent_nwei: u128,
+    pub valuation_source: String,
+    pub valuation_status: String,
+    pub gas_used: u64,
+    pub base_fee_per_gas_nwei: u64,
+    pub gas_fee_nwei: u128,
+    pub amount_fee_bps: u64,
+    pub amount_protocol_fee_nwei: u128,
+    pub storage_fee_nwei: u128,
+    pub priority_fee_nwei: u128,
+    pub total_fee_nwei: u128,
+    pub fee_collector_address: String,
+    pub success: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BurnLedgerEntry {
+    pub asset_id: String,
+    pub total_burned_or_locked: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BurnAddressTransferEvent {
+    pub tx_hash: String,
+    pub sender: String,
+    pub asset_id: String,
+    pub amount: u128,
+    pub burn_address: String,
+    pub supply_reduced_bool: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionState {
     pub balances_nwei: BTreeMap<String, u128>,
+    pub fee_accumulators: BTreeMap<u64, FeeAccumulator>,
+    pub fee_events: Vec<FeeChargedEvent>,
+    pub burn_ledger: BTreeMap<String, BurnLedgerEntry>,
+    pub burn_events: Vec<BurnAddressTransferEvent>,
+    pub sts_state: StsState,
     pub verified_authorizations: BTreeMap<TxId, Hash>,
     pub synq_verifications: BTreeMap<TxId, SynQVerificationSummary>,
     pub synq_errors: BTreeMap<TxId, (String, String)>,
@@ -23,6 +79,11 @@ impl ExecutionState {
     pub fn new() -> Self {
         Self {
             balances_nwei: BTreeMap::new(),
+            fee_accumulators: BTreeMap::new(),
+            fee_events: Vec::new(),
+            burn_ledger: BTreeMap::new(),
+            burn_events: Vec::new(),
+            sts_state: StsState::new(),
             verified_authorizations: BTreeMap::new(),
             synq_verifications: BTreeMap::new(),
             synq_errors: BTreeMap::new(),
@@ -35,6 +96,97 @@ impl ExecutionState {
     pub fn with_balance(mut self, account: &str, amount_nwei: u128) -> Self {
         self.balances_nwei.insert(account.to_string(), amount_nwei);
         self
+    }
+
+    fn record_fee_charged(
+        &mut self,
+        tx_hash: String,
+        block_height: u64,
+        epoch: u64,
+        payer: String,
+        breakdown: &crate::gas::NetworkFeeBreakdown,
+        success: bool,
+    ) -> Result<(), String> {
+        if breakdown.total_network_fee_nwei == 0 {
+            return Ok(());
+        }
+        let accumulator = self
+            .fee_accumulators
+            .entry(epoch)
+            .or_insert_with(|| FeeAccumulator {
+                epoch,
+                total_collected_nwei: 0,
+                by_tx_type: BTreeMap::new(),
+                opened_at_height: block_height,
+                closed_at_height: None,
+                status: "open".to_string(),
+            });
+        accumulator.total_collected_nwei = accumulator
+            .total_collected_nwei
+            .checked_add(breakdown.total_network_fee_nwei)
+            .ok_or_else(|| "fee accumulator overflow".to_string())?;
+        let by_type = accumulator
+            .by_tx_type
+            .entry(breakdown.tx_type.as_str().to_string())
+            .or_insert(0);
+        *by_type = by_type
+            .checked_add(breakdown.total_network_fee_nwei)
+            .ok_or_else(|| "fee accumulator tx-type overflow".to_string())?;
+        self.fee_events.push(FeeChargedEvent {
+            tx_hash,
+            block_height,
+            epoch,
+            payer,
+            tx_type: breakdown.tx_type.as_str().to_string(),
+            asset_id: breakdown.asset_id.clone(),
+            amount_raw: breakdown.amount_raw,
+            amount_snrgequivalent_nwei: breakdown.amount_snrgequivalent_nwei,
+            valuation_source: breakdown.valuation_source.clone(),
+            valuation_status: breakdown.valuation_status.as_str().to_string(),
+            gas_used: breakdown.gas_used,
+            base_fee_per_gas_nwei: breakdown.base_fee_per_gas_nwei,
+            gas_fee_nwei: breakdown.gas_fee_nwei,
+            amount_fee_bps: breakdown.amount_fee_bps,
+            amount_protocol_fee_nwei: breakdown.amount_protocol_fee_nwei,
+            storage_fee_nwei: breakdown.storage_fee_nwei,
+            priority_fee_nwei: breakdown.priority_fee_nwei,
+            total_fee_nwei: breakdown.total_network_fee_nwei,
+            fee_collector_address: crate::token::FEE_COLLECTOR_ADDRESS.to_string(),
+            success,
+        });
+        Ok(())
+    }
+
+    fn record_burn_address_transfer(
+        &mut self,
+        tx_hash: String,
+        sender: String,
+        asset_id: String,
+        amount: u128,
+    ) -> Result<(), String> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let entry = self
+            .burn_ledger
+            .entry(asset_id.clone())
+            .or_insert_with(|| BurnLedgerEntry {
+                asset_id: asset_id.clone(),
+                total_burned_or_locked: 0,
+            });
+        entry.total_burned_or_locked = entry
+            .total_burned_or_locked
+            .checked_add(amount)
+            .ok_or_else(|| "burn ledger overflow".to_string())?;
+        self.burn_events.push(BurnAddressTransferEvent {
+            tx_hash,
+            sender,
+            asset_id,
+            amount,
+            burn_address: crate::address::NETWORK_BURN_ADDRESS.to_string(),
+            supply_reduced_bool: false,
+        });
+        Ok(())
     }
 
     pub fn mark_authorized(&mut self, tx: &Transaction) -> Result<TxId, String> {
@@ -76,6 +228,7 @@ pub struct TransactionReceipt {
     pub tx_id: TxId,
     pub status: ReceiptStatus,
     pub gas_used: u64,
+    pub fee_breakdown: Option<crate::gas::NetworkFeeBreakdown>,
     pub error: String,
     pub state_root_after: Hash,
     pub synq_verification: Option<SynQVerificationSummary>,
@@ -188,6 +341,11 @@ pub fn compute_state_root_after(state: &ExecutionState) -> Result<Hash, String> 
     #[derive(serde::Serialize)]
     struct StateRootPayload<'a> {
         balances_nwei: &'a BTreeMap<String, u128>,
+        fee_accumulators: &'a BTreeMap<u64, FeeAccumulator>,
+        fee_events: &'a [FeeChargedEvent],
+        burn_ledger: &'a BTreeMap<String, BurnLedgerEntry>,
+        burn_events: &'a [BurnAddressTransferEvent],
+        sts_state: &'a StsState,
         synq_artifacts: Vec<ArtifactRootEntry<'a>>,
         synq_contracts: &'a BTreeMap<String, SynQDeploymentRecord>,
         synq_aivm_state_root: [u8; 32],
@@ -200,6 +358,11 @@ pub fn compute_state_root_after(state: &ExecutionState) -> Result<Hash, String> 
         .collect::<Vec<_>>();
     let payload = StateRootPayload {
         balances_nwei: &state.balances_nwei,
+        fee_accumulators: &state.fee_accumulators,
+        fee_events: &state.fee_events,
+        burn_ledger: &state.burn_ledger,
+        burn_events: &state.burn_events,
+        sts_state: &state.sts_state,
         synq_artifacts,
         synq_contracts: &state.synq_contracts,
         synq_aivm_state_root: state.synq_aivm_state.state_root(),
@@ -239,6 +402,12 @@ fn execute_transaction(
     }
 
     let sender = tx.sender_uma_or_account.clone();
+    if let Some(sts_payload) =
+        crate::sts::decode_sts_payload(&tx.payload).map_err(|error| error.to_string())?
+    {
+        return execute_sts_transaction(id, tx, state, sts_payload);
+    }
+
     let receiver = tx.receiver_uma_or_account.clone();
     let total_debit = tx.amount_nwei.saturating_add(tx.max_fee_nwei);
     let sender_balance = state.balances_nwei.get(&sender).copied().unwrap_or(0);
@@ -316,6 +485,90 @@ fn execute_transaction(
         }
     };
     Ok(receipt)
+}
+
+fn execute_sts_transaction(
+    id: TxId,
+    tx: &Transaction,
+    state: &mut ExecutionState,
+    sts_payload: StsSignedPayload,
+) -> Result<TransactionReceipt, String> {
+    let sender = tx.sender_uma_or_account.clone();
+    let sender_balance = state.balances_nwei.get(&sender).copied().unwrap_or(0);
+    let fee_nwei = tx.max_fee_nwei;
+    let gas_used = tx
+        .gas_limit
+        .min(crate::sts::estimate_sts_gas(&sts_payload.tx));
+    let synq_error = state.synq_errors.get(&id).cloned();
+
+    if sender_balance < fee_nwei {
+        return Ok(TransactionReceipt {
+            tx_id: id,
+            status: ReceiptStatus::Failed,
+            gas_used,
+            error: "INSUFFICIENT_FUNDS".to_string(),
+            state_root_after: compute_state_root_after(state)?,
+            synq_verification: None,
+            synq_aivm: None,
+            synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
+            synq_error_message: synq_error.map(|(_, message)| message),
+        });
+    }
+
+    let mut candidate = state.sts_state.clone();
+    let apply_result = candidate.apply_signed_payload(&sender, &sts_payload);
+    charge_fee_to_collector(state, &sender, fee_nwei)?;
+
+    match apply_result {
+        Ok(_) => {
+            state.sts_state = candidate;
+            Ok(TransactionReceipt {
+                tx_id: id,
+                status: ReceiptStatus::Success,
+                gas_used,
+                error: String::new(),
+                state_root_after: compute_state_root_after(state)?,
+                synq_verification: None,
+                synq_aivm: None,
+                synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
+                synq_error_message: synq_error.map(|(_, message)| message),
+            })
+        }
+        Err(error) => Ok(TransactionReceipt {
+            tx_id: id,
+            status: ReceiptStatus::Failed,
+            gas_used,
+            error: error.to_string(),
+            state_root_after: compute_state_root_after(state)?,
+            synq_verification: None,
+            synq_aivm: None,
+            synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
+            synq_error_message: synq_error.map(|(_, message)| message),
+        }),
+    }
+}
+
+fn charge_fee_to_collector(
+    state: &mut ExecutionState,
+    sender: &str,
+    fee_nwei: u128,
+) -> Result<(), String> {
+    let sender_balance = state.balances_nwei.get(sender).copied().unwrap_or(0);
+    if sender_balance < fee_nwei {
+        return Err("insufficient SNRG balance for STS fee".to_string());
+    }
+    state
+        .balances_nwei
+        .insert(sender.to_string(), sender_balance - fee_nwei);
+    let collector = crate::token::FEE_COLLECTOR_ADDRESS.to_string();
+    let collector_balance = state.balances_nwei.get(&collector).copied().unwrap_or(0);
+    let next_collector_balance = collector_balance
+        .checked_add(fee_nwei)
+        .ok_or_else(|| "fee collector balance overflow".to_string())?;
+    state
+        .balances_nwei
+        .insert(collector, next_collector_balance);
+    Ok(())
 }
 
 fn current_unix_timestamp() -> u64 {
