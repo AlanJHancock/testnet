@@ -889,6 +889,12 @@ fn peer_matches_address(peer: &PeerConnection, requested_address: &str) -> bool 
             .map(str::trim)
             .filter(|value| !value.is_empty())
             == Some(requested_address)
+        || peer
+            .validator_address
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            == Some(requested_address)
 }
 
 fn peer_is_public_history_gateway(peer: &PeerConnection) -> bool {
@@ -2019,11 +2025,7 @@ fn reserve_outbound_dial(
         if peers.len() >= max_peers {
             return false;
         }
-        if peers.contains_key(target)
-            || peers.values().any(|peer| {
-                peer.address == target || peer.public_address.as_deref() == Some(target)
-            })
-        {
+        if connected_peer_key_for_address(&peers, target).is_some() {
             return false;
         }
     }
@@ -2106,6 +2108,12 @@ fn canonical_validator_public_address(
     peer_address: &str,
     announced_public_address: Option<&str>,
 ) -> Option<String> {
+    if let Some(stable_validator_address) =
+        announced_public_address.and_then(normalize_validator_address_target)
+    {
+        return Some(stable_validator_address);
+    }
+
     if let Some(peer_dial) = parse_bootnode_dial_address(peer_address) {
         if is_public_history_gateway_dial_address(&peer_dial) {
             return Some(peer_dial);
@@ -3469,10 +3477,7 @@ impl P2PNetwork {
                     }
                     let already_connected = {
                         let peers = network.connected_peers.lock().unwrap();
-                        peers.contains_key(addr)
-                            || peers
-                                .values()
-                                .any(|p| p.public_address.as_deref() == Some(addr.as_str()))
+                        connected_peer_key_for_address(&peers, addr).is_some()
                     };
                     if !already_connected {
                         let _ = network.connect_to_peer(addr);
@@ -5964,13 +5969,8 @@ fn handle_messages(
                                 let peers = connected_peers.lock().unwrap();
                                 if peers.len() >= max_peers {
                                     false
-                                } else if peers.contains_key(&addr) {
-                                    false
                                 } else {
-                                    // Also avoid redialing if the addr is already known as a public address.
-                                    !peers
-                                        .values()
-                                        .any(|p| p.public_address.as_deref() == Some(addr.as_str()))
+                                    connected_peer_key_for_address(&peers, &addr).is_none()
                                 }
                             };
                             if should_dial {
@@ -7291,14 +7291,14 @@ mod tests {
         canonical_genesis_hash, canonical_validator_public_address, chain_has_block_sync_overlap,
         chain_snapshot_clone_allowed, collect_known_peer_addresses,
         configured_public_address_for_validator, configured_validator_p2p_dials,
-        configured_validator_public_address_map, connected_validator_participants,
-        current_bootstrap_refresh_interval, current_timestamp, dial_with_timeout,
-        disconnect_peer_after_poisoned_write, dispatch_peer_message,
+        configured_validator_public_address_map, connected_peer_key_for_address,
+        connected_validator_participants, current_bootstrap_refresh_interval, current_timestamp,
+        dial_with_timeout, disconnect_peer_after_poisoned_write, dispatch_peer_message,
         ensure_peer_status_allows_chain_data, handle_status_message, hydrate_peer_from_cache,
         local_node_runs_validator_consensus, local_peer_identity, merge_peer_state_from_existing,
         parse_bootnode_dial_address, peer_has_identifying_metadata, peer_identity_key,
-        peer_is_eligible_block_sync_source, pending_incoming_connections_from_host,
-        preferred_connection_direction, receive_message,
+        peer_is_eligible_block_sync_source, peer_matches_address,
+        pending_incoming_connections_from_host, preferred_connection_direction, receive_message,
         recover_peer_validator_address_for_vote_target, resolve_bootstrap_dial_targets,
         resolve_duplicate_connection, select_block_sync_response_blocks,
         should_canonicalize_validator_public_address,
@@ -7383,6 +7383,24 @@ mod tests {
             consensus_duties_disabled: false,
             recovery_state: None,
         }
+    }
+
+    #[test]
+    fn peer_address_matching_uses_validator_identity_for_vpn_connections() {
+        let validator_address = "synv11validatorxxxxxxxxxxxxxxxxxxxx";
+        let mut peer = test_peer_with_validator_address(Some(validator_address));
+        peer.address = "10.69.10.5:58352".to_string();
+        peer.public_address = None;
+
+        assert!(peer_matches_address(&peer, validator_address));
+
+        let mut peers = HashMap::new();
+        peers.insert(peer.address.clone(), peer);
+
+        assert_eq!(
+            connected_peer_key_for_address(&peers, validator_address),
+            Some("10.69.10.5:58352".to_string())
+        );
     }
 
     #[test]
@@ -8050,6 +8068,16 @@ mod tests {
         assert_eq!(
             canonical_validator_public_address("94.72.117.108:62422", Some("94.72.117.108:5622")),
             Some("94.72.117.108:5622".to_string())
+        );
+    }
+
+    #[test]
+    fn canonical_validator_public_address_preserves_stable_validator_identity() {
+        let validator_address = "synv11validatorxxxxxxxxxxxxxxxxxxxx";
+
+        assert_eq!(
+            canonical_validator_public_address("10.69.10.5:58352", Some(validator_address)),
+            Some(validator_address.to_string())
         );
     }
 

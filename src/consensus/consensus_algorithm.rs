@@ -933,18 +933,23 @@ impl ProofOfSynergy {
                                 leader_timeout_secs,
                                 Self::current_timestamp(),
                             );
-                        let view_offset = Self::cap_view_offset_by_tip_observation(
+                        let calculated_view_offset = Self::cap_view_offset_by_tip_observation(
                             shared_view_offset,
                             last_tip_observed_at,
                             leader_timeout_secs,
                             current_time,
                         );
-                        if view_offset != 0 {
+                        // Launch recovery must not let locally observed wall-clock view offsets
+                        // split the fleet into multiple same-height proposers. Use the canonical
+                        // height schedule for live leaders, then fall back to the live set below
+                        // only when that scheduled leader is not live.
+                        let view_offset = 0;
+                        if calculated_view_offset != 0 {
                             debug!(
                                 "consensus",
-                                "Applying shared same-height leader view offset",
-                                "shared_view_offset" => shared_view_offset,
-                                "bounded_view_offset" => view_offset,
+                                "Ignoring local wall-clock view offset for canonical leader selection",
+                                "calculated_view_offset" => calculated_view_offset,
+                                "canonical_view_offset" => view_offset,
                                 "block_height" => latest_block_clone.block_index + 1
                             );
                         }
