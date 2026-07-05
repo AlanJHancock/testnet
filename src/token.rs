@@ -489,7 +489,13 @@ impl TokenManager {
                 fee_charged_nwei,
                 supply_reduced: true,
                 tx_hash: tx_hash.unwrap_or_else(|| {
-                    Self::generate_tx_hash(from, NETWORK_BURN_ADDRESS, token_symbol, amount, fee_charged_nwei)
+                    Self::generate_tx_hash(
+                        from,
+                        NETWORK_BURN_ADDRESS,
+                        token_symbol,
+                        amount,
+                        fee_charged_nwei,
+                    )
                 }),
                 block_height,
                 kind: BurnRecordKind::ExplicitBurn,
@@ -619,8 +625,8 @@ impl TokenManager {
             }
         }
 
-        let tx_hash = tx_hash
-            .unwrap_or_else(|| Self::generate_tx_hash(from, to, token_symbol, amount, fee));
+        let tx_hash =
+            tx_hash.unwrap_or_else(|| Self::generate_tx_hash(from, to, token_symbol, amount, fee));
 
         if crate::address::is_network_burn_address(to) {
             self.record_burn(BurnRecord {
@@ -722,7 +728,11 @@ impl TokenManager {
         if self
             .burn_records
             .lock()
-            .map(|records| records.iter().any(|existing| existing.tx_hash == record.tx_hash))
+            .map(|records| {
+                records
+                    .iter()
+                    .any(|existing| existing.tx_hash == record.tx_hash)
+            })
             .unwrap_or(false)
         {
             return Ok(());
@@ -1585,7 +1595,7 @@ impl TokenManager {
             // Mint tokens to rewards pool if it's empty or low
             match self.mint_tokens(VALIDATOR_REWARDS_POOL_ADDRESS, "SNRG", REFILL_AMOUNT) {
                 Ok(_) => {
-                    let new_balance = self.get_balance(REWARDS_POOL, "SNRG");
+                    let new_balance = self.get_balance(VALIDATOR_REWARDS_POOL_ADDRESS, "SNRG");
                     println!(
                         "✅ Rewards pool initialized with {} SNRG (balance: {} nWei)",
                         REFILL_AMOUNT / 1_000_000_000,

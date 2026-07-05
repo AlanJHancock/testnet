@@ -660,7 +660,7 @@ pub fn allocate_epoch_validator_rewards(
             .collect::<Vec<_>>();
         let cluster_score_total = cluster_validators
             .iter()
-            .try_fold(0u128, |acc, (_, score)| acc.checked_add(**score as u128))
+            .try_fold(0u128, |acc, (_, score)| acc.checked_add(*score as u128))
             .ok_or_else(|| "cluster validator score total overflow".to_string())?;
         let mut assigned_cluster_total = 0u128;
         for (validator_index, (validator, score)) in cluster_validators.iter().enumerate() {
@@ -668,7 +668,7 @@ pub fn allocate_epoch_validator_rewards(
                 cluster_reward.saturating_sub(assigned_cluster_total)
             } else {
                 cluster_reward
-                    .checked_mul(**score as u128)
+                    .checked_mul(*score as u128)
                     .ok_or_else(|| "validator pending reward multiplication overflow".to_string())?
                     / cluster_score_total
             };
@@ -793,12 +793,12 @@ pub fn calculate_release_coefficient(
         0
     };
 
-    if matches!(
-        performance.penalty_reason,
-        ValidatorPenaltyReason::Jailed
-    ) {
+    if matches!(performance.penalty_reason, ValidatorPenaltyReason::Jailed) {
         coefficient = coefficient.min(5_000);
-    } else if matches!(performance.penalty_reason, ValidatorPenaltyReason::MajorDowntime) {
+    } else if matches!(
+        performance.penalty_reason,
+        ValidatorPenaltyReason::MajorDowntime
+    ) {
         coefficient = coefficient.min(6_000);
     } else if matches!(
         performance.penalty_reason,
@@ -1330,7 +1330,9 @@ impl RewardLedger {
                 let ledger = self
                     .treasury_recovery_ledger
                     .entry(settlement.accountability_epoch)
-                    .or_insert_with(|| TreasuryRecoveryLedger::new(settlement.accountability_epoch));
+                    .or_insert_with(|| {
+                        TreasuryRecoveryLedger::new(settlement.accountability_epoch)
+                    });
                 let reason_codes = if settlement.reason_codes.is_empty() {
                     vec!["TREASURY_RECOVERY_RECORDED".to_string()]
                 } else {
@@ -1691,8 +1693,14 @@ mod tests {
         assert_eq!(score_reward_coefficient_bps(6_500).unwrap(), 5_000);
         assert_eq!(score_reward_coefficient_bps(5_500).unwrap(), 2_500);
         assert_eq!(score_reward_coefficient_bps(4_999).unwrap(), 0);
-        assert_eq!(effective_release_coefficient_bps(9_500, 7_000).unwrap(), 7_000);
-        assert_eq!(effective_release_coefficient_bps(6_000, 8_500).unwrap(), 6_000);
+        assert_eq!(
+            effective_release_coefficient_bps(9_500, 7_000).unwrap(),
+            7_000
+        );
+        assert_eq!(
+            effective_release_coefficient_bps(6_000, 8_500).unwrap(),
+            6_000
+        );
     }
 
     #[test]
@@ -1746,7 +1754,9 @@ mod tests {
         assert!(low.pending_reward_nwei < high.pending_reward_nwei);
         assert!(low.final_reward_nwei < high.final_reward_nwei);
         assert_eq!(low.score_reward_coefficient_bps, 7_000);
-        assert!(low.reason_codes.contains(&"SCORE_REWARD_COEFFICIENT_REDUCED".to_string()));
+        assert!(low
+            .reason_codes
+            .contains(&"SCORE_REWARD_COEFFICIENT_REDUCED".to_string()));
     }
 
     #[test]
@@ -1955,12 +1965,18 @@ mod tests {
         let settlements = ledger
             .settle_pending_rewards(3, &HashMap::from([("validator-1".to_string(), 8_500)]), 44)
             .unwrap();
-        assert_eq!(settlements[0].unreleased_destination, UnreleasedDestination::TreasuryRecovery);
+        assert_eq!(
+            settlements[0].unreleased_destination,
+            UnreleasedDestination::TreasuryRecovery
+        );
         let recovery = ledger.treasury_recovery_ledger.get(&2).unwrap();
         assert_eq!(recovery.total_recovered_nwei, 150);
         assert!(ledger.audit_events.iter().any(|event| matches!(
             event,
-            RewardAuditEvent::TreasuryRecoveryCredited { amount_nwei: 150, .. }
+            RewardAuditEvent::TreasuryRecoveryCredited {
+                amount_nwei: 150,
+                ..
+            }
         )));
     }
 

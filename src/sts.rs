@@ -366,7 +366,7 @@ impl StsState {
         payload.require_testnet()?;
         let before = self.events.len();
         let result = match &payload.tx {
-            StsTx::CreateFungible(params) => self.create_fungible(params.clone()),
+            StsTx::CreateFungible(params) => self.create_fungible(params.clone()).map(|_| ()),
             StsTx::MintFungible {
                 token_id,
                 to,
@@ -425,10 +425,7 @@ impl StsState {
         }
     }
 
-    pub fn create_fungible(
-        &mut self,
-        params: CreateFungibleParams,
-    ) -> Result<String, StsError> {
+    pub fn create_fungible(&mut self, params: CreateFungibleParams) -> Result<String, StsError> {
         validate_timestamp_seconds(params.created_at)?;
         validate_metadata(&params.metadata_uri, &params.metadata_hash)?;
         validate_metadata_hash_option(params.metadata_hash.as_deref())?;
@@ -472,7 +469,10 @@ impl StsState {
                     || params.flags.can_denylist,
                 &params.creator,
             ),
-            transfer_authority: authority_when(params.flags.requires_transfer_approval, &params.creator),
+            transfer_authority: authority_when(
+                params.flags.requires_transfer_approval,
+                &params.creator,
+            ),
             ..AuthoritySet::default()
         };
         let definition = FungibleDefinition {
@@ -497,7 +497,12 @@ impl StsState {
         };
         self.token_registry.insert(token_id.clone(), definition);
         if params.initial_supply > 0 {
-            self.credit_balance(&token_id, &params.creator, params.initial_supply, params.created_at)?;
+            self.credit_balance(
+                &token_id,
+                &params.creator,
+                params.initial_supply,
+                params.created_at,
+            )?;
         }
         self.push_event(StsEvent {
             event_type: "StsFungibleCreated".to_string(),
@@ -623,7 +628,8 @@ impl StsState {
         self.credit_balance(token_id, to, net_amount, timestamp)?;
         let mut attributes = BTreeMap::new();
         if fee > 0 {
-            let fee_recipient = transfer_fee_recipient(&definition).ok_or(StsError::PolicyNotEnabled)?;
+            let fee_recipient =
+                transfer_fee_recipient(&definition).ok_or(StsError::PolicyNotEnabled)?;
             self.credit_balance(token_id, fee_recipient, fee, timestamp)?;
             attributes.insert("fee_amount".to_string(), fee.to_string());
             attributes.insert("fee_recipient".to_string(), fee_recipient.to_string());
@@ -1077,7 +1083,9 @@ pub fn derive_credential_id(
 pub fn validate_metadata_hash(value: &str) -> Result<(), StsError> {
     if value.starts_with("0x")
         || value.len() != HEX_32_LEN
-        || value.chars().any(|ch| !ch.is_ascii_hexdigit() || ch.is_ascii_uppercase())
+        || value
+            .chars()
+            .any(|ch| !ch.is_ascii_hexdigit() || ch.is_ascii_uppercase())
     {
         return Err(StsError::InvalidMetadataHash);
     }
@@ -1095,7 +1103,9 @@ pub fn validate_timestamp_seconds(value: u64) -> Result<(), StsError> {
 pub fn estimate_sts_gas(tx: &StsTx) -> u64 {
     match tx {
         StsTx::CreateFungible(params) => {
-            125_000 + metadata_size_gas(&params.metadata_uri) + policy_count_gas(params.policies.len())
+            125_000
+                + metadata_size_gas(&params.metadata_uri)
+                + policy_count_gas(params.policies.len())
         }
         StsTx::MintFungible { .. } => 55_000,
         StsTx::BurnFungible { .. } => 50_000,
@@ -1108,7 +1118,9 @@ pub fn estimate_sts_gas(tx: &StsTx) -> u64 {
 }
 
 fn metadata_size_gas(uri: &Option<String>) -> u64 {
-    uri.as_ref().map(|value| value.len() as u64 * 16).unwrap_or(0)
+    uri.as_ref()
+        .map(|value| value.len() as u64 * 16)
+        .unwrap_or(0)
 }
 
 fn policy_count_gas(count: usize) -> u64 {
@@ -1391,11 +1403,15 @@ mod tests {
     #[test]
     fn malformed_hash_timestamp_and_decimals_are_rejected() {
         assert_eq!(
-            validate_metadata_hash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            validate_metadata_hash(
+                "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
             Err(StsError::InvalidMetadataHash)
         );
         assert_eq!(
-            validate_metadata_hash("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            validate_metadata_hash(
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            ),
             Err(StsError::InvalidMetadataHash)
         );
         assert_eq!(

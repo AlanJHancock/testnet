@@ -321,8 +321,7 @@ fn weighted_epoch_raw_score_bps(
 ) -> u64 {
     let weighted = (uptime_bps as u128 * config.uptime_weight_bps as u128)
         + (responsiveness_bps as u128 * config.responsiveness_weight_bps as u128)
-        + (consensus_participation_bps as u128
-            * config.consensus_participation_weight_bps as u128)
+        + (consensus_participation_bps as u128 * config.consensus_participation_weight_bps as u128)
         + (validation_accuracy_bps as u128 * config.validation_accuracy_weight_bps as u128)
         + (cluster_contribution_bps as u128 * config.cluster_contribution_weight_bps as u128)
         + (config_compliance_bps as u128 * config.config_compliance_weight_bps as u128)
@@ -330,7 +329,10 @@ fn weighted_epoch_raw_score_bps(
     (weighted / BPS_DENOMINATOR as u128) as u64
 }
 
-fn config_compliance_score(evidence: &ValidatorEpochEvidence, reason_codes: &mut Vec<String>) -> u64 {
+fn config_compliance_score(
+    evidence: &ValidatorEpochEvidence,
+    reason_codes: &mut Vec<String>,
+) -> u64 {
     match evidence.config_compliant {
         Some(true) => BPS_DENOMINATOR,
         Some(false) => {
@@ -361,7 +363,10 @@ fn telemetry_integrity_score(
     }
 }
 
-fn classify_fault(evidence: &ValidatorEpochEvidence, reason_codes: &mut Vec<String>) -> FaultCategory {
+fn classify_fault(
+    evidence: &ValidatorEpochEvidence,
+    reason_codes: &mut Vec<String>,
+) -> FaultCategory {
     if evidence.incident_relief {
         add_reason(reason_codes, "CATEGORY_D_INCIDENT_RELIEF");
         return FaultCategory::IncidentRelief;
@@ -375,28 +380,23 @@ fn classify_fault(evidence: &ValidatorEpochEvidence, reason_codes: &mut Vec<Stri
         return FaultCategory::Critical;
     }
 
-    let persistent_misses =
-        evidence.expected_consensus_duties > 0
-            && evidence.observed_consensus_votes.saturating_mul(2)
-                < evidence.expected_consensus_duties;
-    let serious_downtime =
-        evidence.uptime_observed_checks > 0
-            && evidence.uptime_successful_checks.saturating_mul(100)
-                < evidence.uptime_observed_checks.saturating_mul(97);
-    let config_or_telemetry_failure =
-        evidence.config_compliant == Some(false)
-            || (evidence.telemetry_available == Some(false)
-                && evidence.telemetry_missing_operator_fault);
+    let persistent_misses = evidence.expected_consensus_duties > 0
+        && evidence.observed_consensus_votes.saturating_mul(2) < evidence.expected_consensus_duties;
+    let serious_downtime = evidence.uptime_observed_checks > 0
+        && evidence.uptime_successful_checks.saturating_mul(100)
+            < evidence.uptime_observed_checks.saturating_mul(97);
+    let config_or_telemetry_failure = evidence.config_compliant == Some(false)
+        || (evidence.telemetry_available == Some(false)
+            && evidence.telemetry_missing_operator_fault);
 
     if persistent_misses || serious_downtime || config_or_telemetry_failure {
         add_reason(reason_codes, "CATEGORY_B_OPERATIONAL_FAULT");
         return FaultCategory::Major;
     }
 
-    let brief_downtime =
-        evidence.expected_consensus_duties > evidence.observed_consensus_votes
-            || evidence.missed_proposals > 0
-            || evidence.rejected_or_invalid_proposals > 0;
+    let brief_downtime = evidence.expected_consensus_duties > evidence.observed_consensus_votes
+        || evidence.missed_proposals > 0
+        || evidence.rejected_or_invalid_proposals > 0;
     if brief_downtime {
         add_reason(reason_codes, "CATEGORY_C_MINOR_FAULT");
         return FaultCategory::Minor;
@@ -521,15 +521,16 @@ pub fn calculate_validator_epoch_score(
         config,
     ));
 
-    let mut score_after_bps = ((score_before_bps as u128
-        * config.previous_score_weight_bps as u128)
+    let score_after_bps = ((score_before_bps as u128 * config.previous_score_weight_bps as u128)
         + (epoch_raw_score_bps as u128 * config.epoch_score_weight_bps as u128))
         / BPS_DENOMINATOR as u128;
     let mut score_after_bps = score_after_bps as u64;
 
     let fault_category = classify_fault(evidence, &mut reason_codes);
-    if matches!(fault_category, FaultCategory::None | FaultCategory::IncidentRelief)
-        && score_after_bps > score_before_bps
+    if matches!(
+        fault_category,
+        FaultCategory::None | FaultCategory::IncidentRelief
+    ) && score_after_bps > score_before_bps
     {
         score_after_bps = score_after_bps.min(
             score_before_bps
@@ -551,8 +552,8 @@ pub fn calculate_validator_epoch_score(
             let capped = score_after_bps.min(config.category_b_score_cap_bps);
             fault_penalty_bps = score_after_bps.saturating_sub(capped);
             score_after_bps = capped;
-            reward_score_coefficient_bps =
-                score_reward_coefficient_from_score(score_after_bps).min(config.category_b_reward_cap_bps);
+            reward_score_coefficient_bps = score_reward_coefficient_from_score(score_after_bps)
+                .min(config.category_b_reward_cap_bps);
         }
         FaultCategory::Minor => {
             let before_penalty = score_after_bps;
@@ -1130,7 +1131,6 @@ mod validator_score_tests {
         let mut evidence = clean_evidence();
         evidence.observed_consensus_votes = 75;
         evidence.timely_responsiveness_messages = 75;
-        evidence.uptime_successful_checks = 75;
         evidence.valid_signed_artifacts = 75;
         let result = calculate_validator_epoch_score(
             &profile(),

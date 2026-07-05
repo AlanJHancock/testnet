@@ -431,6 +431,10 @@ fn execute_transaction(
             .as_ref()
             .is_some_and(|receipt| receipt.status != "succeeded")
         {
+            let gas_used = synq_aivm
+                .as_ref()
+                .map(|receipt| receipt.gas_used)
+                .unwrap_or_else(|| tx.gas_limit.min(21_000));
             let error = synq_aivm
                 .as_ref()
                 .and_then(|receipt| receipt.error_message.clone())
@@ -438,10 +442,8 @@ fn execute_transaction(
             return Ok(TransactionReceipt {
                 tx_id: id,
                 status: ReceiptStatus::Failed,
-                gas_used: synq_aivm
-                    .as_ref()
-                    .map(|receipt| receipt.gas_used)
-                    .unwrap_or_else(|| tx.gas_limit.min(21_000)),
+                gas_used,
+                fee_breakdown: None,
                 error,
                 state_root_after: compute_state_root_after(state)?,
                 synq_verification,
@@ -457,13 +459,15 @@ fn execute_transaction(
         state
             .balances_nwei
             .insert(receiver, receiver_balance.saturating_add(tx.amount_nwei));
+        let gas_used = synq_aivm
+            .as_ref()
+            .map(|receipt| receipt.gas_used)
+            .unwrap_or_else(|| tx.gas_limit.min(21_000));
         TransactionReceipt {
             tx_id: id,
             status: ReceiptStatus::Success,
-            gas_used: synq_aivm
-                .as_ref()
-                .map(|receipt| receipt.gas_used)
-                .unwrap_or_else(|| tx.gas_limit.min(21_000)),
+            gas_used,
+            fee_breakdown: None,
             error: String::new(),
             state_root_after: compute_state_root_after(state)?,
             synq_verification,
@@ -476,6 +480,7 @@ fn execute_transaction(
             tx_id: id,
             status: ReceiptStatus::Failed,
             gas_used: tx.gas_limit.min(21_000),
+            fee_breakdown: None,
             error: "INSUFFICIENT_FUNDS".to_string(),
             state_root_after: compute_state_root_after(state)?,
             synq_verification,
@@ -506,6 +511,7 @@ fn execute_sts_transaction(
             tx_id: id,
             status: ReceiptStatus::Failed,
             gas_used,
+            fee_breakdown: None,
             error: "INSUFFICIENT_FUNDS".to_string(),
             state_root_after: compute_state_root_after(state)?,
             synq_verification: None,
@@ -526,6 +532,7 @@ fn execute_sts_transaction(
                 tx_id: id,
                 status: ReceiptStatus::Success,
                 gas_used,
+                fee_breakdown: None,
                 error: String::new(),
                 state_root_after: compute_state_root_after(state)?,
                 synq_verification: None,
@@ -538,6 +545,7 @@ fn execute_sts_transaction(
             tx_id: id,
             status: ReceiptStatus::Failed,
             gas_used,
+            fee_breakdown: None,
             error: error.to_string(),
             state_root_after: compute_state_root_after(state)?,
             synq_verification: None,
