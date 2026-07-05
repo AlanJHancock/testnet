@@ -2050,6 +2050,32 @@ impl ProofOfSynergy {
                     live_validator_addresses.insert(validator_address);
                 }
             }
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            for peer in network.collect_peer_snapshots() {
+                if peer.quarantined || peer.consensus_duties_disabled {
+                    continue;
+                }
+                if peer.genesis_hash.trim().is_empty() || peer.status_received_at.is_none() {
+                    continue;
+                }
+                if now.saturating_sub(peer.last_seen) > 30 {
+                    continue;
+                }
+                let Some(validator_address) = peer
+                    .validator_address
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|address| !address.is_empty())
+                else {
+                    continue;
+                };
+                if active_validator_addresses.contains(validator_address) {
+                    live_validator_addresses.insert(validator_address.to_string());
+                }
+            }
         }
 
         let mut live_validator_addresses = live_validator_addresses.into_iter().collect::<Vec<_>>();

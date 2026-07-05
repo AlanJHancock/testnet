@@ -1280,9 +1280,12 @@ fn should_prune_stale_peer(
         return connected_age >= STALE_UNIDENTIFIED_PEER_SECS;
     }
 
+    let recently_seen = now.saturating_sub(peer.last_seen) <= STALE_VALIDATOR_STATUS_SECS;
+
     (peer_has_validator_identity(peer) || recovered_validator.is_some())
         && !peer_has_remote_status(peer)
         && connected_age >= STALE_VALIDATOR_STATUS_SECS
+        && !recently_seen
 }
 
 fn prune_stale_peers(
@@ -1398,16 +1401,19 @@ fn merge_cached_state_into_peer(peer: &mut PeerConnection, state: &CachedPeerSta
     if peer.capabilities.is_empty() {
         peer.capabilities = state.capabilities.clone();
     }
-    if peer.status_received_at.is_none() && state.status_received_at.is_some() {
+    let hydrated_status_from_cache =
+        peer.status_received_at.is_none() && state.status_received_at.is_some();
+    if hydrated_status_from_cache {
         peer.last_known_height = state.last_known_height;
         peer.best_block_hash = state.best_block_hash.clone();
         peer.genesis_hash = state.genesis_hash.clone();
         peer.status_received_at = state.status_received_at;
     }
-    peer.quarantined = peer.quarantined || state.quarantined;
-    peer.consensus_duties_disabled =
-        peer.consensus_duties_disabled || state.consensus_duties_disabled;
-    if peer.recovery_state.is_none() {
+    if hydrated_status_from_cache {
+        peer.quarantined = state.quarantined;
+        peer.consensus_duties_disabled = state.consensus_duties_disabled;
+    }
+    if peer.recovery_state.is_none() && hydrated_status_from_cache {
         peer.recovery_state = state.recovery_state.clone();
     }
     peer.last_seen = peer.last_seen.max(state.last_seen);
@@ -10540,10 +10546,16 @@ mod tests {
             now + STALE_UNIDENTIFIED_PEER_SECS,
             &active_validator_addresses,
         ));
-        assert!(should_prune_stale_peer(
+        assert!(!should_prune_stale_peer(
             &config,
             peer,
             now + STALE_VALIDATOR_STATUS_SECS,
+            &active_validator_addresses,
+        ));
+        assert!(should_prune_stale_peer(
+            &config,
+            peer,
+            now + STALE_VALIDATOR_STATUS_SECS + 1,
             &active_validator_addresses,
         ));
     }
@@ -10582,10 +10594,16 @@ mod tests {
             200 + STALE_VALIDATOR_STATUS_SECS - 1,
             &active_validator_addresses,
         ));
-        assert!(should_prune_stale_peer(
+        assert!(!should_prune_stale_peer(
             &config,
             &peer,
             200 + STALE_VALIDATOR_STATUS_SECS,
+            &active_validator_addresses,
+        ));
+        assert!(should_prune_stale_peer(
+            &config,
+            &peer,
+            200 + STALE_VALIDATOR_STATUS_SECS + 1,
             &active_validator_addresses,
         ));
     }
