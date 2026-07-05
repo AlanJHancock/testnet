@@ -1570,6 +1570,15 @@ mod tests {
         self, ConsensusForkMigration, ForkValidatorConsensusKey,
     };
     use base64::{engine::general_purpose, Engine as _};
+    use std::sync::{Mutex, MutexGuard};
+
+    static VALIDATOR_TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn validator_test_env_lock() -> MutexGuard<'static, ()> {
+        VALIDATOR_TEST_ENV_LOCK
+            .lock()
+            .expect("validator test env mutex should lock")
+    }
 
     fn pending_registration(index: usize) -> ValidatorRegistration {
         ValidatorRegistration {
@@ -1661,6 +1670,45 @@ mod tests {
         }
     }
 
+    fn unique_test_dir(slug: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("synergy-{slug}-{unique}"))
+    }
+
+    fn write_epoch_validator_sets(path: &Path, sets: serde_json::Value) {
+        std::fs::write(
+            path,
+            serde_json::json!({
+                "epoch_validator_sets": sets
+            })
+            .to_string(),
+        )
+        .expect("epoch validator set snapshot should be written");
+    }
+
+    fn validator_addresses(start: usize, end_inclusive: usize) -> Vec<String> {
+        (start..=end_inclusive)
+            .map(|index| format!("validator-{index}"))
+            .collect()
+    }
+
+    fn active_validators_from_addresses(addresses: &[String]) -> Vec<Validator> {
+        addresses
+            .iter()
+            .map(|address| active_validator(address))
+            .collect()
+    }
+
+    fn membership_addresses(validators: &[Validator]) -> Vec<String> {
+        validators
+            .iter()
+            .map(|validator| validator.address.clone())
+            .collect()
+    }
+
     fn funded_test_address(required_nwei: u64) -> String {
         crate::genesis::canonical_genesis()
             .ok()
@@ -1709,6 +1757,7 @@ mod tests {
 
     #[test]
     fn validator_manager_resolves_legacy_registry_path_to_runtime_data_root() {
+        let _env_lock = validator_test_env_lock();
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1803,6 +1852,7 @@ mod tests {
 
     #[test]
     fn activated_validator_expands_consensus_membership_when_allowlist_disabled() {
+        let _env_lock = validator_test_env_lock();
         let previous_strict = std::env::var("SYNERGY_STRICT_VALIDATOR_ALLOWLIST").ok();
         std::env::set_var("SYNERGY_STRICT_VALIDATOR_ALLOWLIST", "0");
 
@@ -1852,6 +1902,7 @@ mod tests {
 
     #[test]
     fn consensus_membership_does_not_truncate_active_validators_with_stale_max_config() {
+        let _env_lock = validator_test_env_lock();
         let active = active_registry(6)
             .validators
             .into_values()
@@ -1875,6 +1926,7 @@ mod tests {
 
     #[test]
     fn consensus_membership_ignores_stale_strict_allowlist_config() {
+        let _env_lock = validator_test_env_lock();
         let active = active_registry(6)
             .validators
             .into_values()
@@ -1905,6 +1957,7 @@ mod tests {
 
     #[test]
     fn epoch_validator_set_for_height_overrides_current_registry_membership() {
+        let _env_lock = validator_test_env_lock();
         let active = (1..=7)
             .map(|index| active_validator(&format!("validator-{index}")))
             .collect::<Vec<_>>();
@@ -1966,7 +2019,197 @@ mod tests {
     }
 
     #[test]
+    fn epoch_validator_set_ignores_config_peers_vpn_and_registry_drift() {
+        let _env_lock = validator_test_env_lock();
+        let all_addresses = validator_addresses(1, 7);
+        let active = active_validators_from_addresses(&all_addresses);
+        let temp_dir = unique_test_dir("epoch-drift-sources");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("node.toml");
+        let peers_path = temp_dir.join("peers.toml");
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+
+        let mut config = crate::config::NodeConfig::default();
+        config.node.strict_validator_allowlist = true;
+        config.node.allowed_validator_addresses = all_addresses.clone();
+        config.network.persistent_peers = vec!["validator-7".to_string()];
+        config.network.validator_vpn_transports = vec![crate::config::ValidatorVpnTransportConfig {
+            validator_address: "validator-7".to_string(),
+            dial_address: "10.69.10.7:5622".to_string(),
+        }];
+        std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+        std::fs::write(
+            &peers_path,
+            r#"
+[global]
+persistent_peers = ["validator-7", "10.69.10.7:5622"]
+additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
+"#,
+        )
+        .unwrap();
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([{
+                "chain_id": 1264,
+                "epoch_id": 7,
+                "validator_set_version": 3,
+                "effective_from_height": 100,
+                "effective_to_height": 199,
+                "active_validators": validator_addresses(1, 6),
+                "pending_validators": ["validator-7"],
+                "quorum_threshold": 4,
+                "validator_set_hash": "six-validator-set"
+            }]),
+        );
+
+        let _config_path = EnvVarGuard::set("SYNERGY_CONFIG_PATH", &config_path.to_string_lossy());
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let loaded_config =
+            crate::config::load_node_config(None).expect("test config should load with peers.toml");
+        assert!(loaded_config
+            .node
+            .allowed_validator_addresses
+            .contains(&"validator-7".to_string()));
+        assert!(loaded_config
+            .network
+            .persistent_peers
+            .contains(&"10.69.10.7:5622".to_string()));
+        assert!(loaded_config
+            .network
+            .validator_vpn_transports
+            .iter()
+            .any(|transport| transport.validator_address == "validator-7"));
+
+        let membership = consensus_membership_validators_for_height(active, 150)
+            .expect("epoch validator set should resolve despite drift sources");
+        let addresses = membership_addresses(&membership);
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        assert_eq!(addresses, validator_addresses(1, 6));
+        assert!(!addresses.contains(&"validator-7".to_string()));
+        assert_eq!(
+            crate::consensus::dual_quorum::required_validator_quorum(membership.len()),
+            4,
+            "peer/config/VPN drift must not inflate quorum beyond the EpochValidatorSet"
+        );
+    }
+
+    #[test]
+    fn epoch_validator_set_keeps_added_validator_pending_until_boundary() {
+        let _env_lock = validator_test_env_lock();
+        let all_addresses = validator_addresses(1, 7);
+        let active = active_validators_from_addresses(&all_addresses);
+        let temp_dir = unique_test_dir("epoch-pending-boundary");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([
+                {
+                    "chain_id": 1264,
+                    "epoch_id": 7,
+                    "validator_set_version": 3,
+                    "effective_from_height": 100,
+                    "effective_to_height": 199,
+                    "active_validators": validator_addresses(1, 6),
+                    "pending_validators": ["validator-7"],
+                    "quorum_threshold": 4,
+                    "validator_set_hash": "six-validator-set"
+                },
+                {
+                    "chain_id": 1264,
+                    "epoch_id": 8,
+                    "validator_set_version": 4,
+                    "effective_from_height": 200,
+                    "active_validators": all_addresses,
+                    "pending_validators": [],
+                    "quorum_threshold": 5,
+                    "previous_set_hash": "six-validator-set",
+                    "validator_set_hash": "seven-validator-set"
+                }
+            ]),
+        );
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let before_boundary = consensus_membership_validators_for_height(active.clone(), 199)
+            .expect("pre-boundary epoch set should resolve");
+        let at_boundary = consensus_membership_validators_for_height(active, 200)
+            .expect("boundary epoch set should resolve");
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        let before_addresses = membership_addresses(&before_boundary);
+        let boundary_addresses = membership_addresses(&at_boundary);
+        assert_eq!(before_addresses, validator_addresses(1, 6));
+        assert!(!before_addresses.contains(&"validator-7".to_string()));
+        assert_eq!(boundary_addresses, validator_addresses(1, 7));
+        assert_eq!(
+            crate::consensus::dual_quorum::required_validator_quorum(before_boundary.len()),
+            4
+        );
+        assert_eq!(
+            crate::consensus::dual_quorum::required_validator_quorum(at_boundary.len()),
+            5
+        );
+    }
+
+    #[test]
+    fn jailed_validator_changes_membership_only_through_next_epoch_set() {
+        let _env_lock = validator_test_env_lock();
+        let all_addresses = validator_addresses(1, 6);
+        let active = active_validators_from_addresses(&all_addresses);
+        let temp_dir = unique_test_dir("epoch-jail-boundary");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([
+                {
+                    "chain_id": 1264,
+                    "epoch_id": 7,
+                    "validator_set_version": 3,
+                    "effective_from_height": 100,
+                    "effective_to_height": 199,
+                    "active_validators": all_addresses,
+                    "jailed_validators": [],
+                    "quorum_threshold": 4,
+                    "validator_set_hash": "six-validator-set"
+                },
+                {
+                    "chain_id": 1264,
+                    "epoch_id": 8,
+                    "validator_set_version": 4,
+                    "effective_from_height": 200,
+                    "active_validators": validator_addresses(1, 5),
+                    "jailed_validators": ["validator-6"],
+                    "quorum_threshold": 4,
+                    "previous_set_hash": "six-validator-set",
+                    "validator_set_hash": "jailed-validator-set"
+                }
+            ]),
+        );
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let before_boundary = consensus_membership_validators_for_height(active.clone(), 199)
+            .expect("pre-jail epoch set should resolve");
+        let at_boundary = consensus_membership_validators_for_height(active, 200)
+            .expect("post-jail epoch set should resolve");
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        let before_addresses = membership_addresses(&before_boundary);
+        let boundary_addresses = membership_addresses(&at_boundary);
+        assert_eq!(before_addresses, validator_addresses(1, 6));
+        assert!(before_addresses.contains(&"validator-6".to_string()));
+        assert_eq!(boundary_addresses, validator_addresses(1, 5));
+        assert!(!boundary_addresses.contains(&"validator-6".to_string()));
+    }
+
+    #[test]
     fn consensus_membership_prefers_active_fork_and_defers_non_fork_validator() {
+        let _env_lock = validator_test_env_lock();
         let canonical = [
             "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
             "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt",

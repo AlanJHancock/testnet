@@ -20,8 +20,9 @@ use crate::rpc::rpc_server::{
 use crate::token::TOKEN_MANAGER;
 use crate::validator::{
     apply_validator_activation_transaction, consensus_membership_validators,
-    is_validator_activation_transaction, replay_validator_activation_transactions, Validator,
-    ValidatorManager, TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
+    consensus_membership_validators_for_height, is_validator_activation_transaction,
+    replay_validator_activation_transactions, Validator, ValidatorManager,
+    TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
 };
 use crate::wallet::WALLET_MANAGER;
 use crate::{debug, info, warn};
@@ -684,12 +685,31 @@ impl ProofOfSynergy {
                             continue;
                         }
 
-                        // Get active validators, then reduce them to the shared consensus
-                        // membership before leader or quorum math uses the set.
+                        let next_block_index = latest_block.block_index.saturating_add(1);
+
+                        // Get active validators, then reduce them to the authoritative
+                        // height-specific consensus membership before leader or quorum
+                        // math uses the set.
                         let registry_active_validators = validator_manager.get_active_validators();
                         let registry_active_count = registry_active_validators.len();
-                        let active_validators =
-                            consensus_membership_validators(registry_active_validators);
+                        let active_validators = match Self::consensus_membership_for_next_block(
+                            registry_active_validators,
+                            latest_block.block_index,
+                        ) {
+                            Ok(validators) => validators,
+                            Err(error) => {
+                                warn!(
+                                    "consensus",
+                                    "Refusing block production because authoritative validator set for next height is unavailable",
+                                    "next_block_height" => next_block_index,
+                                    "error" => error
+                                );
+                                drop(chain_guard);
+                                drop(pool);
+                                thread::sleep(Duration::from_millis(250));
+                                continue;
+                            }
+                        };
                         let consensus_active_count = active_validators.len();
                         let live_validator_addresses =
                             Self::collect_live_validator_addresses(&validator_manager);
@@ -735,7 +755,7 @@ impl ProofOfSynergy {
                         }
 
                         if let Some(network) = crate::p2p::get_p2p_network() {
-                            let status_ready_validators = live_validator_addresses.len();
+                            let status_ready_validators = live_active_validators.len();
                             if status_ready_gate_enabled {
                                 let is_genesis_height = latest_block.block_index == 0;
                                 if !is_genesis_height {
@@ -961,7 +981,6 @@ impl ProofOfSynergy {
 
                         // Phase 1: Leader selection using entropy beacon and synergy scores
                         // Use next block index for leader selection (current block + 1)
-                        let next_block_index = latest_block_clone.block_index + 1;
                         // Rebuild leader rotation from the shared duty-active set. Quarantined
                         // and shadow validators remain registered/history-known, but they must
                         // not be scheduled as live proposers while their duties are disabled.
@@ -2024,6 +2043,16 @@ impl ProofOfSynergy {
 
     fn resolve_local_validator_address() -> Option<String> {
         crate::config::resolve_runtime_validator_address()
+    }
+
+    fn consensus_membership_for_next_block(
+        registry_active_validators: Vec<Validator>,
+        latest_block_height: u64,
+    ) -> Result<Vec<Validator>, String> {
+        consensus_membership_validators_for_height(
+            registry_active_validators,
+            latest_block_height.saturating_add(1),
+        )
     }
 
     fn collect_live_validator_addresses(validator_manager: &Arc<ValidatorManager>) -> Vec<String> {
@@ -3717,7 +3746,7 @@ mod tests {
         consensus_algorithm_label, register_test_validator_signing_key,
     };
     use crate::transaction::Transaction;
-    use crate::validator::ValidatorStatus;
+    use crate::validator::{ValidatorStatus, EPOCH_VALIDATOR_SETS_ENV};
     use base64::engine::general_purpose;
     use std::sync::OnceLock;
 
@@ -3751,6 +3780,128 @@ mod tests {
             ))
             .join("data")
             .join("consensus_vote_locks.json")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn epoch_set_env_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn test_validator(address: &str) -> Validator {
+        let mut validator = Validator::new(
+            address.to_string(),
+            format!("{address}-public-key"),
+            "Validator".to_string(),
+            50_000_000_000_000,
+        );
+        validator.status = ValidatorStatus::Active;
+        validator
+    }
+
+    fn test_validator_addresses(start: usize, end_inclusive: usize) -> Vec<String> {
+        (start..=end_inclusive)
+            .map(|index| format!("validator-{index}"))
+            .collect()
+    }
+
+    fn test_validators(start: usize, end_inclusive: usize) -> Vec<Validator> {
+        test_validator_addresses(start, end_inclusive)
+            .iter()
+            .map(|address| test_validator(address))
+            .collect()
+    }
+
+    fn validator_membership_addresses(validators: &[Validator]) -> Vec<String> {
+        validators
+            .iter()
+            .map(|validator| validator.address.clone())
+            .collect()
+    }
+
+    #[test]
+    fn next_block_membership_uses_epoch_validator_set_effective_height() {
+        let _env_lock = epoch_set_env_test_lock()
+            .lock()
+            .expect("epoch set env test lock should succeed");
+        let temp_dir = unique_proposal_cache_dir("next-block-epoch-validator-set");
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        std::fs::write(
+            &snapshot_path,
+            serde_json::json!({
+                "epoch_validator_sets": [
+                    {
+                        "chain_id": 1264,
+                        "epoch_id": 7,
+                        "validator_set_version": 3,
+                        "effective_from_height": 100,
+                        "effective_to_height": 199,
+                        "active_validators": test_validator_addresses(1, 6),
+                        "pending_validators": ["validator-7"],
+                        "quorum_threshold": 4,
+                        "validator_set_hash": "six-validator-set"
+                    },
+                    {
+                        "chain_id": 1264,
+                        "epoch_id": 8,
+                        "validator_set_version": 4,
+                        "effective_from_height": 200,
+                        "active_validators": test_validator_addresses(1, 7),
+                        "pending_validators": [],
+                        "quorum_threshold": 5,
+                        "previous_set_hash": "six-validator-set",
+                        "validator_set_hash": "seven-validator-set"
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("epoch validator set snapshot should be written");
+        let _snapshot_guard =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let before_boundary =
+            ProofOfSynergy::consensus_membership_for_next_block(test_validators(1, 7), 198)
+                .expect("next height 199 should resolve to six-validator set");
+        let at_boundary =
+            ProofOfSynergy::consensus_membership_for_next_block(test_validators(1, 7), 199)
+                .expect("next height 200 should resolve to seven-validator set");
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        assert_eq!(
+            validator_membership_addresses(&before_boundary),
+            test_validator_addresses(1, 6),
+            "pending validator must not enter proposer/quorum membership before effective height"
+        );
+        assert_eq!(
+            validator_membership_addresses(&at_boundary),
+            test_validator_addresses(1, 7),
+            "new validator enters proposer/quorum membership exactly at effective height"
+        );
+        assert_eq!(required_validator_quorum(before_boundary.len()), 4);
+        assert_eq!(required_validator_quorum(at_boundary.len()), 5);
     }
 
     fn catchup_decision(
