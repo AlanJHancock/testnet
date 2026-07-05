@@ -3440,17 +3440,7 @@ fn handle_json_rpc(
         }
 
         "synergy_getPeerInfo" => {
-            if let Some(p2p) = crate::p2p::get_p2p_network() {
-                json!({
-                    "peer_count": p2p.get_peer_count(),
-                    "peers": p2p.get_peer_info()
-                })
-            } else {
-                json!({
-                    "peer_count": 0,
-                    "peers": []
-                })
-            }
+            peer_info_json()
         }
 
         // =====================================================================
@@ -5338,12 +5328,30 @@ fn start_live_sync_json() -> Value {
 }
 
 fn peer_info_json() -> Value {
-    let peer_count = crate::p2p::get_p2p_network()
-        .map(|p2p| p2p.get_peer_count() as u64)
-        .unwrap_or(0);
+    if let Some(p2p) = crate::p2p::get_p2p_network() {
+        let peers = p2p.get_peer_info();
+        let status_ready_validator_addresses = p2p.get_status_ready_validator_addresses();
+        return peer_info_response_json(
+            peers,
+            status_ready_validator_addresses,
+            p2p.get_peer_count(),
+        );
+    }
+
+    peer_info_response_json(Vec::new(), Vec::new(), 0)
+}
+
+fn peer_info_response_json(
+    peers: Vec<Value>,
+    status_ready_validator_addresses: Vec<String>,
+    connected_validator_count: usize,
+) -> Value {
     json!({
-        "peer_count": peer_count,
-        "peers": peer_count,
+        "peer_count": peers.len(),
+        "connected_validator_count": connected_validator_count,
+        "status_ready_validator_count": status_ready_validator_addresses.len(),
+        "status_ready_validator_addresses": status_ready_validator_addresses,
+        "peers": peers,
         "chain": chain_identity_json(),
     })
 }
@@ -7735,6 +7743,45 @@ mod tests {
             translate_legacy_rpc_result(legacy).expect_err("legacy error should map to RpcError");
         assert_eq!(error.code, -32000);
         assert_eq!(error.message, "boom");
+    }
+
+    #[test]
+    fn peer_info_response_reports_snapshot_readiness_counts_and_reasons() {
+        let response = peer_info_response_json(
+            vec![
+                json!({
+                    "validator_address": "synv1ready",
+                    "status_fresh": true,
+                    "readiness_exclusion_reason": null
+                }),
+                json!({
+                    "validator_address": "synv1stale",
+                    "status_fresh": false,
+                    "readiness_exclusion_reason": "stale-status"
+                }),
+            ],
+            vec!["synv1ready".to_string()],
+            2,
+        );
+
+        assert_eq!(response["peer_count"].as_u64(), Some(2));
+        assert_eq!(response["connected_validator_count"].as_u64(), Some(2));
+        assert_eq!(response["status_ready_validator_count"].as_u64(), Some(1));
+        assert_eq!(
+            response["status_ready_validator_addresses"]
+                .as_array()
+                .and_then(|items| items.first())
+                .and_then(Value::as_str),
+            Some("synv1ready")
+        );
+        assert_eq!(
+            response["peers"]
+                .as_array()
+                .and_then(|items| items.get(1))
+                .and_then(|peer| peer.get("readiness_exclusion_reason"))
+                .and_then(Value::as_str),
+            Some("stale-status")
+        );
     }
 
     #[test]
