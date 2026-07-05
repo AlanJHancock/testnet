@@ -45,9 +45,9 @@ pub struct RewardConfig {
 impl Default for RewardConfig {
     fn default() -> Self {
         Self {
-            validator_fee_share_bps: 6_500,
-            treasury_fee_share_bps: 2_500,
-            burn_fee_share_bps: 1_000,
+            validator_fee_share_bps: 7_000,
+            treasury_fee_share_bps: 3_000,
+            burn_fee_share_bps: 0,
             network_owned_validator_treasury_share_bps: 7_000,
             network_owned_validator_bonus_pool_share_bps: 3_000,
             phase1_consensus_participation_weight_bps: 3_500,
@@ -356,6 +356,94 @@ pub fn calculate_phase1_score_bps(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ValidatorAllocationInput {
+    pub validator_id: String,
+    pub reward_payout_address: String,
+    pub metrics: Phase1Metrics,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ValidatorEpochAllocation {
+    pub epoch_id: u64,
+    pub validator_id: String,
+    pub reward_payout_address: String,
+    pub allocation_score_bps: u64,
+    pub pending_reward_nwei: u128,
+    pub reason_codes: Vec<String>,
+}
+
+pub fn allocate_validator_epoch_rewards(
+    epoch_id: u64,
+    validator_pool_epoch_nwei: u128,
+    validators: &[ValidatorAllocationInput],
+    config: &RewardConfig,
+) -> Result<Vec<ValidatorEpochAllocation>, String> {
+    config.validate()?;
+    let mut scored = Vec::with_capacity(validators.len());
+    let mut total_allocation_score = 0u128;
+
+    for validator in validators {
+        let allocation_score_bps = calculate_phase1_score_bps(&validator.metrics, config)?;
+        total_allocation_score = total_allocation_score
+            .checked_add(allocation_score_bps as u128)
+            .ok_or_else(|| "total allocation score overflow".to_string())?;
+        scored.push((validator, allocation_score_bps));
+    }
+
+    if total_allocation_score == 0 {
+        return Ok(validators
+            .iter()
+            .map(|validator| ValidatorEpochAllocation {
+                epoch_id,
+                validator_id: validator.validator_id.clone(),
+                reward_payout_address: validator.reward_payout_address.clone(),
+                allocation_score_bps: 0,
+                pending_reward_nwei: 0,
+                reason_codes: vec!["TOTAL_ALLOCATION_SCORE_ZERO".to_string()],
+            })
+            .collect());
+    }
+
+    let mut allocated = 0u128;
+    let last_nonzero = scored
+        .iter()
+        .rposition(|(_, score)| *score > 0)
+        .unwrap_or(0);
+
+    scored
+        .iter()
+        .enumerate()
+        .map(|(index, (validator, allocation_score_bps))| {
+            let pending_reward_nwei = if *allocation_score_bps == 0 {
+                0
+            } else if index == last_nonzero {
+                validator_pool_epoch_nwei.saturating_sub(allocated)
+            } else {
+                validator_pool_epoch_nwei
+                    .checked_mul(*allocation_score_bps as u128)
+                    .map(|value| value / total_allocation_score)
+                    .ok_or_else(|| "validator allocation multiplication overflow".to_string())?
+            };
+            allocated = allocated
+                .checked_add(pending_reward_nwei)
+                .ok_or_else(|| "validator allocation assigned overflow".to_string())?;
+            Ok(ValidatorEpochAllocation {
+                epoch_id,
+                validator_id: validator.validator_id.clone(),
+                reward_payout_address: validator.reward_payout_address.clone(),
+                allocation_score_bps: *allocation_score_bps,
+                pending_reward_nwei,
+                reason_codes: if *allocation_score_bps == 0 {
+                    vec!["VALIDATOR_ALLOCATION_SCORE_ZERO".to_string()]
+                } else {
+                    Vec::new()
+                },
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PendingRewardStatus {
     Pending,
     Settled,
@@ -372,6 +460,7 @@ pub enum SettlementStatus {
 pub enum UnreleasedDestination {
     Burn,
     Treasury,
+    TreasuryRecovery,
     BonusPool,
 }
 
@@ -458,6 +547,179 @@ pub struct ClusterRewardSettlement {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ValidatorPhase1Input {
+    pub validator_id: String,
+    pub validator_operator_address: String,
+    pub validator_payout_address: String,
+    pub cluster_id: String,
+    pub cluster_escrow_address: String,
+    pub metrics: Phase1Metrics,
+    pub eligible: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClusterRewardAllocation {
+    pub epoch_id: u64,
+    pub cluster_id: String,
+    pub cluster_escrow_address: String,
+    pub cluster_allocation_score: u128,
+    pub total_cluster_reward_nwei: u128,
+    pub validator_reward_pool_address: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EpochRewardAllocation {
+    pub epoch_id: u64,
+    pub validator_reward_pool_amount_nwei: u128,
+    pub cluster_allocations: Vec<ClusterRewardAllocation>,
+    pub pending_rewards: Vec<ValidatorPendingReward>,
+    pub dust_nwei: u128,
+}
+
+pub fn allocate_epoch_validator_rewards(
+    epoch_id: u64,
+    validator_reward_pool_amount_nwei: u128,
+    validators: &[ValidatorPhase1Input],
+    created_block_height: u64,
+    config: &RewardConfig,
+) -> Result<EpochRewardAllocation, String> {
+    config.validate()?;
+    let mut measured = validators
+        .iter()
+        .filter(|validator| validator.eligible)
+        .map(|validator| {
+            calculate_phase1_score_bps(&validator.metrics, config).map(|score| (validator, score))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    measured.sort_by(|(left, _), (right, _)| {
+        left.cluster_id
+            .cmp(&right.cluster_id)
+            .then_with(|| left.validator_id.cmp(&right.validator_id))
+    });
+
+    let mut cluster_scores: Vec<(String, String, u128)> = Vec::new();
+    for (validator, score) in &measured {
+        if *score == 0 {
+            continue;
+        }
+        if let Some((_, _, total_score)) = cluster_scores
+            .iter_mut()
+            .find(|(cluster_id, _, _)| cluster_id == &validator.cluster_id)
+        {
+            *total_score = total_score
+                .checked_add(*score as u128)
+                .ok_or_else(|| "cluster allocation score overflow".to_string())?;
+        } else {
+            cluster_scores.push((
+                validator.cluster_id.clone(),
+                validator.cluster_escrow_address.clone(),
+                *score as u128,
+            ));
+        }
+    }
+    cluster_scores.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let total_cluster_score = cluster_scores
+        .iter()
+        .try_fold(0u128, |acc, (_, _, score)| acc.checked_add(*score))
+        .ok_or_else(|| "total cluster allocation score overflow".to_string())?;
+    if total_cluster_score == 0 {
+        return Err("no eligible validator allocation score".to_string());
+    }
+
+    let mut cluster_allocations = Vec::new();
+    let mut pending_rewards = Vec::new();
+    let mut assigned_epoch_total = 0u128;
+    for (cluster_index, (cluster_id, escrow_address, cluster_score)) in
+        cluster_scores.iter().enumerate()
+    {
+        let cluster_reward = if cluster_index + 1 == cluster_scores.len() {
+            validator_reward_pool_amount_nwei.saturating_sub(assigned_epoch_total)
+        } else {
+            validator_reward_pool_amount_nwei
+                .checked_mul(*cluster_score)
+                .ok_or_else(|| "cluster reward multiplication overflow".to_string())?
+                / total_cluster_score
+        };
+        assigned_epoch_total = assigned_epoch_total
+            .checked_add(cluster_reward)
+            .ok_or_else(|| "cluster reward assignment overflow".to_string())?;
+
+        cluster_allocations.push(ClusterRewardAllocation {
+            epoch_id,
+            cluster_id: cluster_id.clone(),
+            cluster_escrow_address: escrow_address.clone(),
+            cluster_allocation_score: *cluster_score,
+            total_cluster_reward_nwei: cluster_reward,
+            validator_reward_pool_address: crate::token::VALIDATOR_REWARDS_POOL_ADDRESS.to_string(),
+        });
+
+        let cluster_validators = measured
+            .iter()
+            .filter(|(validator, score)| validator.cluster_id == *cluster_id && *score > 0)
+            .collect::<Vec<_>>();
+        let cluster_score_total = cluster_validators
+            .iter()
+            .try_fold(0u128, |acc, (_, score)| acc.checked_add(*score as u128))
+            .ok_or_else(|| "cluster validator score total overflow".to_string())?;
+        let mut assigned_cluster_total = 0u128;
+        for (validator_index, (validator, score)) in cluster_validators.iter().enumerate() {
+            let pending_reward_nwei = if validator_index + 1 == cluster_validators.len() {
+                cluster_reward.saturating_sub(assigned_cluster_total)
+            } else {
+                cluster_reward
+                    .checked_mul(*score as u128)
+                    .ok_or_else(|| "validator pending reward multiplication overflow".to_string())?
+                    / cluster_score_total
+            };
+            assigned_cluster_total = assigned_cluster_total
+                .checked_add(pending_reward_nwei)
+                .ok_or_else(|| "validator pending reward assignment overflow".to_string())?;
+            pending_rewards.push(ValidatorPendingReward {
+                original_epoch_id: epoch_id,
+                epoch_id,
+                original_cluster_address: validator.cluster_escrow_address.clone(),
+                cluster_id: validator.cluster_id.clone(),
+                validator_id: validator.validator_id.clone(),
+                reward_payout_address: validator.validator_payout_address.clone(),
+                pending_reward_nwei,
+                source_emissions_nwei: 0,
+                source_fee_rewards_nwei: pending_reward_nwei,
+                source_cluster_bonus_nwei: 0,
+                phase1_score_bps: *score,
+                consensus_participation_score_bps: validator
+                    .metrics
+                    .consensus_participation_score_bps,
+                block_proposal_score_bps: validator.metrics.block_proposal_score_bps,
+                validation_accuracy_score_bps: validator.metrics.validation_accuracy_score_bps,
+                cluster_contribution_score_bps: validator.metrics.cluster_contribution_score_bps,
+                synergy_score_modifier_bps: validator.metrics.synergy_score_modifier_bps,
+                created_at_epoch: epoch_id,
+                unlock_epoch: epoch_id + 2,
+                accountability_epoch: epoch_id + 1,
+                status: PendingRewardStatus::Pending,
+                segment_ids: vec![format!("epoch:{epoch_id}:height:{created_block_height}")],
+            });
+        }
+    }
+
+    let pending_total = pending_rewards
+        .iter()
+        .try_fold(0u128, |acc, reward| {
+            acc.checked_add(reward.pending_reward_nwei)
+        })
+        .ok_or_else(|| "pending reward total overflow".to_string())?;
+
+    Ok(EpochRewardAllocation {
+        epoch_id,
+        validator_reward_pool_amount_nwei,
+        cluster_allocations,
+        pending_rewards,
+        dust_nwei: validator_reward_pool_amount_nwei.saturating_sub(pending_total),
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ValidatorPenaltyReason {
     None,
     MinorDowntime,
@@ -515,31 +777,62 @@ pub fn calculate_release_coefficient(
         ),
     ])?;
 
-    let mut coefficient = if score >= 9_800 {
+    let mut coefficient = if score >= 9_995 {
         BPS_DENOMINATOR
-    } else if score >= 9_500 {
-        9_800 + ((score - 9_500) * 200 / 300)
-    } else if score >= 9_000 {
-        score
+    } else if score >= 9_950 {
+        9_500
+    } else if score >= 9_900 {
+        8_500
+    } else if score >= 9_800 {
+        6_000
+    } else if score >= 9_700 {
+        2_500
     } else if score >= 8_000 {
-        score * 7_500 / BPS_DENOMINATOR
+        0
     } else {
-        score * 5_000 / BPS_DENOMINATOR
+        0
     };
 
-    if matches!(
+    if matches!(performance.penalty_reason, ValidatorPenaltyReason::Jailed) {
+        coefficient = coefficient.min(5_000);
+    } else if matches!(
         performance.penalty_reason,
-        ValidatorPenaltyReason::Jailed | ValidatorPenaltyReason::MajorDowntime
+        ValidatorPenaltyReason::MajorDowntime
     ) {
-        coefficient /= 2;
+        coefficient = coefficient.min(6_000);
     } else if matches!(
         performance.penalty_reason,
         ValidatorPenaltyReason::MinorDowntime
     ) {
-        coefficient = coefficient * 9_000 / BPS_DENOMINATOR;
+        coefficient = coefficient.min(8_500);
     }
 
     Ok(coefficient.min(BPS_DENOMINATOR))
+}
+
+pub fn score_reward_coefficient_bps(score_bps: u64) -> Result<u64, String> {
+    if score_bps > BPS_DENOMINATOR {
+        return Err("score bps value exceeds 10000".to_string());
+    }
+    Ok(match score_bps {
+        9_500..=10_000 => BPS_DENOMINATOR,
+        9_000..=9_499 => 9_500,
+        8_000..=8_999 => 8_500,
+        7_000..=7_999 => 7_000,
+        6_000..=6_999 => 5_000,
+        5_000..=5_999 => 2_500,
+        _ => 0,
+    })
+}
+
+pub fn effective_release_coefficient_bps(
+    accountability_release_bps: u64,
+    score_reward_bps: u64,
+) -> Result<u64, String> {
+    if accountability_release_bps > BPS_DENOMINATOR || score_reward_bps > BPS_DENOMINATOR {
+        return Err("release coefficient bps value exceeds 10000".to_string());
+    }
+    Ok(accountability_release_bps.min(score_reward_bps))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -553,11 +846,53 @@ pub struct ValidatorRewardSettlement {
     pub reward_payout_address: String,
     pub pending_reward_nwei: u128,
     pub release_coefficient_bps: u64,
+    pub score_reward_coefficient_bps: u64,
+    pub effective_release_coefficient_bps: u64,
+    pub penalty_nwei: u128,
     pub final_reward_nwei: u128,
     pub unreleased_reward_nwei: u128,
+    pub treasury_recovery_nwei: u128,
     pub unreleased_destination: UnreleasedDestination,
+    pub reason_codes: Vec<String>,
+    pub ledger_ref: Option<String>,
     pub settled_block_height: u64,
     pub status: SettlementStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TreasuryRecoveryEntry {
+    pub validator_id: String,
+    pub cluster_id: String,
+    pub pending_epoch: u64,
+    pub settlement_epoch: u64,
+    pub amount_nwei: u128,
+    pub reason_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct TreasuryRecoveryLedger {
+    pub epoch: u64,
+    pub total_recovered_nwei: u128,
+    pub entries: Vec<TreasuryRecoveryEntry>,
+}
+
+impl TreasuryRecoveryLedger {
+    pub fn new(epoch: u64) -> Self {
+        Self {
+            epoch,
+            total_recovered_nwei: 0,
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn credit(&mut self, entry: TreasuryRecoveryEntry) -> Result<(), String> {
+        self.total_recovered_nwei = self
+            .total_recovered_nwei
+            .checked_add(entry.amount_nwei)
+            .ok_or_else(|| "treasury recovery ledger overflow".to_string())?;
+        self.entries.push(entry);
+        Ok(())
+    }
 }
 
 pub fn settle_pending_reward(
@@ -565,15 +900,53 @@ pub fn settle_pending_reward(
     release_coefficient_bps: u64,
     settled_block_height: u64,
 ) -> Result<ValidatorRewardSettlement, String> {
+    settle_pending_reward_with_score(
+        pending,
+        release_coefficient_bps,
+        pending.synergy_score_modifier_bps,
+        0,
+        settled_block_height,
+        Vec::new(),
+    )
+}
+
+pub fn settle_pending_reward_with_score(
+    pending: &mut ValidatorPendingReward,
+    release_coefficient_bps: u64,
+    validator_score_bps: u64,
+    penalty_nwei: u128,
+    settled_block_height: u64,
+    reason_codes: Vec<String>,
+) -> Result<ValidatorRewardSettlement, String> {
     if pending.status != PendingRewardStatus::Pending {
         return Err("pending reward already settled".to_string());
     }
-    let final_reward = mul_bps(pending.pending_reward_nwei, release_coefficient_bps)?;
+    let score_reward_coefficient_bps = score_reward_coefficient_bps(validator_score_bps)?;
+    let effective_release_coefficient_bps =
+        effective_release_coefficient_bps(release_coefficient_bps, score_reward_coefficient_bps)?;
+    let gross_released = mul_bps(
+        pending.pending_reward_nwei,
+        effective_release_coefficient_bps,
+    )?;
+    let final_reward = gross_released.saturating_sub(penalty_nwei);
     let unreleased = pending
         .pending_reward_nwei
         .checked_sub(final_reward)
         .ok_or_else(|| "unreleased reward underflow".to_string())?;
     pending.status = PendingRewardStatus::Settled;
+    let mut settlement_reason_codes = reason_codes;
+    if score_reward_coefficient_bps < BPS_DENOMINATOR {
+        settlement_reason_codes.push("SCORE_REWARD_COEFFICIENT_REDUCED".to_string());
+    }
+    if release_coefficient_bps < BPS_DENOMINATOR {
+        settlement_reason_codes.push("ACCOUNTABILITY_RELEASE_COEFFICIENT_REDUCED".to_string());
+    }
+    if penalty_nwei > 0 {
+        settlement_reason_codes.push("PENALTY_DEDUCTED".to_string());
+    }
+    if unreleased > 0 {
+        settlement_reason_codes.push("TREASURY_RECOVERY_RECORDED".to_string());
+    }
 
     Ok(ValidatorRewardSettlement {
         original_epoch_id: pending.original_epoch_id,
@@ -585,9 +958,18 @@ pub fn settle_pending_reward(
         reward_payout_address: pending.reward_payout_address.clone(),
         pending_reward_nwei: pending.pending_reward_nwei,
         release_coefficient_bps,
+        score_reward_coefficient_bps,
+        effective_release_coefficient_bps,
+        penalty_nwei,
         final_reward_nwei: final_reward,
         unreleased_reward_nwei: unreleased,
-        unreleased_destination: UnreleasedDestination::Burn,
+        treasury_recovery_nwei: unreleased,
+        unreleased_destination: UnreleasedDestination::TreasuryRecovery,
+        reason_codes: settlement_reason_codes,
+        ledger_ref: Some(format!(
+            "validator-reward:{}:{}:{}",
+            pending.validator_id, pending.original_epoch_id, settled_block_height
+        )),
         settled_block_height,
         status: SettlementStatus::Complete,
     })
@@ -833,10 +1215,14 @@ pub enum RewardAuditEvent {
         release_coefficient_bps: u64,
     },
     ValidatorRewardSettled(ValidatorRewardSettlement),
-    UnreleasedRewardBurned {
+    TreasuryRecoveryCredited {
         original_epoch_id: u64,
+        settlement_epoch: u64,
         validator_id: String,
+        cluster_id: String,
         amount_nwei: u128,
+        treasury_recovery_wallet_address: String,
+        reason_codes: Vec<String>,
     },
     NetworkOwnedValidatorRewardRouted(NetworkOwnedValidatorRewardRouting),
     ReliabilityBonusPoolFunded {
@@ -857,6 +1243,7 @@ pub struct RewardLedger {
     pub cluster_settlements: HashMap<(u64, String), ClusterRewardSettlement>,
     pub pending_rewards: Vec<ValidatorPendingReward>,
     pub reward_settlements: Vec<ValidatorRewardSettlement>,
+    pub treasury_recovery_ledger: HashMap<u64, TreasuryRecoveryLedger>,
     pub network_owned_routings: HashMap<(u64, String), NetworkOwnedValidatorRewardRouting>,
     pub reliability_states: HashMap<String, ValidatorReliabilityState>,
     pub bonus_pool: ReliabilityBonusPool,
@@ -940,11 +1327,35 @@ impl RewardLedger {
             self.audit_events
                 .push(RewardAuditEvent::ValidatorRewardSettled(settlement.clone()));
             if settlement.unreleased_reward_nwei > 0 {
+                let ledger = self
+                    .treasury_recovery_ledger
+                    .entry(settlement.accountability_epoch)
+                    .or_insert_with(|| {
+                        TreasuryRecoveryLedger::new(settlement.accountability_epoch)
+                    });
+                let reason_codes = if settlement.reason_codes.is_empty() {
+                    vec!["TREASURY_RECOVERY_RECORDED".to_string()]
+                } else {
+                    settlement.reason_codes.clone()
+                };
+                ledger.credit(TreasuryRecoveryEntry {
+                    validator_id: settlement.validator_id.clone(),
+                    cluster_id: settlement.cluster_id.clone(),
+                    pending_epoch: settlement.original_epoch_id,
+                    settlement_epoch: settlement.accountability_epoch,
+                    amount_nwei: settlement.treasury_recovery_nwei,
+                    reason_codes: reason_codes.clone(),
+                })?;
                 self.audit_events
-                    .push(RewardAuditEvent::UnreleasedRewardBurned {
+                    .push(RewardAuditEvent::TreasuryRecoveryCredited {
                         original_epoch_id: settlement.original_epoch_id,
+                        settlement_epoch: settlement.accountability_epoch,
                         validator_id: settlement.validator_id.clone(),
-                        amount_nwei: settlement.unreleased_reward_nwei,
+                        cluster_id: settlement.cluster_id.clone(),
+                        amount_nwei: settlement.treasury_recovery_nwei,
+                        treasury_recovery_wallet_address:
+                            crate::token::DAO_TREASURY_ADDRESS.to_string(),
+                        reason_codes,
                     });
             }
             self.reward_settlements.push(settlement.clone());
@@ -1146,11 +1557,11 @@ mod tests {
     }
 
     #[test]
-    fn epoch_fee_split_is_65_25_10_with_treasury_dust() {
+    fn epoch_fee_split_is_70_30_with_treasury_dust() {
         let split = split_epoch_fees(7, 101, 55).unwrap();
-        assert_eq!(split.validator_share_nwei, 65);
-        assert_eq!(split.burn_share_nwei, 10);
-        assert_eq!(split.treasury_share_nwei, 26);
+        assert_eq!(split.validator_share_nwei, 70);
+        assert_eq!(split.burn_share_nwei, 0);
+        assert_eq!(split.treasury_share_nwei, 31);
         assert_eq!(split.rounding_dust_nwei, 1);
         assert_eq!(
             split.validator_share_nwei + split.treasury_share_nwei + split.burn_share_nwei,
@@ -1226,17 +1637,17 @@ mod tests {
             10_000
         );
 
-        let ninety_two = ReleasePerformance {
-            uptime_score_bps: 9_200,
-            responsiveness_score_bps: 9_200,
-            no_jail_slash_score_bps: 9_200,
-            cluster_stability_score_bps: 9_200,
-            governance_participation_score_bps: 9_200,
+        let medium = ReleasePerformance {
+            uptime_score_bps: 9_900,
+            responsiveness_score_bps: 9_900,
+            no_jail_slash_score_bps: 9_900,
+            cluster_stability_score_bps: 9_900,
+            governance_participation_score_bps: 9_900,
             penalty_reason: ValidatorPenaltyReason::None,
         };
         assert_eq!(
-            calculate_release_coefficient(&ninety_two, &config).unwrap(),
-            9_200
+            calculate_release_coefficient(&medium, &config).unwrap(),
+            8_500
         );
 
         let slashed = ReleasePerformance {
@@ -1247,7 +1658,7 @@ mod tests {
     }
 
     #[test]
-    fn final_reward_settlement_burns_unreleased_amount_and_is_single_use() {
+    fn final_reward_settlement_recovers_unreleased_amount_and_is_single_use() {
         let mut pending = calculate_pending_reward(
             5,
             "cluster",
@@ -1263,11 +1674,170 @@ mod tests {
         let settlement = settle_pending_reward(&mut pending, 9_000, 99).unwrap();
         assert_eq!(settlement.final_reward_nwei, 900);
         assert_eq!(settlement.unreleased_reward_nwei, 100);
+        assert_eq!(settlement.score_reward_coefficient_bps, 10_000);
+        assert_eq!(settlement.effective_release_coefficient_bps, 9_000);
+        assert_eq!(settlement.treasury_recovery_nwei, 100);
         assert_eq!(
             settlement.unreleased_destination,
-            UnreleasedDestination::Burn
+            UnreleasedDestination::TreasuryRecovery
         );
         assert!(settle_pending_reward(&mut pending, 9_000, 100).is_err());
+    }
+
+    #[test]
+    fn score_reward_coefficient_bands_and_effective_release_are_enforced() {
+        assert_eq!(score_reward_coefficient_bps(9_500).unwrap(), 10_000);
+        assert_eq!(score_reward_coefficient_bps(9_000).unwrap(), 9_500);
+        assert_eq!(score_reward_coefficient_bps(8_000).unwrap(), 8_500);
+        assert_eq!(score_reward_coefficient_bps(7_500).unwrap(), 7_000);
+        assert_eq!(score_reward_coefficient_bps(6_500).unwrap(), 5_000);
+        assert_eq!(score_reward_coefficient_bps(5_500).unwrap(), 2_500);
+        assert_eq!(score_reward_coefficient_bps(4_999).unwrap(), 0);
+        assert_eq!(
+            effective_release_coefficient_bps(9_500, 7_000).unwrap(),
+            7_000
+        );
+        assert_eq!(
+            effective_release_coefficient_bps(6_000, 8_500).unwrap(),
+            6_000
+        );
+    }
+
+    #[test]
+    fn low_score_visibly_reduces_released_rewards() {
+        let mut high_score_pending = calculate_pending_reward(
+            5,
+            "cluster",
+            "validator-high",
+            "payout",
+            1_000,
+            0,
+            0,
+            &perfect_phase1(),
+            &RewardConfig::default(),
+        )
+        .unwrap();
+        let high = settle_pending_reward_with_score(
+            &mut high_score_pending,
+            10_000,
+            10_000,
+            0,
+            99,
+            Vec::new(),
+        )
+        .unwrap();
+
+        let mut low_metrics = perfect_phase1();
+        low_metrics.synergy_score_modifier_bps = 7_500;
+        let mut low_score_pending = calculate_pending_reward(
+            5,
+            "cluster",
+            "validator-low",
+            "payout",
+            1_000,
+            0,
+            0,
+            &low_metrics,
+            &RewardConfig::default(),
+        )
+        .unwrap();
+        let low = settle_pending_reward_with_score(
+            &mut low_score_pending,
+            10_000,
+            7_500,
+            0,
+            99,
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert!(low.pending_reward_nwei < high.pending_reward_nwei);
+        assert!(low.final_reward_nwei < high.final_reward_nwei);
+        assert_eq!(low.score_reward_coefficient_bps, 7_000);
+        assert!(low
+            .reason_codes
+            .contains(&"SCORE_REWARD_COEFFICIENT_REDUCED".to_string()));
+    }
+
+    #[test]
+    fn all_zero_allocation_scores_release_no_validator_rewards() {
+        let zero_metrics = Phase1Metrics {
+            consensus_participation_score_bps: 0,
+            block_proposal_score_bps: 0,
+            validation_accuracy_score_bps: 0,
+            cluster_contribution_score_bps: 0,
+            synergy_score_modifier_bps: 0,
+        };
+        let allocations = allocate_validator_epoch_rewards(
+            1,
+            1_000,
+            &[ValidatorAllocationInput {
+                validator_id: "validator-zero".to_string(),
+                reward_payout_address: "synw1zero".to_string(),
+                metrics: zero_metrics,
+            }],
+            &RewardConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(allocations[0].pending_reward_nwei, 0);
+        assert!(allocations[0]
+            .reason_codes
+            .contains(&"TOTAL_ALLOCATION_SCORE_ZERO".to_string()));
+    }
+
+    #[test]
+    fn epoch_reward_allocation_reconciles_clusters_and_pending_rewards() {
+        let validators = vec![
+            ValidatorPhase1Input {
+                validator_id: "validator-a".to_string(),
+                validator_operator_address: "synv1a".to_string(),
+                validator_payout_address: "synw1a".to_string(),
+                cluster_id: "cluster-a".to_string(),
+                cluster_escrow_address: "syngrp1a".to_string(),
+                metrics: perfect_phase1(),
+                eligible: true,
+            },
+            ValidatorPhase1Input {
+                validator_id: "validator-b".to_string(),
+                validator_operator_address: "synv1b".to_string(),
+                validator_payout_address: "synw1b".to_string(),
+                cluster_id: "cluster-a".to_string(),
+                cluster_escrow_address: "syngrp1a".to_string(),
+                metrics: Phase1Metrics {
+                    consensus_participation_score_bps: 5_000,
+                    block_proposal_score_bps: 5_000,
+                    validation_accuracy_score_bps: 5_000,
+                    cluster_contribution_score_bps: 5_000,
+                    synergy_score_modifier_bps: 5_000,
+                },
+                eligible: true,
+            },
+            ValidatorPhase1Input {
+                validator_id: "validator-c".to_string(),
+                validator_operator_address: "synv1c".to_string(),
+                validator_payout_address: "synw1c".to_string(),
+                cluster_id: "cluster-b".to_string(),
+                cluster_escrow_address: "syngrp1b".to_string(),
+                metrics: perfect_phase1(),
+                eligible: true,
+            },
+        ];
+        let allocation =
+            allocate_epoch_validator_rewards(7, 1_001, &validators, 77, &RewardConfig::default())
+                .unwrap();
+        let cluster_total: u128 = allocation
+            .cluster_allocations
+            .iter()
+            .map(|cluster| cluster.total_cluster_reward_nwei)
+            .sum();
+        let pending_total: u128 = allocation
+            .pending_rewards
+            .iter()
+            .map(|reward| reward.pending_reward_nwei)
+            .sum();
+        assert_eq!(cluster_total, 1_001);
+        assert_eq!(pending_total, 1_001);
+        assert_eq!(allocation.dust_nwei, 0);
     }
 
     #[test]
@@ -1374,6 +1944,40 @@ mod tests {
         .unwrap();
         ledger.add_pending_reward(pending).unwrap();
         assert_eq!(ledger.get_validator_pending_rewards("validator-1").len(), 1);
+    }
+
+    #[test]
+    fn ledger_sends_unreleased_rewards_to_treasury_recovery() {
+        let mut ledger = RewardLedger::default();
+        let pending = calculate_pending_reward(
+            1,
+            "cluster-a",
+            "validator-1",
+            "payout",
+            1_000,
+            0,
+            0,
+            &perfect_phase1(),
+            &RewardConfig::default(),
+        )
+        .unwrap();
+        ledger.add_pending_reward(pending).unwrap();
+        let settlements = ledger
+            .settle_pending_rewards(3, &HashMap::from([("validator-1".to_string(), 8_500)]), 44)
+            .unwrap();
+        assert_eq!(
+            settlements[0].unreleased_destination,
+            UnreleasedDestination::TreasuryRecovery
+        );
+        let recovery = ledger.treasury_recovery_ledger.get(&2).unwrap();
+        assert_eq!(recovery.total_recovered_nwei, 150);
+        assert!(ledger.audit_events.iter().any(|event| matches!(
+            event,
+            RewardAuditEvent::TreasuryRecoveryCredited {
+                amount_nwei: 150,
+                ..
+            }
+        )));
     }
 
     #[test]
