@@ -612,7 +612,7 @@ pruning_interval = 86400
 bootstrap_only = false
 auto_register_validator = false
 validator_address = "${validator_address}"
-strict_validator_allowlist = true
+strict_validator_allowlist = false
 allowed_validator_addresses = ${allowed_json}
 
 [telemetry]
