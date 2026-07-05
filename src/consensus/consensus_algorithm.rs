@@ -81,16 +81,19 @@ fn staking_amount_nwei(tx: &crate::transaction::Transaction) -> Option<u64> {
 }
 
 fn snrg_balance_required_for_transaction(tx: &crate::transaction::Transaction) -> u64 {
+    let fee = tx.get_total_network_fee_u64().unwrap_or(u64::MAX);
     if tx
         .data
         .as_deref()
         .map(|data| data.starts_with("stake:"))
         .unwrap_or(false)
     {
-        return staking_amount_nwei(tx).unwrap_or(tx.amount);
+        return staking_amount_nwei(tx)
+            .unwrap_or(tx.amount)
+            .saturating_add(fee);
     }
 
-    tx.amount.saturating_add(tx.get_fee())
+    tx.amount.saturating_add(fee)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -657,10 +660,19 @@ impl ProofOfSynergy {
                             drop(chain_guard);
                             drop(pool);
                             if Self::emergency_stable_committee_mode_enabled() {
+                                let closing_epoch = current_epoch;
+                                let closing_epoch_validators =
+                                    validator_manager.get_active_validators();
                                 current_epoch = next_epoch;
                                 if let Ok(mut consensus) = dual_quorum_consensus.lock() {
                                     consensus.current_epoch = current_epoch;
                                 }
+                                Self::run_epoch_reward_lifecycle_for_boundary(
+                                    closing_epoch,
+                                    current_epoch,
+                                    latest_height,
+                                    &closing_epoch_validators,
+                                );
                                 info!(
                                     "consensus",
                                     "Emergency stable committee mode held validator set fixed across epoch boundary",
@@ -679,6 +691,7 @@ impl ProofOfSynergy {
                                     &validator_rotation,
                                     &dao_governance,
                                     &cartel_detection,
+                                    latest_height,
                                 );
                             }
                             thread::sleep(Duration::from_millis(100));
@@ -2459,6 +2472,45 @@ impl ProofOfSynergy {
         (elapsed_secs / timeout_secs) as usize
     }
 
+    fn run_epoch_reward_lifecycle_for_boundary(
+        closing_epoch: u64,
+        next_epoch: u64,
+        transition_block_height: u64,
+        closing_epoch_validators: &[Validator],
+    ) {
+        match TOKEN_MANAGER.run_epoch_reward_lifecycle(
+            closing_epoch,
+            next_epoch,
+            transition_block_height,
+            closing_epoch_validators,
+        ) {
+            Ok(summary) => {
+                info!(
+                    "consensus",
+                    "Epoch rewards lifecycle completed",
+                    "closing_epoch" => summary.closing_epoch,
+                    "next_epoch" => summary.next_epoch,
+                    "settled_unlock_epoch" => summary.settled_unlock_epoch,
+                    "transition_block_height" => summary.transition_block_height,
+                    "total_fees_collected_nwei" => summary.total_fees_collected_nwei.to_string(),
+                    "reward_allocation_recorded" => summary.reward_allocation.is_some(),
+                    "settlement_count" => summary.settlements.len() as u64,
+                    "skipped_reasons" => summary.skipped_reasons.join("; ")
+                );
+            }
+            Err(error) => {
+                warn!(
+                    "consensus",
+                    "Epoch rewards lifecycle failed",
+                    "closing_epoch" => closing_epoch,
+                    "next_epoch" => next_epoch,
+                    "transition_block_height" => transition_block_height,
+                    "error" => error
+                );
+            }
+        }
+    }
+
     fn handle_epoch_transition(
         current_epoch: &mut u64,
         previous_qc: QuorumCertificate,
@@ -2469,8 +2521,11 @@ impl ProofOfSynergy {
         validator_rotation: &Arc<ValidatorRotation>,
         dao_governance: &Arc<Mutex<DAOGovernance>>,
         cartel_detection: &Arc<Mutex<CartelDetectionEngine>>,
+        transition_block_height: u64,
     ) {
-        *current_epoch += 1;
+        let closing_epoch = *current_epoch;
+        let closing_epoch_validators = validator_manager.get_active_validators();
+        *current_epoch = current_epoch.saturating_add(1);
         println!("🔄 Epoch Transition: Starting epoch {}", current_epoch);
 
         // 1. Generate new epoch randomness
@@ -2494,6 +2549,13 @@ impl ProofOfSynergy {
                 "error" => error.to_string()
             );
         }
+
+        Self::run_epoch_reward_lifecycle_for_boundary(
+            closing_epoch,
+            *current_epoch,
+            transition_block_height,
+            &closing_epoch_validators,
+        );
 
         // 5. Detect cartels and apply penalties
         let mut cartel_engine = cartel_detection.lock().unwrap();

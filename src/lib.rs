@@ -27,6 +27,7 @@ pub mod rewards;
 pub mod role_profiles;
 pub mod role_runtime;
 pub mod rpc;
+pub mod sts;
 pub mod sxcp;
 pub mod sync;
 pub mod synergy_types;

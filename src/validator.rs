@@ -520,6 +520,9 @@ impl ValidatorRegistry {
         &mut self,
         registration: ValidatorRegistration,
     ) -> Result<String, String> {
+        if crate::address::is_network_burn_address(&registration.address) {
+            return Err("Network burn address cannot register as a validator".to_string());
+        }
         // Check if already registered
         if self.validators.contains_key(&registration.address) {
             return Err("Validator already registered".to_string());
@@ -1710,6 +1713,16 @@ mod tests {
             submitted_at: 0,
             registration_tx_hash: format!("registration-{}", index),
         }
+    }
+
+    #[test]
+    fn burn_address_cannot_register_as_validator() {
+        let mut registry = ValidatorRegistry::new();
+        let mut registration = pending_registration(1);
+        registration.address = crate::address::NETWORK_BURN_ADDRESS.to_string();
+
+        let err = registry.register_validator(registration).unwrap_err();
+        assert_eq!(err, "Network burn address cannot register as a validator");
     }
 
     fn active_registry(count: usize) -> ValidatorRegistry {

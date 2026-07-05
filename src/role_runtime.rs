@@ -1401,10 +1401,12 @@ fn maybe_preload_launch_block1_transaction(
         ));
     }
 
-    let required_balance = envelope
-        .transaction
-        .amount
-        .saturating_add(envelope.transaction.get_fee());
+    let required_balance = envelope.transaction.amount.saturating_add(
+        envelope
+            .transaction
+            .get_total_network_fee_u64()
+            .unwrap_or(u64::MAX),
+    );
     let sender_balance = TOKEN_MANAGER.get_balance(&envelope.transaction.sender, "SNRG");
     if sender_balance < required_balance {
         return Err(format!(

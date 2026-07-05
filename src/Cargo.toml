@@ -71,6 +71,10 @@ name = "wallet-pqc-cli"
 path = "bin/wallet_pqc_cli.rs"
 
 [[bin]]
+name = "synergy-sts"
+path = "bin/synergy-sts.rs"
+
+[[bin]]
 name = "synergy-rpc-gateway-node"
 path = "bin/synergy-rpc-gateway-node.rs"
 
