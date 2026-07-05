@@ -217,6 +217,16 @@
       "private_ip": "10.69.10.6",
       "public_ip": "157.173.192.45",
       "activated_via_onboarding": true
+    },
+    {
+      "slot": 7,
+      "label": "GenVal-07",
+      "address": "synv11g29q6azk9fs9u8ln94dx3xn48w574t9l262",
+      "private_host": "10.69.10.7",
+      "private_ip": "10.69.10.7",
+      "public_ip": null,
+      "activated_via_onboarding": true,
+      "runtime": "local-mac-mini"
     }
   ],
   "allocations": {

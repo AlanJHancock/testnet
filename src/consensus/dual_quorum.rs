@@ -546,12 +546,7 @@ impl DualQuorumConsensus {
         while Instant::now() < deadline {
             self.apply_recorded_equivocations();
             votes.retain(|vote| {
-                self.vote_is_eligible_for_collection(
-                    vote,
-                    block_hash,
-                    epoch_number,
-                    round_number,
-                )
+                self.vote_is_eligible_for_collection(vote, block_hash, epoch_number, round_number)
             });
 
             let pending_votes =
@@ -1335,27 +1330,23 @@ impl DualQuorumConsensus {
                         "collection_round" => round_number
                     );
                 } else {
-                warn!(
-                    "consensus",
-                    "Discarding equivocating vote",
-                    "validator" => vote.validator_address.clone(),
-                    "block_hash" => vote.block_hash.clone(),
-                    "height" => vote.block_index,
-                    "epoch" => vote.epoch_number,
-                    "round" => vote.round_number
-                );
-                continue;
+                    warn!(
+                        "consensus",
+                        "Discarding equivocating vote",
+                        "validator" => vote.validator_address.clone(),
+                        "block_hash" => vote.block_hash.clone(),
+                        "height" => vote.block_index,
+                        "epoch" => vote.epoch_number,
+                        "round" => vote.round_number
+                    );
+                    continue;
                 }
             }
             if !expected_validators.contains(&vote.validator_address) {
                 continue;
             }
-            if !self.vote_is_eligible_for_collection(
-                &vote,
-                block_hash,
-                epoch_number,
-                round_number,
-            ) {
+            if !self.vote_is_eligible_for_collection(&vote, block_hash, epoch_number, round_number)
+            {
                 continue;
             }
             if seen_validators.contains(&vote.validator_address) {
@@ -4243,17 +4234,11 @@ mod tests {
                 .expect("prior round vote should be created");
         let conflicting_block = signed_block(10, 1, "validator3");
         let conflicting_prior_round_vote =
-            DualQuorumConsensus::create_vote_for_validator(
-                "validator2",
-                &conflicting_block,
-                12,
-                2,
-            )
-            .expect("conflicting prior round vote should be created");
-        assert!(DualQuorumConsensus::register_vote_observation(
-            &conflicting_prior_round_vote
-        )
-        .is_none());
+            DualQuorumConsensus::create_vote_for_validator("validator2", &conflicting_block, 12, 2)
+                .expect("conflicting prior round vote should be created");
+        assert!(
+            DualQuorumConsensus::register_vote_observation(&conflicting_prior_round_vote).is_none()
+        );
         assert!(DualQuorumConsensus::register_vote_observation(&prior_round_vote).is_some());
 
         let expected_validators = ["validator1", "validator2", "validator3"]
@@ -4274,9 +4259,9 @@ mod tests {
         assert_eq!(votes.len(), 2);
         votes.retain(|vote| consensus.vote_is_eligible_for_collection(&vote, &block.hash, 12, 4));
         assert_eq!(votes.len(), 2);
-        assert!(votes.iter().any(|vote| {
-            vote.validator_address == "validator2" && vote.round_number == 2
-        }));
+        assert!(votes
+            .iter()
+            .any(|vote| { vote.validator_address == "validator2" && vote.round_number == 2 }));
     }
 
     #[test]
@@ -4325,9 +4310,9 @@ mod tests {
         );
 
         assert_eq!(votes.len(), 2);
-        assert!(votes.iter().any(|vote| {
-            vote.validator_address == "validator2" && vote.round_number == 3
-        }));
+        assert!(votes
+            .iter()
+            .any(|vote| { vote.validator_address == "validator2" && vote.round_number == 3 }));
     }
 
     #[test]
