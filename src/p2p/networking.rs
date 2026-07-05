@@ -98,6 +98,10 @@ const VALIDATOR_P2P_PORT: u16 = 5622;
 const VALIDATOR_STATUS_GENESIS_GRACE_SECS: u64 = 30;
 const STALE_UNIDENTIFIED_PEER_SECS: u64 = 15;
 const STALE_VALIDATOR_STATUS_SECS: u64 = VALIDATOR_STATUS_GENESIS_GRACE_SECS + 15;
+const PEER_STATUS_FRESHNESS_TTL_SECS: u64 = STALE_VALIDATOR_STATUS_SECS;
+const STATUS_READY_TTL_SECS: u64 = STALE_VALIDATOR_STATUS_SECS;
+const DUTY_DISABLED_TTL_SECS: u64 = STALE_VALIDATOR_STATUS_SECS;
+const QUARANTINE_STATUS_TTL_SECS: u64 = STALE_VALIDATOR_STATUS_SECS;
 const BACKGROUND_SYNC_POLL_MILLIS: u64 = 1000;
 const BLOCK_SYNC_RECONCILIATION_LOOKBACK: u64 = 8;
 const BLOCK_SYNC_PROGRESS_OVERLAP: u64 = 2;
@@ -182,6 +186,10 @@ struct PeerConnection {
     best_block_hash: String,
     genesis_hash: String,
     status_received_at: Option<u64>,
+    status_reported_at: Option<u64>,
+    status_validator_address: Option<String>,
+    status_source_session_id: Option<String>,
+    active_validator_set_hash: Option<String>,
     quarantined: bool,
     consensus_duties_disabled: bool,
     recovery_state: Option<String>,
@@ -219,6 +227,10 @@ struct CachedPeerState {
     best_block_hash: String,
     genesis_hash: String,
     status_received_at: Option<u64>,
+    status_reported_at: Option<u64>,
+    status_validator_address: Option<String>,
+    status_source_session_id: Option<String>,
+    active_validator_set_hash: Option<String>,
     quarantined: bool,
     consensus_duties_disabled: bool,
     recovery_state: Option<String>,
@@ -848,8 +860,85 @@ fn peer_identity_from_connection(peer: &PeerConnection) -> Option<String> {
         .map(|node_id| peer_identity_key(node_id, peer.validator_address.as_deref()))
 }
 
+fn normalized_status_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 fn peer_has_remote_status(peer: &PeerConnection) -> bool {
     peer.status_received_at.is_some() && !peer.genesis_hash.trim().is_empty()
+}
+
+fn peer_status_age_secs_at(peer: &PeerConnection, now: u64) -> Option<u64> {
+    peer.status_received_at
+        .map(|received_at| now.saturating_sub(received_at))
+}
+
+fn peer_has_fresh_remote_status_at(peer: &PeerConnection, now: u64) -> bool {
+    !peer.genesis_hash.trim().is_empty()
+        && peer_status_age_secs_at(peer, now)
+            .map(|age| age <= PEER_STATUS_FRESHNESS_TTL_SECS)
+            .unwrap_or(false)
+}
+
+fn peer_has_status_ready_lease_at(peer: &PeerConnection, now: u64) -> bool {
+    !peer.genesis_hash.trim().is_empty()
+        && peer_status_age_secs_at(peer, now)
+            .map(|age| age <= STATUS_READY_TTL_SECS)
+            .unwrap_or(false)
+}
+
+fn peer_quarantine_active_at(peer: &PeerConnection, now: u64) -> bool {
+    peer.quarantined
+        && peer_status_age_secs_at(peer, now)
+            .map(|age| age <= QUARANTINE_STATUS_TTL_SECS)
+            .unwrap_or(false)
+}
+
+fn peer_duties_disabled_active_at(peer: &PeerConnection, now: u64) -> bool {
+    peer.consensus_duties_disabled
+        && peer_status_age_secs_at(peer, now)
+            .map(|age| age <= DUTY_DISABLED_TTL_SECS)
+            .unwrap_or(false)
+}
+
+fn peer_readiness_exclusion_reason_at(
+    peer: &PeerConnection,
+    now: u64,
+    expected_validator_set_hash: Option<&str>,
+) -> Option<&'static str> {
+    if !peer_has_validator_identity(peer) {
+        return Some("missing-validator-identity");
+    }
+    if !peer_has_status_ready_lease_at(peer, now) {
+        return Some("stale-status");
+    }
+    if peer_quarantine_active_at(peer, now) {
+        return Some("quarantined");
+    }
+    if peer_duties_disabled_active_at(peer, now) {
+        return Some("duty-disabled");
+    }
+
+    let expected_validator_set_hash = expected_validator_set_hash
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let peer_validator_set_hash = peer
+        .active_validator_set_hash
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let (Some(expected), Some(peer_hash)) =
+        (expected_validator_set_hash, peer_validator_set_hash)
+    {
+        if peer_hash != expected {
+            return Some("wrong-validator-set-hash");
+        }
+    }
+
+    None
 }
 
 fn peer_has_identifying_metadata(peer: &PeerConnection) -> bool {
@@ -1289,7 +1378,7 @@ fn should_prune_stale_peer(
     let recently_seen = now.saturating_sub(peer.last_seen) <= STALE_VALIDATOR_STATUS_SECS;
 
     (peer_has_validator_identity(peer) || recovered_validator.is_some())
-        && !peer_has_remote_status(peer)
+        && !peer_has_fresh_remote_status_at(peer, now)
         && connected_age >= STALE_VALIDATOR_STATUS_SECS
         && !recently_seen
 }
@@ -1330,7 +1419,8 @@ fn prune_stale_peers(
                         &active_validator_addresses,
                     )
                     .is_some(),
-                "has_remote_status" => peer_has_remote_status(peer)
+                "has_remote_status" => peer_has_remote_status(peer),
+                "has_fresh_remote_status" => peer_has_fresh_remote_status_at(peer, now)
             );
         }
         disconnect_peer_entry(peer_state_cache, &mut peers, &peer_key);
@@ -1362,6 +1452,10 @@ fn build_cached_peer_state(peer: &PeerConnection) -> Option<(String, CachedPeerS
             best_block_hash: peer.best_block_hash.clone(),
             genesis_hash: peer.genesis_hash.clone(),
             status_received_at: peer.status_received_at,
+            status_reported_at: peer.status_reported_at,
+            status_validator_address: peer.status_validator_address.clone(),
+            status_source_session_id: peer.status_source_session_id.clone(),
+            active_validator_set_hash: peer.active_validator_set_hash.clone(),
             quarantined: peer.quarantined,
             consensus_duties_disabled: peer.consensus_duties_disabled,
             recovery_state: peer.recovery_state.clone(),
@@ -1407,13 +1501,23 @@ fn merge_cached_state_into_peer(peer: &mut PeerConnection, state: &CachedPeerSta
     if peer.capabilities.is_empty() {
         peer.capabilities = state.capabilities.clone();
     }
-    let hydrated_status_from_cache =
-        peer.status_received_at.is_none() && state.status_received_at.is_some();
+    let now = current_timestamp();
+    let cached_status_is_fresh = state
+        .status_received_at
+        .map(|received_at| now.saturating_sub(received_at) <= PEER_STATUS_FRESHNESS_TTL_SECS)
+        .unwrap_or(false);
+    let hydrated_status_from_cache = peer.status_received_at.is_none()
+        && state.status_received_at.is_some()
+        && cached_status_is_fresh;
     if hydrated_status_from_cache {
         peer.last_known_height = state.last_known_height;
         peer.best_block_hash = state.best_block_hash.clone();
         peer.genesis_hash = state.genesis_hash.clone();
         peer.status_received_at = state.status_received_at;
+        peer.status_reported_at = state.status_reported_at;
+        peer.status_validator_address = state.status_validator_address.clone();
+        peer.status_source_session_id = state.status_source_session_id.clone();
+        peer.active_validator_set_hash = state.active_validator_set_hash.clone();
     }
     if hydrated_status_from_cache {
         peer.quarantined = state.quarantined;
@@ -1457,6 +1561,10 @@ fn merge_peer_state_from_existing(existing: &PeerConnection, replacement: &mut P
             best_block_hash: existing.best_block_hash.clone(),
             genesis_hash: existing.genesis_hash.clone(),
             status_received_at: existing.status_received_at,
+            status_reported_at: existing.status_reported_at,
+            status_validator_address: existing.status_validator_address.clone(),
+            status_source_session_id: existing.status_source_session_id.clone(),
+            active_validator_set_hash: existing.active_validator_set_hash.clone(),
             quarantined: existing.quarantined,
             consensus_duties_disabled: existing.consensus_duties_disabled,
             recovery_state: existing.recovery_state.clone(),
@@ -1585,6 +1693,10 @@ fn apply_status_to_peer(
     block_height: u64,
     best_block_hash: &str,
     genesis_hash: &str,
+    status_reported_at: Option<u64>,
+    status_validator_address: Option<&str>,
+    status_source_session_id: Option<&str>,
+    active_validator_set_hash: Option<&str>,
     quarantined: bool,
     consensus_duties_disabled: bool,
     recovery_state: Option<&str>,
@@ -1602,6 +1714,29 @@ fn apply_status_to_peer(
     }
 
     peer.status_received_at = Some(status_received_at);
+    peer.status_reported_at = status_reported_at.or(Some(status_received_at));
+    if let Some(validator_address) = normalized_status_string(status_validator_address) {
+        if peer
+            .validator_address
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .is_empty()
+        {
+            peer.validator_address = Some(validator_address.clone());
+        }
+        peer.status_validator_address = Some(validator_address);
+    } else if peer.status_validator_address.is_none() {
+        peer.status_validator_address = peer.validator_address.clone();
+    }
+    if let Some(source_session_id) = normalized_status_string(status_source_session_id) {
+        peer.status_source_session_id = Some(source_session_id);
+    } else if peer.status_source_session_id.is_none() {
+        peer.status_source_session_id = peer.node_id.clone();
+    }
+    if let Some(validator_set_hash) = normalized_status_string(active_validator_set_hash) {
+        peer.active_validator_set_hash = Some(validator_set_hash);
+    }
     peer.quarantined = quarantined;
     peer.consensus_duties_disabled = consensus_duties_disabled || quarantined;
     peer.recovery_state = recovery_state
@@ -1617,6 +1752,10 @@ fn propagate_status_to_matching_peers(
     block_height: u64,
     best_block_hash: &str,
     genesis_hash: &str,
+    status_reported_at: Option<u64>,
+    status_validator_address: Option<&str>,
+    status_source_session_id: Option<&str>,
+    active_validator_set_hash: Option<&str>,
     quarantined: bool,
     consensus_duties_disabled: bool,
     recovery_state: Option<&str>,
@@ -1688,6 +1827,10 @@ fn propagate_status_to_matching_peers(
                 block_height,
                 best_block_hash,
                 genesis_hash,
+                status_reported_at,
+                status_validator_address,
+                status_source_session_id,
+                active_validator_set_hash,
                 quarantined,
                 consensus_duties_disabled,
                 recovery_state,
@@ -1779,6 +1922,10 @@ fn handle_status_message(
     block_height: u64,
     best_block_hash: &str,
     genesis_hash: &str,
+    status_reported_at: Option<u64>,
+    status_validator_address: Option<&str>,
+    status_source_session_id: Option<&str>,
+    active_validator_set_hash: Option<&str>,
     quarantined: bool,
     consensus_duties_disabled: bool,
     recovery_state: Option<&str>,
@@ -1823,6 +1970,10 @@ fn handle_status_message(
             block_height,
             best_block_hash,
             genesis_hash,
+            status_reported_at,
+            status_validator_address,
+            status_source_session_id,
+            active_validator_set_hash,
             quarantined,
             consensus_duties_disabled,
             recovery_state,
@@ -1874,6 +2025,10 @@ fn handle_status_message(
             block_height,
             best_block_hash,
             genesis_hash,
+            status_reported_at,
+            status_validator_address,
+            status_source_session_id,
+            active_validator_set_hash,
             quarantined,
             consensus_duties_disabled,
             recovery_state,
@@ -2312,22 +2467,22 @@ fn status_ready_validator_addresses(
 
     if let Ok(peers) = connected_peers.lock() {
         for peer in peers.values() {
-            if peer.quarantined || peer.consensus_duties_disabled {
+            if !peer_has_status_ready_lease_at(peer, now) {
                 continue;
             }
-            let recovered_validator = recover_peer_validator_address_for_vote_target(
+            let Some(recovered_validator) = recover_peer_validator_address_for_vote_target(
                 config,
                 peer,
                 &active_validator_addresses,
-            );
-            let recently_seen_configured_validator = recovered_validator.is_some()
-                && now.saturating_sub(peer.last_seen) <= STALE_VALIDATOR_STATUS_SECS;
-            if !peer_has_remote_status(peer) && !recently_seen_configured_validator {
+            ) else {
+                continue;
+            };
+            if peer_readiness_exclusion_reason_at(peer, now, Some(&canonical_validator_set_hash()))
+                .is_some()
+            {
                 continue;
             }
-            if let Some(address) = recovered_validator {
-                validators.insert(address);
-            }
+            validators.insert(recovered_validator);
         }
     }
 
@@ -2350,9 +2505,12 @@ fn status_ready_validator_addresses_with_local_duty_gate(
         }
     }
 
+    let now = current_timestamp();
     if let Ok(peers) = connected_peers.lock() {
         for peer in peers.values() {
-            if !peer_has_remote_status(peer) || peer.quarantined || peer.consensus_duties_disabled {
+            if peer_readiness_exclusion_reason_at(peer, now, Some(&canonical_validator_set_hash()))
+                .is_some()
+            {
                 continue;
             }
             if let Some(address) = peer.validator_address.as_deref() {
@@ -2388,21 +2546,23 @@ fn best_connected_validator_height(connected_peers: &PeersArc) -> u64 {
 }
 
 fn peer_is_active_validator_sync_source(peer: &PeerConnection) -> bool {
+    let now = current_timestamp();
     peer.validator_address
         .as_deref()
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
-        && peer_has_remote_status(peer)
-        && !peer.quarantined
-        && !peer.consensus_duties_disabled
+        && peer_has_fresh_remote_status_at(peer, now)
+        && !peer_quarantine_active_at(peer, now)
+        && !peer_duties_disabled_active_at(peer, now)
 }
 
 fn peer_is_eligible_block_sync_source(peer: &PeerConnection) -> bool {
-    if peer.quarantined {
+    let now = current_timestamp();
+    if peer_quarantine_active_at(peer, now) {
         return false;
     }
 
-    !peer.consensus_duties_disabled
+    !peer_duties_disabled_active_at(peer, now)
         || !peer_has_validator_identity(peer)
         || peer_identity_is_support_sync_source(
             peer.node_id.as_deref(),
@@ -2910,11 +3070,21 @@ pub struct PeerSnapshot {
     pub address: String,
     pub direction: String,
     pub node_id: Option<String>,
+    pub public_address: Option<String>,
     pub validator_address: Option<String>,
+    pub version: Option<String>,
+    pub capabilities: Vec<String>,
     pub block_height: u64,
     pub best_block_hash: String,
     pub genesis_hash: String,
     pub status_received_at: Option<u64>,
+    pub status_reported_at: Option<u64>,
+    pub status_validator_address: Option<String>,
+    pub status_source_session_id: Option<String>,
+    pub active_validator_set_hash: Option<String>,
+    pub status_fresh: bool,
+    pub status_age_secs: Option<u64>,
+    pub readiness_exclusion_reason: Option<String>,
     pub quarantined: bool,
     pub consensus_duties_disabled: bool,
     pub recovery_state: Option<String>,
@@ -2924,6 +3094,51 @@ pub struct PeerSnapshot {
     pub blocks_received: u64,
     pub txs_sent: u64,
     pub txs_received: u64,
+}
+
+fn build_peer_snapshot(peer: &PeerConnection, now: u64) -> PeerSnapshot {
+    let expected_validator_set_hash = canonical_validator_set_hash();
+    PeerSnapshot {
+        address: peer
+            .public_address
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| peer.address.clone()),
+        direction: match peer.direction {
+            ConnectionDirection::Incoming => "incoming".to_string(),
+            ConnectionDirection::Outgoing => "outgoing".to_string(),
+        },
+        node_id: peer.node_id.clone(),
+        public_address: peer.public_address.clone(),
+        validator_address: peer.validator_address.clone(),
+        version: peer.version.clone(),
+        capabilities: peer.capabilities.clone(),
+        block_height: peer.last_known_height,
+        best_block_hash: peer.best_block_hash.clone(),
+        genesis_hash: peer.genesis_hash.clone(),
+        status_received_at: peer.status_received_at,
+        status_reported_at: peer.status_reported_at,
+        status_validator_address: peer.status_validator_address.clone(),
+        status_source_session_id: peer.status_source_session_id.clone(),
+        active_validator_set_hash: peer.active_validator_set_hash.clone(),
+        status_fresh: peer_has_fresh_remote_status_at(peer, now),
+        status_age_secs: peer_status_age_secs_at(peer, now),
+        readiness_exclusion_reason: peer_readiness_exclusion_reason_at(
+            peer,
+            now,
+            Some(&expected_validator_set_hash),
+        )
+        .map(ToOwned::to_owned),
+        quarantined: peer_quarantine_active_at(peer, now),
+        consensus_duties_disabled: peer_duties_disabled_active_at(peer, now),
+        recovery_state: peer.recovery_state.clone(),
+        connected_at: peer.connected_at,
+        last_seen: peer.last_seen,
+        blocks_sent: peer.blocks_sent,
+        blocks_received: peer.blocks_received,
+        txs_sent: peer.txs_sent,
+        txs_received: peer.txs_received,
+    }
 }
 
 impl P2PNetwork {
@@ -3129,19 +3344,11 @@ impl P2PNetwork {
                 .into_iter()
                 .map(|validator| validator.address)
                 .collect::<HashSet<_>>();
+        let expected_validator_set_hash = canonical_validator_set_hash();
+        let now = current_timestamp();
         let mut sent_validator_addresses = HashSet::new();
         let mut peers = self.connected_peers.lock().unwrap();
         for (address, peer) in peers.iter_mut() {
-            if peer.quarantined || peer.consensus_duties_disabled {
-                debug!(
-                    "p2p",
-                    "Skipping vote request to duty-disabled validator peer",
-                    "peer" => address.clone(),
-                    "validator_address" => peer.validator_address.clone().unwrap_or_default(),
-                    "height" => block.block_index
-                );
-                continue;
-            }
             let Some(validator_address) = recover_peer_validator_address_for_vote_target(
                 &self.config,
                 peer,
@@ -3179,6 +3386,19 @@ impl P2PNetwork {
                     "height" => block.block_index
                 );
                 peer.validator_address = Some(validator_address.clone());
+            }
+            if let Some(reason) =
+                peer_readiness_exclusion_reason_at(peer, now, Some(&expected_validator_set_hash))
+            {
+                debug!(
+                    "p2p",
+                    "Skipping vote request to non-ready validator peer",
+                    "peer" => address.clone(),
+                    "validator_address" => validator_address.clone(),
+                    "height" => block.block_index,
+                    "reason" => reason
+                );
+                continue;
             }
             if let Some(ref mut stream) = peer.stream {
                 if let Err(error) = send_consensus_message(stream, &message) {
@@ -3251,9 +3471,8 @@ impl P2PNetwork {
     }
 
     pub fn get_peer_info(&self) -> Vec<serde_json::Value> {
-        let peers = self.connected_peers.lock().unwrap();
-        peers
-            .values()
+        self.collect_peer_snapshots()
+            .into_iter()
             .map(|peer| {
                 serde_json::json!({
                     "address": peer.address,
@@ -3268,7 +3487,18 @@ impl P2PNetwork {
                     "validator_address": peer.validator_address,
                     "version": peer.version,
                     "capabilities": peer.capabilities,
-                    "genesis_hash": peer.genesis_hash
+                    "genesis_hash": peer.genesis_hash,
+                    "status_received_at": peer.status_received_at,
+                    "status_reported_at": peer.status_reported_at,
+                    "status_validator_address": peer.status_validator_address,
+                    "status_source_session_id": peer.status_source_session_id,
+                    "active_validator_set_hash": peer.active_validator_set_hash,
+                    "status_fresh": peer.status_fresh,
+                    "status_age_secs": peer.status_age_secs,
+                    "readiness_exclusion_reason": peer.readiness_exclusion_reason,
+                    "quarantined": peer.quarantined,
+                    "consensus_duties_disabled": peer.consensus_duties_disabled,
+                    "recovery_state": peer.recovery_state,
                 })
             })
             .collect()
@@ -3303,35 +3533,11 @@ impl P2PNetwork {
     }
 
     pub fn collect_peer_snapshots(&self) -> Vec<PeerSnapshot> {
+        let now = current_timestamp();
         let peers = self.connected_peers.lock().unwrap();
         peers
             .values()
-            .map(|peer| PeerSnapshot {
-                address: peer
-                    .public_address
-                    .clone()
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or_else(|| peer.address.clone()),
-                direction: match peer.direction {
-                    ConnectionDirection::Incoming => "incoming".to_string(),
-                    ConnectionDirection::Outgoing => "outgoing".to_string(),
-                },
-                node_id: peer.node_id.clone(),
-                validator_address: peer.validator_address.clone(),
-                block_height: peer.last_known_height,
-                best_block_hash: peer.best_block_hash.clone(),
-                genesis_hash: peer.genesis_hash.clone(),
-                status_received_at: peer.status_received_at,
-                quarantined: peer.quarantined,
-                consensus_duties_disabled: peer.consensus_duties_disabled,
-                recovery_state: peer.recovery_state.clone(),
-                connected_at: peer.connected_at,
-                last_seen: peer.last_seen,
-                blocks_sent: peer.blocks_sent,
-                blocks_received: peer.blocks_received,
-                txs_sent: peer.txs_sent,
-                txs_received: peer.txs_received,
-            })
+            .map(|peer| build_peer_snapshot(peer, now))
             .collect()
     }
 
@@ -4858,6 +5064,10 @@ fn build_local_status_message(blockchain: &BlockchainArc, config: &NodeConfig) -
         block_height,
         best_block_hash,
         genesis_hash,
+        status_timestamp: Some(current_timestamp()),
+        validator_address: announced_validator_address(config),
+        source_session_id: Some(config.p2p.node_name.clone()),
+        active_validator_set_hash: normalized_status_string(Some(&canonical_validator_set_hash())),
         quarantined,
         consensus_duties_disabled: quarantined,
         recovery_state,
@@ -4924,6 +5134,10 @@ fn handle_incoming_connection(
                 best_block_hash: String::new(),
                 genesis_hash: String::new(),
                 status_received_at: None,
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -5027,6 +5241,10 @@ fn handle_outgoing_connection(
                 best_block_hash: String::new(),
                 genesis_hash: String::new(),
                 status_received_at: None,
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -5336,6 +5554,8 @@ fn handle_messages(
                                             if !genesis_hash.trim().is_empty() {
                                                 peer.genesis_hash = genesis_hash.clone();
                                             }
+                                            peer.active_validator_set_hash =
+                                                active_validator_set_hash.clone();
                                         }
                                         info!(
                                             "p2p",
@@ -5400,6 +5620,8 @@ fn handle_messages(
                                                     if !genesis_hash.trim().is_empty() {
                                                         peer.genesis_hash = genesis_hash.clone();
                                                     }
+                                                    peer.active_validator_set_hash =
+                                                        active_validator_set_hash.clone();
                                                     hydrate_peer_from_cache(
                                                         &peer_state_cache,
                                                         &peer_identity,
@@ -5482,6 +5704,17 @@ fn handle_messages(
                                                             .clone(),
                                                         status_received_at: existing_state
                                                             .status_received_at,
+                                                        status_reported_at: existing_state
+                                                            .status_reported_at,
+                                                        status_validator_address: existing_state
+                                                            .status_validator_address
+                                                            .clone(),
+                                                        status_source_session_id: existing_state
+                                                            .status_source_session_id
+                                                            .clone(),
+                                                        active_validator_set_hash: existing_state
+                                                            .active_validator_set_hash
+                                                            .clone(),
                                                         quarantined: existing_state.quarantined,
                                                         consensus_duties_disabled: existing_state
                                                             .consensus_duties_disabled,
@@ -5535,6 +5768,7 @@ fn handle_messages(
                                 if !genesis_hash.trim().is_empty() {
                                     peer.genesis_hash = genesis_hash.clone();
                                 }
+                                peer.active_validator_set_hash = active_validator_set_hash.clone();
                                 hydrate_peer_from_cache(&peer_state_cache, &peer_identity, peer);
                                 cache_peer_state(&peer_state_cache, peer);
                             }
@@ -5772,6 +6006,10 @@ fn handle_messages(
                         block_height,
                         best_block_hash,
                         genesis_hash,
+                        status_timestamp,
+                        validator_address,
+                        source_session_id,
+                        active_validator_set_hash,
                         quarantined,
                         consensus_duties_disabled,
                         recovery_state,
@@ -5785,6 +6023,10 @@ fn handle_messages(
                             block_height,
                             &best_block_hash,
                             &genesis_hash,
+                            status_timestamp,
+                            validator_address.as_deref(),
+                            source_session_id.as_deref(),
+                            active_validator_set_hash.as_deref(),
                             quarantined,
                             consensus_duties_disabled,
                             recovery_state.as_deref(),
@@ -7282,7 +7524,7 @@ fn dial_peer_async(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_block_batch, apply_block_if_new, background_poll_interval,
+        apply_block_batch, apply_block_if_new, apply_status_to_peer, background_poll_interval,
         best_connected_validator_height, block_sync_min_serve_interval_secs,
         block_sync_request_range, block_sync_request_range_with_overlap,
         block_sync_response_policy, build_local_handshake,
@@ -7298,7 +7540,8 @@ mod tests {
         local_node_runs_validator_consensus, local_peer_identity, merge_peer_state_from_existing,
         parse_bootnode_dial_address, peer_has_identifying_metadata, peer_identity_key,
         peer_is_eligible_block_sync_source, peer_matches_address,
-        pending_incoming_connections_from_host, preferred_connection_direction, receive_message,
+        peer_readiness_exclusion_reason_at, pending_incoming_connections_from_host,
+        preferred_connection_direction, receive_message,
         recover_peer_validator_address_for_vote_target, resolve_bootstrap_dial_targets,
         resolve_duplicate_connection, select_block_sync_response_blocks,
         should_canonicalize_validator_public_address,
@@ -7309,13 +7552,13 @@ mod tests {
         validate_vote_request_extends_local_tip, validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_handshake_pq_signature,
         vote_request_parent_sync_range, ConnectionDirection, DialTargetsArc, DuplicateResolution,
-        PeerConnection, PeerEntryGuard, BACKGROUND_SYNC_POLL_MILLIS,
-        BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, DEFAULT_BOOTSTRAP_REFRESH_SECS,
+        P2PNetwork, PeerConnection, PeerEntryGuard, BACKGROUND_SYNC_POLL_MILLIS,
+        BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, DEFAULT_BOOTSTRAP_REFRESH_SECS, DUTY_DISABLED_TTL_SECS,
         IMMEDIATE_STATUS_SYNC_BATCH, MAX_P2P_FRAME_BYTES, MAX_STATUS_SYNC_BATCH,
         MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS, MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS,
-        NORMAL_BOOTSTRAP_REFRESH_SECS, PENDING_BLOCKS, STALE_UNIDENTIFIED_PEER_SECS,
-        STALE_VALIDATOR_STATUS_SECS, SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS,
-        TEST_COMMIT_VERIFIER_VALIDATOR_MANAGER,
+        NORMAL_BOOTSTRAP_REFRESH_SECS, PENDING_BLOCKS, QUARANTINE_STATUS_TTL_SECS,
+        STALE_UNIDENTIFIED_PEER_SECS, STALE_VALIDATOR_STATUS_SECS, STATUS_READY_TTL_SECS,
+        SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, TEST_COMMIT_VERIFIER_VALIDATOR_MANAGER,
         VALIDATOR_SUPPORT_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS,
     };
     use crate::block::{Block, BlockChain};
@@ -7378,7 +7621,11 @@ mod tests {
             last_known_height: 0,
             best_block_hash: String::new(),
             genesis_hash: canonical_genesis_hash(),
-            status_received_at: Some(0),
+            status_received_at: Some(current_timestamp()),
+            status_reported_at: None,
+            status_validator_address: None,
+            status_source_session_id: None,
+            active_validator_set_hash: None,
             quarantined: false,
             consensus_duties_disabled: false,
             recovery_state: None,
@@ -7443,6 +7690,164 @@ mod tests {
             status_ready_validator_addresses_with_local_duty_gate(&config, &connected_peers, true);
         assert!(!local_disabled.contains(&"synv1local".to_string()));
         assert!(local_disabled.contains(&"synv1healthy".to_string()));
+    }
+
+    #[test]
+    fn stale_peer_status_expires_from_status_ready_snapshot() {
+        let mut config = NodeConfig::default();
+        config.node.validator_address = "synv1local".to_string();
+        let connected_peers = Arc::new(Mutex::new(HashMap::new()));
+        let now = current_timestamp();
+
+        let mut stale_peer = test_peer_with_validator_address(Some("synv1stale"));
+        stale_peer.address = "peer-stale".to_string();
+        stale_peer.status_received_at =
+            Some(now.saturating_sub(STATUS_READY_TTL_SECS.saturating_add(1)));
+        let stale_reason = peer_readiness_exclusion_reason_at(&stale_peer, now, None);
+
+        let mut fresh_peer = test_peer_with_validator_address(Some("synv1fresh"));
+        fresh_peer.address = "peer-fresh".to_string();
+        fresh_peer.status_received_at = Some(now);
+
+        {
+            let mut peers = connected_peers.lock().unwrap();
+            peers.insert("peer-stale".to_string(), stale_peer);
+            peers.insert("peer-fresh".to_string(), fresh_peer);
+        }
+
+        let addresses =
+            status_ready_validator_addresses_with_local_duty_gate(&config, &connected_peers, false);
+        assert!(addresses.contains(&"synv1fresh".to_string()));
+        assert!(!addresses.contains(&"synv1stale".to_string()));
+        assert_eq!(stale_reason, Some("stale-status"));
+    }
+
+    #[test]
+    fn fresh_status_overwrites_stale_quarantine_and_duty_flags() {
+        let mut peer = test_peer_with_validator_address(Some("synv1peer"));
+        let now = current_timestamp();
+        peer.status_received_at =
+            Some(now.saturating_sub(DUTY_DISABLED_TTL_SECS.saturating_add(1)));
+        peer.quarantined = true;
+        peer.consensus_duties_disabled = true;
+        peer.recovery_state = Some("STALE_QUARANTINE".to_string());
+
+        apply_status_to_peer(
+            &mut peer,
+            77,
+            "fresh-hash",
+            "genesis-hash",
+            Some(now),
+            Some("synv1peer"),
+            Some("peer-session"),
+            Some("validator-set-hash"),
+            false,
+            false,
+            None,
+            now,
+        );
+
+        assert_eq!(peer.last_known_height, 77);
+        assert_eq!(peer.best_block_hash, "fresh-hash");
+        assert!(!peer.quarantined);
+        assert!(!peer.consensus_duties_disabled);
+        assert_eq!(peer.status_validator_address.as_deref(), Some("synv1peer"));
+        assert_eq!(
+            peer.status_source_session_id.as_deref(),
+            Some("peer-session")
+        );
+        assert_eq!(
+            peer.active_validator_set_hash.as_deref(),
+            Some("validator-set-hash")
+        );
+        assert_eq!(
+            peer_readiness_exclusion_reason_at(&peer, now, Some("validator-set-hash")),
+            None
+        );
+    }
+
+    #[test]
+    fn reconnect_hydration_does_not_inherit_stale_quarantine() {
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let now = current_timestamp();
+        let mut existing = test_peer_with_validator_address(Some("synv1peer"));
+        existing.status_received_at =
+            Some(now.saturating_sub(QUARANTINE_STATUS_TTL_SECS.saturating_add(1)));
+        existing.quarantined = true;
+        existing.consensus_duties_disabled = true;
+        existing.recovery_state = Some("STALE_QUARANTINE".to_string());
+        cache_peer_state(&cache, &existing);
+
+        let mut replacement = test_peer_with_validator_address(Some("synv1peer"));
+        replacement.status_received_at = None;
+        replacement.genesis_hash.clear();
+        replacement.quarantined = false;
+        replacement.consensus_duties_disabled = false;
+        let peer_identity = peer_identity_key("peer-a", Some("synv1peer"));
+        hydrate_peer_from_cache(&cache, &peer_identity, &mut replacement);
+
+        assert_eq!(replacement.status_received_at, None);
+        assert!(!replacement.quarantined);
+        assert!(!replacement.consensus_duties_disabled);
+        assert_eq!(
+            peer_readiness_exclusion_reason_at(&replacement, now, None),
+            Some("stale-status")
+        );
+    }
+
+    #[test]
+    fn peer_info_uses_canonical_peer_snapshot_readiness_reason() {
+        let config = NodeConfig::default();
+        let blockchain = Arc::new(Mutex::new(BlockChain::new()));
+        let network = P2PNetwork::new(blockchain, &config);
+        let now = current_timestamp();
+        let mut peer = test_peer_with_validator_address(Some("synv1peer"));
+        peer.address = "peer-stale".to_string();
+        peer.status_received_at = Some(now.saturating_sub(STATUS_READY_TTL_SECS.saturating_add(1)));
+        network
+            .connected_peers
+            .lock()
+            .unwrap()
+            .insert("peer-stale".to_string(), peer);
+
+        let snapshot = network
+            .collect_peer_snapshots()
+            .into_iter()
+            .next()
+            .expect("peer snapshot");
+        let info = network
+            .get_peer_info()
+            .into_iter()
+            .next()
+            .expect("peer info");
+
+        assert_eq!(
+            snapshot.readiness_exclusion_reason.as_deref(),
+            Some("stale-status")
+        );
+        assert_eq!(
+            info.get("readiness_exclusion_reason")
+                .and_then(serde_json::Value::as_str),
+            Some("stale-status")
+        );
+        assert_eq!(
+            info.get("status_fresh")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn peer_readiness_reports_wrong_validator_set_hash() {
+        let now = current_timestamp();
+        let mut peer = test_peer_with_validator_address(Some("synv1peer"));
+        peer.status_received_at = Some(now);
+        peer.active_validator_set_hash = Some("wrong-set".to_string());
+
+        assert_eq!(
+            peer_readiness_exclusion_reason_at(&peer, now, Some("expected-set")),
+            Some("wrong-validator-set-hash")
+        );
     }
 
     #[test]
@@ -7910,6 +8315,7 @@ mod tests {
     #[test]
     fn reconnect_hydration_preserves_remote_status_for_same_validator_identity() {
         let cache = Arc::new(Mutex::new(HashMap::new()));
+        let status_time = current_timestamp();
         let existing = PeerConnection {
             address: "62.146.182.208:5622".to_string(),
             direction: ConnectionDirection::Outgoing,
@@ -7928,7 +8334,11 @@ mod tests {
             last_known_height: 42,
             best_block_hash: "block-hash".to_string(),
             genesis_hash: "genesis-hash".to_string(),
-            status_received_at: Some(21),
+            status_received_at: Some(status_time),
+            status_reported_at: None,
+            status_validator_address: None,
+            status_source_session_id: None,
+            active_validator_set_hash: None,
             quarantined: false,
             consensus_duties_disabled: false,
             recovery_state: None,
@@ -7954,6 +8364,10 @@ mod tests {
             best_block_hash: String::new(),
             genesis_hash: String::new(),
             status_received_at: None,
+            status_reported_at: None,
+            status_validator_address: None,
+            status_source_session_id: None,
+            active_validator_set_hash: None,
             quarantined: false,
             consensus_duties_disabled: false,
             recovery_state: None,
@@ -7965,11 +8379,12 @@ mod tests {
         assert_eq!(replacement.last_known_height, 42);
         assert_eq!(replacement.best_block_hash, "block-hash".to_string());
         assert_eq!(replacement.genesis_hash, "genesis-hash".to_string());
-        assert_eq!(replacement.status_received_at, Some(21));
+        assert_eq!(replacement.status_received_at, Some(status_time));
     }
 
     #[test]
     fn replacement_session_inherits_existing_remote_status() {
+        let status_time = current_timestamp();
         let existing = PeerConnection {
             address: "62.146.182.208:5622".to_string(),
             direction: ConnectionDirection::Outgoing,
@@ -7988,7 +8403,11 @@ mod tests {
             last_known_height: 9,
             best_block_hash: "hash-9".to_string(),
             genesis_hash: "genesis-hash".to_string(),
-            status_received_at: Some(16),
+            status_received_at: Some(status_time),
+            status_reported_at: None,
+            status_validator_address: None,
+            status_source_session_id: None,
+            active_validator_set_hash: None,
             quarantined: false,
             consensus_duties_disabled: false,
             recovery_state: None,
@@ -8012,6 +8431,10 @@ mod tests {
             best_block_hash: String::new(),
             genesis_hash: String::new(),
             status_received_at: None,
+            status_reported_at: None,
+            status_validator_address: None,
+            status_source_session_id: None,
+            active_validator_set_hash: None,
             quarantined: false,
             consensus_duties_disabled: false,
             recovery_state: None,
@@ -8021,7 +8444,7 @@ mod tests {
 
         assert_eq!(replacement.last_known_height, 9);
         assert_eq!(replacement.genesis_hash, "genesis-hash".to_string());
-        assert_eq!(replacement.status_received_at, Some(16));
+        assert_eq!(replacement.status_received_at, Some(status_time));
         assert_eq!(
             replacement.public_address,
             Some("62.146.182.208:5622".to_string())
@@ -8199,6 +8622,10 @@ mod tests {
                 best_block_hash: String::new(),
                 genesis_hash: String::new(),
                 status_received_at: None,
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -8298,6 +8725,10 @@ mod tests {
             best_block_hash: String::new(),
             genesis_hash: String::new(),
             status_received_at: None,
+            status_reported_at: None,
+            status_validator_address: None,
+            status_source_session_id: None,
+            active_validator_set_hash: None,
             quarantined: false,
             consensus_duties_disabled: false,
             recovery_state: None,
@@ -8436,6 +8867,10 @@ mod tests {
             best_block_hash: String::new(),
             genesis_hash: String::new(),
             status_received_at: None,
+            status_reported_at: None,
+            status_validator_address: None,
+            status_source_session_id: None,
+            active_validator_set_hash: None,
             quarantined: false,
             consensus_duties_disabled: false,
             recovery_state: None,
@@ -8476,6 +8911,10 @@ mod tests {
             best_block_hash: String::new(),
             genesis_hash: String::new(),
             status_received_at: None,
+            status_reported_at: None,
+            status_validator_address: None,
+            status_source_session_id: None,
+            active_validator_set_hash: None,
             quarantined: false,
             consensus_duties_disabled: false,
             recovery_state: None,
@@ -8620,6 +9059,10 @@ mod tests {
                 best_block_hash: String::new(),
                 genesis_hash: String::new(),
                 status_received_at: None,
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -8646,6 +9089,10 @@ mod tests {
                 best_block_hash: String::new(),
                 genesis_hash: String::new(),
                 status_received_at: None,
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -8683,6 +9130,10 @@ mod tests {
             best_block_hash: String::new(),
             genesis_hash: String::new(),
             status_received_at: None,
+            status_reported_at: None,
+            status_validator_address: None,
+            status_source_session_id: None,
+            active_validator_set_hash: None,
             quarantined: false,
             consensus_duties_disabled: false,
             recovery_state: None,
@@ -8706,6 +9157,10 @@ mod tests {
             best_block_hash: String::new(),
             genesis_hash: String::new(),
             status_received_at: None,
+            status_reported_at: None,
+            status_validator_address: None,
+            status_source_session_id: None,
+            active_validator_set_hash: None,
             quarantined: false,
             consensus_duties_disabled: false,
             recovery_state: None,
@@ -8739,6 +9194,10 @@ mod tests {
                 best_block_hash: String::new(),
                 genesis_hash: String::new(),
                 status_received_at: None,
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -8765,6 +9224,10 @@ mod tests {
                 best_block_hash: String::new(),
                 genesis_hash: String::new(),
                 status_received_at: None,
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -8791,6 +9254,10 @@ mod tests {
                 best_block_hash: String::new(),
                 genesis_hash: String::new(),
                 status_received_at: None,
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -8828,6 +9295,10 @@ mod tests {
                 best_block_hash: String::new(),
                 genesis_hash: String::new(),
                 status_received_at: None,
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -8949,6 +9420,10 @@ mod tests {
                 best_block_hash: String::new(),
                 genesis_hash: String::new(),
                 status_received_at: None,
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -8995,6 +9470,10 @@ mod tests {
                 best_block_hash: "remote-tip".to_string(),
                 genesis_hash: "remote-hash".to_string(),
                 status_received_at: Some(current_timestamp()),
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -9199,6 +9678,10 @@ mod tests {
             block_height: 1,
             best_block_hash: "tip".to_string(),
             genesis_hash: "genesis".to_string(),
+            status_timestamp: Some(1),
+            validator_address: Some("synv1leader".to_string()),
+            source_session_id: Some("test-session".to_string()),
+            active_validator_set_hash: Some("test-validator-set".to_string()),
             quarantined: false,
             consensus_duties_disabled: false,
             recovery_state: None,
@@ -9729,6 +10212,10 @@ mod tests {
                 best_block_hash: String::new(),
                 genesis_hash: String::new(),
                 status_received_at: None,
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -9817,6 +10304,10 @@ mod tests {
                 best_block_hash: String::new(),
                 genesis_hash: String::new(),
                 status_received_at: None,
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -9841,6 +10332,10 @@ mod tests {
                 12,
                 "best-hash",
                 &genesis_hash_for_thread,
+                Some(current_timestamp()),
+                Some("synv1peer-a"),
+                Some("peer-a"),
+                Some("test-validator-set"),
                 false,
                 false,
                 None,
@@ -9914,6 +10409,10 @@ mod tests {
             195_000,
             "best-hash",
             &genesis_hash,
+            Some(current_timestamp()),
+            Some("synv21ga3nsdjagzt9pmks4mzjq4vdjyngdwq6jst632"),
+            Some("sentry1"),
+            Some("test-validator-set"),
             false,
             true,
             Some("SUPPORT_RELAY"),
@@ -10007,7 +10506,11 @@ mod tests {
                     last_known_height: 0,
                     best_block_hash: String::new(),
                     genesis_hash: "genesis-hash".to_string(),
-                    status_received_at: Some(1),
+                    status_received_at: Some(current_timestamp()),
+                    status_reported_at: None,
+                    status_validator_address: None,
+                    status_source_session_id: None,
+                    active_validator_set_hash: None,
                     quarantined: false,
                     consensus_duties_disabled: false,
                     recovery_state: None,
@@ -10053,6 +10556,10 @@ mod tests {
                 best_block_hash: String::new(),
                 genesis_hash: String::new(),
                 status_received_at: None,
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -10078,7 +10585,11 @@ mod tests {
                 last_known_height: 0,
                 best_block_hash: String::new(),
                 genesis_hash: "genesis-hash".to_string(),
-                status_received_at: Some(1),
+                status_received_at: Some(current_timestamp()),
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -10142,6 +10653,10 @@ mod tests {
                 best_block_hash: String::new(),
                 genesis_hash: String::new(),
                 status_received_at: None,
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -10167,7 +10682,11 @@ mod tests {
                 last_known_height: 7,
                 best_block_hash: String::new(),
                 genesis_hash: "genesis-hash".to_string(),
-                status_received_at: Some(1),
+                status_received_at: Some(current_timestamp()),
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -10201,7 +10720,11 @@ mod tests {
                 last_known_height: 12,
                 best_block_hash: "hash-12".to_string(),
                 genesis_hash: "genesis-hash".to_string(),
-                status_received_at: Some(1),
+                status_received_at: Some(current_timestamp()),
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -10227,7 +10750,11 @@ mod tests {
                 last_known_height: 12,
                 best_block_hash: "hash-12".to_string(),
                 genesis_hash: "genesis-hash".to_string(),
-                status_received_at: Some(1),
+                status_received_at: Some(current_timestamp()),
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -10253,7 +10780,11 @@ mod tests {
                 last_known_height: 20,
                 best_block_hash: "fork-20".to_string(),
                 genesis_hash: "genesis-hash".to_string(),
-                status_received_at: Some(1),
+                status_received_at: Some(current_timestamp()),
+                status_reported_at: None,
+                status_validator_address: None,
+                status_source_session_id: None,
+                active_validator_set_hash: None,
                 quarantined: false,
                 consensus_duties_disabled: false,
                 recovery_state: None,
@@ -10280,7 +10811,7 @@ mod tests {
             peer.address = peer_id.to_string();
             peer.last_known_height = height;
             peer.best_block_hash = format!("hash-{height}");
-            peer.status_received_at = Some(1);
+            peer.status_received_at = Some(current_timestamp());
             peers.insert(peer_id.to_string(), peer);
         }
 
@@ -10305,7 +10836,7 @@ mod tests {
             peer.address = peer_id.to_string();
             peer.last_known_height = height;
             peer.best_block_hash = format!("hash-{height}");
-            peer.status_received_at = Some(1);
+            peer.status_received_at = Some(current_timestamp());
             peer.quarantined = quarantined;
             peer.consensus_duties_disabled = duty_disabled;
             peers.insert(peer_id.to_string(), peer);
@@ -10489,6 +11020,10 @@ mod tests {
             best_block_hash: String::new(),
             genesis_hash: String::new(),
             status_received_at: None,
+            status_reported_at: None,
+            status_validator_address: None,
+            status_source_session_id: None,
+            active_validator_set_hash: None,
             quarantined: false,
             consensus_duties_disabled: false,
             recovery_state: None,
@@ -10511,7 +11046,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_validator_dial_is_status_ready_during_identity_recovery_grace() {
+    fn configured_validator_dial_is_not_status_ready_until_status_exchange() {
         let validators = vec![
             "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs".to_string(),
             "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt".to_string(),
@@ -10551,6 +11086,10 @@ mod tests {
             best_block_hash: String::new(),
             genesis_hash: String::new(),
             status_received_at: None,
+            status_reported_at: None,
+            status_validator_address: None,
+            status_source_session_id: None,
+            active_validator_set_hash: None,
             quarantined: false,
             consensus_duties_disabled: false,
             recovery_state: None,
@@ -10563,7 +11102,7 @@ mod tests {
         let status_ready = status_ready_validator_addresses(&config, &connected_peers);
 
         assert!(status_ready.contains(&"synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string()));
-        assert!(status_ready.contains(&"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string()));
+        assert!(!status_ready.contains(&"synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5".to_string()));
         let peers = connected_peers.lock().expect("peer map should lock");
         let peer = peers
             .get("73.79.66.255:5622")
@@ -10609,6 +11148,10 @@ mod tests {
             best_block_hash: String::new(),
             genesis_hash: String::new(),
             status_received_at: None,
+            status_reported_at: None,
+            status_validator_address: None,
+            status_source_session_id: None,
+            active_validator_set_hash: None,
             quarantined: false,
             consensus_duties_disabled: false,
             recovery_state: None,

@@ -6,9 +6,13 @@ use crate::transaction::Transaction;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub const EPOCH_VALIDATOR_SETS_ENV: &str = "SYNERGY_EPOCH_VALIDATOR_SETS_FILE";
+pub const DEFAULT_EPOCH_VALIDATOR_SETS_PATH: &str = "config/epoch-validator-sets.json";
 
 const VERBOSE_VALIDATOR_LOGS: bool = false;
 pub const INITIAL_VALIDATOR_SYNERGY_SCORE: f64 = 100.0;
@@ -173,6 +177,113 @@ pub struct ValidatorRegistration {
     pub stake_amount: u64,
     pub submitted_at: u64,
     pub registration_tx_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpochValidatorSetSnapshot {
+    #[serde(default)]
+    pub chain_id: Option<u64>,
+    #[serde(default)]
+    pub epoch_id: Option<u64>,
+    #[serde(default)]
+    pub validator_set_version: Option<u64>,
+    pub effective_from_height: u64,
+    #[serde(default)]
+    pub effective_to_height: Option<u64>,
+    #[serde(default)]
+    pub active_validators: Vec<EpochValidatorMember>,
+    #[serde(default)]
+    pub pending_validators: Vec<EpochValidatorMember>,
+    #[serde(default)]
+    pub jailed_validators: Vec<EpochValidatorMember>,
+    #[serde(default)]
+    pub removed_validators: Vec<EpochValidatorMember>,
+    #[serde(default)]
+    pub quorum_threshold: Option<usize>,
+    #[serde(default)]
+    pub source_registry_hash: Option<String>,
+    #[serde(default)]
+    pub state_hash: Option<String>,
+    #[serde(default)]
+    pub previous_set_hash: Option<String>,
+    #[serde(default)]
+    pub validator_set_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EpochValidatorMember {
+    Address(String),
+    Record {
+        #[serde(
+            default,
+            alias = "address",
+            alias = "operator_address",
+            alias = "validator_id"
+        )]
+        validator_address: String,
+        #[serde(default)]
+        voting_weight: Option<u64>,
+        #[serde(default)]
+        proposer_eligible: Option<bool>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum EpochValidatorSetDocument {
+    List(Vec<EpochValidatorSetSnapshot>),
+    Wrapped {
+        #[serde(default, alias = "validator_sets")]
+        epoch_validator_sets: Vec<EpochValidatorSetSnapshot>,
+    },
+}
+
+impl EpochValidatorSetSnapshot {
+    fn applies_to_height(&self, height: u64) -> bool {
+        height >= self.effective_from_height
+            && self
+                .effective_to_height
+                .map(|effective_to| height <= effective_to)
+                .unwrap_or(true)
+    }
+
+    fn active_validator_addresses(&self) -> Result<Vec<String>, String> {
+        let mut addresses = Vec::with_capacity(self.active_validators.len());
+        let mut seen = HashSet::new();
+        for member in &self.active_validators {
+            let address = member.validator_address().ok_or_else(|| {
+                "epoch validator set contains an empty active validator".to_string()
+            })?;
+            if !seen.insert(address.clone()) {
+                return Err(format!(
+                    "epoch validator set contains duplicate active validator {address}"
+                ));
+            }
+            addresses.push(address);
+        }
+        if addresses.is_empty() {
+            return Err("epoch validator set has no active validators".to_string());
+        }
+        Ok(addresses)
+    }
+}
+
+impl EpochValidatorMember {
+    fn validator_address(&self) -> Option<String> {
+        match self {
+            EpochValidatorMember::Address(address) => {
+                let trimmed = address.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }
+            EpochValidatorMember::Record {
+                validator_address, ..
+            } => {
+                let trimmed = validator_address.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1070,12 +1181,79 @@ lazy_static::lazy_static! {
     pub static ref VALIDATOR_MANAGER: Arc<ValidatorManager> = Arc::new(ValidatorManager::new());
 }
 
-fn configured_consensus_order(active_validators: &[Validator]) -> (Option<Vec<String>>, usize) {
+fn configured_max_validators(active_validators: &[Validator]) -> usize {
     let config = crate::config::load_node_config(None).ok();
-    let max_validators = config
+    config
         .as_ref()
         .map(|config| config.consensus.max_validators.max(active_validators.len()))
-        .unwrap_or(usize::MAX);
+        .unwrap_or(usize::MAX)
+}
+
+fn epoch_validator_sets_path() -> Result<Option<PathBuf>, String> {
+    if let Ok(value) = std::env::var(EPOCH_VALIDATOR_SETS_ENV) {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        let path = PathBuf::from(trimmed);
+        if !path.is_file() {
+            return Err(format!(
+                "epoch validator set file {} does not exist",
+                path.display()
+            ));
+        }
+        return Ok(Some(path));
+    }
+
+    let path = std::env::var("SYNERGY_PROJECT_ROOT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| PathBuf::from(value).join(DEFAULT_EPOCH_VALIDATOR_SETS_PATH))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_EPOCH_VALIDATOR_SETS_PATH));
+    if path.is_file() {
+        Ok(Some(path))
+    } else {
+        Ok(None)
+    }
+}
+
+fn load_epoch_validator_sets() -> Result<Vec<EpochValidatorSetSnapshot>, String> {
+    let Some(path) = epoch_validator_sets_path()? else {
+        return Ok(Vec::new());
+    };
+    let raw = fs::read_to_string(&path)
+        .map_err(|error| format!("read epoch validator set file {}: {error}", path.display()))?;
+    let document: EpochValidatorSetDocument = serde_json::from_str(&raw)
+        .map_err(|error| format!("parse epoch validator set file {}: {error}", path.display()))?;
+    let mut sets = match document {
+        EpochValidatorSetDocument::List(sets) => sets,
+        EpochValidatorSetDocument::Wrapped {
+            epoch_validator_sets,
+        } => epoch_validator_sets,
+    };
+    sets.sort_by(|left, right| {
+        right
+            .effective_from_height
+            .cmp(&left.effective_from_height)
+            .then_with(|| right.validator_set_version.cmp(&left.validator_set_version))
+    });
+    Ok(sets)
+}
+
+fn epoch_validator_addresses_for_height(height: u64) -> Result<Option<Vec<String>>, String> {
+    for set in load_epoch_validator_sets()? {
+        if set.applies_to_height(height) {
+            return set.active_validator_addresses().map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn current_configured_consensus_order(
+    active_validators: &[Validator],
+) -> (Option<Vec<String>>, usize) {
+    let max_validators = configured_max_validators(active_validators);
     let active_addresses = active_validators
         .iter()
         .map(|validator| validator.address.clone())
@@ -1120,6 +1298,27 @@ fn configured_consensus_order(active_validators: &[Validator]) -> (Option<Vec<St
     }
 
     (None, max_validators)
+}
+
+fn validators_for_authoritative_order(
+    active_validators: Vec<Validator>,
+    ordered_addresses: Vec<String>,
+    max_validators: usize,
+) -> Result<Vec<Validator>, String> {
+    let validators_by_address = active_validators
+        .into_iter()
+        .map(|validator| (validator.address.clone(), validator))
+        .collect::<HashMap<_, _>>();
+    let mut validators = Vec::with_capacity(ordered_addresses.len());
+    for address in ordered_addresses.into_iter().take(max_validators) {
+        let Some(validator) = validators_by_address.get(&address) else {
+            return Err(format!(
+                "authoritative validator set references validator {address} missing from local registry"
+            ));
+        };
+        validators.push(validator.clone());
+    }
+    Ok(validators)
 }
 
 pub fn is_validator_activation_transaction(tx: &Transaction) -> bool {
@@ -1301,7 +1500,7 @@ fn canonical_minimum_validator_stake_nwei() -> u64 {
 }
 
 pub fn consensus_membership_validators(active_validators: Vec<Validator>) -> Vec<Validator> {
-    let (configured_order, max_validators) = configured_consensus_order(&active_validators);
+    let (configured_order, max_validators) = current_configured_consensus_order(&active_validators);
     if let Some(ordered_addresses) = configured_order {
         let validators_by_address = active_validators
             .into_iter()
@@ -1317,6 +1516,50 @@ pub fn consensus_membership_validators(active_validators: Vec<Validator>) -> Vec
     fallback_validators.sort_by(|left, right| left.address.cmp(&right.address));
     fallback_validators.truncate(max_validators);
     fallback_validators
+}
+
+pub fn consensus_membership_validators_for_height(
+    validators: Vec<Validator>,
+    height: u64,
+) -> Result<Vec<Validator>, String> {
+    let max_validators = configured_max_validators(&validators);
+    if let Some(ordered_addresses) = epoch_validator_addresses_for_height(height)? {
+        return validators_for_authoritative_order(validators, ordered_addresses, max_validators);
+    }
+
+    if let Some(migration) = consensus_fork::active_consensus_fork_migration()? {
+        if migration.applies_to_height(height) {
+            let ordered_addresses = migration
+                .new_validator_registry
+                .iter()
+                .map(|entry| entry.validator_address.clone())
+                .collect::<Vec<_>>();
+            return validators_for_authoritative_order(
+                validators,
+                ordered_addresses,
+                max_validators,
+            );
+        }
+    }
+
+    if let Ok(genesis) = canonical_genesis() {
+        let ordered_addresses = genesis
+            .validators()
+            .iter()
+            .map(|entry| entry.operator_address.clone())
+            .collect::<Vec<_>>();
+        if !ordered_addresses.is_empty() {
+            if let Ok(genesis_validators) = validators_for_authoritative_order(
+                validators.clone(),
+                ordered_addresses,
+                max_validators,
+            ) {
+                return Ok(genesis_validators);
+            }
+        }
+    }
+
+    Ok(consensus_membership_validators(validators))
 }
 
 #[cfg(test)]
@@ -1658,6 +1901,68 @@ mod tests {
 
         std::fs::remove_dir_all(temp_dir).ok();
         assert_eq!(membership.len(), 6);
+    }
+
+    #[test]
+    fn epoch_validator_set_for_height_overrides_current_registry_membership() {
+        let active = (1..=7)
+            .map(|index| active_validator(&format!("validator-{index}")))
+            .collect::<Vec<_>>();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("synergy-epoch-validator-set-{unique}"));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        std::fs::write(
+            &snapshot_path,
+            serde_json::json!({
+                "epoch_validator_sets": [{
+                    "chain_id": 1264,
+                    "epoch_id": 7,
+                    "validator_set_version": 3,
+                    "effective_from_height": 100,
+                    "effective_to_height": 199,
+                    "active_validators": [
+                        "validator-1",
+                        "validator-2",
+                        "validator-3",
+                        "validator-4",
+                        "validator-5",
+                        "validator-6"
+                    ],
+                    "pending_validators": ["validator-7"],
+                    "quorum_threshold": 4,
+                    "validator_set_hash": "test-epoch-set-hash"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let historical = consensus_membership_validators_for_height(active.clone(), 150)
+            .expect("historical epoch validator set should resolve");
+        let historical_addresses = historical
+            .iter()
+            .map(|validator| validator.address.as_str())
+            .collect::<Vec<_>>();
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        assert_eq!(
+            historical_addresses,
+            vec![
+                "validator-1",
+                "validator-2",
+                "validator-3",
+                "validator-4",
+                "validator-5",
+                "validator-6"
+            ]
+        );
+        assert!(!historical_addresses.contains(&"validator-7"));
     }
 
     #[test]

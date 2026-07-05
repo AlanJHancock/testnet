@@ -10,8 +10,9 @@ use crate::consensus::validator_keys::{
 };
 use crate::crypto::pqc::{PQCCiphertext, PQCManager, PQCPrivateKey, PQCPublicKey, PQCSignature};
 use crate::validator::{
-    consensus_membership_validators, target_validator_cluster_count, Validator, ValidatorManager,
-    ValidatorPerformanceUpdate, TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
+    consensus_membership_validators, consensus_membership_validators_for_height,
+    target_validator_cluster_count, Validator, ValidatorManager, ValidatorPerformanceUpdate,
+    TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
 };
 use crate::{debug, warn};
 use serde::{Deserialize, Serialize};
@@ -546,12 +547,7 @@ impl DualQuorumConsensus {
         while Instant::now() < deadline {
             self.apply_recorded_equivocations();
             votes.retain(|vote| {
-                self.vote_is_eligible_for_collection(
-                    vote,
-                    block_hash,
-                    epoch_number,
-                    round_number,
-                )
+                self.vote_is_eligible_for_collection(vote, block_hash, epoch_number, round_number)
             });
 
             let pending_votes =
@@ -1335,27 +1331,23 @@ impl DualQuorumConsensus {
                         "collection_round" => round_number
                     );
                 } else {
-                warn!(
-                    "consensus",
-                    "Discarding equivocating vote",
-                    "validator" => vote.validator_address.clone(),
-                    "block_hash" => vote.block_hash.clone(),
-                    "height" => vote.block_index,
-                    "epoch" => vote.epoch_number,
-                    "round" => vote.round_number
-                );
-                continue;
+                    warn!(
+                        "consensus",
+                        "Discarding equivocating vote",
+                        "validator" => vote.validator_address.clone(),
+                        "block_hash" => vote.block_hash.clone(),
+                        "height" => vote.block_index,
+                        "epoch" => vote.epoch_number,
+                        "round" => vote.round_number
+                    );
+                    continue;
                 }
             }
             if !expected_validators.contains(&vote.validator_address) {
                 continue;
             }
-            if !self.vote_is_eligible_for_collection(
-                &vote,
-                block_hash,
-                epoch_number,
-                round_number,
-            ) {
+            if !self.vote_is_eligible_for_collection(&vote, block_hash, epoch_number, round_number)
+            {
                 continue;
             }
             if seen_validators.contains(&vote.validator_address) {
@@ -1824,10 +1816,21 @@ impl DualQuorumConsensus {
             return Err("QC does not include individually verifiable Aegis PQC votes".to_string());
         }
 
-        let active_validators =
-            consensus_membership_validators(validator_manager.get_active_validators());
+        let active_validators = consensus_membership_validators_for_height(
+            validator_manager.get_all_validators(),
+            block.block_index,
+        )
+        .map_err(|error| {
+            format!(
+                "QC verification cannot resolve validator set for height {}: {error}",
+                block.block_index
+            )
+        })?;
         if active_validators.is_empty() {
-            return Err("QC verification has no active validator set".to_string());
+            return Err(format!(
+                "QC verification has no active validator set for height {}",
+                block.block_index
+            ));
         }
         let active_by_address = active_validators
             .iter()
@@ -2898,9 +2901,16 @@ impl DualQuorumConsensus {
     }
 
     fn vote_validator_is_active(&self, vote: &Vote) -> bool {
-        consensus_membership_validators(self.validator_manager.get_active_validators())
-            .into_iter()
-            .any(|validator| validator.address == vote.validator_address)
+        consensus_membership_validators_for_height(
+            self.validator_manager.get_all_validators(),
+            vote.block_index,
+        )
+        .map(|validators| {
+            validators
+                .into_iter()
+                .any(|validator| validator.address == vote.validator_address)
+        })
+        .unwrap_or(false)
     }
 
     fn vote_mailbox_key(block_hash: &str, epoch_number: u64, round_number: u64) -> String {
@@ -3159,6 +3169,107 @@ mod tests {
         let required = DualQuorumConsensus::required_qc_validator_votes(10);
 
         assert_eq!(required, required_validator_quorum(10));
+    }
+
+    #[test]
+    fn historical_qc_verification_uses_epoch_validator_set_for_block_height() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        let validator_manager = approved_validator_manager(&[
+            "validator1",
+            "validator2",
+            "validator3",
+            "validator4",
+            "validator5",
+            "validator6",
+            "validator7",
+        ]);
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = env::temp_dir().join(format!("synergy-qc-epoch-set-{unique}"));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        fs::write(
+            &snapshot_path,
+            serde_json::json!({
+                "epoch_validator_sets": [{
+                    "chain_id": 1264,
+                    "epoch_id": 0,
+                    "validator_set_version": 1,
+                    "effective_from_height": 1,
+                    "effective_to_height": 99,
+                    "active_validators": [
+                        "validator1",
+                        "validator2",
+                        "validator3",
+                        "validator4",
+                        "validator5",
+                        "validator6"
+                    ],
+                    "pending_validators": ["validator7"],
+                    "quorum_threshold": 4,
+                    "validator_set_hash": "historical-six-validator-set"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let previous_snapshot = env::var(crate::validator::EPOCH_VALIDATOR_SETS_ENV).ok();
+        env::set_var(crate::validator::EPOCH_VALIDATOR_SETS_ENV, &snapshot_path);
+
+        let mut block = Block::new(
+            1,
+            vec![],
+            "parent-hash".to_string(),
+            "validator1".to_string(),
+            1,
+        );
+        let (proposer_public_key, proposer_signature) = sign_with_local_validator_key_for_height(
+            block.block_index,
+            "validator1",
+            block.hash.as_bytes(),
+            &validator_manager,
+        )
+        .expect("validator1 proposer key should sign test block");
+        block.proposer_public_key = proposer_public_key.key_data;
+        block.block_signature = proposer_signature.signature_data;
+        block.block_signature_algorithm = "fndsa".to_string();
+        let mut qc = test_qc(&block.hash);
+        qc.votes = vec![Vote {
+            validator_address: "validator7".to_string(),
+            block_hash: block.hash.clone(),
+            block_index: block.block_index,
+            epoch_number: qc.epoch_number,
+            round_number: qc.round_number,
+            signature: PQCSignature {
+                algorithm: PQCAlgorithm::FNDSA,
+                signature_data: Vec::new(),
+                message_hash: Vec::new(),
+                public_key_id: String::new(),
+                created_at: 0,
+            },
+            signer_public_key: Vec::new(),
+            timestamp: block.timestamp,
+        }];
+
+        let result = DualQuorumConsensus::verify_commit_certificate_for_block_static(
+            &block,
+            &qc,
+            &validator_manager,
+        );
+
+        match previous_snapshot {
+            Some(value) => env::set_var(crate::validator::EPOCH_VALIDATOR_SETS_ENV, value),
+            None => env::remove_var(crate::validator::EPOCH_VALIDATOR_SETS_ENV),
+        }
+        fs::remove_dir_all(temp_dir).ok();
+
+        let error = result.expect_err("validator7 is pending in the historical epoch set");
+        assert!(
+            error.contains("outside active validator set"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -4243,17 +4354,11 @@ mod tests {
                 .expect("prior round vote should be created");
         let conflicting_block = signed_block(10, 1, "validator3");
         let conflicting_prior_round_vote =
-            DualQuorumConsensus::create_vote_for_validator(
-                "validator2",
-                &conflicting_block,
-                12,
-                2,
-            )
-            .expect("conflicting prior round vote should be created");
-        assert!(DualQuorumConsensus::register_vote_observation(
-            &conflicting_prior_round_vote
-        )
-        .is_none());
+            DualQuorumConsensus::create_vote_for_validator("validator2", &conflicting_block, 12, 2)
+                .expect("conflicting prior round vote should be created");
+        assert!(
+            DualQuorumConsensus::register_vote_observation(&conflicting_prior_round_vote).is_none()
+        );
         assert!(DualQuorumConsensus::register_vote_observation(&prior_round_vote).is_some());
 
         let expected_validators = ["validator1", "validator2", "validator3"]
@@ -4274,9 +4379,9 @@ mod tests {
         assert_eq!(votes.len(), 2);
         votes.retain(|vote| consensus.vote_is_eligible_for_collection(&vote, &block.hash, 12, 4));
         assert_eq!(votes.len(), 2);
-        assert!(votes.iter().any(|vote| {
-            vote.validator_address == "validator2" && vote.round_number == 2
-        }));
+        assert!(votes
+            .iter()
+            .any(|vote| { vote.validator_address == "validator2" && vote.round_number == 2 }));
     }
 
     #[test]
@@ -4325,9 +4430,9 @@ mod tests {
         );
 
         assert_eq!(votes.len(), 2);
-        assert!(votes.iter().any(|vote| {
-            vote.validator_address == "validator2" && vote.round_number == 3
-        }));
+        assert!(votes
+            .iter()
+            .any(|vote| { vote.validator_address == "validator2" && vote.round_number == 3 }));
     }
 
     #[test]
