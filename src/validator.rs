@@ -1,4 +1,5 @@
 use crate::address::generate_cluster_address;
+use crate::consensus::consensus_fork;
 use crate::genesis::canonical_genesis;
 use crate::token::TokenManager;
 use crate::transaction::Transaction;
@@ -1080,18 +1081,15 @@ fn configured_consensus_order(active_validators: &[Validator]) -> (Option<Vec<St
         .map(|validator| validator.address.clone())
         .collect::<HashSet<_>>();
 
-    if let Some(config) = config.as_ref() {
-        if config.node.strict_validator_allowlist
-            && !config.node.allowed_validator_addresses.is_empty()
-        {
-            let mut ordered = config
-                .node
-                .allowed_validator_addresses
-                .iter()
-                .filter(|address| active_addresses.contains(*address))
-                .cloned()
-                .collect::<Vec<_>>();
-            ordered.truncate(max_validators);
+    if let Ok(Some(migration)) = consensus_fork::active_consensus_fork_migration() {
+        let mut ordered = migration
+            .new_validator_registry
+            .iter()
+            .map(|entry| entry.validator_address.clone())
+            .filter(|address| active_addresses.contains(address))
+            .collect::<Vec<_>>();
+        ordered.truncate(max_validators);
+        if !ordered.is_empty() {
             return (Some(ordered), max_validators);
         }
     }
@@ -1325,6 +1323,10 @@ pub fn consensus_membership_validators(active_validators: Vec<Validator>) -> Vec
 mod tests {
     use super::*;
     use crate::block::{Block, BlockChain};
+    use crate::consensus::consensus_fork::{
+        self, ConsensusForkMigration, ForkValidatorConsensusKey,
+    };
+    use base64::{engine::general_purpose, Engine as _};
 
     fn pending_registration(index: usize) -> ValidatorRegistration {
         ValidatorRegistration {
@@ -1354,6 +1356,43 @@ mod tests {
         }
         registry.reorganize_clusters();
         registry
+    }
+
+    fn active_validator(address: &str) -> Validator {
+        let mut validator = Validator::new(
+            address.to_string(),
+            format!("public-key-{address}"),
+            format!("Validator {address}"),
+            TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+        );
+        validator.status = ValidatorStatus::Active;
+        validator
+    }
+
+    fn fork_migration_for(addresses: &[&str]) -> ConsensusForkMigration {
+        ConsensusForkMigration {
+            fork_height: 204_216,
+            parent_height: 204_215,
+            parent_hash: "parent".to_string(),
+            state_root: "state".to_string(),
+            old_consensus_algorithm: "FN-DSA".to_string(),
+            new_consensus_algorithm: "FN-DSA".to_string(),
+            new_validator_registry: addresses
+                .iter()
+                .enumerate()
+                .map(|(index, address)| ForkValidatorConsensusKey {
+                    validator_address: (*address).to_string(),
+                    consensus_key_type: "FN-DSA".to_string(),
+                    consensus_public_key: format!(
+                        "fn-dsa:{}",
+                        general_purpose::STANDARD.encode([index as u8 + 1, 2, 3, 4])
+                    ),
+                })
+                .collect(),
+            migration_reason: "test fork membership authority".to_string(),
+            parser_mode: "fail_closed".to_string(),
+            migration_signature: None,
+        }
     }
 
     struct EnvVarGuard {
@@ -1589,6 +1628,84 @@ mod tests {
         let membership = consensus_membership_validators(active);
 
         assert_eq!(membership.len(), 6);
+    }
+
+    #[test]
+    fn consensus_membership_ignores_stale_strict_allowlist_config() {
+        let active = active_registry(6)
+            .validators
+            .into_values()
+            .collect::<Vec<_>>();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir =
+            std::env::temp_dir().join(format!("synergy-validator-allowlist-test-{unique}"));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("node.toml");
+        let mut config = crate::config::NodeConfig::default();
+        config.node.strict_validator_allowlist = true;
+        config.node.allowed_validator_addresses = vec![
+            "validator-0".to_string(),
+            "validator-1".to_string(),
+            "validator-2".to_string(),
+        ];
+        std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+        let _config_path = EnvVarGuard::set("SYNERGY_CONFIG_PATH", &config_path.to_string_lossy());
+
+        let membership = consensus_membership_validators(active);
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        assert_eq!(membership.len(), 6);
+    }
+
+    #[test]
+    fn consensus_membership_prefers_active_fork_and_defers_non_fork_validator() {
+        let canonical = [
+            "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
+            "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt",
+            "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re",
+            "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5",
+            "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f",
+            "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx",
+        ];
+        let _fork_guard = consensus_fork::set_test_active_consensus_fork_migration(
+            fork_migration_for(&canonical),
+        );
+        let mut active = canonical
+            .iter()
+            .map(|address| active_validator(address))
+            .collect::<Vec<_>>();
+        active.push(active_validator(
+            "synv11wsfus6ghzgjvm4glpatuy8tnyacrwealyjv",
+        ));
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("synergy-validator-fork-test-{unique}"));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("node.toml");
+        let mut config = crate::config::NodeConfig::default();
+        config.node.strict_validator_allowlist = true;
+        config.node.allowed_validator_addresses = canonical[..4]
+            .iter()
+            .map(|address| (*address).to_string())
+            .collect();
+        std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+        let _config_path = EnvVarGuard::set("SYNERGY_CONFIG_PATH", &config_path.to_string_lossy());
+
+        let membership = consensus_membership_validators(active);
+        let membership_addresses = membership
+            .iter()
+            .map(|validator| validator.address.as_str())
+            .collect::<Vec<_>>();
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        assert_eq!(membership_addresses, canonical);
+        assert!(!membership_addresses.contains(&"synv11wsfus6ghzgjvm4glpatuy8tnyacrwealyjv"));
     }
 
     #[test]
