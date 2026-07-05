@@ -933,23 +933,18 @@ impl ProofOfSynergy {
                                 leader_timeout_secs,
                                 Self::current_timestamp(),
                             );
-                        let calculated_view_offset = Self::cap_view_offset_by_tip_observation(
+                        let view_offset = Self::cap_view_offset_by_tip_observation(
                             shared_view_offset,
                             last_tip_observed_at,
                             leader_timeout_secs,
                             current_time,
                         );
-                        // Launch recovery must not let locally observed wall-clock view offsets
-                        // split the fleet into multiple same-height proposers. Use the canonical
-                        // height schedule for live leaders, then fall back to the live set below
-                        // only when that scheduled leader is not live.
-                        let view_offset = 0;
-                        if calculated_view_offset != 0 {
+                        if view_offset != 0 {
                             debug!(
                                 "consensus",
-                                "Ignoring local wall-clock view offset for canonical leader selection",
-                                "calculated_view_offset" => calculated_view_offset,
-                                "canonical_view_offset" => view_offset,
+                                "Applying shared same-height leader view offset",
+                                "shared_view_offset" => shared_view_offset,
+                                "bounded_view_offset" => view_offset,
                                 "block_height" => latest_block_clone.block_index + 1
                             );
                         }
@@ -1080,7 +1075,7 @@ impl ProofOfSynergy {
                                     last_logged_view_timeout = Some(timeout_marker);
                                 }
                             } else {
-                                info!(
+                                debug!(
                                     "consensus",
                                     "Local validator is not the scheduled leader; waiting for remote proposal",
                                     "leader" => selected_validator.address.clone(),
@@ -4214,6 +4209,35 @@ mod tests {
         );
 
         assert_eq!(shared_offset_a, shared_offset_b);
+    }
+
+    #[test]
+    fn same_height_view_offset_advances_after_shared_and_local_timeout() {
+        let leader_timeout_secs = 4;
+        let canonical_tip_timestamp = 1_000;
+        let block_time_secs = 2;
+        let current_timestamp = canonical_tip_timestamp + block_time_secs + leader_timeout_secs;
+        let shared_view_offset = ProofOfSynergy::deterministic_view_offset_for_next_block_slot(
+            40_536,
+            canonical_tip_timestamp,
+            block_time_secs,
+            leader_timeout_secs,
+            current_timestamp,
+        );
+        let current_time = UNIX_EPOCH + Duration::from_secs(current_timestamp);
+        let observed_tip_at = current_time - Duration::from_secs(leader_timeout_secs);
+
+        assert_eq!(shared_view_offset, 1);
+        assert_eq!(
+            ProofOfSynergy::cap_view_offset_by_tip_observation(
+                shared_view_offset,
+                observed_tip_at,
+                leader_timeout_secs,
+                current_time,
+            ),
+            1,
+            "leader selection must rotate after both the canonical view timeout and the local observation timeout have elapsed"
+        );
     }
 
     #[test]
