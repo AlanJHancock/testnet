@@ -761,23 +761,23 @@ impl TokenManager {
             self.transfer_tokens_with_metadata(
                 FEE_COLLECTOR_ADDRESS,
                 VALIDATOR_REWARDS_POOL_ADDRESS,
-                    SNRG_SYMBOL,
-                    validator_share,
-                    0,
-                    format!("epoch-fees:{epoch_id}:validator-pool"),
-                    distribution_block_height,
-                )?;
+                SNRG_SYMBOL,
+                validator_share,
+                0,
+                format!("epoch-fees:{epoch_id}:validator-pool"),
+                distribution_block_height,
+            )?;
         }
         if treasury_share > 0 {
             self.transfer_tokens_with_metadata(
                 FEE_COLLECTOR_ADDRESS,
                 DAO_TREASURY_ADDRESS,
-                    SNRG_SYMBOL,
-                    treasury_share,
-                    0,
-                    format!("epoch-fees:{epoch_id}:treasury"),
-                    distribution_block_height,
-                )?;
+                SNRG_SYMBOL,
+                treasury_share,
+                0,
+                format!("epoch-fees:{epoch_id}:treasury"),
+                distribution_block_height,
+            )?;
         }
         if burn_share > 0 {
             self.burn_tokens(FEE_COLLECTOR_ADDRESS, SNRG_SYMBOL, burn_share)?;
@@ -1050,8 +1050,7 @@ impl TokenManager {
             }
         }
 
-        let release_coefficients =
-            Self::validator_release_coefficients(closing_epoch_validators)?;
+        let release_coefficients = Self::validator_release_coefficients(closing_epoch_validators)?;
         let settlements = self.settle_epoch_validator_rewards_from_escrows(
             closing_epoch,
             &release_coefficients,
@@ -1159,7 +1158,10 @@ impl TokenManager {
             .total_transactions_validated
             .saturating_add(validator.total_blocks_produced);
         let missed_duties = validator.missed_blocks;
-        Self::ratio_to_bps(successful_duties, successful_duties.saturating_add(missed_duties))
+        Self::ratio_to_bps(
+            successful_duties,
+            successful_duties.saturating_add(missed_duties),
+        )
     }
 
     fn validator_proposal_success_bps(validator: &crate::validator::Validator) -> u64 {
@@ -1210,11 +1212,13 @@ impl TokenManager {
                 crate::validator::ValidatorStatus::Jailed => {
                     crate::rewards::ValidatorPenaltyReason::Jailed
                 }
-                _ if validator.missed_vote_window >= crate::validator::MISSED_VOTE_SLASH_THRESHOLD =>
+                _ if validator.missed_vote_window
+                    >= crate::validator::MISSED_VOTE_SLASH_THRESHOLD =>
                 {
                     crate::rewards::ValidatorPenaltyReason::MajorDowntime
                 }
-                _ if validator.missed_vote_window >= crate::validator::MISSED_VOTE_JAIL_THRESHOLD =>
+                _ if validator.missed_vote_window
+                    >= crate::validator::MISSED_VOTE_JAIL_THRESHOLD =>
                 {
                     crate::rewards::ValidatorPenaltyReason::MinorDowntime
                 }
@@ -1256,8 +1260,7 @@ impl TokenManager {
         if denominator == 0 {
             return crate::rewards::BPS_DENOMINATOR;
         }
-        let bps = (numerator as u128)
-            .saturating_mul(crate::rewards::BPS_DENOMINATOR as u128)
+        let bps = (numerator as u128).saturating_mul(crate::rewards::BPS_DENOMINATOR as u128)
             / (denominator as u128);
         u64::try_from(bps)
             .unwrap_or(crate::rewards::BPS_DENOMINATOR)

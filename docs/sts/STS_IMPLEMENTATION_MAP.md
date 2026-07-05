@@ -13,11 +13,14 @@ This branch is `feature/native-sts-token-system-testnet`.
 - `src/execution.rs` stores `StsState` inside `ExecutionState`, includes it in the deterministic state root, decodes STS payloads after Aegis authorization, charges native SNRG fees, and applies STS mutations atomically.
 - Native SNRG is represented as the gas asset with `token_address = null`; the 41-zero string `00000000000000000000000000000000000000000` is reserved only as a compatibility placeholder for string-only surfaces.
 - Non-native STS assets expose `token_address` equal to their deterministic Bech32m object ID, so every user-created fungible token has a non-empty `synb1`, `synb2`, or `synb3` token address.
-- `src/bin/synergy-sts.rs` provides a dedicated `synergy-sts` CLI for building native STS payloads for create, mint, transfer, burn, freeze, thaw, pause, unpause, clawback, snapshot, and native-info workflows.
+- `src/sts.rs` enforces protocol-level unsafe-token protections: no native SNRG/Synergy impersonation, bounded uppercase symbols, immutable metadata in this slice, no unenforced allowlist/denylist/transfer-approval flags, bounded mint supply when mint authority exists, duplicate-symbol rejection, and a 1000 bps transfer-fee cap.
+- `src/sts.rs` supports token image metadata at creation and `set_fungible_image`, which only the creator can execute and which locks the image after the first set.
+- `src/bin/synergy-sts.rs` provides a dedicated `synergy-sts` CLI for building native STS payloads for create, mint, transfer, burn, freeze, thaw, pause, unpause, clawback, snapshot, set-image, and native-info workflows.
 - The CLI emits `payload_hex` and payload JSON for signed transaction wrapping; it does not mutate chain state directly or call legacy token-manager RPC write methods.
 - `.github/workflows/release-synergy-sts-cli.yml` publishes standalone macOS and Linux CLI binaries to `synergy-network-hq/synergy-sts-cli-releases`.
 - `scripts/install-synergy-sts.sh` installs the released CLI on macOS and Linux, verifies release checksums by default, supports pinned versions, and can also install from a local source checkout or an existing binary.
-- Atlas indexing support is implemented in `synergy-atlas`: the indexer decodes `synergy-sts-v1:` payloads, derives non-native `synb*` token addresses, materializes STS token definitions/events/balances, and the `/tokens` API merges STS assets into the token registry.
+- Atlas indexing support is implemented in `synergy-atlas`: the indexer decodes `synergy-sts-v1:` payloads, derives non-native `synb*` token addresses, materializes STS token definitions/events/balances/images, and the `/tokens` API merges STS assets into the token registry.
+- Atlas exposes a wallet-authenticated `POST /tokens/:tokenAddress/image` fallback for the creator wallet to set an omitted image exactly once from the token detail view.
 
 ## Implemented Classes
 
@@ -49,12 +52,13 @@ This branch is `feature/native-sts-token-system-testnet`.
 - Add RPC-backed `synergy-sts --submit` flow after signed transaction wrapping is finalized.
 - Add SDK builders for `StsSignedPayload` and payload encoding.
 - Add wallet signing/submit support for STS payloads.
-- Deploy Atlas STS migrations and indexer/API/frontend changes, then prove a live STS create transaction appears automatically on Atlas after finality.
+- Deploy Atlas STS image migrations and indexer/API/frontend changes, then prove a live STS create transaction appears automatically on Atlas after finality.
 - Add SynQ/AIVM host functions only after native STS execution is stable.
 - Complete native state machines for NFT ownership, multi-asset balances, and credentials.
 
 ## Verification Notes
 
 - Baseline `cargo test -p synergy-testnet` failed before STS implementation with one consensus test failure and five SynQ fixture failures caused by missing `Counter.compiled.synq`.
-- `cargo fmt --check -p synergy-testnet` passes after this slice.
-- `cargo test -p synergy-testnet sts --lib` and `cargo check -p synergy-testnet --lib` could not be completed in this session because local cargo artifact locks and isolated-target build sessions repeatedly wedged during dependency compilation.
+- `cargo check -p synergy-testnet --bin synergy-sts` passes after this slice.
+- `cargo test -p synergy-testnet --lib sts::tests` passes with 10 focused STS tests.
+- `cargo test -p synergy-testnet --bin synergy-sts` passes with 4 focused CLI tests.

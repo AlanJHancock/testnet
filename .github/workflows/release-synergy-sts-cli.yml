@@ -44,15 +44,23 @@ jobs:
           - os: ubuntu-latest
             label: linux-amd64
             binary_suffix: ""
+            rust_target: ""
+            run_tests: "true"
           - os: ubuntu-24.04-arm
             label: linux-arm64
             binary_suffix: ""
-          - os: macos-13
+            rust_target: ""
+            run_tests: "true"
+          - os: macos-14
             label: macos-amd64
             binary_suffix: ""
+            rust_target: x86_64-apple-darwin
+            run_tests: "false"
           - os: macos-14
             label: macos-arm64
             binary_suffix: ""
+            rust_target: ""
+            run_tests: "true"
 
     steps:
       - name: Checkout
@@ -113,14 +121,30 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Rust target
+        if: matrix.rust_target != ''
+        shell: bash
+        env:
+          MATRIX_RUST_TARGET: ${{ matrix.rust_target }}
+        run: rustup target add "${MATRIX_RUST_TARGET}"
+
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
       - name: Build synergy-sts
         shell: bash
-        run: cargo build --release --locked -p synergy-testnet --bin synergy-sts
+        env:
+          MATRIX_RUST_TARGET: ${{ matrix.rust_target }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${MATRIX_RUST_TARGET}" ]]; then
+            cargo build --release --locked --target "${MATRIX_RUST_TARGET}" -p synergy-testnet --bin synergy-sts
+          else
+            cargo build --release --locked -p synergy-testnet --bin synergy-sts
+          fi
 
       - name: Test synergy-sts
+        if: matrix.run_tests == 'true'
         shell: bash
         run: cargo test --locked -p synergy-testnet --bin synergy-sts
 
@@ -129,6 +153,7 @@ jobs:
         env:
           MATRIX_LABEL: ${{ matrix.label }}
           MATRIX_SUFFIX: ${{ matrix.binary_suffix }}
+          MATRIX_RUST_TARGET: ${{ matrix.rust_target }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
           GITHUB_SHA: ${{ github.sha }}
         run: |
@@ -143,8 +168,12 @@ jobs:
 
           label = os.environ["MATRIX_LABEL"]
           suffix = os.environ["MATRIX_SUFFIX"]
+          rust_target = os.environ.get("MATRIX_RUST_TARGET", "")
           ref_name = os.environ.get("GITHUB_REF_NAME") or os.environ["GITHUB_SHA"]
-          source = pathlib.Path("target") / "release" / f"synergy-sts{suffix}"
+          source = pathlib.Path("target")
+          if rust_target:
+              source = source / rust_target
+          source = source / "release" / f"synergy-sts{suffix}"
           dist = pathlib.Path("dist")
           staged_name = f"synergy-sts-{label}{suffix}"
           staged = dist / staged_name

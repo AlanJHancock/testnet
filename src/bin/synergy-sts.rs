@@ -2,10 +2,10 @@ use serde_json::json;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use synergy_testnet::sts::{
-    decode_sts_payload, derive_fungible_token_id, encode_sts_payload, estimate_sts_gas,
-    native_snrg_definition, sts_object_token_address, validate_sts_object_id, CreateFungibleParams,
-    FungibleControlFlags, FungiblePolicy, StsSignedPayload, StsTx, TokenClass,
-    NATIVE_SNRG_PLACEHOLDER_ADDRESS, STS_TESTNET_CHAIN_ID, STS_TESTNET_NETWORK,
+    decode_sts_payload, encode_sts_payload, estimate_sts_gas, native_snrg_definition,
+    validate_sts_object_id, CreateFungibleParams, FungibleControlFlags, FungiblePolicy,
+    StsSignedPayload, StsState, StsTx, TokenClass, NATIVE_SNRG_PLACEHOLDER_ADDRESS,
+    STS_TESTNET_CHAIN_ID, STS_TESTNET_NETWORK,
 };
 
 fn main() {
@@ -53,10 +53,11 @@ Usage:
   synergy-sts decode --payload-hex <hex> [--output json|payload-json] [--out <path>]
   synergy-sts decode --file <artifact.json-or-hex> [--output json|payload-json] [--out <path>]
   synergy-sts estimate --payload-hex <hex> [--gas-price-nwei <u64>]
-  synergy-sts token create --network testnet --class b1|b2|b3 --name <name> --symbol <symbol> --decimals <0-9> --initial-supply <base_units> --from <creator> --creator-nonce <u64> [--created-at <u64>] [--max-supply <base_units>] [--metadata-uri <uri> --metadata-hash <sha3_256_hex>] [--metadata-file <path>] [--metadata-mutable] [--mint-authority <addr>] [--metadata-authority <addr>] [--can-freeze] [--can-pause] [--can-clawback] [--can-denylist] [--can-allowlist] [--can-update-metadata] [--requires-transfer-approval] [--policy <template>] [--output json|payload-hex|payload-json] [--out <path>]
+  synergy-sts token create --network testnet --class b1|b2|b3 --name <name> --symbol <symbol> --decimals <0-9> --initial-supply <base_units> --from <creator> --creator-nonce <u64> [--created-at <u64>] [--max-supply <base_units>] [--metadata-uri <uri> --metadata-hash <sha3_256_hex>] [--metadata-file <path>] [--image-uri <uri> --image-hash <sha3_256_hex>] [--image-file <path>] [--no-mint-authority|--mint-authority <addr>] [--metadata-authority <addr>] [--can-freeze] [--can-pause] [--can-clawback] [--policy <template>] [--output json|payload-hex|payload-json] [--out <path>]
   synergy-sts token mint --network testnet --token <synb*> --to <owner> --amount <base_units> --from <authority> [--timestamp <u64>]
   synergy-sts token transfer --network testnet --token <synb*> --from <owner> --to <owner> --amount <base_units> [--timestamp <u64>]
   synergy-sts token burn --network testnet --token <synb*> --from <owner> --amount <base_units> [--timestamp <u64>]
+  synergy-sts token set-image --network testnet --token <synb*> --image-uri <uri> --image-hash <sha3_256_hex> --from <creator> [--image-file <path>] [--timestamp <u64>]
   synergy-sts token freeze --network testnet --token <synb2*> --owner <owner> --from <authority> [--timestamp <u64>]
   synergy-sts token thaw --network testnet --token <synb2*> --owner <owner> --from <authority> [--timestamp <u64>]
   synergy-sts token pause --network testnet --token <synb2*> --from <authority> [--timestamp <u64>]
@@ -85,6 +86,7 @@ fn run_token_command(args: &[String]) -> Result<(), String> {
         "mint" => build_simple_amount_tx(rest, "mint"),
         "transfer" => build_simple_amount_tx(rest, "transfer"),
         "burn" => build_simple_amount_tx(rest, "burn"),
+        "set-image" => build_set_image_tx(rest),
         "freeze" => build_account_control_tx(rest, true),
         "thaw" => build_account_control_tx(rest, false),
         "pause" => build_pause_tx(rest, true),
@@ -172,9 +174,39 @@ fn build_create_fungible(args: &[String]) -> Result<(), String> {
         return Err("--metadata-hash is required when --metadata-uri is provided".to_string());
     }
 
+    let image_uri = optional_arg(args, "--image-uri");
+    let image_file = optional_arg(args, "--image-file");
+    let image_file_hash = image_file.as_deref().map(hash_file_sha3_256).transpose()?;
+    let image_hash = match (optional_arg(args, "--image-hash"), image_file_hash.as_ref()) {
+        (Some(explicit), Some(file_hash)) if explicit.as_str() != file_hash.as_str() => {
+            return Err(format!(
+                "--image-hash does not match SHA3-256(image-file): expected {file_hash}"
+            ));
+        }
+        (Some(explicit), _) => Some(explicit),
+        (None, Some(file_hash)) => Some(file_hash.clone()),
+        (None, None) => None,
+    };
+    if image_uri.is_some() && image_hash.is_none() {
+        return Err("--image-hash is required when --image-uri is provided".to_string());
+    }
+    if image_uri.is_none() && image_hash.is_some() {
+        return Err(
+            "--image-uri is required when --image-hash or --image-file is provided".to_string(),
+        );
+    }
+
     let creator = required_arg(args, "--from")?;
     let created_at = optional_u64_arg(args, "--created-at")?.unwrap_or(current_timestamp()?);
     let creator_nonce = required_u64_arg(args, "--creator-nonce")?;
+    let mint_authority = if has_flag(args, "--no-mint-authority") {
+        if optional_arg(args, "--mint-authority").is_some() {
+            return Err("--no-mint-authority cannot be combined with --mint-authority".to_string());
+        }
+        None
+    } else {
+        optional_arg(args, "--mint-authority").or_else(|| Some(creator.clone()))
+    };
     let params = CreateFungibleParams {
         class,
         creator: creator.clone(),
@@ -184,12 +216,14 @@ fn build_create_fungible(args: &[String]) -> Result<(), String> {
         decimals: required_u8_arg(args, "--decimals")?,
         initial_supply: required_u128_arg(args, "--initial-supply")?,
         max_supply: optional_u128_arg(args, "--max-supply")?,
-        mint_authority: optional_arg(args, "--mint-authority").or_else(|| Some(creator.clone())),
+        mint_authority,
         metadata_authority: optional_arg(args, "--metadata-authority")
             .or_else(|| has_flag(args, "--metadata-mutable").then(|| creator.clone())),
         metadata_uri,
         metadata_hash: metadata_hash.clone(),
         metadata_mutable: has_flag(args, "--metadata-mutable"),
+        image_uri: image_uri.clone(),
+        image_hash: image_hash.clone(),
         flags: FungibleControlFlags {
             can_freeze: has_flag(args, "--can-freeze"),
             can_pause: has_flag(args, "--can-pause"),
@@ -203,18 +237,15 @@ fn build_create_fungible(args: &[String]) -> Result<(), String> {
         created_at,
     };
 
-    let derived_metadata_hash =
-        metadata_hash.unwrap_or_else(|| sha3_256_hex(params.name.as_bytes()));
-    let token_id = derive_fungible_token_id(
-        STS_TESTNET_CHAIN_ID,
-        class,
-        &creator,
-        creator_nonce,
-        &derived_metadata_hash,
-        created_at,
-    );
-    let token_address = sts_object_token_address(class, &token_id)
-        .map_err(|error| format!("derived token address failed validation: {error}"))?;
+    let mut preview = StsState::new();
+    let token_id = preview
+        .create_fungible(params.clone())
+        .map_err(|error| format!("create payload rejected by STS policy: {error}"))?;
+    let token_address = preview
+        .token_registry
+        .get(&token_id)
+        .map(|definition| definition.token_address.clone())
+        .ok_or_else(|| "preview token registry did not contain created token".to_string())?;
 
     let tx = StsTx::CreateFungible(params);
     print_payload(
@@ -223,12 +254,54 @@ fn build_create_fungible(args: &[String]) -> Result<(), String> {
         StsSignedPayload::new(tx),
         Some(token_id),
         Some(token_address),
-        metadata_file.map(|path| {
-            json!({
-                "metadata_file": path,
-                "metadata_file_sha3_256": metadata_file_hash,
-            })
+        Some(json!({
+            "metadata_file": metadata_file,
+            "metadata_file_sha3_256": metadata_file_hash,
+            "image_file": image_file,
+            "image_file_sha3_256": image_file_hash,
+            "image_uri": image_uri,
+            "image_hash": image_hash,
+        })),
+    )
+}
+
+fn build_set_image_tx(args: &[String]) -> Result<(), String> {
+    let sender = required_arg(args, "--from")?;
+    let token_id = required_arg(args, "--token")?;
+    validate_fungible_token_id(&token_id)?;
+    let image_uri = required_arg(args, "--image-uri")?;
+    let image_file = optional_arg(args, "--image-file");
+    let image_file_hash = image_file.as_deref().map(hash_file_sha3_256).transpose()?;
+    let image_hash = match (
+        required_arg(args, "--image-hash")?,
+        image_file_hash.as_ref(),
+    ) {
+        (explicit, Some(file_hash)) if explicit.as_str() != file_hash.as_str() => {
+            return Err(format!(
+                "--image-hash does not match SHA3-256(image-file): expected {file_hash}"
+            ));
+        }
+        (explicit, _) => explicit,
+    };
+    validate_image_uri_hash(&image_uri, &image_hash)?;
+    let timestamp = optional_u64_arg(args, "--timestamp")?.unwrap_or(current_timestamp()?);
+    print_payload(
+        args,
+        &sender,
+        StsSignedPayload::new(StsTx::SetFungibleImage {
+            token_id,
+            image_uri: image_uri.clone(),
+            image_hash: image_hash.clone(),
+            timestamp,
         }),
+        None,
+        None,
+        Some(json!({
+            "image_file": image_file,
+            "image_file_sha3_256": image_file_hash,
+            "image_uri": image_uri,
+            "image_hash": image_hash,
+        })),
     )
 }
 
@@ -489,9 +562,34 @@ fn fungible_class_from_token_id(token_id: &str) -> Option<TokenClass> {
 }
 
 fn hash_file_sha3_256(path: &str) -> Result<String, String> {
-    let bytes =
-        fs::read(path).map_err(|error| format!("failed to read metadata file {path}: {error}"))?;
+    let bytes = fs::read(path).map_err(|error| format!("failed to read file {path}: {error}"))?;
     Ok(sha3_256_hex(&bytes))
+}
+
+fn validate_image_uri_hash(image_uri: &str, image_hash: &str) -> Result<(), String> {
+    let allowed = image_uri.starts_with("ipfs://")
+        || image_uri.starts_with("ar://")
+        || image_uri.starts_with("https://");
+    if !allowed
+        || image_uri.len() > 512
+        || image_uri
+            .chars()
+            .any(|ch| ch.is_ascii_control() || ch.is_ascii_whitespace() || ch == '\\')
+        || image_uri.to_ascii_lowercase().contains(".svg")
+    {
+        return Err("image URI must be ipfs://, ar://, or https://, must not contain whitespace, and must not reference SVG".to_string());
+    }
+    if image_hash.len() != 64
+        || image_hash.starts_with("0x")
+        || !image_hash
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
+    {
+        return Err(
+            "image hash must be 64 lowercase SHA3-256 hex characters without 0x".to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn emit_output(args: &[String], value: serde_json::Value) -> Result<(), String> {

@@ -13,7 +13,11 @@ pub const NATIVE_SNRG_NAME: &str = "Synergy Token";
 pub const NATIVE_SNRG_DECIMALS: u8 = 9;
 pub const NATIVE_SNRG_PLACEHOLDER_ADDRESS: &str = "00000000000000000000000000000000000000000";
 pub const STS_MAX_DECIMALS: u8 = 9;
+pub const STS_MAX_TRANSFER_FEE_BPS: u16 = 1_000;
 const HEX_32_LEN: usize = 64;
+const MAX_TOKEN_SYMBOL_LEN: usize = 12;
+const MAX_TOKEN_NAME_LEN: usize = 64;
+const MAX_STS_URI_LEN: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
@@ -137,7 +141,11 @@ pub enum StsError {
     InvalidAmount,
     InvalidDecimals,
     InvalidMetadata,
+    InvalidImage,
     InvalidNetwork,
+    ReservedTokenIdentity,
+    UnsafeTokenPractice,
+    ImageAlreadySet,
 }
 
 impl fmt::Display for StsError {
@@ -204,6 +212,8 @@ pub struct CreateFungibleParams {
     pub metadata_uri: Option<String>,
     pub metadata_hash: Option<String>,
     pub metadata_mutable: bool,
+    pub image_uri: Option<String>,
+    pub image_hash: Option<String>,
     pub flags: FungibleControlFlags,
     pub policies: Vec<FungiblePolicy>,
     pub created_at: u64,
@@ -234,6 +244,9 @@ pub struct FungibleDefinition {
     pub metadata_uri: Option<String>,
     pub metadata_hash: Option<String>,
     pub metadata_mutable: bool,
+    pub image_uri: Option<String>,
+    pub image_hash: Option<String>,
+    pub image_locked: bool,
     pub created_at: u64,
     pub updated_at: u64,
     pub flags: FungibleControlFlags,
@@ -316,6 +329,12 @@ pub enum StsTx {
         token_id: String,
         timestamp: u64,
     },
+    SetFungibleImage {
+        token_id: String,
+        image_uri: String,
+        image_hash: String,
+        timestamp: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,7 +396,13 @@ impl StsState {
         payload.require_testnet()?;
         let before = self.events.len();
         let result: Result<(), StsError> = match &payload.tx {
-            StsTx::CreateFungible(params) => self.create_fungible(params.clone()).map(|_| ()),
+            StsTx::CreateFungible(params) => {
+                if sender != params.creator {
+                    Err(StsError::Unauthorized)
+                } else {
+                    self.create_fungible(params.clone()).map(|_| ())
+                }
+            }
             StsTx::MintFungible {
                 token_id,
                 to,
@@ -426,6 +451,12 @@ impl StsState {
                 token_id,
                 timestamp,
             } => self.create_fungible_snapshot(sender, token_id, *timestamp),
+            StsTx::SetFungibleImage {
+                token_id,
+                image_uri,
+                image_hash,
+                timestamp,
+            } => self.set_fungible_image(sender, token_id, image_uri, image_hash, *timestamp),
         };
         match result {
             Ok(()) => Ok(self.events[before..].to_vec()),
@@ -438,12 +469,11 @@ impl StsState {
 
     pub fn create_fungible(&mut self, params: CreateFungibleParams) -> Result<String, StsError> {
         validate_timestamp_seconds(params.created_at)?;
+        validate_token_identity(&params.name, &params.symbol)?;
         validate_metadata(&params.metadata_uri, &params.metadata_hash)?;
+        validate_token_image(&params.image_uri, &params.image_hash)?;
         if !params.class.is_fungible() {
             return Err(StsError::InvalidTokenClass);
-        }
-        if params.name.trim().is_empty() || params.symbol.trim().is_empty() {
-            return Err(StsError::InvalidMetadata);
         }
         if params.decimals > STS_MAX_DECIMALS {
             return Err(StsError::InvalidDecimals);
@@ -454,8 +484,24 @@ impl StsState {
         {
             return Err(StsError::SupplyOverflow);
         }
+        if params.metadata_mutable
+            || params.flags.can_update_metadata
+            || params.flags.can_allowlist
+            || params.flags.can_denylist
+            || params.flags.requires_transfer_approval
+            || (params.mint_authority.is_some() && params.max_supply.is_none())
+        {
+            return Err(StsError::UnsafeTokenPractice);
+        }
         validate_fungible_flags(params.class, &params.flags)?;
         validate_fungible_policies(params.class, &params.policies)?;
+        if self
+            .token_registry
+            .values()
+            .any(|definition| definition.symbol == params.symbol)
+        {
+            return Err(StsError::ReservedTokenIdentity);
+        }
 
         let metadata_hash = params
             .metadata_hash
@@ -505,6 +551,9 @@ impl StsState {
             metadata_uri: params.metadata_uri,
             metadata_hash: Some(metadata_hash),
             metadata_mutable: params.metadata_mutable,
+            image_uri: params.image_uri.clone(),
+            image_hash: params.image_hash.clone(),
+            image_locked: params.image_uri.is_some() || params.image_hash.is_some(),
             created_at: params.created_at,
             updated_at: params.created_at,
             flags: params.flags,
@@ -535,6 +584,56 @@ impl StsState {
             ]),
         });
         Ok(token_id)
+    }
+
+    pub fn set_fungible_image(
+        &mut self,
+        caller: &str,
+        token_id: &str,
+        image_uri: &str,
+        image_hash: &str,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        validate_timestamp_seconds(timestamp)?;
+        validate_sts_object_id(
+            fungible_class_from_token_id(token_id).ok_or(StsError::InvalidTokenId)?,
+            token_id,
+        )?;
+        validate_token_image(&Some(image_uri.to_string()), &Some(image_hash.to_string()))?;
+        let creator = {
+            let definition = self
+                .token_registry
+                .get_mut(token_id)
+                .ok_or(StsError::InvalidTokenId)?;
+            if caller != definition.creator {
+                return Err(StsError::Unauthorized);
+            }
+            if definition.image_locked
+                || definition.image_uri.is_some()
+                || definition.image_hash.is_some()
+            {
+                return Err(StsError::ImageAlreadySet);
+            }
+            definition.image_uri = Some(image_uri.to_string());
+            definition.image_hash = Some(image_hash.to_string());
+            definition.image_locked = true;
+            definition.updated_at = timestamp;
+            definition.creator.clone()
+        };
+        self.push_event(StsEvent {
+            event_type: "StsFungibleImageSet".to_string(),
+            token_id: Some(token_id.to_string()),
+            sender: caller.to_string(),
+            owner: Some(creator),
+            recipient: None,
+            amount: None,
+            timestamp,
+            attributes: BTreeMap::from([
+                ("image_uri".to_string(), image_uri.to_string()),
+                ("image_hash".to_string(), image_hash.to_string()),
+            ]),
+        });
+        Ok(())
     }
 
     pub fn mint_fungible(
@@ -1142,6 +1241,7 @@ pub fn estimate_sts_gas(tx: &StsTx) -> u64 {
         StsTx::PauseFungible { .. } | StsTx::UnpauseFungible { .. } => 35_000,
         StsTx::ClawbackFungible { .. } => 70_000,
         StsTx::CreateFungibleSnapshot { .. } => 95_000,
+        StsTx::SetFungibleImage { .. } => 35_000,
     }
 }
 
@@ -1154,11 +1254,7 @@ fn validate_fungible_flags(
             Err(StsError::PolicyNotEnabled)
         }
         TokenClass::B3PolicyFungible
-            if flags.can_clawback
-                || flags.can_freeze
-                || flags.can_pause
-                || flags.can_allowlist
-                || flags.can_denylist =>
+            if flags.can_clawback || flags.can_freeze || flags.can_pause =>
         {
             Err(StsError::PolicyNotEnabled)
         }
@@ -1176,7 +1272,7 @@ fn validate_fungible_policies(
     for policy in policies {
         match policy {
             FungiblePolicy::TransferFeeV1 { fee_bps, recipient } => {
-                if *fee_bps > 10_000 || recipient.trim().is_empty() {
+                if *fee_bps > STS_MAX_TRANSFER_FEE_BPS || recipient.trim().is_empty() {
                     return Err(StsError::PolicyNotEnabled);
                 }
             }
@@ -1206,13 +1302,76 @@ fn validate_fungible_policies(
 fn validate_metadata(uri: &Option<String>, hash: &Option<String>) -> Result<(), StsError> {
     validate_metadata_hash_option(hash.as_deref())?;
     if let Some(uri) = uri {
-        let allowed =
-            uri.starts_with("ipfs://") || uri.starts_with("ar://") || uri.starts_with("https://");
-        if !allowed {
+        if !valid_external_uri(uri) {
             return Err(StsError::InvalidMetadata);
         }
     }
     Ok(())
+}
+
+fn validate_token_image(uri: &Option<String>, hash: &Option<String>) -> Result<(), StsError> {
+    match (uri.as_deref(), hash.as_deref()) {
+        (None, None) => Ok(()),
+        (Some(uri), Some(hash)) => {
+            if !valid_external_uri(uri) || uri.to_ascii_lowercase().contains(".svg") {
+                return Err(StsError::InvalidImage);
+            }
+            validate_metadata_hash(hash).map_err(|_| StsError::InvalidImage)
+        }
+        _ => Err(StsError::InvalidImage),
+    }
+}
+
+fn valid_external_uri(uri: &str) -> bool {
+    let allowed =
+        uri.starts_with("ipfs://") || uri.starts_with("ar://") || uri.starts_with("https://");
+    allowed
+        && uri.len() <= MAX_STS_URI_LEN
+        && !uri
+            .chars()
+            .any(|ch| ch.is_ascii_control() || ch.is_ascii_whitespace() || ch == '\\')
+}
+
+fn validate_token_identity(name: &str, symbol: &str) -> Result<(), StsError> {
+    let name = name.trim();
+    let symbol = symbol.trim();
+    if name.is_empty()
+        || name.len() > MAX_TOKEN_NAME_LEN
+        || !name.is_ascii()
+        || symbol.len() < 2
+        || symbol.len() > MAX_TOKEN_SYMBOL_LEN
+        || !symbol.is_ascii()
+        || !symbol
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+        || !symbol
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+    {
+        return Err(StsError::InvalidMetadata);
+    }
+
+    let upper_name = name.to_ascii_uppercase();
+    if symbol.contains(NATIVE_SNRG_SYMBOL)
+        || upper_name.contains(NATIVE_SNRG_SYMBOL)
+        || upper_name.contains("SYNERGY")
+    {
+        return Err(StsError::ReservedTokenIdentity);
+    }
+    Ok(())
+}
+
+fn fungible_class_from_token_id(token_id: &str) -> Option<TokenClass> {
+    if token_id.starts_with(TokenClass::B1BasicFungible.prefix()) {
+        Some(TokenClass::B1BasicFungible)
+    } else if token_id.starts_with(TokenClass::B2ManagedFungible.prefix()) {
+        Some(TokenClass::B2ManagedFungible)
+    } else if token_id.starts_with(TokenClass::B3PolicyFungible.prefix()) {
+        Some(TokenClass::B3PolicyFungible)
+    } else {
+        None
+    }
 }
 
 fn validate_metadata_hash_option(hash: Option<&str>) -> Result<(), StsError> {
@@ -1368,7 +1527,9 @@ mod tests {
             metadata_authority: Some(ALICE.to_string()),
             metadata_uri: Some("ipfs://metadata".to_string()),
             metadata_hash: Some(HASH.to_string()),
-            metadata_mutable: true,
+            metadata_mutable: false,
+            image_uri: None,
+            image_hash: None,
             flags: FungibleControlFlags::default(),
             policies: Vec::new(),
             created_at: 1_700_000_000,
@@ -1549,5 +1710,73 @@ mod tests {
         );
         assert!(state.token_registry.is_empty());
         assert!(state.events.is_empty());
+    }
+
+    #[test]
+    fn create_payload_sender_must_match_declared_creator() {
+        let payload =
+            StsSignedPayload::new(StsTx::CreateFungible(params(TokenClass::B1BasicFungible)));
+        let mut state = StsState::new();
+        assert_eq!(
+            state.apply_signed_payload(BOB, &payload),
+            Err(StsError::Unauthorized)
+        );
+        assert!(state.token_registry.is_empty());
+    }
+
+    #[test]
+    fn reserved_and_unsafe_token_creation_is_rejected() {
+        let mut state = StsState::new();
+
+        let mut reserved = params(TokenClass::B1BasicFungible);
+        reserved.symbol = "SNRGX".to_string();
+        assert_eq!(
+            state.create_fungible(reserved),
+            Err(StsError::ReservedTokenIdentity)
+        );
+
+        let mut unsafe_metadata = params(TokenClass::B1BasicFungible);
+        unsafe_metadata.metadata_mutable = true;
+        assert_eq!(
+            state.create_fungible(unsafe_metadata),
+            Err(StsError::UnsafeTokenPractice)
+        );
+
+        let mut unbounded_mint = params(TokenClass::B1BasicFungible);
+        unbounded_mint.max_supply = None;
+        assert_eq!(
+            state.create_fungible(unbounded_mint),
+            Err(StsError::UnsafeTokenPractice)
+        );
+
+        let mut duplicate_symbol = params(TokenClass::B1BasicFungible);
+        state.create_fungible(duplicate_symbol.clone()).unwrap();
+        duplicate_symbol.creator_nonce += 1;
+        assert_eq!(
+            state.create_fungible(duplicate_symbol),
+            Err(StsError::ReservedTokenIdentity)
+        );
+    }
+
+    #[test]
+    fn token_image_can_be_set_by_creator_exactly_once() {
+        let mut state = StsState::new();
+        let token_id = state
+            .create_fungible(params(TokenClass::B1BasicFungible))
+            .unwrap();
+        assert_eq!(
+            state.set_fungible_image(BOB, &token_id, "ipfs://image", HASH, 1_700_000_001),
+            Err(StsError::Unauthorized)
+        );
+        state
+            .set_fungible_image(ALICE, &token_id, "ipfs://image", HASH, 1_700_000_001)
+            .unwrap();
+        let definition = state.token_registry.get(&token_id).unwrap();
+        assert_eq!(definition.image_uri.as_deref(), Some("ipfs://image"));
+        assert!(definition.image_locked);
+        assert_eq!(
+            state.set_fungible_image(ALICE, &token_id, "ipfs://image2", HASH, 1_700_000_002),
+            Err(StsError::ImageAlreadySet)
+        );
     }
 }

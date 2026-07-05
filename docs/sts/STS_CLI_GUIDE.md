@@ -8,6 +8,7 @@ Current scope in this branch:
 - Fungible token payloads for `synb1`, `synb2`, and `synb3`.
 - Payload decode and gas/fee estimation.
 - Metadata-file hashing with SHA3-256.
+- Token image URI/hash attachment at creation and one-time post-create image setting.
 - Output artifacts for later signing and transaction submission.
 
 The CLI does not mutate chain state by itself. It builds deterministic STS payload bytes that must be wrapped in a signed Synergy transaction and submitted through the normal transaction path.
@@ -41,7 +42,7 @@ Install a specific release tag:
 
 ```bash
 curl -fsSL https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/latest/download/install-synergy-sts.sh \
-  | bash -s -- --version synergy-sts-v15.0.6
+  | bash -s -- --version synergy-sts-v15.0.6-alpha.1
 ```
 
 Install to a different directory:
@@ -69,9 +70,16 @@ The installer verifies release `.sha256` checksums by default. Advanced users ca
 
 ```bash
 ./install-synergy-sts.sh \
-  --url https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/download/synergy-sts-v15.0.6/synergy-sts-linux-amd64 \
+  --url https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/download/synergy-sts-v15.0.6-alpha.1/synergy-sts-linux-amd64 \
   --sha256 <expected_sha256>
 ```
+
+Release repository assets:
+
+- `install-synergy-sts.sh`: portable macOS/Linux installer.
+- `latest.json`: release metadata and asset names for automation.
+- `synergy-sts-<os>-<arch>`: standalone executable.
+- `synergy-sts-<os>-<arch>.sha256`: checksum used by the installer.
 
 ## Install From Source
 
@@ -205,8 +213,10 @@ synergy-sts token create \
   --symbol TGLD \
   --decimals 9 \
   --initial-supply 1000000000000000 \
+  --max-supply 1000000000000000 \
   --metadata-uri ipfs://bafy.../metadata.json \
   --metadata-file ./metadata.json \
+  --no-mint-authority \
   --from synw1... \
   --creator-nonce 1
 ```
@@ -218,6 +228,124 @@ Rules:
 - If both `--metadata-file` and `--metadata-hash` are supplied, they must match.
 - A metadata URI requires a metadata hash.
 - Amounts are integer base units. The CLI does not accept floating-point token amounts.
+- Metadata is immutable in the current protocol slice. `--metadata-mutable` and `--can-update-metadata` fail closed.
+
+## Exhaustive Token Metadata Template
+
+Store token metadata on IPFS, Arweave, or HTTPS and pass its SHA3-256 hash with `--metadata-hash` or `--metadata-file`. Atlas treats this metadata as descriptive; protocol identity and supply rules still come from the signed STS payload.
+
+```json
+{
+  "schema": "synergy.sts.token.metadata.v1",
+  "chain_id": 1264,
+  "network": "testnet",
+  "standard": "sts-fungible-v1",
+  "asset": {
+    "class": "b1",
+    "token_address": "synb1...",
+    "name": "Testnet Gold",
+    "symbol": "TGLD",
+    "decimals": 9,
+    "description": "Short public description of the token purpose.",
+    "category": "utility",
+    "tags": ["testnet", "utility"],
+    "image": "ipfs://bafy.../logo.png",
+    "image_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "external_url": "https://example.com/token"
+  },
+  "supply": {
+    "initial_supply_base_units": "1000000000000000",
+    "max_supply_base_units": "1000000000000000",
+    "mint_authority": null,
+    "burn_model": "holder_burn"
+  },
+  "authorities": {
+    "creator": "synw1...",
+    "metadata_authority": null,
+    "freeze_authority": null,
+    "compliance_authority": null
+  },
+  "security": {
+    "native": false,
+    "gas_asset": false,
+    "immutable_metadata": true,
+    "image_set_once": true,
+    "impersonation_review": {
+      "not_snrg": true,
+      "not_synergy_official": true,
+      "official_issuer_statement": ""
+    }
+  },
+  "links": {
+    "website": "https://example.com",
+    "docs": "https://example.com/docs",
+    "support": "https://example.com/support",
+    "repository": "https://github.com/example/project"
+  },
+  "socials": {
+    "x": "",
+    "discord": "",
+    "telegram": "",
+    "matrix": ""
+  },
+  "compliance": {
+    "issuer_name": "",
+    "issuer_jurisdiction": "",
+    "terms_url": "",
+    "risk_disclosure_url": ""
+  },
+  "checksums": {
+    "metadata_sha3_256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "image_sha3_256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  }
+}
+```
+
+Required protocol fields are `class`, `name`, `symbol`, `decimals`, `initial_supply`, `creator`, `creator_nonce`, and `created_at`. Recommended metadata fields are all fields shown above so Atlas, wallets, and future SDKs can present the token consistently.
+
+## Token Images
+
+Token images can be set at creation:
+
+```bash
+synergy-sts token create \
+  --network testnet \
+  --class b1 \
+  --name "Testnet Gold" \
+  --symbol TGLD \
+  --decimals 9 \
+  --initial-supply 1000000000000000 \
+  --max-supply 1000000000000000 \
+  --metadata-uri ipfs://bafy.../metadata.json \
+  --metadata-file ./metadata.json \
+  --image-uri ipfs://bafy.../logo.png \
+  --image-file ./logo.png \
+  --from synw1testcreator000000000000000000000000 \
+  --creator-nonce 1 \
+  --out ./tgld-create.json
+```
+
+Or after creation, exactly once, by the token creator:
+
+```bash
+synergy-sts token set-image \
+  --network testnet \
+  --token synb1... \
+  --image-uri ipfs://bafy.../logo.png \
+  --image-file ./logo.png \
+  --image-hash dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+  --from synw1testcreator000000000000000000000000 \
+  --out ./tgld-image.json
+```
+
+Image rules:
+
+- `--image-uri` must be `ipfs://`, `ar://`, or `https://`.
+- `--image-hash` is SHA3-256 lowercase hex without `0x`.
+- `--image-file` computes SHA3-256 locally and must match `--image-hash` when both are supplied.
+- SVG image URIs are rejected for explorer safety.
+- If an image is present at token creation, the image is locked immediately.
+- If no image is present at creation, Atlas allows the connected creator wallet to set it once from the token detail view.
 
 ## Create B1 Token
 
@@ -234,6 +362,8 @@ synergy-sts token create \
   --max-supply 1000000000000000 \
   --metadata-uri ipfs://tgld \
   --metadata-hash aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --image-uri ipfs://tgld/logo.png \
+  --image-hash dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
   --from synw1testcreator000000000000000000000000 \
   --creator-nonce 1 \
   --created-at 1700000000 \
@@ -253,7 +383,7 @@ The output includes:
 
 ## Create B2 Managed Token
 
-B2 allows managed issuer powers, but dangerous powers must be declared at creation.
+B2 allows managed issuer powers, but dangerous powers must be declared at creation and must be enforceable by the current protocol slice.
 
 ```bash
 synergy-sts token create \
@@ -271,7 +401,6 @@ synergy-sts token create \
   --can-freeze \
   --can-pause \
   --can-clawback \
-  --metadata-mutable \
   --out ./musd-create.json
 ```
 
@@ -304,6 +433,7 @@ synergy-sts token create \
   --symbol GOV \
   --decimals 9 \
   --initial-supply 100000000000000000 \
+  --max-supply 100000000000000000 \
   --metadata-uri ipfs://gov \
   --metadata-hash cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
   --from synw1issuer0000000000000000000000000000 \
@@ -380,7 +510,10 @@ Decoded create payload shape:
       "initial_supply": 1000000000000000,
       "max_supply": 1000000000000000,
       "metadata_uri": "ipfs://...",
-      "metadata_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      "metadata_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "metadata_mutable": false,
+      "image_uri": "ipfs://.../logo.png",
+      "image_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
     }
   }
 }
@@ -404,7 +537,15 @@ The CLI fails closed when:
 - A B3 snapshot command receives a non-`synb3` token ID.
 - Payload hex uses `0x`, uppercase hex, or malformed bytes.
 - Metadata hash is uppercase, has `0x`, or does not match `--metadata-file`.
+- Token image hash is uppercase, has `0x`, does not match `--image-file`, or image URI is unsafe.
 - Amounts are not integer base units.
+- Symbol is not 2-12 uppercase ASCII letters/digits starting with a letter.
+- Name is empty, longer than 64 ASCII bytes, or impersonates `SNRG`/`Synergy`.
+- Symbol contains `SNRG`, duplicates an existing STS token symbol in state, or attempts native-token impersonation.
+- Mint authority exists without a bounded `--max-supply`.
+- Metadata mutability, updateable metadata, allowlists, denylists, or transfer approvals are requested before full protocol enforcement exists.
+- B3 transfer fee exceeds 1000 bps.
+- A create payload is signed by a wallet other than the declared creator.
 
 ## Current Limitations
 
