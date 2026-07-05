@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const EPOCH_VALIDATOR_SETS_ENV: &str = "SYNERGY_EPOCH_VALIDATOR_SETS_FILE";
 pub const DEFAULT_EPOCH_VALIDATOR_SETS_PATH: &str = "config/epoch-validator-sets.json";
+pub const SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION: u64 = 1;
 
 const VERBOSE_VALIDATOR_LOGS: bool = false;
 pub const INITIAL_VALIDATOR_SYNERGY_SCORE: f64 = 100.0;
@@ -181,6 +182,8 @@ pub struct ValidatorRegistration {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EpochValidatorSetSnapshot {
+    #[serde(default = "default_epoch_validator_set_format_version")]
+    pub snapshot_format_version: u64,
     #[serde(default)]
     pub chain_id: Option<u64>,
     #[serde(default)]
@@ -208,6 +211,21 @@ pub struct EpochValidatorSetSnapshot {
     pub previous_set_hash: Option<String>,
     #[serde(default)]
     pub validator_set_hash: Option<String>,
+    #[serde(
+        default,
+        alias = "protocol_version",
+        alias = "consensus_protocol_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub required_protocol_version: Option<String>,
+    #[serde(
+        default,
+        alias = "binary_version",
+        alias = "runtime_version",
+        alias = "required_runtime_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub required_binary_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,6 +285,67 @@ impl EpochValidatorSetSnapshot {
         }
         Ok(addresses)
     }
+
+    fn validate_local_compatibility(&self) -> Result<(), String> {
+        if self.snapshot_format_version > SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION {
+            return Err(format!(
+                "epoch validator set format version {} is newer than supported version {}; refusing consensus participation",
+                self.snapshot_format_version, SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION
+            ));
+        }
+
+        if let Some(required_protocol_version) =
+            normalized_optional_string(self.required_protocol_version.as_deref())
+        {
+            let local_protocol_version = local_epoch_validator_set_protocol_version();
+            if required_protocol_version != local_protocol_version {
+                return Err(format!(
+                    "epoch validator set requires protocol version {required_protocol_version}, local protocol version is {local_protocol_version}; refusing consensus participation"
+                ));
+            }
+        }
+
+        if let Some(required_binary_version) =
+            normalized_optional_string(self.required_binary_version.as_deref())
+        {
+            let local_binary_version = env!("CARGO_PKG_VERSION");
+            if required_binary_version != local_binary_version {
+                return Err(format!(
+                    "epoch validator set requires binary version {required_binary_version}, local binary version is {local_binary_version}; refusing consensus participation"
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EpochValidatorSetCompatibility {
+    pub snapshot_format_version: u64,
+    pub supported_snapshot_format_version: u64,
+    pub required_protocol_version: Option<String>,
+    pub local_protocol_version: String,
+    pub required_binary_version: Option<String>,
+    pub local_binary_version: String,
+    pub validator_set_hash: Option<String>,
+}
+
+fn default_epoch_validator_set_format_version() -> u64 {
+    SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION
+}
+
+fn normalized_optional_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+pub fn local_epoch_validator_set_protocol_version() -> String {
+    canonical_genesis()
+        .map(|genesis| genesis.protocol_version().to_string())
+        .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
 }
 
 impl EpochValidatorMember {
@@ -1241,13 +1320,55 @@ fn load_epoch_validator_sets() -> Result<Vec<EpochValidatorSetSnapshot>, String>
     Ok(sets)
 }
 
-fn epoch_validator_addresses_for_height(height: u64) -> Result<Option<Vec<String>>, String> {
+fn epoch_validator_set_for_height(
+    height: u64,
+) -> Result<Option<EpochValidatorSetSnapshot>, String> {
     for set in load_epoch_validator_sets()? {
         if set.applies_to_height(height) {
-            return set.active_validator_addresses().map(Some);
+            return Ok(Some(set));
         }
     }
     Ok(None)
+}
+
+fn epoch_validator_addresses_for_height(height: u64) -> Result<Option<Vec<String>>, String> {
+    let Some(set) = epoch_validator_set_for_height(height)? else {
+        return Ok(None);
+    };
+    set.validate_local_compatibility()?;
+    set.active_validator_addresses().map(Some)
+}
+
+pub fn epoch_validator_set_hash_for_height(height: u64) -> Result<Option<String>, String> {
+    Ok(epoch_validator_set_for_height(height)?
+        .and_then(|set| normalized_optional_string(set.validator_set_hash.as_deref())))
+}
+
+pub fn epoch_validator_set_compatibility_for_height(
+    height: u64,
+) -> Result<Option<EpochValidatorSetCompatibility>, String> {
+    Ok(
+        epoch_validator_set_for_height(height)?.map(|set| EpochValidatorSetCompatibility {
+            snapshot_format_version: set.snapshot_format_version,
+            supported_snapshot_format_version: SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION,
+            required_protocol_version: normalized_optional_string(
+                set.required_protocol_version.as_deref(),
+            ),
+            local_protocol_version: local_epoch_validator_set_protocol_version(),
+            required_binary_version: normalized_optional_string(
+                set.required_binary_version.as_deref(),
+            ),
+            local_binary_version: env!("CARGO_PKG_VERSION").to_string(),
+            validator_set_hash: normalized_optional_string(set.validator_set_hash.as_deref()),
+        }),
+    )
+}
+
+pub fn assert_epoch_validator_set_compatible_for_height(height: u64) -> Result<(), String> {
+    let Some(set) = epoch_validator_set_for_height(height)? else {
+        return Ok(());
+    };
+    set.validate_local_compatibility()
 }
 
 fn current_configured_consensus_order(
@@ -2019,6 +2140,84 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_epoch_validator_set_format_blocks_consensus_membership() {
+        let _env_lock = validator_test_env_lock();
+        let active = active_validators_from_addresses(&validator_addresses(1, 6));
+        let temp_dir = unique_test_dir("epoch-unsupported-format");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([{
+                "snapshot_format_version": SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION + 1,
+                "chain_id": 1264,
+                "epoch_id": 7,
+                "validator_set_version": 3,
+                "effective_from_height": 100,
+                "active_validators": validator_addresses(1, 6),
+                "quorum_threshold": 4,
+                "validator_set_hash": "future-format-set"
+            }]),
+        );
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let error = consensus_membership_validators_for_height(active, 150)
+            .expect_err("future snapshot format must fail closed");
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        assert!(
+            error.contains("newer than supported version"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn incompatible_epoch_validator_set_binary_version_blocks_consensus_membership() {
+        let _env_lock = validator_test_env_lock();
+        let active = active_validators_from_addresses(&validator_addresses(1, 6));
+        let temp_dir = unique_test_dir("epoch-wrong-binary");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([{
+                "snapshot_format_version": SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION,
+                "chain_id": 1264,
+                "epoch_id": 7,
+                "validator_set_version": 3,
+                "effective_from_height": 100,
+                "active_validators": validator_addresses(1, 6),
+                "quorum_threshold": 4,
+                "validator_set_hash": "wrong-binary-set",
+                "required_binary_version": "0.0.0-incompatible"
+            }]),
+        );
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let error = consensus_membership_validators_for_height(active, 150)
+            .expect_err("wrong binary version must fail closed");
+        let compatibility = epoch_validator_set_compatibility_for_height(150)
+            .expect("compatibility diagnostics should load")
+            .expect("height should have an epoch validator set");
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        assert!(
+            error.contains("requires binary version 0.0.0-incompatible"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            compatibility.validator_set_hash.as_deref(),
+            Some("wrong-binary-set")
+        );
+        assert_eq!(
+            compatibility.local_binary_version,
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    #[test]
     fn epoch_validator_set_ignores_config_peers_vpn_and_registry_drift() {
         let _env_lock = validator_test_env_lock();
         let all_addresses = validator_addresses(1, 7);
@@ -2033,10 +2232,11 @@ mod tests {
         config.node.strict_validator_allowlist = true;
         config.node.allowed_validator_addresses = all_addresses.clone();
         config.network.persistent_peers = vec!["validator-7".to_string()];
-        config.network.validator_vpn_transports = vec![crate::config::ValidatorVpnTransportConfig {
-            validator_address: "validator-7".to_string(),
-            dial_address: "10.69.10.7:5622".to_string(),
-        }];
+        config.network.validator_vpn_transports =
+            vec![crate::config::ValidatorVpnTransportConfig {
+                validator_address: "validator-7".to_string(),
+                dial_address: "10.69.10.7:5622".to_string(),
+            }];
         std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
         std::fs::write(
             &peers_path,

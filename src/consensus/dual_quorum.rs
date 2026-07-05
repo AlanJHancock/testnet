@@ -10,9 +10,10 @@ use crate::consensus::validator_keys::{
 };
 use crate::crypto::pqc::{PQCCiphertext, PQCManager, PQCPrivateKey, PQCPublicKey, PQCSignature};
 use crate::validator::{
-    consensus_membership_validators, consensus_membership_validators_for_height,
-    target_validator_cluster_count, Validator, ValidatorManager, ValidatorPerformanceUpdate,
-    TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
+    assert_epoch_validator_set_compatible_for_height, consensus_membership_validators,
+    consensus_membership_validators_for_height, target_validator_cluster_count, Validator,
+    ValidatorManager, ValidatorPerformanceUpdate, TESTNET_VALIDATOR_CLUSTER_SIZE,
+    VALIDATOR_MANAGER,
 };
 use crate::{debug, warn};
 use serde::{Deserialize, Serialize};
@@ -1211,6 +1212,11 @@ impl DualQuorumConsensus {
         round_number: u64,
         validator_manager: &Arc<ValidatorManager>,
     ) -> Result<Vote, String> {
+        assert_epoch_validator_set_compatible_for_height(proposed_block.block_index).map_err(
+            |error| {
+                format!("refusing vote because validator-set snapshot is incompatible: {error}")
+            },
+        )?;
         let timestamp = Self::current_timestamp();
         let message = Self::vote_signature_payload(
             validator_address,
@@ -3030,10 +3036,41 @@ mod tests {
         consensus_algorithm_label, register_test_validator_signing_key,
     };
     use crate::crypto::pqc::PQCAlgorithm;
-    use crate::validator::{Validator, ValidatorRegistration, ValidatorStatus};
+    use crate::validator::{
+        Validator, ValidatorRegistration, ValidatorStatus, EPOCH_VALIDATOR_SETS_ENV,
+    };
     use base64::{engine::general_purpose, Engine as _};
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    fn epoch_set_env_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = env::var(key).ok();
+            env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                env::set_var(self.key, previous);
+            } else {
+                env::remove_var(self.key);
+            }
+        }
+    }
 
     fn approved_validator_manager(addresses: &[&str]) -> Arc<ValidatorManager> {
         let manager = Arc::new(ValidatorManager::new());
@@ -3173,6 +3210,9 @@ mod tests {
 
     #[test]
     fn historical_qc_verification_uses_epoch_validator_set_for_block_height() {
+        let _epoch_set_env_guard = epoch_set_env_test_lock()
+            .lock()
+            .expect("epoch validator set env test lock should succeed");
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
         let validator_manager = approved_validator_manager(&[
             "validator1",
@@ -3215,8 +3255,8 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let previous_snapshot = env::var(crate::validator::EPOCH_VALIDATOR_SETS_ENV).ok();
-        env::set_var(crate::validator::EPOCH_VALIDATOR_SETS_ENV, &snapshot_path);
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
 
         let mut block = Block::new(
             1,
@@ -3259,15 +3299,72 @@ mod tests {
             &validator_manager,
         );
 
-        match previous_snapshot {
-            Some(value) => env::set_var(crate::validator::EPOCH_VALIDATOR_SETS_ENV, value),
-            None => env::remove_var(crate::validator::EPOCH_VALIDATOR_SETS_ENV),
-        }
         fs::remove_dir_all(temp_dir).ok();
 
         let error = result.expect_err("validator7 is pending in the historical epoch set");
         assert!(
             error.contains("outside active validator set"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn incompatible_epoch_validator_set_blocks_vote_signing() {
+        let _epoch_set_env_guard = epoch_set_env_test_lock()
+            .lock()
+            .expect("epoch validator set env test lock should succeed");
+        let validator_manager = approved_validator_manager(&["validator1"]);
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = env::temp_dir().join(format!("synergy-vote-epoch-compat-{unique}"));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        fs::write(
+            &snapshot_path,
+            serde_json::json!({
+                "epoch_validator_sets": [{
+                    "snapshot_format_version": crate::validator::SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION,
+                    "chain_id": 1264,
+                    "epoch_id": 0,
+                    "validator_set_version": 1,
+                    "effective_from_height": 1,
+                    "active_validators": ["validator1"],
+                    "quorum_threshold": 1,
+                    "validator_set_hash": "wrong-runtime-set",
+                    "required_binary_version": "0.0.0-incompatible"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+        let block = Block::new(
+            1,
+            vec![],
+            "parent-hash".to_string(),
+            "validator1".to_string(),
+            1,
+        );
+
+        let error = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator1",
+            &block,
+            0,
+            1,
+            &validator_manager,
+        )
+        .expect_err("wrong binary version must prevent local vote signing");
+
+        fs::remove_dir_all(temp_dir).ok();
+        assert!(
+            error.contains("refusing vote because validator-set snapshot is incompatible"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("requires binary version 0.0.0-incompatible"),
             "unexpected error: {error}"
         );
     }
