@@ -3,9 +3,11 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use synergy_testnet::sts::{
     decode_sts_payload, encode_sts_payload, estimate_sts_gas, native_snrg_definition,
-    validate_sts_object_id, CreateFungibleParams, FungibleControlFlags, FungiblePolicy,
-    StsSignedPayload, StsState, StsTx, TokenClass, NATIVE_SNRG_PLACEHOLDER_ADDRESS,
-    STS_TESTNET_CHAIN_ID, STS_TESTNET_NETWORK,
+    validate_sts_object_id, CreateCredentialSchemaParams, CreateFungibleParams,
+    CreateMultiAssetCollectionParams, CreateMultiAssetItemParams, CreateNftCollectionParams,
+    FungibleControlFlags, FungiblePolicy, IssueCredentialParams, MintNftParams, MultiAssetAmount,
+    MultiAssetItemType, MultiAssetTransferPolicy, StsSignedPayload, StsState, StsTx, TokenClass,
+    NATIVE_SNRG_PLACEHOLDER_ADDRESS, STS_TESTNET_CHAIN_ID, STS_TESTNET_NETWORK,
 };
 
 fn main() {
@@ -31,6 +33,9 @@ fn run() -> Result<(), String> {
         Some("decode") => decode_payload_command(&args[1..]),
         Some("estimate") => estimate_payload_command(&args[1..]),
         Some("token") => run_token_command(&args[1..]),
+        Some("nft") => run_nft_command(&args[1..]),
+        Some("ma") | Some("multi-asset") => run_multi_asset_command(&args[1..]),
+        Some("credential") | Some("credentials") => run_credential_command(&args[1..]),
         Some("help") => {
             usage();
             Ok(())
@@ -64,6 +69,18 @@ Usage:
   synergy-sts token unpause --network testnet --token <synb2*> --from <authority> [--timestamp <u64>]
   synergy-sts token clawback --network testnet --token <synb2*> --source <owner> --to <owner> --amount <base_units> --from <authority> [--timestamp <u64>]
   synergy-sts token snapshot --network testnet --token <synb3*> --from <authority> [--timestamp <u64>]
+  synergy-sts nft create-collection --network testnet --class nf1|nf2 --name <name> --symbol <symbol> --from <creator> --creator-nonce <u64> [--metadata-uri <uri> --metadata-hash <sha3_256_hex>] [--metadata-file <path>] [--image-uri <uri> --image-hash <sha3_256_hex>] [--royalty-bps <0-10000> --royalty-recipient <addr>] [--non-transferable] [--requires-issuer-approval]
+  synergy-sts nft mint --network testnet --collection <synn*> --to <owner> --from <authority> [--metadata-uri <uri> --metadata-hash <sha3_256_hex>] [--metadata-file <path>] [--expires-at <u64>] [--non-transferable] [--requires-issuer-approval]
+  synergy-sts nft transfer --network testnet --nft <synn*> --from <owner-or-authority> --owner <current-owner> --to <owner> [--timestamp <u64>]
+  synergy-sts nft burn --network testnet --nft <synn*> --from <owner-or-authority> --owner <current-owner> [--timestamp <u64>]
+  synergy-sts nft revoke|use|freeze|thaw --network testnet --nft <synn*> --from <authority-or-owner> [--timestamp <u64>]
+  synergy-sts ma create --network testnet --name <name> --symbol <symbol> --from <creator> --creator-nonce <u64> [--metadata-uri <uri> --metadata-hash <sha3_256_hex>] [--metadata-file <path>]
+  synergy-sts ma create-item --network testnet --collection <synj*> --item-id <u64> --type fungible|non_fungible|semi_fungible --name <name> --symbol <symbol> --decimals <0-9> --from <authority> [--max-supply <base_units>] [--transfer-policy open|non_transferable|authority_only]
+  synergy-sts ma mint|transfer|burn --network testnet --collection <synj*> --item-id <u64> --amount <base_units> --from <owner-or-authority> [--to <owner>]
+  synergy-sts ma batch-transfer --network testnet --collection <synj*> --from <owner> --to <owner> --item <item_id>:<amount> [--item <item_id>:<amount> ...]
+  synergy-sts credential schema create --network testnet --schema-id <id> --name <name> --schema-hash <sha3_256_hex> --from <issuer> [--description-hash <sha3_256_hex>]
+  synergy-sts credential issue --network testnet --schema-id <id> --subject <addr> --subject-commitment <sha3_256_hex> --credential-hash <sha3_256_hex> --from <issuer> [--expires-at <u64>]
+  synergy-sts credential revoke|suspend|restore|expire|verify-status --network testnet --credential <synk*> --from <issuer-or-caller> [--reason-hash <sha3_256_hex>]
 
 Policy examples:
   --policy snapshot_v1
@@ -94,6 +111,73 @@ fn run_token_command(args: &[String]) -> Result<(), String> {
         "clawback" => build_clawback_tx(rest),
         "snapshot" => build_snapshot_tx(rest),
         other => Err(format!("unknown token subcommand '{other}'")),
+    }
+}
+
+fn run_nft_command(args: &[String]) -> Result<(), String> {
+    let Some(subcommand) = args.first().map(String::as_str) else {
+        return Err("nft command requires a subcommand".to_string());
+    };
+    let rest = &args[1..];
+    require_testnet(rest)?;
+    match subcommand {
+        "create-collection" => build_create_nft_collection(rest),
+        "mint" => build_mint_nft(rest),
+        "transfer" => build_transfer_nft(rest),
+        "burn" => build_burn_nft(rest),
+        "freeze" => build_nft_control(rest, "freeze"),
+        "thaw" => build_nft_control(rest, "thaw"),
+        "revoke" => build_nft_control(rest, "revoke"),
+        "use" => build_nft_control(rest, "use"),
+        "update-metadata" => build_update_nft_metadata(rest),
+        "verify-collection" => build_verify_nft_collection(rest),
+        other => Err(format!("unknown nft subcommand '{other}'")),
+    }
+}
+
+fn run_multi_asset_command(args: &[String]) -> Result<(), String> {
+    let Some(subcommand) = args.first().map(String::as_str) else {
+        return Err("ma command requires a subcommand".to_string());
+    };
+    let rest = &args[1..];
+    require_testnet(rest)?;
+    match subcommand {
+        "create" => build_create_multi_asset_collection(rest),
+        "create-item" => build_create_multi_asset_item(rest),
+        "mint" => build_multi_asset_amount_tx(rest, "mint"),
+        "batch-mint" => build_batch_multi_asset_amount_tx(rest, "batch-mint"),
+        "transfer" => build_multi_asset_amount_tx(rest, "transfer"),
+        "burn" => build_multi_asset_amount_tx(rest, "burn"),
+        "batch-burn" => build_batch_multi_asset_amount_tx(rest, "batch-burn"),
+        "batch-transfer" => build_batch_multi_asset_transfer(rest),
+        other => Err(format!("unknown ma subcommand '{other}'")),
+    }
+}
+
+fn run_credential_command(args: &[String]) -> Result<(), String> {
+    let Some(subcommand) = args.first().map(String::as_str) else {
+        return Err("credential command requires a subcommand".to_string());
+    };
+    let rest = &args[1..];
+    if subcommand == "schema" {
+        let Some(schema_subcommand) = rest.first().map(String::as_str) else {
+            return Err("credential schema requires a subcommand".to_string());
+        };
+        require_testnet(&rest[1..])?;
+        return match schema_subcommand {
+            "create" => build_create_credential_schema(&rest[1..]),
+            other => Err(format!("unknown credential schema subcommand '{other}'")),
+        };
+    }
+    require_testnet(rest)?;
+    match subcommand {
+        "issue" => build_issue_credential(rest),
+        "revoke" => build_credential_status_tx(rest, "revoke"),
+        "suspend" => build_credential_status_tx(rest, "suspend"),
+        "restore" => build_credential_status_tx(rest, "restore"),
+        "expire" => build_credential_status_tx(rest, "expire"),
+        "verify-status" | "verify" => build_credential_status_tx(rest, "verify-status"),
+        other => Err(format!("unknown credential subcommand '{other}'")),
     }
 }
 
@@ -443,6 +527,480 @@ fn build_snapshot_tx(args: &[String]) -> Result<(), String> {
     )
 }
 
+fn build_create_nft_collection(args: &[String]) -> Result<(), String> {
+    let class = parse_token_class(&required_arg(args, "--class")?)?;
+    if !matches!(
+        class,
+        TokenClass::NF1StandardNft | TokenClass::NF2ControlledNft
+    ) {
+        return Err("--class must be nf1 or nf2".to_string());
+    }
+    let creator = required_arg(args, "--from")?;
+    let created_at = optional_u64_arg(args, "--created-at")?.unwrap_or(current_timestamp()?);
+    let (metadata_file, metadata_file_hash, metadata_hash) = metadata_hash_args(args)?;
+    let metadata_uri = optional_arg(args, "--metadata-uri");
+    require_uri_hash_pair(
+        "--metadata-uri",
+        metadata_uri.as_ref(),
+        metadata_hash.as_ref(),
+    )?;
+    let (image_file, image_file_hash, image_hash) = image_hash_args(args)?;
+    let image_uri = optional_arg(args, "--image-uri");
+    require_uri_hash_pair("--image-uri", image_uri.as_ref(), image_hash.as_ref())?;
+    if let (Some(uri), Some(hash)) = (image_uri.as_ref(), image_hash.as_ref()) {
+        validate_image_uri_hash(uri, hash)?;
+    }
+    let transferable = if class == TokenClass::NF1StandardNft {
+        true
+    } else {
+        has_flag(args, "--transferable") || has_flag(args, "--requires-issuer-approval")
+    };
+    let royalty_basis_points = optional_u16_arg(args, "--royalty-bps")?;
+    let royalty_recipient = optional_arg(args, "--royalty-recipient");
+    if royalty_basis_points.unwrap_or(0) > 0 && royalty_recipient.is_none() {
+        return Err(
+            "--royalty-recipient is required when --royalty-bps is greater than 0".to_string(),
+        );
+    }
+    let params = CreateNftCollectionParams {
+        class,
+        creator: creator.clone(),
+        creator_nonce: required_u64_arg(args, "--creator-nonce")?,
+        name: required_arg(args, "--name")?,
+        symbol: required_arg(args, "--symbol")?,
+        metadata_uri,
+        metadata_hash: metadata_hash.clone(),
+        metadata_mutable: has_flag(args, "--metadata-mutable"),
+        image_uri: image_uri.clone(),
+        image_hash: image_hash.clone(),
+        collection_authority: optional_arg(args, "--collection-authority")
+            .or_else(|| Some(creator.clone())),
+        mint_authority: optional_arg(args, "--mint-authority").or_else(|| Some(creator.clone())),
+        metadata_authority: optional_arg(args, "--metadata-authority")
+            .or_else(|| has_flag(args, "--metadata-mutable").then(|| creator.clone())),
+        royalty_basis_points,
+        royalty_recipient,
+        transferable,
+        requires_issuer_approval: has_flag(args, "--requires-issuer-approval"),
+        created_at,
+    };
+    let mut preview = StsState::new();
+    let collection_id = preview
+        .create_nft_collection(params.clone())
+        .map_err(|error| {
+            format!("create NFT collection payload rejected by STS policy: {error}")
+        })?;
+    let collection_address = preview
+        .nft_collection(&collection_id)
+        .map(|collection| collection.collection_address.clone());
+    print_payload(
+        args,
+        &creator,
+        StsSignedPayload::new(StsTx::CreateNftCollection(params)),
+        Some(collection_id),
+        collection_address,
+        Some(json!({
+            "metadata_file": metadata_file,
+            "metadata_file_sha3_256": metadata_file_hash,
+            "image_file": image_file,
+            "image_file_sha3_256": image_file_hash,
+            "image_uri": image_uri,
+            "image_hash": image_hash,
+        })),
+    )
+}
+
+fn build_mint_nft(args: &[String]) -> Result<(), String> {
+    let sender = required_arg(args, "--from")?;
+    let collection_id = required_arg(args, "--collection")?;
+    validate_nft_object_id(&collection_id)?;
+    let minted_at = optional_u64_arg(args, "--timestamp")?.unwrap_or(current_timestamp()?);
+    let (metadata_file, metadata_file_hash, metadata_hash) = metadata_hash_args(args)?;
+    let metadata_uri = optional_arg(args, "--metadata-uri");
+    require_uri_hash_pair(
+        "--metadata-uri",
+        metadata_uri.as_ref(),
+        metadata_hash.as_ref(),
+    )?;
+    let transferable = if has_flag(args, "--transferable") {
+        Some(true)
+    } else if has_flag(args, "--non-transferable") {
+        Some(false)
+    } else {
+        None
+    };
+    let requires_issuer_approval = has_flag(args, "--requires-issuer-approval").then_some(true);
+    print_payload(
+        args,
+        &sender,
+        StsSignedPayload::new(StsTx::MintNft(MintNftParams {
+            collection_id,
+            to: required_arg(args, "--to")?,
+            metadata_uri,
+            metadata_hash: metadata_hash.clone(),
+            metadata_mutable: has_flag(args, "--metadata-mutable"),
+            transferable,
+            requires_issuer_approval,
+            expires_at: optional_u64_arg(args, "--expires-at")?,
+            minted_at,
+        })),
+        None,
+        None,
+        Some(json!({
+            "metadata_file": metadata_file,
+            "metadata_file_sha3_256": metadata_file_hash,
+        })),
+    )
+}
+
+fn build_transfer_nft(args: &[String]) -> Result<(), String> {
+    let sender = required_arg(args, "--from")?;
+    let nft_id = required_arg(args, "--nft")?;
+    validate_nft_object_id(&nft_id)?;
+    let owner = optional_arg(args, "--owner").unwrap_or_else(|| sender.clone());
+    let timestamp = optional_u64_arg(args, "--timestamp")?.unwrap_or(current_timestamp()?);
+    print_payload(
+        args,
+        &sender,
+        StsSignedPayload::new(StsTx::TransferNft {
+            nft_id,
+            from: owner,
+            to: required_arg(args, "--to")?,
+            timestamp,
+        }),
+        None,
+        None,
+        None,
+    )
+}
+
+fn build_burn_nft(args: &[String]) -> Result<(), String> {
+    let sender = required_arg(args, "--from")?;
+    let nft_id = required_arg(args, "--nft")?;
+    validate_nft_object_id(&nft_id)?;
+    let owner = optional_arg(args, "--owner").unwrap_or_else(|| sender.clone());
+    let timestamp = optional_u64_arg(args, "--timestamp")?.unwrap_or(current_timestamp()?);
+    print_payload(
+        args,
+        &sender,
+        StsSignedPayload::new(StsTx::BurnNft {
+            nft_id,
+            owner,
+            timestamp,
+        }),
+        None,
+        None,
+        None,
+    )
+}
+
+fn build_nft_control(args: &[String], op: &str) -> Result<(), String> {
+    let sender = required_arg(args, "--from")?;
+    let nft_id = required_arg(args, "--nft")?;
+    validate_nft_object_id(&nft_id)?;
+    let timestamp = optional_u64_arg(args, "--timestamp")?.unwrap_or(current_timestamp()?);
+    let tx = match op {
+        "freeze" => StsTx::FreezeNft { nft_id, timestamp },
+        "thaw" => StsTx::ThawNft { nft_id, timestamp },
+        "revoke" => StsTx::RevokeNft { nft_id, timestamp },
+        "use" => StsTx::UseNft { nft_id, timestamp },
+        _ => return Err(format!("unsupported nft control op '{op}'")),
+    };
+    print_payload(args, &sender, StsSignedPayload::new(tx), None, None, None)
+}
+
+fn build_update_nft_metadata(args: &[String]) -> Result<(), String> {
+    let sender = required_arg(args, "--from")?;
+    let nft_id = required_arg(args, "--nft")?;
+    validate_nft_object_id(&nft_id)?;
+    let metadata_uri = required_arg(args, "--metadata-uri")?;
+    let (_, _, metadata_hash) = metadata_hash_args(args)?;
+    let metadata_hash = metadata_hash
+        .ok_or_else(|| "--metadata-hash or --metadata-file is required".to_string())?;
+    validate_sha3_256_hash("--metadata-hash", &metadata_hash)?;
+    let timestamp = optional_u64_arg(args, "--timestamp")?.unwrap_or(current_timestamp()?);
+    print_payload(
+        args,
+        &sender,
+        StsSignedPayload::new(StsTx::UpdateNftMetadata {
+            nft_id,
+            metadata_uri,
+            metadata_hash,
+            timestamp,
+        }),
+        None,
+        None,
+        None,
+    )
+}
+
+fn build_verify_nft_collection(args: &[String]) -> Result<(), String> {
+    let sender = required_arg(args, "--from")?;
+    let collection_id = required_arg(args, "--collection")?;
+    validate_nft_object_id(&collection_id)?;
+    let timestamp = optional_u64_arg(args, "--timestamp")?.unwrap_or(current_timestamp()?);
+    print_payload(
+        args,
+        &sender,
+        StsSignedPayload::new(StsTx::VerifyNftCollection {
+            collection_id,
+            timestamp,
+        }),
+        None,
+        None,
+        None,
+    )
+}
+
+fn build_create_multi_asset_collection(args: &[String]) -> Result<(), String> {
+    let creator = required_arg(args, "--from")?;
+    let created_at = optional_u64_arg(args, "--created-at")?.unwrap_or(current_timestamp()?);
+    let (metadata_file, metadata_file_hash, metadata_hash) = metadata_hash_args(args)?;
+    let metadata_uri = optional_arg(args, "--metadata-uri");
+    require_uri_hash_pair(
+        "--metadata-uri",
+        metadata_uri.as_ref(),
+        metadata_hash.as_ref(),
+    )?;
+    let (image_file, image_file_hash, image_hash) = image_hash_args(args)?;
+    let image_uri = optional_arg(args, "--image-uri");
+    require_uri_hash_pair("--image-uri", image_uri.as_ref(), image_hash.as_ref())?;
+    if let (Some(uri), Some(hash)) = (image_uri.as_ref(), image_hash.as_ref()) {
+        validate_image_uri_hash(uri, hash)?;
+    }
+    let params = CreateMultiAssetCollectionParams {
+        creator: creator.clone(),
+        creator_nonce: required_u64_arg(args, "--creator-nonce")?,
+        name: required_arg(args, "--name")?,
+        symbol: required_arg(args, "--symbol")?,
+        metadata_uri,
+        metadata_hash: metadata_hash.clone(),
+        image_uri: image_uri.clone(),
+        image_hash: image_hash.clone(),
+        collection_authority: optional_arg(args, "--collection-authority")
+            .or_else(|| Some(creator.clone())),
+        metadata_authority: optional_arg(args, "--metadata-authority")
+            .or_else(|| Some(creator.clone())),
+        created_at,
+    };
+    let mut preview = StsState::new();
+    let collection_id = preview
+        .create_multi_asset_collection(params.clone())
+        .map_err(|error| {
+            format!("create multi-asset collection payload rejected by STS policy: {error}")
+        })?;
+    let collection_address = preview
+        .multi_asset_collection(&collection_id)
+        .map(|collection| collection.collection_address.clone());
+    print_payload(
+        args,
+        &creator,
+        StsSignedPayload::new(StsTx::CreateMultiAssetCollection(params)),
+        Some(collection_id),
+        collection_address,
+        Some(json!({
+            "metadata_file": metadata_file,
+            "metadata_file_sha3_256": metadata_file_hash,
+            "image_file": image_file,
+            "image_file_sha3_256": image_file_hash,
+            "image_uri": image_uri,
+            "image_hash": image_hash,
+        })),
+    )
+}
+
+fn build_create_multi_asset_item(args: &[String]) -> Result<(), String> {
+    let sender = required_arg(args, "--from")?;
+    let collection_id = required_arg(args, "--collection")?;
+    validate_multi_asset_collection_id(&collection_id)?;
+    let (metadata_file, metadata_file_hash, metadata_hash) = metadata_hash_args(args)?;
+    let metadata_uri = optional_arg(args, "--metadata-uri");
+    require_uri_hash_pair(
+        "--metadata-uri",
+        metadata_uri.as_ref(),
+        metadata_hash.as_ref(),
+    )?;
+    let tx = StsTx::CreateMultiAssetItem(CreateMultiAssetItemParams {
+        collection_id,
+        item_id: required_u64_arg(args, "--item-id")?,
+        item_type: parse_multi_asset_item_type(args)?,
+        name: required_arg(args, "--name")?,
+        symbol: required_arg(args, "--symbol")?,
+        decimals: required_u8_arg(args, "--decimals")?,
+        metadata_uri,
+        metadata_hash: metadata_hash.clone(),
+        max_supply: optional_u128_arg(args, "--max-supply")?,
+        mint_authority: optional_arg(args, "--mint-authority"),
+        burn_authority: optional_arg(args, "--burn-authority"),
+        transfer_policy: parse_multi_asset_transfer_policy(args)?,
+        created_at: optional_u64_arg(args, "--created-at")?.unwrap_or(current_timestamp()?),
+    });
+    print_payload(
+        args,
+        &sender,
+        StsSignedPayload::new(tx),
+        None,
+        None,
+        Some(json!({
+            "metadata_file": metadata_file,
+            "metadata_file_sha3_256": metadata_file_hash,
+        })),
+    )
+}
+
+fn build_multi_asset_amount_tx(args: &[String], op: &str) -> Result<(), String> {
+    let sender = required_arg(args, "--from")?;
+    let collection_id = required_arg(args, "--collection")?;
+    validate_multi_asset_collection_id(&collection_id)?;
+    let item_id = required_u64_arg(args, "--item-id")?;
+    let amount = required_u128_arg(args, "--amount")?;
+    let timestamp = optional_u64_arg(args, "--timestamp")?.unwrap_or(current_timestamp()?);
+    let tx = match op {
+        "mint" => StsTx::MintMultiAsset {
+            collection_id,
+            item_id,
+            to: required_arg(args, "--to")?,
+            amount,
+            timestamp,
+        },
+        "transfer" => StsTx::TransferMultiAsset {
+            collection_id,
+            item_id,
+            from: optional_arg(args, "--owner").unwrap_or_else(|| sender.clone()),
+            to: required_arg(args, "--to")?,
+            amount,
+            timestamp,
+        },
+        "burn" => StsTx::BurnMultiAsset {
+            collection_id,
+            item_id,
+            from: optional_arg(args, "--owner").unwrap_or_else(|| sender.clone()),
+            amount,
+            timestamp,
+        },
+        _ => return Err(format!("unsupported multi-asset amount op '{op}'")),
+    };
+    print_payload(args, &sender, StsSignedPayload::new(tx), None, None, None)
+}
+
+fn build_batch_multi_asset_transfer(args: &[String]) -> Result<(), String> {
+    build_batch_multi_asset_amount_tx(args, "batch-transfer")
+}
+
+fn build_batch_multi_asset_amount_tx(args: &[String], op: &str) -> Result<(), String> {
+    let sender = required_arg(args, "--from")?;
+    let collection_id = required_arg(args, "--collection")?;
+    validate_multi_asset_collection_id(&collection_id)?;
+    let items = parse_multi_asset_amounts(args)?;
+    let timestamp = optional_u64_arg(args, "--timestamp")?.unwrap_or(current_timestamp()?);
+    let tx = match op {
+        "batch-mint" => StsTx::BatchMintMultiAsset {
+            collection_id,
+            mints: items,
+            to: required_arg(args, "--to")?,
+            timestamp,
+        },
+        "batch-transfer" => StsTx::BatchTransferMultiAsset {
+            collection_id,
+            transfers: items,
+            from: optional_arg(args, "--owner").unwrap_or_else(|| sender.clone()),
+            to: required_arg(args, "--to")?,
+            timestamp,
+        },
+        "batch-burn" => StsTx::BatchBurnMultiAsset {
+            collection_id,
+            burns: items,
+            from: optional_arg(args, "--owner").unwrap_or_else(|| sender.clone()),
+            timestamp,
+        },
+        _ => return Err(format!("unsupported multi-asset batch op '{op}'")),
+    };
+    print_payload(args, &sender, StsSignedPayload::new(tx), None, None, None)
+}
+
+fn build_create_credential_schema(args: &[String]) -> Result<(), String> {
+    let sender = required_arg(args, "--from")?;
+    let schema_hash = required_arg(args, "--schema-hash")?;
+    validate_sha3_256_hash("--schema-hash", &schema_hash)?;
+    let description_hash = optional_arg(args, "--description-hash");
+    if let Some(hash) = description_hash.as_ref() {
+        validate_sha3_256_hash("--description-hash", hash)?;
+    }
+    let tx = StsTx::CreateCredentialSchema(CreateCredentialSchemaParams {
+        issuer: sender.clone(),
+        schema_id: required_arg(args, "--schema-id")?,
+        name: required_arg(args, "--name")?,
+        description_hash,
+        schema_hash,
+        active: !has_flag(args, "--inactive"),
+        created_at: optional_u64_arg(args, "--created-at")?.unwrap_or(current_timestamp()?),
+    });
+    print_payload(args, &sender, StsSignedPayload::new(tx), None, None, None)
+}
+
+fn build_issue_credential(args: &[String]) -> Result<(), String> {
+    let sender = required_arg(args, "--from")?;
+    let subject = optional_arg(args, "--subject");
+    let subject_commitment = optional_arg(args, "--subject-commitment")
+        .or_else(|| {
+            subject
+                .as_ref()
+                .map(|subject| sha3_256_hex(subject.as_bytes()))
+        })
+        .ok_or_else(|| "--subject or --subject-commitment is required".to_string())?;
+    validate_sha3_256_hash("--subject-commitment", &subject_commitment)?;
+    let credential_hash = required_arg(args, "--credential-hash")?;
+    validate_sha3_256_hash("--credential-hash", &credential_hash)?;
+    let tx = StsTx::IssueCredential(IssueCredentialParams {
+        issuer: sender.clone(),
+        subject,
+        subject_commitment,
+        schema_id: required_arg(args, "--schema-id")?,
+        credential_hash,
+        expires_at: optional_u64_arg(args, "--expires-at")?,
+        issued_at: optional_u64_arg(args, "--issued-at")?.unwrap_or(current_timestamp()?),
+    });
+    print_payload(args, &sender, StsSignedPayload::new(tx), None, None, None)
+}
+
+fn build_credential_status_tx(args: &[String], op: &str) -> Result<(), String> {
+    let sender = required_arg(args, "--from")?;
+    let credential_id = required_arg(args, "--credential")?;
+    validate_credential_id(&credential_id)?;
+    let timestamp = optional_u64_arg(args, "--timestamp")?.unwrap_or(current_timestamp()?);
+    let tx = match op {
+        "revoke" => {
+            let reason_hash = optional_arg(args, "--reason-hash");
+            if let Some(hash) = reason_hash.as_ref() {
+                validate_sha3_256_hash("--reason-hash", hash)?;
+            }
+            StsTx::RevokeCredential {
+                credential_id,
+                reason_hash,
+                timestamp,
+            }
+        }
+        "suspend" => StsTx::SuspendCredential {
+            credential_id,
+            timestamp,
+        },
+        "restore" => StsTx::RestoreCredential {
+            credential_id,
+            timestamp,
+        },
+        "expire" => StsTx::ExpireCredential {
+            credential_id,
+            timestamp,
+        },
+        "verify-status" => StsTx::VerifyCredentialStatus {
+            credential_id,
+            timestamp,
+        },
+        _ => return Err(format!("unsupported credential status op '{op}'")),
+    };
+    print_payload(args, &sender, StsSignedPayload::new(tx), None, None, None)
+}
+
 fn print_payload(
     args: &[String],
     sender: &str,
@@ -561,9 +1119,98 @@ fn fungible_class_from_token_id(token_id: &str) -> Option<TokenClass> {
     }
 }
 
+fn validate_nft_object_id(object_id: &str) -> Result<TokenClass, String> {
+    let class = if object_id.starts_with(TokenClass::NF1StandardNft.prefix()) {
+        TokenClass::NF1StandardNft
+    } else if object_id.starts_with(TokenClass::NF2ControlledNft.prefix()) {
+        TokenClass::NF2ControlledNft
+    } else {
+        return Err("NFT object IDs must start with synn1 or synn2".to_string());
+    };
+    validate_sts_object_id(class, object_id)
+        .map_err(|_| format!("object ID is not a valid {} Bech32m ID", class.prefix()))?;
+    Ok(class)
+}
+
+fn validate_multi_asset_collection_id(collection_id: &str) -> Result<(), String> {
+    validate_sts_object_id(TokenClass::MAMultiAsset, collection_id)
+        .map_err(|_| "--collection must be a valid synj multi-asset collection ID".to_string())
+}
+
+fn validate_credential_id(credential_id: &str) -> Result<(), String> {
+    validate_sts_object_id(TokenClass::IDCredential, credential_id)
+        .map_err(|_| "--credential must be a valid synk credential ID".to_string())
+}
+
+fn metadata_hash_args(
+    args: &[String],
+) -> Result<(Option<String>, Option<String>, Option<String>), String> {
+    optional_hash_with_file(args, "--metadata-hash", "--metadata-file", "metadata")
+}
+
+fn image_hash_args(
+    args: &[String],
+) -> Result<(Option<String>, Option<String>, Option<String>), String> {
+    optional_hash_with_file(args, "--image-hash", "--image-file", "image")
+}
+
+fn optional_hash_with_file(
+    args: &[String],
+    hash_arg: &str,
+    file_arg: &str,
+    _label: &str,
+) -> Result<(Option<String>, Option<String>, Option<String>), String> {
+    let file = optional_arg(args, file_arg);
+    let file_hash = file.as_deref().map(hash_file_sha3_256).transpose()?;
+    let hash = match (optional_arg(args, hash_arg), file_hash.as_ref()) {
+        (Some(explicit), Some(file_hash)) if explicit.as_str() != file_hash.as_str() => {
+            return Err(format!(
+                "{hash_arg} does not match SHA3-256({file_arg}): expected {file_hash}"
+            ));
+        }
+        (Some(explicit), _) => Some(explicit),
+        (None, Some(file_hash)) => Some(file_hash.clone()),
+        (None, None) => None,
+    };
+    if let Some(hash) = hash.as_ref() {
+        validate_sha3_256_hash(hash_arg, hash)?;
+    }
+    Ok((file, file_hash, hash))
+}
+
+fn require_uri_hash_pair(
+    uri_arg: &str,
+    uri: Option<&String>,
+    hash: Option<&String>,
+) -> Result<(), String> {
+    if uri.is_some() && hash.is_none() {
+        return Err(format!("{uri_arg} requires a matching hash"));
+    }
+    if uri.is_none() && hash.is_some() {
+        return Err(format!(
+            "{uri_arg} is required when a hash or file is provided"
+        ));
+    }
+    Ok(())
+}
+
 fn hash_file_sha3_256(path: &str) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|error| format!("failed to read file {path}: {error}"))?;
     Ok(sha3_256_hex(&bytes))
+}
+
+fn validate_sha3_256_hash(name: &str, hash: &str) -> Result<(), String> {
+    if hash.len() != 64
+        || hash.starts_with("0x")
+        || !hash
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
+    {
+        return Err(format!(
+            "{name} must be 64 lowercase SHA3-256 hex characters without 0x"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_image_uri_hash(image_uri: &str, image_hash: &str) -> Result<(), String> {
@@ -590,6 +1237,61 @@ fn validate_image_uri_hash(image_uri: &str, image_hash: &str) -> Result<(), Stri
         );
     }
     Ok(())
+}
+
+fn parse_multi_asset_item_type(args: &[String]) -> Result<MultiAssetItemType, String> {
+    if has_flag(args, "--fungible") {
+        return Ok(MultiAssetItemType::Fungible);
+    }
+    if has_flag(args, "--non-fungible") {
+        return Ok(MultiAssetItemType::NonFungible);
+    }
+    if has_flag(args, "--semi-fungible") {
+        return Ok(MultiAssetItemType::SemiFungible);
+    }
+    match required_arg(args, "--type")?.as_str() {
+        "fungible" => Ok(MultiAssetItemType::Fungible),
+        "non_fungible" | "non-fungible" => Ok(MultiAssetItemType::NonFungible),
+        "semi_fungible" | "semi-fungible" => Ok(MultiAssetItemType::SemiFungible),
+        other => Err(format!(
+            "--type must be fungible, non_fungible, or semi_fungible; got '{other}'"
+        )),
+    }
+}
+
+fn parse_multi_asset_transfer_policy(args: &[String]) -> Result<MultiAssetTransferPolicy, String> {
+    match optional_arg(args, "--transfer-policy")
+        .unwrap_or_else(|| "open".to_string())
+        .as_str()
+    {
+        "open" => Ok(MultiAssetTransferPolicy::Open),
+        "non_transferable" | "non-transferable" => Ok(MultiAssetTransferPolicy::NonTransferable),
+        "authority_only" | "authority-only" => Ok(MultiAssetTransferPolicy::AuthorityOnly),
+        other => Err(format!(
+            "--transfer-policy must be open, non_transferable, or authority_only; got '{other}'"
+        )),
+    }
+}
+
+fn parse_multi_asset_amounts(args: &[String]) -> Result<Vec<MultiAssetAmount>, String> {
+    let mut items = Vec::new();
+    for raw in arg_values(args, "--item") {
+        let (item_id, amount) = raw
+            .split_once(':')
+            .ok_or_else(|| "--item must use <item_id>:<amount>".to_string())?;
+        items.push(MultiAssetAmount {
+            item_id: item_id
+                .parse::<u64>()
+                .map_err(|_| "--item item_id must be u64".to_string())?,
+            amount: amount
+                .parse::<u128>()
+                .map_err(|_| "--item amount must be u128 base units".to_string())?,
+        });
+    }
+    if items.is_empty() {
+        return Err("at least one --item <item_id>:<amount> is required".to_string());
+    }
+    Ok(items)
 }
 
 fn emit_output(args: &[String], value: serde_json::Value) -> Result<(), String> {
@@ -724,6 +1426,16 @@ fn required_u8_arg(args: &[String], name: &str) -> Result<u8, String> {
     required_arg(args, name)?
         .parse::<u8>()
         .map_err(|_| format!("{name} must be u8"))
+}
+
+fn optional_u16_arg(args: &[String], name: &str) -> Result<Option<u16>, String> {
+    optional_arg(args, name)
+        .map(|value| {
+            value
+                .parse::<u16>()
+                .map_err(|_| format!("{name} must be u16"))
+        })
+        .transpose()
 }
 
 fn required_u64_arg(args: &[String], name: &str) -> Result<u64, String> {

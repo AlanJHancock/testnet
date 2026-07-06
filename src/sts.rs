@@ -271,6 +271,424 @@ pub struct FungibleBalance {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateNftCollectionParams {
+    pub class: TokenClass,
+    pub creator: String,
+    pub creator_nonce: u64,
+    pub name: String,
+    pub symbol: String,
+    pub metadata_uri: Option<String>,
+    pub metadata_hash: Option<String>,
+    pub metadata_mutable: bool,
+    pub image_uri: Option<String>,
+    pub image_hash: Option<String>,
+    pub collection_authority: Option<String>,
+    pub mint_authority: Option<String>,
+    pub metadata_authority: Option<String>,
+    pub royalty_basis_points: Option<u16>,
+    pub royalty_recipient: Option<String>,
+    pub transferable: bool,
+    pub requires_issuer_approval: bool,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MintNftParams {
+    pub collection_id: String,
+    pub to: String,
+    pub metadata_uri: Option<String>,
+    pub metadata_hash: Option<String>,
+    pub metadata_mutable: bool,
+    pub transferable: Option<bool>,
+    pub requires_issuer_approval: Option<bool>,
+    pub expires_at: Option<u64>,
+    pub minted_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NftCollection {
+    pub collection_id: String,
+    pub collection_address: String,
+    pub class: TokenClass,
+    pub creator: String,
+    pub name: String,
+    pub symbol: String,
+    pub metadata_uri: Option<String>,
+    pub metadata_hash: Option<String>,
+    pub metadata_mutable: bool,
+    pub image_uri: Option<String>,
+    pub image_hash: Option<String>,
+    pub image_locked: bool,
+    pub authorities: AuthoritySet,
+    pub royalty_basis_points: Option<u16>,
+    pub royalty_recipient: Option<String>,
+    pub verified: bool,
+    pub transferable: bool,
+    pub requires_issuer_approval: bool,
+    pub next_serial_number: u64,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NftInstance {
+    pub nft_id: String,
+    pub nft_address: String,
+    pub collection_id: String,
+    pub class: TokenClass,
+    pub serial_number: u64,
+    pub owner: String,
+    pub metadata_uri: Option<String>,
+    pub metadata_hash: Option<String>,
+    pub metadata_mutable: bool,
+    pub burned: bool,
+    pub frozen: bool,
+    pub transferable: bool,
+    pub requires_issuer_approval: bool,
+    pub expires_at: Option<u64>,
+    pub revoked: bool,
+    pub revoked_at: Option<u64>,
+    pub used: bool,
+    pub used_at: Option<u64>,
+    pub issuer_authority: Option<String>,
+    pub transfer_authority: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum MultiAssetItemType {
+    Fungible = 1,
+    NonFungible = 2,
+    SemiFungible = 3,
+}
+
+impl MultiAssetItemType {
+    pub const fn wire(self) -> &'static str {
+        match self {
+            MultiAssetItemType::Fungible => "fungible",
+            MultiAssetItemType::NonFungible => "non_fungible",
+            MultiAssetItemType::SemiFungible => "semi_fungible",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Result<Self, StsError> {
+        match value {
+            "fungible" => Ok(MultiAssetItemType::Fungible),
+            "non_fungible" => Ok(MultiAssetItemType::NonFungible),
+            "semi_fungible" => Ok(MultiAssetItemType::SemiFungible),
+            _ => Err(StsError::InvalidTokenClass),
+        }
+    }
+}
+
+impl Serialize for MultiAssetItemType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.wire())
+    }
+}
+
+impl<'de> Deserialize<'de> for MultiAssetItemType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct MultiAssetItemTypeVisitor;
+
+        impl<'de> Visitor<'de> for MultiAssetItemTypeVisitor {
+            type Value = MultiAssetItemType;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a stable STS multi-asset item type string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                MultiAssetItemType::from_wire(value).map_err(|error| E::custom(error.to_string()))
+            }
+        }
+
+        deserializer.deserialize_str(MultiAssetItemTypeVisitor)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum MultiAssetTransferPolicy {
+    Open = 1,
+    NonTransferable = 2,
+    AuthorityOnly = 3,
+}
+
+impl MultiAssetTransferPolicy {
+    pub const fn wire(self) -> &'static str {
+        match self {
+            MultiAssetTransferPolicy::Open => "open",
+            MultiAssetTransferPolicy::NonTransferable => "non_transferable",
+            MultiAssetTransferPolicy::AuthorityOnly => "authority_only",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Result<Self, StsError> {
+        match value {
+            "open" => Ok(MultiAssetTransferPolicy::Open),
+            "non_transferable" => Ok(MultiAssetTransferPolicy::NonTransferable),
+            "authority_only" => Ok(MultiAssetTransferPolicy::AuthorityOnly),
+            _ => Err(StsError::PolicyNotEnabled),
+        }
+    }
+}
+
+impl Default for MultiAssetTransferPolicy {
+    fn default() -> Self {
+        Self::Open
+    }
+}
+
+impl Serialize for MultiAssetTransferPolicy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.wire())
+    }
+}
+
+impl<'de> Deserialize<'de> for MultiAssetTransferPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct MultiAssetTransferPolicyVisitor;
+
+        impl<'de> Visitor<'de> for MultiAssetTransferPolicyVisitor {
+            type Value = MultiAssetTransferPolicy;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a stable STS multi-asset transfer policy string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                MultiAssetTransferPolicy::from_wire(value)
+                    .map_err(|error| E::custom(error.to_string()))
+            }
+        }
+
+        deserializer.deserialize_str(MultiAssetTransferPolicyVisitor)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateMultiAssetCollectionParams {
+    pub creator: String,
+    pub creator_nonce: u64,
+    pub name: String,
+    pub symbol: String,
+    pub metadata_uri: Option<String>,
+    pub metadata_hash: Option<String>,
+    pub image_uri: Option<String>,
+    pub image_hash: Option<String>,
+    pub collection_authority: Option<String>,
+    pub metadata_authority: Option<String>,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateMultiAssetItemParams {
+    pub collection_id: String,
+    pub item_id: u64,
+    pub item_type: MultiAssetItemType,
+    pub name: String,
+    pub symbol: String,
+    pub decimals: u8,
+    pub metadata_uri: Option<String>,
+    pub metadata_hash: Option<String>,
+    pub max_supply: Option<u128>,
+    pub mint_authority: Option<String>,
+    pub burn_authority: Option<String>,
+    #[serde(default)]
+    pub transfer_policy: MultiAssetTransferPolicy,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiAssetCollection {
+    pub collection_id: String,
+    pub collection_address: String,
+    pub creator: String,
+    pub name: String,
+    pub symbol: String,
+    pub metadata_uri: Option<String>,
+    pub metadata_hash: Option<String>,
+    pub image_uri: Option<String>,
+    pub image_hash: Option<String>,
+    pub image_locked: bool,
+    pub authorities: AuthoritySet,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiAssetItem {
+    pub collection_id: String,
+    pub item_id: u64,
+    pub item_type: MultiAssetItemType,
+    pub name: String,
+    pub symbol: String,
+    pub decimals: u8,
+    pub metadata_uri: Option<String>,
+    pub metadata_hash: Option<String>,
+    pub max_supply: Option<u128>,
+    pub total_supply: u128,
+    pub mint_authority: Option<String>,
+    pub burn_authority: Option<String>,
+    pub transfer_policy: MultiAssetTransferPolicy,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiAssetBalance {
+    pub owner: String,
+    pub collection_id: String,
+    pub item_id: u64,
+    pub amount: u128,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiAssetAmount {
+    pub item_id: u64,
+    pub amount: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum CredentialStatus {
+    Active = 1,
+    Revoked = 2,
+    Expired = 3,
+    Suspended = 4,
+}
+
+impl CredentialStatus {
+    pub const fn wire(self) -> &'static str {
+        match self {
+            CredentialStatus::Active => "active",
+            CredentialStatus::Revoked => "revoked",
+            CredentialStatus::Expired => "expired",
+            CredentialStatus::Suspended => "suspended",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Result<Self, StsError> {
+        match value {
+            "active" => Ok(CredentialStatus::Active),
+            "revoked" => Ok(CredentialStatus::Revoked),
+            "expired" => Ok(CredentialStatus::Expired),
+            "suspended" => Ok(CredentialStatus::Suspended),
+            _ => Err(StsError::InvalidMetadata),
+        }
+    }
+}
+
+impl Serialize for CredentialStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.wire())
+    }
+}
+
+impl<'de> Deserialize<'de> for CredentialStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct CredentialStatusVisitor;
+
+        impl<'de> Visitor<'de> for CredentialStatusVisitor {
+            type Value = CredentialStatus;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a stable STS credential status string")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: DeError,
+            {
+                CredentialStatus::from_wire(value).map_err(|error| E::custom(error.to_string()))
+            }
+        }
+
+        deserializer.deserialize_str(CredentialStatusVisitor)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateCredentialSchemaParams {
+    pub issuer: String,
+    pub schema_id: String,
+    pub name: String,
+    pub description_hash: Option<String>,
+    pub schema_hash: String,
+    pub active: bool,
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueCredentialParams {
+    pub issuer: String,
+    pub subject: Option<String>,
+    pub subject_commitment: String,
+    pub schema_id: String,
+    pub credential_hash: String,
+    pub expires_at: Option<u64>,
+    pub issued_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialSchema {
+    pub schema_id: String,
+    pub issuer: String,
+    pub name: String,
+    pub description_hash: Option<String>,
+    pub schema_hash: String,
+    pub active: bool,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialRecord {
+    pub credential_id: String,
+    pub issuer: String,
+    pub subject: Option<String>,
+    pub subject_commitment: String,
+    pub schema_id: String,
+    pub credential_hash: String,
+    pub status: CredentialStatus,
+    pub issued_at: u64,
+    pub expires_at: Option<u64>,
+    pub revoked_at: Option<u64>,
+    pub revocation_reason_hash: Option<String>,
+    pub transferable: bool,
+    pub updated_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StsEvent {
     pub event_type: String,
     pub token_id: Option<String>,
@@ -338,6 +756,111 @@ pub enum StsTx {
         token_id: String,
         image_uri: String,
         image_hash: String,
+        timestamp: u64,
+    },
+    CreateNftCollection(CreateNftCollectionParams),
+    MintNft(MintNftParams),
+    TransferNft {
+        nft_id: String,
+        from: String,
+        to: String,
+        timestamp: u64,
+    },
+    BurnNft {
+        nft_id: String,
+        owner: String,
+        timestamp: u64,
+    },
+    FreezeNft {
+        nft_id: String,
+        timestamp: u64,
+    },
+    ThawNft {
+        nft_id: String,
+        timestamp: u64,
+    },
+    RevokeNft {
+        nft_id: String,
+        timestamp: u64,
+    },
+    UseNft {
+        nft_id: String,
+        timestamp: u64,
+    },
+    UpdateNftMetadata {
+        nft_id: String,
+        metadata_uri: String,
+        metadata_hash: String,
+        timestamp: u64,
+    },
+    VerifyNftCollection {
+        collection_id: String,
+        timestamp: u64,
+    },
+    CreateMultiAssetCollection(CreateMultiAssetCollectionParams),
+    CreateMultiAssetItem(CreateMultiAssetItemParams),
+    MintMultiAsset {
+        collection_id: String,
+        item_id: u64,
+        to: String,
+        amount: u128,
+        timestamp: u64,
+    },
+    BatchMintMultiAsset {
+        collection_id: String,
+        mints: Vec<MultiAssetAmount>,
+        to: String,
+        timestamp: u64,
+    },
+    TransferMultiAsset {
+        collection_id: String,
+        item_id: u64,
+        from: String,
+        to: String,
+        amount: u128,
+        timestamp: u64,
+    },
+    BatchTransferMultiAsset {
+        collection_id: String,
+        transfers: Vec<MultiAssetAmount>,
+        from: String,
+        to: String,
+        timestamp: u64,
+    },
+    BurnMultiAsset {
+        collection_id: String,
+        item_id: u64,
+        from: String,
+        amount: u128,
+        timestamp: u64,
+    },
+    BatchBurnMultiAsset {
+        collection_id: String,
+        burns: Vec<MultiAssetAmount>,
+        from: String,
+        timestamp: u64,
+    },
+    CreateCredentialSchema(CreateCredentialSchemaParams),
+    IssueCredential(IssueCredentialParams),
+    RevokeCredential {
+        credential_id: String,
+        reason_hash: Option<String>,
+        timestamp: u64,
+    },
+    SuspendCredential {
+        credential_id: String,
+        timestamp: u64,
+    },
+    RestoreCredential {
+        credential_id: String,
+        timestamp: u64,
+    },
+    ExpireCredential {
+        credential_id: String,
+        timestamp: u64,
+    },
+    VerifyCredentialStatus {
+        credential_id: String,
         timestamp: u64,
     },
 }
@@ -436,10 +959,29 @@ pub struct StsFinalizedTransactionReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct StsState {
     pub schema_version: u32,
+    #[serde(default)]
     pub token_registry: BTreeMap<String, FungibleDefinition>,
+    #[serde(default)]
     pub fungible_balances: BTreeMap<String, FungibleBalance>,
+    #[serde(default)]
     pub fungible_snapshots: BTreeMap<String, BTreeMap<String, u128>>,
+    #[serde(default)]
     pub next_snapshot_id: u64,
+    #[serde(default)]
+    pub nft_collections: BTreeMap<String, NftCollection>,
+    #[serde(default)]
+    pub nft_instances: BTreeMap<String, NftInstance>,
+    #[serde(default)]
+    pub multi_asset_collections: BTreeMap<String, MultiAssetCollection>,
+    #[serde(default)]
+    pub multi_asset_items: BTreeMap<String, MultiAssetItem>,
+    #[serde(default)]
+    pub multi_asset_balances: BTreeMap<String, MultiAssetBalance>,
+    #[serde(default)]
+    pub credential_schemas: BTreeMap<String, CredentialSchema>,
+    #[serde(default)]
+    pub credential_records: BTreeMap<String, CredentialRecord>,
+    #[serde(default)]
     pub events: Vec<StsEvent>,
 }
 
@@ -451,6 +993,13 @@ impl StsState {
             fungible_balances: BTreeMap::new(),
             fungible_snapshots: BTreeMap::new(),
             next_snapshot_id: 1,
+            nft_collections: BTreeMap::new(),
+            nft_instances: BTreeMap::new(),
+            multi_asset_collections: BTreeMap::new(),
+            multi_asset_items: BTreeMap::new(),
+            multi_asset_balances: BTreeMap::new(),
+            credential_schemas: BTreeMap::new(),
+            credential_records: BTreeMap::new(),
             events: Vec::new(),
         }
     }
@@ -524,6 +1073,160 @@ impl StsState {
                 image_hash,
                 timestamp,
             } => self.set_fungible_image(sender, token_id, image_uri, image_hash, *timestamp),
+            StsTx::CreateNftCollection(params) => {
+                if sender != params.creator {
+                    Err(StsError::Unauthorized)
+                } else {
+                    self.create_nft_collection(params.clone()).map(|_| ())
+                }
+            }
+            StsTx::MintNft(params) => self.mint_nft(sender, params.clone()).map(|_| ()),
+            StsTx::TransferNft {
+                nft_id,
+                from,
+                to,
+                timestamp,
+            } => self.transfer_nft(sender, nft_id, from, to, *timestamp),
+            StsTx::BurnNft {
+                nft_id,
+                owner,
+                timestamp,
+            } => self.burn_nft(sender, nft_id, owner, *timestamp),
+            StsTx::FreezeNft { nft_id, timestamp } => {
+                self.set_nft_frozen(sender, nft_id, true, *timestamp)
+            }
+            StsTx::ThawNft { nft_id, timestamp } => {
+                self.set_nft_frozen(sender, nft_id, false, *timestamp)
+            }
+            StsTx::RevokeNft { nft_id, timestamp } => self.revoke_nft(sender, nft_id, *timestamp),
+            StsTx::UseNft { nft_id, timestamp } => self.use_nft(sender, nft_id, *timestamp),
+            StsTx::UpdateNftMetadata {
+                nft_id,
+                metadata_uri,
+                metadata_hash,
+                timestamp,
+            } => self.update_nft_metadata(sender, nft_id, metadata_uri, metadata_hash, *timestamp),
+            StsTx::VerifyNftCollection {
+                collection_id,
+                timestamp,
+            } => self.verify_nft_collection(sender, collection_id, *timestamp),
+            StsTx::CreateMultiAssetCollection(params) => {
+                if sender != params.creator {
+                    Err(StsError::Unauthorized)
+                } else {
+                    self.create_multi_asset_collection(params.clone())
+                        .map(|_| ())
+                }
+            }
+            StsTx::CreateMultiAssetItem(params) => self
+                .create_multi_asset_item(sender, params.clone())
+                .map(|_| ()),
+            StsTx::MintMultiAsset {
+                collection_id,
+                item_id,
+                to,
+                amount,
+                timestamp,
+            } => self.mint_multi_asset(sender, collection_id, *item_id, to, *amount, *timestamp),
+            StsTx::BatchMintMultiAsset {
+                collection_id,
+                mints,
+                to,
+                timestamp,
+            } => self.batch_mint_multi_asset(sender, collection_id, mints, to, *timestamp),
+            StsTx::TransferMultiAsset {
+                collection_id,
+                item_id,
+                from,
+                to,
+                amount,
+                timestamp,
+            } => self.transfer_multi_asset(
+                sender,
+                collection_id,
+                *item_id,
+                from,
+                to,
+                *amount,
+                *timestamp,
+            ),
+            StsTx::BatchTransferMultiAsset {
+                collection_id,
+                transfers,
+                from,
+                to,
+                timestamp,
+            } => self.batch_transfer_multi_asset(
+                sender,
+                collection_id,
+                transfers,
+                from,
+                to,
+                *timestamp,
+            ),
+            StsTx::BurnMultiAsset {
+                collection_id,
+                item_id,
+                from,
+                amount,
+                timestamp,
+            } => self.burn_multi_asset(sender, collection_id, *item_id, from, *amount, *timestamp),
+            StsTx::BatchBurnMultiAsset {
+                collection_id,
+                burns,
+                from,
+                timestamp,
+            } => self.batch_burn_multi_asset(sender, collection_id, burns, from, *timestamp),
+            StsTx::CreateCredentialSchema(params) => {
+                if sender != params.issuer {
+                    Err(StsError::Unauthorized)
+                } else {
+                    self.create_credential_schema(params.clone()).map(|_| ())
+                }
+            }
+            StsTx::IssueCredential(params) => {
+                if sender != params.issuer {
+                    Err(StsError::Unauthorized)
+                } else {
+                    self.issue_credential(params.clone()).map(|_| ())
+                }
+            }
+            StsTx::RevokeCredential {
+                credential_id,
+                reason_hash,
+                timestamp,
+            } => self.revoke_credential(sender, credential_id, reason_hash.as_deref(), *timestamp),
+            StsTx::SuspendCredential {
+                credential_id,
+                timestamp,
+            } => self.set_credential_status(
+                sender,
+                credential_id,
+                CredentialStatus::Suspended,
+                *timestamp,
+            ),
+            StsTx::RestoreCredential {
+                credential_id,
+                timestamp,
+            } => self.set_credential_status(
+                sender,
+                credential_id,
+                CredentialStatus::Active,
+                *timestamp,
+            ),
+            StsTx::ExpireCredential {
+                credential_id,
+                timestamp,
+            } => self.set_credential_status(
+                sender,
+                credential_id,
+                CredentialStatus::Expired,
+                *timestamp,
+            ),
+            StsTx::VerifyCredentialStatus {
+                credential_id,
+                timestamp,
+            } => self.verify_credential_status_event(sender, credential_id, *timestamp),
         };
         match result {
             Ok(()) => Ok(self.events[before..].to_vec()),
@@ -562,11 +1265,7 @@ impl StsState {
         }
         validate_fungible_flags(params.class, &params.flags)?;
         validate_fungible_policies(params.class, &params.policies)?;
-        if self
-            .token_registry
-            .values()
-            .any(|definition| definition.symbol == params.symbol)
-        {
+        if self.asset_identity_in_use(&params.name, &params.symbol) {
             return Err(StsError::ReservedTokenIdentity);
         }
 
@@ -699,6 +1398,347 @@ impl StsState {
                 ("image_uri".to_string(), image_uri.to_string()),
                 ("image_hash".to_string(), image_hash.to_string()),
             ]),
+        });
+        Ok(())
+    }
+
+    pub fn create_nft_collection(
+        &mut self,
+        params: CreateNftCollectionParams,
+    ) -> Result<String, StsError> {
+        validate_timestamp_seconds(params.created_at)?;
+        validate_nft_class(params.class)?;
+        validate_token_identity(&params.name, &params.symbol)?;
+        validate_metadata(&params.metadata_uri, &params.metadata_hash)?;
+        validate_token_image(&params.image_uri, &params.image_hash)?;
+        validate_royalty(
+            params.royalty_basis_points,
+            params.royalty_recipient.as_deref(),
+        )?;
+        validate_actor_ref(&params.creator)?;
+        if params.class == TokenClass::NF1StandardNft
+            && (!params.transferable || params.requires_issuer_approval)
+        {
+            return Err(StsError::PolicyNotEnabled);
+        }
+        if self.asset_identity_in_use(&params.name, &params.symbol) {
+            return Err(StsError::ReservedTokenIdentity);
+        }
+
+        let metadata_hash = params
+            .metadata_hash
+            .clone()
+            .unwrap_or_else(|| sha3_256_hex(params.name.as_bytes()));
+        let collection_id = derive_nft_collection_id(
+            STS_TESTNET_CHAIN_ID,
+            params.class,
+            &params.creator,
+            params.creator_nonce,
+            &metadata_hash,
+            params.created_at,
+        )?;
+        if self.nft_collections.contains_key(&collection_id) {
+            return Err(StsError::InvalidTokenId);
+        }
+        let collection_address = sts_object_token_address(params.class, &collection_id)?;
+        let authorities = AuthoritySet {
+            mint_authority: params
+                .mint_authority
+                .clone()
+                .or_else(|| Some(params.creator.clone())),
+            metadata_authority: params
+                .metadata_authority
+                .clone()
+                .or_else(|| params.metadata_mutable.then(|| params.creator.clone())),
+            issuer_authority: (params.class == TokenClass::NF2ControlledNft)
+                .then(|| params.creator.clone()),
+            transfer_authority: (params.class == TokenClass::NF2ControlledNft
+                && params.requires_issuer_approval)
+                .then(|| params.creator.clone()),
+            upgrade_authority: params
+                .collection_authority
+                .clone()
+                .or_else(|| Some(params.creator.clone())),
+            ..AuthoritySet::default()
+        };
+        let collection = NftCollection {
+            collection_id: collection_id.clone(),
+            collection_address: collection_address.clone(),
+            class: params.class,
+            creator: params.creator.clone(),
+            name: params.name,
+            symbol: params.symbol,
+            metadata_uri: params.metadata_uri,
+            metadata_hash: Some(metadata_hash),
+            metadata_mutable: params.metadata_mutable,
+            image_uri: params.image_uri.clone(),
+            image_hash: params.image_hash.clone(),
+            image_locked: params.image_uri.is_some() || params.image_hash.is_some(),
+            authorities,
+            royalty_basis_points: params.royalty_basis_points,
+            royalty_recipient: params.royalty_recipient,
+            verified: false,
+            transferable: params.transferable,
+            requires_issuer_approval: params.requires_issuer_approval,
+            next_serial_number: 1,
+            created_at: params.created_at,
+            updated_at: params.created_at,
+        };
+        self.nft_collections
+            .insert(collection_id.clone(), collection);
+        self.push_event(StsEvent {
+            event_type: "StsNftCollectionCreated".to_string(),
+            token_id: Some(collection_id.clone()),
+            sender: params.creator.clone(),
+            owner: Some(params.creator),
+            recipient: None,
+            amount: None,
+            timestamp: params.created_at,
+            attributes: BTreeMap::from([
+                ("class".to_string(), params.class.wire().to_string()),
+                ("collection_address".to_string(), collection_address),
+            ]),
+        });
+        Ok(collection_id)
+    }
+
+    pub fn mint_nft(&mut self, caller: &str, params: MintNftParams) -> Result<String, StsError> {
+        validate_timestamp_seconds(params.minted_at)?;
+        validate_actor_ref(&params.to)?;
+        validate_metadata(&params.metadata_uri, &params.metadata_hash)?;
+        if let Some(expires_at) = params.expires_at {
+            validate_timestamp_seconds(expires_at)?;
+            if expires_at <= params.minted_at {
+                return Err(StsError::InvalidTimestamp);
+            }
+        }
+        let collection = self
+            .nft_collections
+            .get(&params.collection_id)
+            .cloned()
+            .ok_or(StsError::InvalidTokenId)?;
+        require_authority(caller, &collection.authorities.mint_authority)?;
+        let metadata_hash = params
+            .metadata_hash
+            .clone()
+            .or_else(|| collection.metadata_hash.clone())
+            .unwrap_or_else(|| sha3_256_hex(params.collection_id.as_bytes()));
+        let serial_number = collection.next_serial_number;
+        let nft_id = derive_nft_instance_id(
+            STS_TESTNET_CHAIN_ID,
+            collection.class,
+            &params.collection_id,
+            serial_number,
+            &metadata_hash,
+            params.minted_at,
+        )?;
+        if self.nft_instances.contains_key(&nft_id) {
+            return Err(StsError::InvalidTokenId);
+        }
+        let nft_address = sts_object_token_address(collection.class, &nft_id)?;
+        let transferable = params.transferable.unwrap_or(collection.transferable);
+        let requires_issuer_approval = params
+            .requires_issuer_approval
+            .unwrap_or(collection.requires_issuer_approval);
+        if collection.class == TokenClass::NF1StandardNft
+            && (!transferable || requires_issuer_approval || params.expires_at.is_some())
+        {
+            return Err(StsError::PolicyNotEnabled);
+        }
+        let instance = NftInstance {
+            nft_id: nft_id.clone(),
+            nft_address: nft_address.clone(),
+            collection_id: params.collection_id.clone(),
+            class: collection.class,
+            serial_number,
+            owner: params.to.clone(),
+            metadata_uri: params.metadata_uri,
+            metadata_hash: Some(metadata_hash),
+            metadata_mutable: params.metadata_mutable,
+            burned: false,
+            frozen: false,
+            transferable,
+            requires_issuer_approval,
+            expires_at: params.expires_at,
+            revoked: false,
+            revoked_at: None,
+            used: false,
+            used_at: None,
+            issuer_authority: collection.authorities.issuer_authority.clone(),
+            transfer_authority: collection.authorities.transfer_authority.clone(),
+            created_at: params.minted_at,
+            updated_at: params.minted_at,
+        };
+        self.nft_instances.insert(nft_id.clone(), instance);
+        let collection = self
+            .nft_collections
+            .get_mut(&params.collection_id)
+            .ok_or(StsError::InvalidTokenId)?;
+        collection.next_serial_number = collection
+            .next_serial_number
+            .checked_add(1)
+            .ok_or(StsError::SupplyOverflow)?;
+        collection.updated_at = params.minted_at;
+        self.push_event(StsEvent {
+            event_type: "StsNftMinted".to_string(),
+            token_id: Some(nft_id.clone()),
+            sender: caller.to_string(),
+            owner: None,
+            recipient: Some(params.to),
+            amount: Some("1".to_string()),
+            timestamp: params.minted_at,
+            attributes: BTreeMap::from([
+                ("collection_id".to_string(), params.collection_id),
+                ("nft_address".to_string(), nft_address),
+                ("serial_number".to_string(), serial_number.to_string()),
+            ]),
+        });
+        Ok(nft_id)
+    }
+
+    pub fn transfer_nft(
+        &mut self,
+        caller: &str,
+        nft_id: &str,
+        from: &str,
+        to: &str,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        validate_timestamp_seconds(timestamp)?;
+        validate_actor_ref(to)?;
+        let nft = self
+            .nft_instances
+            .get(nft_id)
+            .cloned()
+            .ok_or(StsError::InvalidTokenId)?;
+        require_nft_active(&nft, timestamp)?;
+        if nft.owner != from {
+            return Err(StsError::Unauthorized);
+        }
+        if !nft.transferable {
+            return Err(StsError::NonTransferableAsset);
+        }
+        if nft.requires_issuer_approval {
+            require_authority(caller, &nft.transfer_authority)?;
+        } else if caller != from {
+            return Err(StsError::Unauthorized);
+        }
+        let collection_id = {
+            let nft = self
+                .nft_instances
+                .get_mut(nft_id)
+                .ok_or(StsError::InvalidTokenId)?;
+            nft.owner = to.to_string();
+            nft.updated_at = timestamp;
+            nft.collection_id.clone()
+        };
+        self.push_event(StsEvent {
+            event_type: "StsNftTransferred".to_string(),
+            token_id: Some(nft_id.to_string()),
+            sender: caller.to_string(),
+            owner: Some(from.to_string()),
+            recipient: Some(to.to_string()),
+            amount: Some("1".to_string()),
+            timestamp,
+            attributes: BTreeMap::from([("collection_id".to_string(), collection_id)]),
+        });
+        Ok(())
+    }
+
+    pub fn burn_nft(
+        &mut self,
+        caller: &str,
+        nft_id: &str,
+        owner: &str,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        validate_timestamp_seconds(timestamp)?;
+        let nft = self
+            .nft_instances
+            .get(nft_id)
+            .cloned()
+            .ok_or(StsError::InvalidTokenId)?;
+        if nft.owner != owner {
+            return Err(StsError::Unauthorized);
+        }
+        let collection = self
+            .nft_collections
+            .get(&nft.collection_id)
+            .ok_or(StsError::InvalidTokenId)?;
+        let authorized = caller == owner
+            || authority_matches(caller, &collection.authorities.upgrade_authority)
+            || authority_matches(caller, &nft.issuer_authority);
+        if !authorized {
+            return Err(StsError::Unauthorized);
+        }
+        let collection_id = {
+            let nft = self
+                .nft_instances
+                .get_mut(nft_id)
+                .ok_or(StsError::InvalidTokenId)?;
+            if nft.burned {
+                return Err(StsError::InvalidTokenId);
+            }
+            nft.burned = true;
+            nft.updated_at = timestamp;
+            nft.collection_id.clone()
+        };
+        self.push_event(StsEvent {
+            event_type: "StsNftBurned".to_string(),
+            token_id: Some(nft_id.to_string()),
+            sender: caller.to_string(),
+            owner: Some(owner.to_string()),
+            recipient: None,
+            amount: Some("1".to_string()),
+            timestamp,
+            attributes: BTreeMap::from([("collection_id".to_string(), collection_id)]),
+        });
+        Ok(())
+    }
+
+    pub fn set_nft_frozen(
+        &mut self,
+        caller: &str,
+        nft_id: &str,
+        frozen: bool,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        validate_timestamp_seconds(timestamp)?;
+        let nft = self
+            .nft_instances
+            .get(nft_id)
+            .cloned()
+            .ok_or(StsError::InvalidTokenId)?;
+        if nft.class != TokenClass::NF2ControlledNft {
+            return Err(StsError::PolicyNotEnabled);
+        }
+        require_authority(caller, &nft.issuer_authority)?;
+        let (owner, collection_id) = {
+            let nft = self
+                .nft_instances
+                .get_mut(nft_id)
+                .ok_or(StsError::InvalidTokenId)?;
+            if nft.burned {
+                return Err(StsError::InvalidTokenId);
+            }
+            nft.frozen = frozen;
+            nft.updated_at = timestamp;
+            (nft.owner.clone(), nft.collection_id.clone())
+        };
+        self.push_event(StsEvent {
+            event_type: if frozen {
+                "StsNftFrozen"
+            } else {
+                "StsNftThawed"
+            }
+            .to_string(),
+            token_id: Some(nft_id.to_string()),
+            sender: caller.to_string(),
+            owner: Some(owner),
+            recipient: None,
+            amount: None,
+            timestamp,
+            attributes: BTreeMap::from([("collection_id".to_string(), collection_id)]),
         });
         Ok(())
     }
@@ -996,6 +2036,799 @@ impl StsState {
         Ok(())
     }
 
+    pub fn revoke_nft(
+        &mut self,
+        caller: &str,
+        nft_id: &str,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        validate_timestamp_seconds(timestamp)?;
+        let nft = self
+            .nft_instances
+            .get(nft_id)
+            .cloned()
+            .ok_or(StsError::InvalidTokenId)?;
+        if nft.class != TokenClass::NF2ControlledNft {
+            return Err(StsError::PolicyNotEnabled);
+        }
+        require_authority(caller, &nft.issuer_authority)?;
+        let (owner, collection_id) = {
+            let nft = self
+                .nft_instances
+                .get_mut(nft_id)
+                .ok_or(StsError::InvalidTokenId)?;
+            nft.revoked = true;
+            nft.revoked_at = Some(timestamp);
+            nft.updated_at = timestamp;
+            (nft.owner.clone(), nft.collection_id.clone())
+        };
+        self.push_event(StsEvent {
+            event_type: "StsNftRevoked".to_string(),
+            token_id: Some(nft_id.to_string()),
+            sender: caller.to_string(),
+            owner: Some(owner),
+            recipient: None,
+            amount: None,
+            timestamp,
+            attributes: BTreeMap::from([("collection_id".to_string(), collection_id)]),
+        });
+        Ok(())
+    }
+
+    pub fn use_nft(&mut self, caller: &str, nft_id: &str, timestamp: u64) -> Result<(), StsError> {
+        validate_timestamp_seconds(timestamp)?;
+        let nft = self
+            .nft_instances
+            .get(nft_id)
+            .cloned()
+            .ok_or(StsError::InvalidTokenId)?;
+        require_nft_active(&nft, timestamp)?;
+        if caller != nft.owner && !authority_matches(caller, &nft.issuer_authority) {
+            return Err(StsError::Unauthorized);
+        }
+        let (owner, collection_id) = {
+            let nft = self
+                .nft_instances
+                .get_mut(nft_id)
+                .ok_or(StsError::InvalidTokenId)?;
+            nft.used = true;
+            nft.used_at = Some(timestamp);
+            nft.updated_at = timestamp;
+            (nft.owner.clone(), nft.collection_id.clone())
+        };
+        self.push_event(StsEvent {
+            event_type: "StsNftUsed".to_string(),
+            token_id: Some(nft_id.to_string()),
+            sender: caller.to_string(),
+            owner: Some(owner),
+            recipient: None,
+            amount: None,
+            timestamp,
+            attributes: BTreeMap::from([("collection_id".to_string(), collection_id)]),
+        });
+        Ok(())
+    }
+
+    pub fn update_nft_metadata(
+        &mut self,
+        caller: &str,
+        nft_id: &str,
+        metadata_uri: &str,
+        metadata_hash: &str,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        validate_timestamp_seconds(timestamp)?;
+        validate_metadata(
+            &Some(metadata_uri.to_string()),
+            &Some(metadata_hash.to_string()),
+        )?;
+        let nft = self
+            .nft_instances
+            .get(nft_id)
+            .cloned()
+            .ok_or(StsError::InvalidTokenId)?;
+        if !nft.metadata_mutable {
+            return Err(StsError::AuthorityRenounced);
+        }
+        let collection = self
+            .nft_collections
+            .get(&nft.collection_id)
+            .ok_or(StsError::InvalidTokenId)?;
+        require_authority(caller, &collection.authorities.metadata_authority)?;
+        let (owner, collection_id) = {
+            let nft = self
+                .nft_instances
+                .get_mut(nft_id)
+                .ok_or(StsError::InvalidTokenId)?;
+            nft.metadata_uri = Some(metadata_uri.to_string());
+            nft.metadata_hash = Some(metadata_hash.to_string());
+            nft.updated_at = timestamp;
+            (nft.owner.clone(), nft.collection_id.clone())
+        };
+        self.push_event(StsEvent {
+            event_type: "StsNftMetadataUpdated".to_string(),
+            token_id: Some(nft_id.to_string()),
+            sender: caller.to_string(),
+            owner: Some(owner),
+            recipient: None,
+            amount: None,
+            timestamp,
+            attributes: BTreeMap::from([
+                ("collection_id".to_string(), collection_id),
+                ("metadata_uri".to_string(), metadata_uri.to_string()),
+                ("metadata_hash".to_string(), metadata_hash.to_string()),
+            ]),
+        });
+        Ok(())
+    }
+
+    pub fn verify_nft_collection(
+        &mut self,
+        caller: &str,
+        collection_id: &str,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        validate_timestamp_seconds(timestamp)?;
+        let collection = self
+            .nft_collections
+            .get(collection_id)
+            .ok_or(StsError::InvalidTokenId)?;
+        require_authority(caller, &collection.authorities.upgrade_authority)?;
+        let creator = {
+            let collection = self
+                .nft_collections
+                .get_mut(collection_id)
+                .ok_or(StsError::InvalidTokenId)?;
+            collection.verified = true;
+            collection.updated_at = timestamp;
+            collection.creator.clone()
+        };
+        self.push_event(StsEvent {
+            event_type: "StsNftCollectionVerified".to_string(),
+            token_id: Some(collection_id.to_string()),
+            sender: caller.to_string(),
+            owner: Some(creator),
+            recipient: None,
+            amount: None,
+            timestamp,
+            attributes: BTreeMap::new(),
+        });
+        Ok(())
+    }
+
+    pub fn create_multi_asset_collection(
+        &mut self,
+        params: CreateMultiAssetCollectionParams,
+    ) -> Result<String, StsError> {
+        validate_timestamp_seconds(params.created_at)?;
+        validate_token_identity(&params.name, &params.symbol)?;
+        validate_metadata(&params.metadata_uri, &params.metadata_hash)?;
+        validate_token_image(&params.image_uri, &params.image_hash)?;
+        validate_actor_ref(&params.creator)?;
+        if self.asset_identity_in_use(&params.name, &params.symbol) {
+            return Err(StsError::ReservedTokenIdentity);
+        }
+        let metadata_hash = params
+            .metadata_hash
+            .clone()
+            .unwrap_or_else(|| sha3_256_hex(params.name.as_bytes()));
+        let collection_id = derive_multi_asset_collection_id(
+            STS_TESTNET_CHAIN_ID,
+            &params.creator,
+            params.creator_nonce,
+            &metadata_hash,
+            params.created_at,
+        );
+        if self.multi_asset_collections.contains_key(&collection_id) {
+            return Err(StsError::InvalidTokenId);
+        }
+        let collection_address =
+            sts_object_token_address(TokenClass::MAMultiAsset, &collection_id)?;
+        let authorities = AuthoritySet {
+            upgrade_authority: params
+                .collection_authority
+                .clone()
+                .or_else(|| Some(params.creator.clone())),
+            metadata_authority: params
+                .metadata_authority
+                .clone()
+                .or_else(|| Some(params.creator.clone())),
+            ..AuthoritySet::default()
+        };
+        let collection = MultiAssetCollection {
+            collection_id: collection_id.clone(),
+            collection_address: collection_address.clone(),
+            creator: params.creator.clone(),
+            name: params.name,
+            symbol: params.symbol,
+            metadata_uri: params.metadata_uri,
+            metadata_hash: Some(metadata_hash),
+            image_uri: params.image_uri.clone(),
+            image_hash: params.image_hash.clone(),
+            image_locked: params.image_uri.is_some() || params.image_hash.is_some(),
+            authorities,
+            created_at: params.created_at,
+            updated_at: params.created_at,
+        };
+        self.multi_asset_collections
+            .insert(collection_id.clone(), collection);
+        self.push_event(StsEvent {
+            event_type: "StsMultiAssetCollectionCreated".to_string(),
+            token_id: Some(collection_id.clone()),
+            sender: params.creator.clone(),
+            owner: Some(params.creator),
+            recipient: None,
+            amount: None,
+            timestamp: params.created_at,
+            attributes: BTreeMap::from([("collection_address".to_string(), collection_address)]),
+        });
+        Ok(collection_id)
+    }
+
+    pub fn create_multi_asset_item(
+        &mut self,
+        caller: &str,
+        params: CreateMultiAssetItemParams,
+    ) -> Result<String, StsError> {
+        validate_timestamp_seconds(params.created_at)?;
+        validate_multi_asset_item_id(params.item_id)?;
+        validate_token_identity(&params.name, &params.symbol)?;
+        validate_metadata(&params.metadata_uri, &params.metadata_hash)?;
+        if params.decimals > STS_MAX_DECIMALS
+            || (params.item_type == MultiAssetItemType::NonFungible && params.decimals != 0)
+        {
+            return Err(StsError::InvalidDecimals);
+        }
+        let collection = self
+            .multi_asset_collections
+            .get(&params.collection_id)
+            .ok_or(StsError::InvalidTokenId)?;
+        require_authority(caller, &collection.authorities.upgrade_authority)?;
+        let key = multi_asset_item_key(&params.collection_id, params.item_id);
+        if self.multi_asset_items.contains_key(&key) {
+            return Err(StsError::InvalidTokenId);
+        }
+        let metadata_hash = params
+            .metadata_hash
+            .clone()
+            .unwrap_or_else(|| sha3_256_hex(params.name.as_bytes()));
+        let item = MultiAssetItem {
+            collection_id: params.collection_id.clone(),
+            item_id: params.item_id,
+            item_type: params.item_type,
+            name: params.name,
+            symbol: params.symbol,
+            decimals: params.decimals,
+            metadata_uri: params.metadata_uri,
+            metadata_hash: Some(metadata_hash),
+            max_supply: params.max_supply,
+            total_supply: 0,
+            mint_authority: params
+                .mint_authority
+                .clone()
+                .or_else(|| Some(caller.to_string())),
+            burn_authority: params.burn_authority.clone(),
+            transfer_policy: params.transfer_policy,
+            created_at: params.created_at,
+            updated_at: params.created_at,
+        };
+        self.multi_asset_items.insert(key.clone(), item);
+        self.push_event(StsEvent {
+            event_type: "StsMultiAssetItemCreated".to_string(),
+            token_id: Some(params.collection_id),
+            sender: caller.to_string(),
+            owner: None,
+            recipient: None,
+            amount: None,
+            timestamp: params.created_at,
+            attributes: BTreeMap::from([
+                ("item_key".to_string(), key.clone()),
+                ("item_id".to_string(), params.item_id.to_string()),
+                ("item_type".to_string(), params.item_type.wire().to_string()),
+            ]),
+        });
+        Ok(key)
+    }
+
+    pub fn mint_multi_asset(
+        &mut self,
+        caller: &str,
+        collection_id: &str,
+        item_id: u64,
+        to: &str,
+        amount: u128,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        validate_amount(amount)?;
+        validate_timestamp_seconds(timestamp)?;
+        validate_actor_ref(to)?;
+        let key = multi_asset_item_key(collection_id, item_id);
+        let item = self
+            .multi_asset_items
+            .get(&key)
+            .cloned()
+            .ok_or(StsError::InvalidTokenId)?;
+        require_authority(caller, &item.mint_authority)?;
+        validate_multi_asset_amount_for_item(&item, to, amount, self)?;
+        let next_supply = item
+            .total_supply
+            .checked_add(amount)
+            .ok_or(StsError::SupplyOverflow)?;
+        if item
+            .max_supply
+            .is_some_and(|max_supply| next_supply > max_supply)
+        {
+            return Err(StsError::SupplyOverflow);
+        }
+        self.credit_multi_asset(collection_id, item_id, to, amount, timestamp)?;
+        let item = self
+            .multi_asset_items
+            .get_mut(&key)
+            .ok_or(StsError::InvalidTokenId)?;
+        item.total_supply = next_supply;
+        item.updated_at = timestamp;
+        self.push_event(multi_asset_amount_event(
+            "StsMultiAssetMinted",
+            collection_id,
+            item_id,
+            caller,
+            None,
+            Some(to),
+            amount,
+            timestamp,
+        ));
+        Ok(())
+    }
+
+    pub fn batch_mint_multi_asset(
+        &mut self,
+        caller: &str,
+        collection_id: &str,
+        mints: &[MultiAssetAmount],
+        to: &str,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        validate_batch_items(mints)?;
+        let mut candidate = self.clone();
+        for mint in mints {
+            candidate.mint_multi_asset(
+                caller,
+                collection_id,
+                mint.item_id,
+                to,
+                mint.amount,
+                timestamp,
+            )?;
+        }
+        *self = candidate;
+        self.push_event(batch_multi_asset_event(
+            "StsMultiAssetBatchMinted",
+            collection_id,
+            caller,
+            None,
+            Some(to),
+            mints,
+            timestamp,
+        ));
+        Ok(())
+    }
+
+    pub fn transfer_multi_asset(
+        &mut self,
+        caller: &str,
+        collection_id: &str,
+        item_id: u64,
+        from: &str,
+        to: &str,
+        amount: u128,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        validate_amount(amount)?;
+        validate_timestamp_seconds(timestamp)?;
+        validate_actor_ref(to)?;
+        let key = multi_asset_item_key(collection_id, item_id);
+        let item = self
+            .multi_asset_items
+            .get(&key)
+            .cloned()
+            .ok_or(StsError::InvalidTokenId)?;
+        match item.transfer_policy {
+            MultiAssetTransferPolicy::Open => {
+                if caller != from {
+                    return Err(StsError::Unauthorized);
+                }
+            }
+            MultiAssetTransferPolicy::NonTransferable => {
+                return Err(StsError::NonTransferableAsset)
+            }
+            MultiAssetTransferPolicy::AuthorityOnly => {
+                let collection = self
+                    .multi_asset_collections
+                    .get(collection_id)
+                    .ok_or(StsError::InvalidTokenId)?;
+                require_authority(caller, &collection.authorities.upgrade_authority)?;
+            }
+        }
+        if item.item_type == MultiAssetItemType::NonFungible && amount != 1 {
+            return Err(StsError::InvalidAmount);
+        }
+        self.debit_multi_asset(collection_id, item_id, from, amount, timestamp)?;
+        self.credit_multi_asset(collection_id, item_id, to, amount, timestamp)?;
+        self.push_event(multi_asset_amount_event(
+            "StsMultiAssetTransferred",
+            collection_id,
+            item_id,
+            caller,
+            Some(from),
+            Some(to),
+            amount,
+            timestamp,
+        ));
+        Ok(())
+    }
+
+    pub fn batch_transfer_multi_asset(
+        &mut self,
+        caller: &str,
+        collection_id: &str,
+        transfers: &[MultiAssetAmount],
+        from: &str,
+        to: &str,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        validate_batch_items(transfers)?;
+        let mut candidate = self.clone();
+        for transfer in transfers {
+            candidate.transfer_multi_asset(
+                caller,
+                collection_id,
+                transfer.item_id,
+                from,
+                to,
+                transfer.amount,
+                timestamp,
+            )?;
+        }
+        *self = candidate;
+        self.push_event(batch_multi_asset_event(
+            "StsMultiAssetBatchTransferred",
+            collection_id,
+            caller,
+            Some(from),
+            Some(to),
+            transfers,
+            timestamp,
+        ));
+        Ok(())
+    }
+
+    pub fn burn_multi_asset(
+        &mut self,
+        caller: &str,
+        collection_id: &str,
+        item_id: u64,
+        from: &str,
+        amount: u128,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        validate_amount(amount)?;
+        validate_timestamp_seconds(timestamp)?;
+        let key = multi_asset_item_key(collection_id, item_id);
+        let item = self
+            .multi_asset_items
+            .get(&key)
+            .cloned()
+            .ok_or(StsError::InvalidTokenId)?;
+        if caller != from {
+            require_authority(caller, &item.burn_authority)?;
+        }
+        self.debit_multi_asset(collection_id, item_id, from, amount, timestamp)?;
+        let item = self
+            .multi_asset_items
+            .get_mut(&key)
+            .ok_or(StsError::InvalidTokenId)?;
+        item.total_supply = item
+            .total_supply
+            .checked_sub(amount)
+            .ok_or(StsError::SupplyOverflow)?;
+        item.updated_at = timestamp;
+        self.push_event(multi_asset_amount_event(
+            "StsMultiAssetBurned",
+            collection_id,
+            item_id,
+            caller,
+            Some(from),
+            None,
+            amount,
+            timestamp,
+        ));
+        Ok(())
+    }
+
+    pub fn batch_burn_multi_asset(
+        &mut self,
+        caller: &str,
+        collection_id: &str,
+        burns: &[MultiAssetAmount],
+        from: &str,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        validate_batch_items(burns)?;
+        let mut candidate = self.clone();
+        for burn in burns {
+            candidate.burn_multi_asset(
+                caller,
+                collection_id,
+                burn.item_id,
+                from,
+                burn.amount,
+                timestamp,
+            )?;
+        }
+        *self = candidate;
+        self.push_event(batch_multi_asset_event(
+            "StsMultiAssetBatchBurned",
+            collection_id,
+            caller,
+            Some(from),
+            None,
+            burns,
+            timestamp,
+        ));
+        Ok(())
+    }
+
+    pub fn create_credential_schema(
+        &mut self,
+        params: CreateCredentialSchemaParams,
+    ) -> Result<String, StsError> {
+        validate_timestamp_seconds(params.created_at)?;
+        validate_actor_ref(&params.issuer)?;
+        validate_schema_id(&params.schema_id)?;
+        validate_metadata_hash_option(params.description_hash.as_deref())?;
+        validate_metadata_hash(&params.schema_hash)?;
+        if params.name.trim().is_empty() || params.name.len() > MAX_TOKEN_NAME_LEN {
+            return Err(StsError::InvalidMetadata);
+        }
+        let key = credential_schema_key(&params.issuer, &params.schema_id);
+        if self.credential_schemas.contains_key(&key) {
+            return Err(StsError::InvalidTokenId);
+        }
+        let schema = CredentialSchema {
+            schema_id: params.schema_id.clone(),
+            issuer: params.issuer.clone(),
+            name: params.name,
+            description_hash: params.description_hash,
+            schema_hash: params.schema_hash,
+            active: params.active,
+            created_at: params.created_at,
+            updated_at: params.created_at,
+        };
+        self.credential_schemas.insert(key, schema);
+        let schema_id = params.schema_id.clone();
+        self.push_event(StsEvent {
+            event_type: "StsCredentialSchemaCreated".to_string(),
+            token_id: Some(schema_id.clone()),
+            sender: params.issuer.clone(),
+            owner: Some(params.issuer),
+            recipient: None,
+            amount: None,
+            timestamp: params.created_at,
+            attributes: BTreeMap::from([("schema_id".to_string(), schema_id.clone())]),
+        });
+        Ok(schema_id)
+    }
+
+    pub fn issue_credential(&mut self, params: IssueCredentialParams) -> Result<String, StsError> {
+        validate_timestamp_seconds(params.issued_at)?;
+        validate_actor_ref(&params.issuer)?;
+        if let Some(subject) = params.subject.as_deref() {
+            validate_actor_ref(subject)?;
+        }
+        validate_metadata_hash(&params.subject_commitment)?;
+        validate_schema_id(&params.schema_id)?;
+        validate_metadata_hash(&params.credential_hash)?;
+        if let Some(expires_at) = params.expires_at {
+            validate_timestamp_seconds(expires_at)?;
+            if expires_at <= params.issued_at {
+                return Err(StsError::InvalidTimestamp);
+            }
+        }
+        let schema = self
+            .credential_schemas
+            .get(&credential_schema_key(&params.issuer, &params.schema_id))
+            .ok_or(StsError::InvalidTokenId)?;
+        if !schema.active {
+            return Err(StsError::PolicyNotEnabled);
+        }
+        let credential_id = derive_credential_id(
+            STS_TESTNET_CHAIN_ID,
+            &params.issuer,
+            &params.subject_commitment,
+            &params.schema_id,
+            &params.credential_hash,
+            params.issued_at,
+        );
+        if self.credential_records.contains_key(&credential_id) {
+            return Err(StsError::InvalidTokenId);
+        }
+        let record = CredentialRecord {
+            credential_id: credential_id.clone(),
+            issuer: params.issuer.clone(),
+            subject: params.subject.clone(),
+            subject_commitment: params.subject_commitment.clone(),
+            schema_id: params.schema_id.clone(),
+            credential_hash: params.credential_hash,
+            status: CredentialStatus::Active,
+            issued_at: params.issued_at,
+            expires_at: params.expires_at,
+            revoked_at: None,
+            revocation_reason_hash: None,
+            transferable: false,
+            updated_at: params.issued_at,
+        };
+        self.credential_records
+            .insert(credential_id.clone(), record);
+        self.push_event(StsEvent {
+            event_type: "StsCredentialIssued".to_string(),
+            token_id: Some(credential_id.clone()),
+            sender: params.issuer.clone(),
+            owner: params.subject,
+            recipient: None,
+            amount: None,
+            timestamp: params.issued_at,
+            attributes: BTreeMap::from([
+                ("schema_id".to_string(), params.schema_id),
+                ("subject_commitment".to_string(), params.subject_commitment),
+            ]),
+        });
+        Ok(credential_id)
+    }
+
+    pub fn revoke_credential(
+        &mut self,
+        caller: &str,
+        credential_id: &str,
+        reason_hash: Option<&str>,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        validate_timestamp_seconds(timestamp)?;
+        validate_metadata_hash_option(reason_hash)?;
+        let record = self
+            .credential_records
+            .get(credential_id)
+            .ok_or(StsError::InvalidTokenId)?;
+        if caller != record.issuer {
+            return Err(StsError::Unauthorized);
+        }
+        let (subject, schema_id) = {
+            let record = self
+                .credential_records
+                .get_mut(credential_id)
+                .ok_or(StsError::InvalidTokenId)?;
+            record.status = CredentialStatus::Revoked;
+            record.revoked_at = Some(timestamp);
+            record.revocation_reason_hash = reason_hash.map(ToString::to_string);
+            record.updated_at = timestamp;
+            (record.subject.clone(), record.schema_id.clone())
+        };
+        self.push_event(StsEvent {
+            event_type: "StsCredentialRevoked".to_string(),
+            token_id: Some(credential_id.to_string()),
+            sender: caller.to_string(),
+            owner: subject,
+            recipient: None,
+            amount: None,
+            timestamp,
+            attributes: BTreeMap::from([("schema_id".to_string(), schema_id)]),
+        });
+        Ok(())
+    }
+
+    pub fn set_credential_status(
+        &mut self,
+        caller: &str,
+        credential_id: &str,
+        status: CredentialStatus,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        validate_timestamp_seconds(timestamp)?;
+        let record = self
+            .credential_records
+            .get(credential_id)
+            .cloned()
+            .ok_or(StsError::InvalidTokenId)?;
+        if caller != record.issuer {
+            return Err(StsError::Unauthorized);
+        }
+        if status == CredentialStatus::Active {
+            match record.status {
+                CredentialStatus::Active | CredentialStatus::Suspended => {}
+                CredentialStatus::Revoked => return Err(StsError::CredentialRevoked),
+                CredentialStatus::Expired => return Err(StsError::CredentialExpired),
+            }
+        }
+        let (subject, schema_id) = {
+            let record = self
+                .credential_records
+                .get_mut(credential_id)
+                .ok_or(StsError::InvalidTokenId)?;
+            record.status = status;
+            if status == CredentialStatus::Revoked {
+                record.revoked_at = Some(timestamp);
+            }
+            record.updated_at = timestamp;
+            (record.subject.clone(), record.schema_id.clone())
+        };
+        let event_type = match status {
+            CredentialStatus::Active => "StsCredentialRestored",
+            CredentialStatus::Revoked => "StsCredentialRevoked",
+            CredentialStatus::Expired => "StsCredentialExpired",
+            CredentialStatus::Suspended => "StsCredentialSuspended",
+        };
+        self.push_event(StsEvent {
+            event_type: event_type.to_string(),
+            token_id: Some(credential_id.to_string()),
+            sender: caller.to_string(),
+            owner: subject,
+            recipient: None,
+            amount: None,
+            timestamp,
+            attributes: BTreeMap::from([("schema_id".to_string(), schema_id)]),
+        });
+        Ok(())
+    }
+
+    pub fn verify_credential_status_event(
+        &mut self,
+        caller: &str,
+        credential_id: &str,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        self.verify_credential_active_at(credential_id, timestamp)?;
+        let (subject, schema_id) = self
+            .credential_records
+            .get(credential_id)
+            .map(|record| (record.subject.clone(), record.schema_id.clone()))
+            .ok_or(StsError::InvalidTokenId)?;
+        self.push_event(StsEvent {
+            event_type: "StsCredentialVerified".to_string(),
+            token_id: Some(credential_id.to_string()),
+            sender: caller.to_string(),
+            owner: subject,
+            recipient: None,
+            amount: None,
+            timestamp,
+            attributes: BTreeMap::from([("schema_id".to_string(), schema_id)]),
+        });
+        Ok(())
+    }
+
+    pub fn verify_credential_active_at(
+        &self,
+        credential_id: &str,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        validate_timestamp_seconds(timestamp)?;
+        let record = self
+            .credential_records
+            .get(credential_id)
+            .ok_or(StsError::InvalidTokenId)?;
+        match record.status {
+            CredentialStatus::Active => {}
+            CredentialStatus::Revoked => return Err(StsError::CredentialRevoked),
+            CredentialStatus::Expired => return Err(StsError::CredentialExpired),
+            CredentialStatus::Suspended => return Err(StsError::CredentialSuspended),
+        }
+        if record
+            .expires_at
+            .is_some_and(|expires_at| timestamp >= expires_at)
+        {
+            return Err(StsError::CredentialExpired);
+        }
+        Ok(())
+    }
+
     pub fn fungible_balance(&self, owner: &str, token_id: &str) -> u128 {
         self.fungible_balances
             .get(&balance_key(token_id, owner))
@@ -1039,6 +2872,100 @@ impl StsState {
             .collect()
     }
 
+    pub fn nft_collection(&self, collection_ref: &str) -> Option<&NftCollection> {
+        self.nft_collections.get(collection_ref).or_else(|| {
+            self.nft_collections
+                .values()
+                .find(|collection| collection.collection_address == collection_ref)
+        })
+    }
+
+    pub fn nft(&self, nft_ref: &str) -> Option<&NftInstance> {
+        self.nft_instances.get(nft_ref).or_else(|| {
+            self.nft_instances
+                .values()
+                .find(|nft| nft.nft_address == nft_ref)
+        })
+    }
+
+    pub fn nfts_for_owner(&self, owner: &str) -> Vec<&NftInstance> {
+        self.nft_instances
+            .values()
+            .filter(|nft| nft.owner == owner && !nft.burned)
+            .collect()
+    }
+
+    pub fn nfts_for_collection(&self, collection_ref: &str) -> Vec<&NftInstance> {
+        let Some(collection) = self.nft_collection(collection_ref) else {
+            return Vec::new();
+        };
+        self.nft_instances
+            .values()
+            .filter(|nft| nft.collection_id == collection.collection_id && !nft.burned)
+            .collect()
+    }
+
+    pub fn multi_asset_collection(&self, collection_ref: &str) -> Option<&MultiAssetCollection> {
+        self.multi_asset_collections
+            .get(collection_ref)
+            .or_else(|| {
+                self.multi_asset_collections
+                    .values()
+                    .find(|collection| collection.collection_address == collection_ref)
+            })
+    }
+
+    pub fn multi_asset_item(&self, collection_ref: &str, item_id: u64) -> Option<&MultiAssetItem> {
+        let collection = self.multi_asset_collection(collection_ref)?;
+        self.multi_asset_items
+            .get(&multi_asset_item_key(&collection.collection_id, item_id))
+    }
+
+    pub fn multi_asset_balance(&self, owner: &str, collection_id: &str, item_id: u64) -> u128 {
+        self.multi_asset_balances
+            .get(&multi_asset_balance_key(collection_id, item_id, owner))
+            .map(|balance| balance.amount)
+            .unwrap_or(0)
+    }
+
+    pub fn multi_asset_balances_for_owner(
+        &self,
+        owner: &str,
+        collection_ref: Option<&str>,
+    ) -> Vec<&MultiAssetBalance> {
+        let collection_id = collection_ref
+            .and_then(|collection_ref| self.multi_asset_collection(collection_ref))
+            .map(|collection| collection.collection_id.as_str());
+        self.multi_asset_balances
+            .values()
+            .filter(|balance| balance.owner == owner)
+            .filter(|balance| {
+                collection_id
+                    .map(|collection_id| balance.collection_id == collection_id)
+                    .unwrap_or(true)
+            })
+            .collect()
+    }
+
+    pub fn credential_schema(&self, issuer: &str, schema_id: &str) -> Option<&CredentialSchema> {
+        self.credential_schemas
+            .get(&credential_schema_key(issuer, schema_id))
+    }
+
+    pub fn credential(&self, credential_id: &str) -> Option<&CredentialRecord> {
+        self.credential_records.get(credential_id)
+    }
+
+    pub fn credentials_for_subject(&self, subject_or_commitment: &str) -> Vec<&CredentialRecord> {
+        self.credential_records
+            .values()
+            .filter(|credential| {
+                credential.subject.as_deref() == Some(subject_or_commitment)
+                    || credential.subject_commitment == subject_or_commitment
+            })
+            .collect()
+    }
+
     pub fn events_for(
         &self,
         token_ref: Option<&str>,
@@ -1046,10 +2973,10 @@ impl StsState {
         limit: usize,
     ) -> Vec<&StsEvent> {
         let token_id = match token_ref {
-            Some(token_ref) => match self.fungible_definition(token_ref) {
-                Some(definition) => Some(definition.token_id.as_str()),
-                None => return Vec::new(),
-            },
+            Some(token_ref) => Some(
+                self.resolve_event_object_ref(token_ref)
+                    .unwrap_or(token_ref),
+            ),
             None => None,
         };
         let mut events = self
@@ -1075,6 +3002,87 @@ impl StsState {
             events.truncate(limit);
         }
         events
+    }
+
+    fn resolve_event_object_ref<'a>(&'a self, object_ref: &'a str) -> Option<&'a str> {
+        self.fungible_definition(object_ref)
+            .map(|definition| definition.token_id.as_str())
+            .or_else(|| {
+                self.nft_collection(object_ref)
+                    .map(|collection| collection.collection_id.as_str())
+            })
+            .or_else(|| self.nft(object_ref).map(|nft| nft.nft_id.as_str()))
+            .or_else(|| {
+                self.multi_asset_collection(object_ref)
+                    .map(|collection| collection.collection_id.as_str())
+            })
+            .or_else(|| {
+                self.credential(object_ref)
+                    .map(|credential| credential.credential_id.as_str())
+            })
+    }
+
+    fn asset_identity_in_use(&self, name: &str, symbol: &str) -> bool {
+        self.token_registry
+            .values()
+            .any(|definition| definition.name == name || definition.symbol == symbol)
+            || self
+                .nft_collections
+                .values()
+                .any(|collection| collection.name == name || collection.symbol == symbol)
+            || self
+                .multi_asset_collections
+                .values()
+                .any(|collection| collection.name == name || collection.symbol == symbol)
+    }
+
+    fn credit_multi_asset(
+        &mut self,
+        collection_id: &str,
+        item_id: u64,
+        owner: &str,
+        amount: u128,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        let key = multi_asset_balance_key(collection_id, item_id, owner);
+        let balance = self
+            .multi_asset_balances
+            .entry(key)
+            .or_insert_with(|| MultiAssetBalance {
+                owner: owner.to_string(),
+                collection_id: collection_id.to_string(),
+                item_id,
+                amount: 0,
+                created_at: timestamp,
+                updated_at: timestamp,
+            });
+        balance.amount = balance
+            .amount
+            .checked_add(amount)
+            .ok_or(StsError::SupplyOverflow)?;
+        balance.updated_at = timestamp;
+        Ok(())
+    }
+
+    fn debit_multi_asset(
+        &mut self,
+        collection_id: &str,
+        item_id: u64,
+        owner: &str,
+        amount: u128,
+        timestamp: u64,
+    ) -> Result<(), StsError> {
+        let key = multi_asset_balance_key(collection_id, item_id, owner);
+        let balance = self
+            .multi_asset_balances
+            .get_mut(&key)
+            .ok_or(StsError::InsufficientBalance)?;
+        balance.amount = balance
+            .amount
+            .checked_sub(amount)
+            .ok_or(StsError::InsufficientBalance)?;
+        balance.updated_at = timestamp;
+        Ok(())
     }
 
     fn credit_balance(
@@ -1652,9 +3660,9 @@ pub fn derive_multi_asset_collection_id(
 pub fn derive_credential_id(
     chain_id: u64,
     issuer_address: &str,
-    subject_address: &str,
-    issuer_nonce: u64,
-    metadata_hash: &str,
+    subject_commitment: &str,
+    schema_id: &str,
+    credential_hash: &str,
     issued_at: u64,
 ) -> String {
     let hash = sts_hash(
@@ -1662,9 +3670,9 @@ pub fn derive_credential_id(
         &[
             &chain_id.to_be_bytes(),
             issuer_address.as_bytes(),
-            subject_address.as_bytes(),
-            &issuer_nonce.to_be_bytes(),
-            metadata_hash.as_bytes(),
+            subject_commitment.as_bytes(),
+            schema_id.as_bytes(),
+            credential_hash.as_bytes(),
             &issued_at.to_be_bytes(),
         ],
     );
@@ -1682,6 +3690,31 @@ pub fn estimate_sts_gas(tx: &StsTx) -> u64 {
         StsTx::ClawbackFungible { .. } => 70_000,
         StsTx::CreateFungibleSnapshot { .. } => 95_000,
         StsTx::SetFungibleImage { .. } => 35_000,
+        StsTx::CreateNftCollection(_) => 135_000,
+        StsTx::MintNft(_) => 75_000,
+        StsTx::TransferNft { .. } => 50_000,
+        StsTx::BurnNft { .. } => 45_000,
+        StsTx::FreezeNft { .. } | StsTx::ThawNft { .. } => 40_000,
+        StsTx::RevokeNft { .. } | StsTx::UseNft { .. } => 45_000,
+        StsTx::UpdateNftMetadata { .. } => 55_000,
+        StsTx::VerifyNftCollection { .. } => 35_000,
+        StsTx::CreateMultiAssetCollection(_) => 135_000,
+        StsTx::CreateMultiAssetItem(_) => 85_000,
+        StsTx::MintMultiAsset { .. } => 65_000,
+        StsTx::BatchMintMultiAsset { mints, .. } => 70_000 + (mints.len() as u64 * 20_000),
+        StsTx::TransferMultiAsset { .. } => 55_000,
+        StsTx::BatchTransferMultiAsset { transfers, .. } => {
+            60_000 + (transfers.len() as u64 * 18_000)
+        }
+        StsTx::BurnMultiAsset { .. } => 50_000,
+        StsTx::BatchBurnMultiAsset { burns, .. } => 55_000 + (burns.len() as u64 * 16_000),
+        StsTx::CreateCredentialSchema(_) => 90_000,
+        StsTx::IssueCredential(_) => 85_000,
+        StsTx::RevokeCredential { .. }
+        | StsTx::SuspendCredential { .. }
+        | StsTx::RestoreCredential { .. }
+        | StsTx::ExpireCredential { .. } => 45_000,
+        StsTx::VerifyCredentialStatus { .. } => 25_000,
     }
 }
 
@@ -1735,6 +3768,122 @@ fn validate_fungible_policies(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_nft_class(token_class: TokenClass) -> Result<(), StsError> {
+    if matches!(
+        token_class,
+        TokenClass::NF1StandardNft | TokenClass::NF2ControlledNft
+    ) {
+        Ok(())
+    } else {
+        Err(StsError::InvalidTokenClass)
+    }
+}
+
+fn validate_royalty(
+    royalty_basis_points: Option<u16>,
+    royalty_recipient: Option<&str>,
+) -> Result<(), StsError> {
+    if let Some(basis_points) = royalty_basis_points {
+        if basis_points > 10_000 {
+            return Err(StsError::PolicyNotEnabled);
+        }
+        if basis_points > 0 {
+            validate_actor_ref(royalty_recipient.ok_or(StsError::InvalidAuthority)?)?;
+        }
+    }
+    Ok(())
+}
+
+fn require_nft_active(nft: &NftInstance, timestamp: u64) -> Result<(), StsError> {
+    if nft.burned {
+        return Err(StsError::InvalidTokenId);
+    }
+    if nft.frozen {
+        return Err(StsError::AccountFrozen);
+    }
+    if nft.revoked {
+        return Err(StsError::CredentialRevoked);
+    }
+    if nft
+        .expires_at
+        .is_some_and(|expires_at| timestamp >= expires_at)
+    {
+        return Err(StsError::CredentialExpired);
+    }
+    Ok(())
+}
+
+fn validate_actor_ref(value: &str) -> Result<(), StsError> {
+    let value = value.trim();
+    if value.is_empty()
+        || value.starts_with("0x")
+        || value.len() > 128
+        || !value.is_ascii()
+        || value
+            .chars()
+            .any(|ch| ch.is_ascii_control() || ch.is_ascii_whitespace())
+    {
+        return Err(StsError::InvalidAuthority);
+    }
+    Ok(())
+}
+
+fn authority_matches(caller: &str, authority: &Option<String>) -> bool {
+    authority.as_deref() == Some(caller)
+}
+
+fn validate_multi_asset_item_id(item_id: u64) -> Result<(), StsError> {
+    if item_id == 0 {
+        Err(StsError::InvalidTokenId)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_multi_asset_amount_for_item(
+    item: &MultiAssetItem,
+    owner: &str,
+    amount: u128,
+    state: &StsState,
+) -> Result<(), StsError> {
+    if item.item_type == MultiAssetItemType::NonFungible {
+        if amount != 1 || state.multi_asset_balance(owner, &item.collection_id, item.item_id) > 0 {
+            return Err(StsError::InvalidAmount);
+        }
+    }
+    Ok(())
+}
+
+fn validate_batch_items(items: &[MultiAssetAmount]) -> Result<(), StsError> {
+    if items.is_empty() || items.len() > 128 {
+        return Err(StsError::InvalidAmount);
+    }
+    let mut seen = BTreeMap::<u64, ()>::new();
+    for item in items {
+        validate_multi_asset_item_id(item.item_id)?;
+        validate_amount(item.amount)?;
+        if seen.insert(item.item_id, ()).is_some() {
+            return Err(StsError::InvalidTokenId);
+        }
+    }
+    Ok(())
+}
+
+fn validate_schema_id(schema_id: &str) -> Result<(), StsError> {
+    if schema_id.is_empty()
+        || schema_id.len() > 128
+        || schema_id.starts_with('.')
+        || schema_id.ends_with('.')
+        || schema_id.contains("..")
+        || !schema_id
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '.' || ch == '-')
+    {
+        return Err(StsError::InvalidMetadata);
     }
     Ok(())
 }
@@ -1903,6 +4052,18 @@ fn snapshot_key(token_id: &str, snapshot_id: u64) -> String {
     format!("{token_id}:{snapshot_id}")
 }
 
+fn multi_asset_item_key(collection_id: &str, item_id: u64) -> String {
+    format!("{collection_id}:{item_id}")
+}
+
+fn multi_asset_balance_key(collection_id: &str, item_id: u64, owner: &str) -> String {
+    format!("{collection_id}:{item_id}:{owner}")
+}
+
+fn credential_schema_key(issuer: &str, schema_id: &str) -> String {
+    format!("{issuer}:{schema_id}")
+}
+
 fn simple_amount_event(
     event_type: &str,
     token_id: &str,
@@ -1921,6 +4082,54 @@ fn simple_amount_event(
         amount: Some(amount.to_string()),
         timestamp,
         attributes: BTreeMap::new(),
+    }
+}
+
+fn multi_asset_amount_event(
+    event_type: &str,
+    collection_id: &str,
+    item_id: u64,
+    sender: &str,
+    owner: Option<&str>,
+    recipient: Option<&str>,
+    amount: u128,
+    timestamp: u64,
+) -> StsEvent {
+    StsEvent {
+        event_type: event_type.to_string(),
+        token_id: Some(collection_id.to_string()),
+        sender: sender.to_string(),
+        owner: owner.map(ToString::to_string),
+        recipient: recipient.map(ToString::to_string),
+        amount: Some(amount.to_string()),
+        timestamp,
+        attributes: BTreeMap::from([("item_id".to_string(), item_id.to_string())]),
+    }
+}
+
+fn batch_multi_asset_event(
+    event_type: &str,
+    collection_id: &str,
+    sender: &str,
+    owner: Option<&str>,
+    recipient: Option<&str>,
+    items: &[MultiAssetAmount],
+    timestamp: u64,
+) -> StsEvent {
+    let item_summary = items
+        .iter()
+        .map(|item| format!("{}:{}", item.item_id, item.amount))
+        .collect::<Vec<_>>()
+        .join(",");
+    StsEvent {
+        event_type: event_type.to_string(),
+        token_id: Some(collection_id.to_string()),
+        sender: sender.to_string(),
+        owner: owner.map(ToString::to_string),
+        recipient: recipient.map(ToString::to_string),
+        amount: Some(items.len().to_string()),
+        timestamp,
+        attributes: BTreeMap::from([("items".to_string(), item_summary)]),
     }
 }
 
@@ -2017,9 +4226,15 @@ mod tests {
             derive_multi_asset_collection_id(STS_TESTNET_CHAIN_ID, ALICE, 1, HASH, 1)
                 .starts_with("synj")
         );
-        assert!(
-            derive_credential_id(STS_TESTNET_CHAIN_ID, ALICE, BOB, 1, HASH, 1).starts_with("synk")
-        );
+        assert!(derive_credential_id(
+            STS_TESTNET_CHAIN_ID,
+            ALICE,
+            HASH,
+            "validator.kyc.v1",
+            HASH,
+            1
+        )
+        .starts_with("synk"));
     }
 
     #[test]
@@ -2359,6 +4574,215 @@ mod tests {
         assert_eq!(
             bob_events.first().map(|event| event.event_type.as_str()),
             Some("StsFungibleTransferred")
+        );
+    }
+
+    fn nft_collection_params(class: TokenClass, symbol: &str) -> CreateNftCollectionParams {
+        CreateNftCollectionParams {
+            class,
+            creator: ALICE.to_string(),
+            creator_nonce: 44,
+            name: format!("{symbol} Collection"),
+            symbol: symbol.to_string(),
+            metadata_uri: Some("ipfs://nft-collection".to_string()),
+            metadata_hash: Some(HASH.to_string()),
+            metadata_mutable: false,
+            image_uri: None,
+            image_hash: None,
+            collection_authority: Some(ALICE.to_string()),
+            mint_authority: Some(ALICE.to_string()),
+            metadata_authority: None,
+            royalty_basis_points: Some(250),
+            royalty_recipient: Some(ALICE.to_string()),
+            transferable: class == TokenClass::NF1StandardNft,
+            requires_issuer_approval: false,
+            created_at: 1_700_010_000,
+        }
+    }
+
+    fn mint_nft_params(collection_id: &str, to: &str) -> MintNftParams {
+        MintNftParams {
+            collection_id: collection_id.to_string(),
+            to: to.to_string(),
+            metadata_uri: Some("ipfs://nft-1".to_string()),
+            metadata_hash: Some(HASH.to_string()),
+            metadata_mutable: false,
+            transferable: None,
+            requires_issuer_approval: None,
+            expires_at: None,
+            minted_at: 1_700_010_001,
+        }
+    }
+
+    #[test]
+    fn nft_collections_mint_transfer_and_nf2_revoke_rules() {
+        let mut state = StsState::new();
+        let nf1_collection = state
+            .create_nft_collection(nft_collection_params(TokenClass::NF1StandardNft, "FDR"))
+            .unwrap();
+        let nft_id = state
+            .mint_nft(ALICE, mint_nft_params(&nf1_collection, ALICE))
+            .unwrap();
+        assert!(nft_id.starts_with("synn1"));
+        state
+            .transfer_nft(ALICE, &nft_id, ALICE, BOB, 1_700_010_002)
+            .unwrap();
+        assert_eq!(state.nft(&nft_id).unwrap().owner, BOB);
+
+        let nf2_collection = state
+            .create_nft_collection(nft_collection_params(TokenClass::NF2ControlledNft, "PASS"))
+            .unwrap();
+        let nf2_id = state
+            .mint_nft(ALICE, mint_nft_params(&nf2_collection, BOB))
+            .unwrap();
+        assert!(nf2_id.starts_with("synn2"));
+        assert_eq!(
+            state.transfer_nft(BOB, &nf2_id, BOB, ALICE, 1_700_010_003),
+            Err(StsError::NonTransferableAsset)
+        );
+        state.revoke_nft(ALICE, &nf2_id, 1_700_010_004).unwrap();
+        assert_eq!(
+            state.use_nft(BOB, &nf2_id, 1_700_010_005),
+            Err(StsError::CredentialRevoked)
+        );
+    }
+
+    fn multi_asset_collection_params() -> CreateMultiAssetCollectionParams {
+        CreateMultiAssetCollectionParams {
+            creator: ALICE.to_string(),
+            creator_nonce: 55,
+            name: "Game Items".to_string(),
+            symbol: "GMI".to_string(),
+            metadata_uri: Some("ipfs://game-items".to_string()),
+            metadata_hash: Some(HASH.to_string()),
+            image_uri: None,
+            image_hash: None,
+            collection_authority: Some(ALICE.to_string()),
+            metadata_authority: Some(ALICE.to_string()),
+            created_at: 1_700_020_000,
+        }
+    }
+
+    fn multi_asset_item_params(
+        collection_id: &str,
+        item_id: u64,
+        symbol: &str,
+    ) -> CreateMultiAssetItemParams {
+        CreateMultiAssetItemParams {
+            collection_id: collection_id.to_string(),
+            item_id,
+            item_type: MultiAssetItemType::Fungible,
+            name: format!("{symbol} Item"),
+            symbol: symbol.to_string(),
+            decimals: 0,
+            metadata_uri: Some("ipfs://game-item".to_string()),
+            metadata_hash: Some(HASH.to_string()),
+            max_supply: Some(10_000),
+            mint_authority: Some(ALICE.to_string()),
+            burn_authority: Some(ALICE.to_string()),
+            transfer_policy: MultiAssetTransferPolicy::Open,
+            created_at: 1_700_020_001 + item_id,
+        }
+    }
+
+    #[test]
+    fn multi_asset_batch_transfer_is_atomic() {
+        let mut state = StsState::new();
+        let collection_id = state
+            .create_multi_asset_collection(multi_asset_collection_params())
+            .unwrap();
+        state
+            .create_multi_asset_item(ALICE, multi_asset_item_params(&collection_id, 1, "GOLD"))
+            .unwrap();
+        state
+            .create_multi_asset_item(ALICE, multi_asset_item_params(&collection_id, 2, "SILV"))
+            .unwrap();
+        state
+            .mint_multi_asset(ALICE, &collection_id, 1, ALICE, 500, 1_700_020_010)
+            .unwrap();
+        let failed = state.batch_transfer_multi_asset(
+            ALICE,
+            &collection_id,
+            &[
+                MultiAssetAmount {
+                    item_id: 1,
+                    amount: 100,
+                },
+                MultiAssetAmount {
+                    item_id: 2,
+                    amount: 1,
+                },
+            ],
+            ALICE,
+            BOB,
+            1_700_020_011,
+        );
+        assert_eq!(failed, Err(StsError::InsufficientBalance));
+        assert_eq!(state.multi_asset_balance(ALICE, &collection_id, 1), 500);
+        assert_eq!(state.multi_asset_balance(BOB, &collection_id, 1), 0);
+
+        state
+            .mint_multi_asset(ALICE, &collection_id, 2, ALICE, 5, 1_700_020_012)
+            .unwrap();
+        state
+            .batch_transfer_multi_asset(
+                ALICE,
+                &collection_id,
+                &[
+                    MultiAssetAmount {
+                        item_id: 1,
+                        amount: 100,
+                    },
+                    MultiAssetAmount {
+                        item_id: 2,
+                        amount: 1,
+                    },
+                ],
+                ALICE,
+                BOB,
+                1_700_020_013,
+            )
+            .unwrap();
+        assert_eq!(state.multi_asset_balance(BOB, &collection_id, 1), 100);
+        assert_eq!(state.multi_asset_balance(BOB, &collection_id, 2), 1);
+    }
+
+    #[test]
+    fn credentials_verify_and_revoke() {
+        let mut state = StsState::new();
+        state
+            .create_credential_schema(CreateCredentialSchemaParams {
+                issuer: ALICE.to_string(),
+                schema_id: "validator.kyc.v1".to_string(),
+                name: "Validator KYC".to_string(),
+                description_hash: Some(HASH.to_string()),
+                schema_hash: HASH.to_string(),
+                active: true,
+                created_at: 1_700_030_000,
+            })
+            .unwrap();
+        let credential_id = state
+            .issue_credential(IssueCredentialParams {
+                issuer: ALICE.to_string(),
+                subject: Some(BOB.to_string()),
+                subject_commitment: HASH.to_string(),
+                schema_id: "validator.kyc.v1".to_string(),
+                credential_hash: HASH.to_string(),
+                expires_at: Some(1_800_000_000),
+                issued_at: 1_700_030_001,
+            })
+            .unwrap();
+        assert!(credential_id.starts_with("synk"));
+        assert_eq!(
+            state.verify_credential_active_at(&credential_id, 1_700_030_002),
+            Ok(())
+        );
+        state
+            .revoke_credential(ALICE, &credential_id, Some(HASH), 1_700_030_003)
+            .unwrap();
+        assert_eq!(
+            state.verify_credential_active_at(&credential_id, 1_700_030_004),
+            Err(StsError::CredentialRevoked)
         );
     }
 }

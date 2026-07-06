@@ -2382,6 +2382,56 @@ fn handle_json_rpc(
 
         "synergy_stsGetBalances" | "sts_getBalances" => sts_balances_json(&params, chain),
 
+        "synergy_stsGetNftCollection" | "sts_getNftCollection" | "sts_get_nft_collection" => {
+            sts_nft_collection_json(&params, chain)
+        }
+
+        "synergy_stsGetNft" | "sts_getNft" | "sts_get_nft" => sts_nft_json(&params, chain),
+
+        "synergy_stsGetNftsByOwner" | "sts_getNftsByOwner" | "sts_get_nfts_by_owner" => {
+            sts_nfts_by_owner_json(&params, chain)
+        }
+
+        "synergy_stsGetNftsByCollection"
+        | "sts_getNftsByCollection"
+        | "sts_get_nfts_by_collection" => sts_nfts_by_collection_json(&params, chain),
+
+        "synergy_stsGetMultiAssetCollection"
+        | "sts_getMultiAssetCollection"
+        | "sts_get_multi_asset_collection" => sts_multi_asset_collection_json(&params, chain),
+
+        "synergy_stsGetMultiAssetItem"
+        | "sts_getMultiAssetItem"
+        | "sts_get_multi_asset_item" => sts_multi_asset_item_json(&params, chain),
+
+        "synergy_stsGetMultiAssetBalance"
+        | "sts_getMultiAssetBalance"
+        | "sts_get_multi_asset_balance" => sts_multi_asset_balance_json(&params, chain),
+
+        "synergy_stsGetMultiAssetBalances"
+        | "sts_getMultiAssetBalances"
+        | "sts_get_multi_asset_balances" => sts_multi_asset_balances_json(&params, chain),
+
+        "synergy_stsGetCredentialSchema"
+        | "sts_getCredentialSchema"
+        | "sts_get_credential_schema" => sts_credential_schema_json(&params, chain),
+
+        "synergy_stsGetCredential" | "sts_getCredential" | "sts_get_credential" => {
+            sts_credential_json(&params, chain)
+        }
+
+        "synergy_stsGetCredentialsBySubject"
+        | "sts_getCredentialsBySubject"
+        | "sts_get_credentials_by_subject" => sts_credentials_by_subject_json(&params, chain),
+
+        "synergy_stsVerifyCredential" | "sts_verifyCredential" | "sts_verify_credential" => {
+            sts_verify_credential_json(&params, chain)
+        }
+
+        "synergy_stsGetCredentialStatus"
+        | "sts_getCredentialStatus"
+        | "sts_get_credential_status" => sts_credential_status_json(&params, chain),
+
         "synergy_stsGetEvents" | "sts_getEvents" => sts_events_json(&params, chain),
 
         // Token methods
@@ -3231,6 +3281,33 @@ fn handle_json_rpc(
             } else {
                 json!({"success": false, "error": "Missing required parameters: from, token_symbol, amount"})
             }
+        }
+
+        "synergy_getBurnLedger" => {
+            let asset_id = params
+                .get(0)
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty());
+            let token_manager = TOKEN_MANAGER.clone();
+            let records = token_manager.get_burn_records(asset_id);
+            let total_burned_raw = if let Some(asset_id) = asset_id {
+                token_manager.get_burned_total(asset_id)
+            } else {
+                records
+                    .iter()
+                    .fold(0u128, |acc, record| acc.saturating_add(record.amount as u128))
+            };
+            let total_burned_nwei = (asset_id == Some(crate::token::SNRG_SYMBOL))
+                .then(|| u128_rpc_value(total_burned_raw))
+                .unwrap_or(Value::Null);
+            json!({
+                "assetId": asset_id.unwrap_or("*"),
+                "burnAddress": crate::address::NETWORK_BURN_ADDRESS,
+                "totalBurnedRaw": u128_rpc_value(total_burned_raw),
+                "totalBurnedNwei": total_burned_nwei,
+                "records": records,
+                "chain": chain_identity_json(),
+            })
         }
 
         "synergy_transferTokens" => {
@@ -4145,6 +4222,19 @@ fn handle_json_rpc(
             Err(_) => json!({"error": "Failed to access reward ledger"}),
         },
 
+        // synergy_checkRewardInvariants / synergy_debugRewardsCheckInvariants
+        "synergy_checkRewardInvariants" | "synergy_debugRewardsCheckInvariants" => {
+            let epoch = params.get(0).and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+            });
+            match crate::rewards::REWARD_LEDGER.lock() {
+                Ok(ledger) => json!(ledger.check_invariants(epoch)),
+                Err(_) => json!({"error": "Failed to access reward ledger"}),
+            }
+        }
+
         // synergy_getValidatorPerformance
         "synergy_getValidatorPerformance" => {
             if let Some(address) = params.get(0).and_then(|v| v.as_str()) {
@@ -4914,12 +5004,51 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_stsGetToken"
         | "synergy_stsGetBalance"
         | "synergy_stsGetBalances"
+        | "synergy_stsGetNftCollection"
+        | "synergy_stsGetNft"
+        | "synergy_stsGetNftsByOwner"
+        | "synergy_stsGetNftsByCollection"
+        | "synergy_stsGetMultiAssetCollection"
+        | "synergy_stsGetMultiAssetItem"
+        | "synergy_stsGetMultiAssetBalance"
+        | "synergy_stsGetMultiAssetBalances"
+        | "synergy_stsGetCredentialSchema"
+        | "synergy_stsGetCredential"
+        | "synergy_stsGetCredentialsBySubject"
+        | "synergy_stsVerifyCredential"
+        | "synergy_stsGetCredentialStatus"
         | "synergy_stsGetEvents"
         | "sts_getNativeAsset"
         | "sts_getTokens"
         | "sts_getToken"
         | "sts_getBalance"
         | "sts_getBalances"
+        | "sts_getNftCollection"
+        | "sts_getNft"
+        | "sts_getNftsByOwner"
+        | "sts_getNftsByCollection"
+        | "sts_getMultiAssetCollection"
+        | "sts_getMultiAssetItem"
+        | "sts_getMultiAssetBalance"
+        | "sts_getMultiAssetBalances"
+        | "sts_getCredentialSchema"
+        | "sts_getCredential"
+        | "sts_getCredentialsBySubject"
+        | "sts_verifyCredential"
+        | "sts_getCredentialStatus"
+        | "sts_get_nft_collection"
+        | "sts_get_nft"
+        | "sts_get_nfts_by_owner"
+        | "sts_get_nfts_by_collection"
+        | "sts_get_multi_asset_collection"
+        | "sts_get_multi_asset_item"
+        | "sts_get_multi_asset_balance"
+        | "sts_get_multi_asset_balances"
+        | "sts_get_credential_schema"
+        | "sts_get_credential"
+        | "sts_get_credentials_by_subject"
+        | "sts_verify_credential"
+        | "sts_get_credential_status"
         | "sts_getEvents"
         | "synergy_getTopValidators"
         | "synergy_getBlockRange"
@@ -4961,6 +5090,7 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_getTransactionFees"
         | "synergy_getFeeCollectorBalance"
         | "synergy_getFeeCollectorDeposits"
+        | "synergy_getBurnLedger"
         | "synergy_gasPrice"
         | "synergy_getLogs"
         | "synergy_getCode"
@@ -4981,6 +5111,8 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_getEpochFeeDistribution"
         | "synergy_getClusterRewardEscrow"
         | "synergy_getTreasuryRecovery"
+        | "synergy_checkRewardInvariants"
+        | "synergy_debugRewardsCheckInvariants"
         | "synergy_getValidatorPerformance"
         | "synergy_getValidatorQueue"
         | "synergy_getValidatorSlashingHistory"
@@ -6117,6 +6249,40 @@ fn sts_rpc_owner_param(params: &Value, array_index: usize) -> Option<String> {
         .or_else(|| rpc_string_param(params, "account", array_index))
 }
 
+fn sts_rpc_collection_param(params: &Value, array_index: usize) -> Option<String> {
+    rpc_string_param(params, "collection", array_index)
+        .or_else(|| rpc_string_param(params, "collection_id", array_index))
+        .or_else(|| rpc_string_param(params, "collectionId", array_index))
+        .or_else(|| rpc_string_param(params, "collection_address", array_index))
+        .or_else(|| rpc_string_param(params, "collectionAddress", array_index))
+}
+
+fn sts_rpc_nft_param(params: &Value, array_index: usize) -> Option<String> {
+    rpc_string_param(params, "nft", array_index)
+        .or_else(|| rpc_string_param(params, "nft_id", array_index))
+        .or_else(|| rpc_string_param(params, "nftId", array_index))
+        .or_else(|| rpc_string_param(params, "nft_address", array_index))
+        .or_else(|| rpc_string_param(params, "nftAddress", array_index))
+}
+
+fn sts_rpc_credential_param(params: &Value, array_index: usize) -> Option<String> {
+    rpc_string_param(params, "credential", array_index)
+        .or_else(|| rpc_string_param(params, "credential_id", array_index))
+        .or_else(|| rpc_string_param(params, "credentialId", array_index))
+}
+
+fn sts_rpc_schema_param(params: &Value, array_index: usize) -> Option<String> {
+    rpc_string_param(params, "schema", array_index)
+        .or_else(|| rpc_string_param(params, "schema_id", array_index))
+        .or_else(|| rpc_string_param(params, "schemaId", array_index))
+}
+
+fn sts_rpc_issuer_param(params: &Value, array_index: usize) -> Option<String> {
+    rpc_string_param(params, "issuer", array_index)
+        .or_else(|| rpc_string_param(params, "issuer_address", array_index))
+        .or_else(|| rpc_string_param(params, "issuerAddress", array_index))
+}
+
 fn sts_tokens_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
     let chain = chain.lock().unwrap();
     match sts_state_from_snapshot_or_chain(&chain) {
@@ -6277,6 +6443,412 @@ fn sts_balances_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
                 "replay": sts_replay_metadata_json(&report),
             })
         }
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_nft_collection_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(collection_ref) = sts_rpc_collection_param(params, 0) else {
+        return json!({"success": false, "error": "Missing collection parameter"});
+    };
+    let chain = chain.lock().unwrap();
+    match sts_state_from_snapshot_or_chain(&chain) {
+        Ok(report) => match report.state.nft_collection(&collection_ref) {
+            Some(collection) => json!({
+                "success": true,
+                "source": report.source,
+                "item": sts_nft_collection_item_json(collection),
+                "replay": sts_replay_metadata_json(&report),
+            }),
+            None => json!({
+                "success": false,
+                "error": "STS NFT collection not found",
+                "collection_ref": collection_ref,
+                "replay": sts_replay_metadata_json(&report),
+            }),
+        },
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_nft_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(nft_ref) = sts_rpc_nft_param(params, 0) else {
+        return json!({"success": false, "error": "Missing nft parameter"});
+    };
+    let chain = chain.lock().unwrap();
+    match sts_state_from_snapshot_or_chain(&chain) {
+        Ok(report) => match report.state.nft(&nft_ref) {
+            Some(nft) => json!({
+                "success": true,
+                "source": report.source,
+                "item": sts_nft_item_json(nft),
+                "replay": sts_replay_metadata_json(&report),
+            }),
+            None => json!({
+                "success": false,
+                "error": "STS NFT not found",
+                "nft_ref": nft_ref,
+                "replay": sts_replay_metadata_json(&report),
+            }),
+        },
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_nfts_by_owner_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(owner) = sts_rpc_owner_param(params, 0) else {
+        return json!({"success": false, "error": "Missing owner/address parameter"});
+    };
+    let limit = rpc_u64_param(params, "limit", 1).unwrap_or(100).min(1_000) as usize;
+    let chain = chain.lock().unwrap();
+    match sts_state_from_snapshot_or_chain(&chain) {
+        Ok(report) => {
+            let mut items = report
+                .state
+                .nfts_for_owner(&owner)
+                .into_iter()
+                .map(sts_nft_item_json)
+                .collect::<Vec<_>>();
+            if items.len() > limit {
+                items.truncate(limit);
+            }
+            json!({
+                "success": true,
+                "source": report.source,
+                "owner": owner,
+                "items": items,
+                "count": items.len(),
+                "replay": sts_replay_metadata_json(&report),
+            })
+        }
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_nfts_by_collection_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(collection_ref) = sts_rpc_collection_param(params, 0) else {
+        return json!({"success": false, "error": "Missing collection parameter"});
+    };
+    let limit = rpc_u64_param(params, "limit", 1).unwrap_or(100).min(1_000) as usize;
+    let chain = chain.lock().unwrap();
+    match sts_state_from_snapshot_or_chain(&chain) {
+        Ok(report) => {
+            let mut items = report
+                .state
+                .nfts_for_collection(&collection_ref)
+                .into_iter()
+                .map(sts_nft_item_json)
+                .collect::<Vec<_>>();
+            if items.len() > limit {
+                items.truncate(limit);
+            }
+            json!({
+                "success": true,
+                "source": report.source,
+                "collection_ref": collection_ref,
+                "items": items,
+                "count": items.len(),
+                "replay": sts_replay_metadata_json(&report),
+            })
+        }
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_multi_asset_collection_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(collection_ref) = sts_rpc_collection_param(params, 0) else {
+        return json!({"success": false, "error": "Missing collection parameter"});
+    };
+    let chain = chain.lock().unwrap();
+    match sts_state_from_snapshot_or_chain(&chain) {
+        Ok(report) => match report.state.multi_asset_collection(&collection_ref) {
+            Some(collection) => json!({
+                "success": true,
+                "source": report.source,
+                "item": sts_multi_asset_collection_item_json(collection),
+                "replay": sts_replay_metadata_json(&report),
+            }),
+            None => json!({
+                "success": false,
+                "error": "STS multi-asset collection not found",
+                "collection_ref": collection_ref,
+                "replay": sts_replay_metadata_json(&report),
+            }),
+        },
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_multi_asset_item_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(collection_ref) = sts_rpc_collection_param(params, 0) else {
+        return json!({"success": false, "error": "Missing collection parameter"});
+    };
+    let Some(item_id) =
+        rpc_u64_param(params, "item_id", 1).or_else(|| rpc_u64_param(params, "itemId", 1))
+    else {
+        return json!({"success": false, "error": "Missing item_id parameter"});
+    };
+    let chain = chain.lock().unwrap();
+    match sts_state_from_snapshot_or_chain(&chain) {
+        Ok(report) => match report.state.multi_asset_item(&collection_ref, item_id) {
+            Some(item) => json!({
+                "success": true,
+                "source": report.source,
+                "item": sts_multi_asset_item_item_json(item),
+                "replay": sts_replay_metadata_json(&report),
+            }),
+            None => json!({
+                "success": false,
+                "error": "STS multi-asset item not found",
+                "collection_ref": collection_ref,
+                "item_id": item_id,
+                "replay": sts_replay_metadata_json(&report),
+            }),
+        },
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_multi_asset_balance_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(owner) = sts_rpc_owner_param(params, 0) else {
+        return json!({"success": false, "error": "Missing owner/address parameter"});
+    };
+    let Some(collection_ref) = sts_rpc_collection_param(params, 1) else {
+        return json!({"success": false, "error": "Missing collection parameter"});
+    };
+    let Some(item_id) =
+        rpc_u64_param(params, "item_id", 2).or_else(|| rpc_u64_param(params, "itemId", 2))
+    else {
+        return json!({"success": false, "error": "Missing item_id parameter"});
+    };
+    let chain = chain.lock().unwrap();
+    match sts_state_from_snapshot_or_chain(&chain) {
+        Ok(report) => {
+            let Some(collection) = report.state.multi_asset_collection(&collection_ref) else {
+                return json!({
+                    "success": false,
+                    "error": "STS multi-asset collection not found",
+                    "collection_ref": collection_ref,
+                    "replay": sts_replay_metadata_json(&report),
+                });
+            };
+            let balance =
+                report
+                    .state
+                    .multi_asset_balance(&owner, &collection.collection_id, item_id);
+            json!({
+                "success": true,
+                "source": report.source,
+                "owner": owner,
+                "collection_id": collection.collection_id,
+                "collection_address": collection.collection_address,
+                "item_id": item_id,
+                "amount": u128_rpc_value(balance),
+                "replay": sts_replay_metadata_json(&report),
+            })
+        }
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_multi_asset_balances_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(owner) = sts_rpc_owner_param(params, 0) else {
+        return json!({"success": false, "error": "Missing owner/address parameter"});
+    };
+    let collection_ref = sts_rpc_collection_param(params, 1);
+    let chain = chain.lock().unwrap();
+    match sts_state_from_snapshot_or_chain(&chain) {
+        Ok(report) => {
+            let items = report
+                .state
+                .multi_asset_balances_for_owner(&owner, collection_ref.as_deref())
+                .into_iter()
+                .map(sts_multi_asset_balance_entry_json)
+                .collect::<Vec<_>>();
+            json!({
+                "success": true,
+                "source": report.source,
+                "owner": owner,
+                "collection_ref": collection_ref,
+                "items": items,
+                "count": items.len(),
+                "replay": sts_replay_metadata_json(&report),
+            })
+        }
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_credential_schema_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(issuer) = sts_rpc_issuer_param(params, 0) else {
+        return json!({"success": false, "error": "Missing issuer parameter"});
+    };
+    let Some(schema_id) = sts_rpc_schema_param(params, 1) else {
+        return json!({"success": false, "error": "Missing schema_id parameter"});
+    };
+    let chain = chain.lock().unwrap();
+    match sts_state_from_snapshot_or_chain(&chain) {
+        Ok(report) => match report.state.credential_schema(&issuer, &schema_id) {
+            Some(schema) => json!({
+                "success": true,
+                "source": report.source,
+                "item": sts_credential_schema_item_json(schema),
+                "replay": sts_replay_metadata_json(&report),
+            }),
+            None => json!({
+                "success": false,
+                "error": "STS credential schema not found",
+                "issuer": issuer,
+                "schema_id": schema_id,
+                "replay": sts_replay_metadata_json(&report),
+            }),
+        },
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_credential_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(credential_id) = sts_rpc_credential_param(params, 0) else {
+        return json!({"success": false, "error": "Missing credential parameter"});
+    };
+    let chain = chain.lock().unwrap();
+    match sts_state_from_snapshot_or_chain(&chain) {
+        Ok(report) => match report.state.credential(&credential_id) {
+            Some(credential) => json!({
+                "success": true,
+                "source": report.source,
+                "item": sts_credential_item_json(credential),
+                "replay": sts_replay_metadata_json(&report),
+            }),
+            None => json!({
+                "success": false,
+                "error": "STS credential not found",
+                "credential_id": credential_id,
+                "replay": sts_replay_metadata_json(&report),
+            }),
+        },
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_credentials_by_subject_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(subject) = rpc_string_param(params, "subject", 0)
+        .or_else(|| rpc_string_param(params, "subject_commitment", 0))
+        .or_else(|| rpc_string_param(params, "subjectCommitment", 0))
+    else {
+        return json!({"success": false, "error": "Missing subject or subject_commitment parameter"});
+    };
+    let chain = chain.lock().unwrap();
+    match sts_state_from_snapshot_or_chain(&chain) {
+        Ok(report) => {
+            let items = report
+                .state
+                .credentials_for_subject(&subject)
+                .into_iter()
+                .map(sts_credential_item_json)
+                .collect::<Vec<_>>();
+            json!({
+                "success": true,
+                "source": report.source,
+                "subject": subject,
+                "items": items,
+                "count": items.len(),
+                "replay": sts_replay_metadata_json(&report),
+            })
+        }
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_verify_credential_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(subject) = rpc_string_param(params, "subject", 0)
+        .or_else(|| rpc_string_param(params, "subject_commitment", 0))
+        .or_else(|| rpc_string_param(params, "subjectCommitment", 0))
+    else {
+        return json!({"success": false, "error": "Missing subject or subject_commitment parameter"});
+    };
+    let Some(schema_id) = sts_rpc_schema_param(params, 1) else {
+        return json!({"success": false, "error": "Missing schema_id parameter"});
+    };
+    let Some(issuer) = sts_rpc_issuer_param(params, 2) else {
+        return json!({"success": false, "error": "Missing issuer parameter"});
+    };
+    let timestamp = rpc_u64_param(params, "timestamp", 3).unwrap_or_else(current_unix_seconds);
+    let chain = chain.lock().unwrap();
+    match sts_state_from_snapshot_or_chain(&chain) {
+        Ok(report) => {
+            let matching = report
+                .state
+                .credentials_for_subject(&subject)
+                .into_iter()
+                .find(|credential| {
+                    credential.schema_id == schema_id && credential.issuer == issuer
+                });
+            match matching {
+                Some(credential) => match report
+                    .state
+                    .verify_credential_active_at(&credential.credential_id, timestamp)
+                {
+                    Ok(()) => json!({
+                        "success": true,
+                        "source": report.source,
+                        "verified": true,
+                        "credential_id": credential.credential_id,
+                        "status": credential.status,
+                        "timestamp": timestamp,
+                        "replay": sts_replay_metadata_json(&report),
+                    }),
+                    Err(error) => json!({
+                        "success": true,
+                        "source": report.source,
+                        "verified": false,
+                        "credential_id": credential.credential_id,
+                        "status": credential.status,
+                        "error": error.to_string(),
+                        "timestamp": timestamp,
+                        "replay": sts_replay_metadata_json(&report),
+                    }),
+                },
+                None => json!({
+                    "success": true,
+                    "source": report.source,
+                    "verified": false,
+                    "error": "credential not found",
+                    "subject": subject,
+                    "schema_id": schema_id,
+                    "issuer": issuer,
+                    "timestamp": timestamp,
+                    "replay": sts_replay_metadata_json(&report),
+                }),
+            }
+        }
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_credential_status_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(credential_id) = sts_rpc_credential_param(params, 0) else {
+        return json!({"success": false, "error": "Missing credential parameter"});
+    };
+    let chain = chain.lock().unwrap();
+    match sts_state_from_snapshot_or_chain(&chain) {
+        Ok(report) => match report.state.credential(&credential_id) {
+            Some(credential) => json!({
+                "success": true,
+                "source": report.source,
+                "credential_id": credential.credential_id,
+                "status": credential.status,
+                "expires_at": credential.expires_at,
+                "revoked_at": credential.revoked_at,
+                "replay": sts_replay_metadata_json(&report),
+            }),
+            None => json!({
+                "success": false,
+                "error": "STS credential not found",
+                "credential_id": credential_id,
+                "replay": sts_replay_metadata_json(&report),
+            }),
+        },
         Err(error) => sts_unavailable_json(error.message),
     }
 }
@@ -6511,6 +7083,148 @@ fn sts_fungible_balance_json(
     })
 }
 
+fn sts_nft_collection_item_json(collection: &crate::sts::NftCollection) -> Value {
+    json!({
+        "asset_kind": "nft_collection",
+        "collection_id": collection.collection_id,
+        "collection_address": collection.collection_address,
+        "class": collection.class,
+        "class_prefix": collection.class.prefix(),
+        "creator": collection.creator,
+        "name": collection.name,
+        "symbol": collection.symbol,
+        "metadata_uri": collection.metadata_uri,
+        "metadata_hash": collection.metadata_hash,
+        "metadata_mutable": collection.metadata_mutable,
+        "image_uri": collection.image_uri,
+        "image_hash": collection.image_hash,
+        "image_locked": collection.image_locked,
+        "authorities": collection.authorities,
+        "royalty_basis_points": collection.royalty_basis_points,
+        "royalty_recipient": collection.royalty_recipient,
+        "verified": collection.verified,
+        "transferable": collection.transferable,
+        "requires_issuer_approval": collection.requires_issuer_approval,
+        "next_serial_number": collection.next_serial_number,
+        "created_at": collection.created_at,
+        "updated_at": collection.updated_at,
+    })
+}
+
+fn sts_nft_item_json(nft: &crate::sts::NftInstance) -> Value {
+    json!({
+        "asset_kind": "nft",
+        "nft_id": nft.nft_id,
+        "nft_address": nft.nft_address,
+        "collection_id": nft.collection_id,
+        "class": nft.class,
+        "class_prefix": nft.class.prefix(),
+        "serial_number": nft.serial_number,
+        "owner": nft.owner,
+        "metadata_uri": nft.metadata_uri,
+        "metadata_hash": nft.metadata_hash,
+        "metadata_mutable": nft.metadata_mutable,
+        "burned": nft.burned,
+        "frozen": nft.frozen,
+        "transferable": nft.transferable,
+        "requires_issuer_approval": nft.requires_issuer_approval,
+        "expires_at": nft.expires_at,
+        "revoked": nft.revoked,
+        "revoked_at": nft.revoked_at,
+        "used": nft.used,
+        "used_at": nft.used_at,
+        "issuer_authority": nft.issuer_authority,
+        "transfer_authority": nft.transfer_authority,
+        "created_at": nft.created_at,
+        "updated_at": nft.updated_at,
+    })
+}
+
+fn sts_multi_asset_collection_item_json(collection: &crate::sts::MultiAssetCollection) -> Value {
+    json!({
+        "asset_kind": "multi_asset_collection",
+        "collection_id": collection.collection_id,
+        "collection_address": collection.collection_address,
+        "creator": collection.creator,
+        "name": collection.name,
+        "symbol": collection.symbol,
+        "metadata_uri": collection.metadata_uri,
+        "metadata_hash": collection.metadata_hash,
+        "image_uri": collection.image_uri,
+        "image_hash": collection.image_hash,
+        "image_locked": collection.image_locked,
+        "authorities": collection.authorities,
+        "created_at": collection.created_at,
+        "updated_at": collection.updated_at,
+    })
+}
+
+fn sts_multi_asset_item_item_json(item: &crate::sts::MultiAssetItem) -> Value {
+    json!({
+        "asset_kind": "multi_asset_item",
+        "collection_id": item.collection_id,
+        "item_id": item.item_id,
+        "item_type": item.item_type,
+        "name": item.name,
+        "symbol": item.symbol,
+        "decimals": item.decimals,
+        "metadata_uri": item.metadata_uri,
+        "metadata_hash": item.metadata_hash,
+        "max_supply": item.max_supply.map(u128_rpc_value),
+        "total_supply": u128_rpc_value(item.total_supply),
+        "mint_authority": item.mint_authority,
+        "burn_authority": item.burn_authority,
+        "transfer_policy": item.transfer_policy,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+    })
+}
+
+fn sts_multi_asset_balance_entry_json(balance: &crate::sts::MultiAssetBalance) -> Value {
+    json!({
+        "asset_kind": "multi_asset_balance",
+        "owner": balance.owner,
+        "collection_id": balance.collection_id,
+        "item_id": balance.item_id,
+        "amount": u128_rpc_value(balance.amount),
+        "created_at": balance.created_at,
+        "updated_at": balance.updated_at,
+    })
+}
+
+fn sts_credential_schema_item_json(schema: &crate::sts::CredentialSchema) -> Value {
+    json!({
+        "asset_kind": "credential_schema",
+        "schema_id": schema.schema_id,
+        "issuer": schema.issuer,
+        "name": schema.name,
+        "description_hash": schema.description_hash,
+        "schema_hash": schema.schema_hash,
+        "active": schema.active,
+        "created_at": schema.created_at,
+        "updated_at": schema.updated_at,
+    })
+}
+
+fn sts_credential_item_json(credential: &crate::sts::CredentialRecord) -> Value {
+    json!({
+        "asset_kind": "credential",
+        "credential_id": credential.credential_id,
+        "issuer": credential.issuer,
+        "subject": credential.subject,
+        "subject_commitment": credential.subject_commitment,
+        "schema_id": credential.schema_id,
+        "credential_hash": credential.credential_hash,
+        "status": credential.status,
+        "issued_at": credential.issued_at,
+        "expires_at": credential.expires_at,
+        "revoked_at": credential.revoked_at,
+        "revocation_reason_hash": credential.revocation_reason_hash,
+        "transferable": credential.transferable,
+        "updated_at": credential.updated_at,
+    })
+}
+
 fn sts_event_json(event: &crate::sts::StsEvent) -> Value {
     json!({
         "event_type": event.event_type,
@@ -6522,6 +7236,13 @@ fn sts_event_json(event: &crate::sts::StsEvent) -> Value {
         "timestamp": event.timestamp,
         "attributes": event.attributes,
     })
+}
+
+fn current_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn fee_breakdown_json(breakdown: &crate::gas::NetworkFeeBreakdown) -> Value {
@@ -8773,6 +9494,7 @@ mod tests {
             "synergy_estimateFee",
             "synergy_getFeeCollector",
             "synergy_getFeeCollectorBalance",
+            "synergy_getBurnLedger",
         ] {
             enforce_rpc_exposure_policy(method, &context)
                 .unwrap_or_else(|error| panic!("{method} should be public: {error:?}"));
@@ -8822,6 +9544,25 @@ mod tests {
             identity["genesis_hash"],
             "f79011f2aaddd40b120d47ba723104fafe3c998d4a17097fae018914b95f1789"
         );
+    }
+
+    #[test]
+    fn burn_ledger_rpc_reports_canonical_burn_address() {
+        let tx_pool = Arc::new(Mutex::new(Vec::<Transaction>::new()));
+        let chain = Arc::new(Mutex::new(BlockChain::new()));
+        let validator_manager = Arc::new(ValidatorManager::new());
+
+        let ledger = handle_json_rpc(
+            "synergy_getBurnLedger",
+            json!(["SNRG"]),
+            &tx_pool,
+            &chain,
+            &validator_manager,
+        );
+
+        assert_eq!(ledger["assetId"], "SNRG");
+        assert_eq!(ledger["burnAddress"], crate::address::NETWORK_BURN_ADDRESS);
+        assert!(ledger["records"].is_array());
     }
 
     #[test]

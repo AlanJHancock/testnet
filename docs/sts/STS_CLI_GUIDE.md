@@ -6,6 +6,9 @@ Current scope in this branch:
 
 - Native SNRG identity inspection.
 - Fungible token payloads for `synb1`, `synb2`, and `synb3`.
+- NFT collection and instance payloads for `synn1` and `synn2`.
+- Multi-asset collection, item, balance, and batch payloads for `synj`.
+- Identity and credential payloads for `synk`.
 - Payload decode and gas/fee estimation.
 - Metadata-file hashing with SHA3-256.
 - Token image URI/hash attachment at creation and one-time post-create image setting.
@@ -42,7 +45,7 @@ Install a specific release tag:
 
 ```bash
 curl -fsSL https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/latest/download/install-synergy-sts.sh \
-  | bash -s -- --version synergy-sts-v15.0.11
+  | bash -s -- --version synergy-sts-v15.0.12
 ```
 
 Install to a different directory:
@@ -70,7 +73,7 @@ The installer verifies release `.sha256` checksums by default. Advanced users ca
 
 ```bash
 ./install-synergy-sts.sh \
-  --url https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/download/synergy-sts-v15.0.11/synergy-sts-linux-amd64 \
+  --url https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/download/synergy-sts-v15.0.12/synergy-sts-linux-amd64 \
   --sha256 <expected_sha256>
 ```
 
@@ -165,6 +168,19 @@ Supported method names:
 - `sts_getToken` / `synergy_stsGetToken`
 - `sts_getBalance` / `synergy_stsGetBalance`
 - `sts_getBalances` / `synergy_stsGetBalances`
+- `sts_getNftCollection` / `synergy_stsGetNftCollection`
+- `sts_getNft` / `synergy_stsGetNft`
+- `sts_getNftsByOwner` / `synergy_stsGetNftsByOwner`
+- `sts_getNftsByCollection` / `synergy_stsGetNftsByCollection`
+- `sts_getMultiAssetCollection` / `synergy_stsGetMultiAssetCollection`
+- `sts_getMultiAssetItem` / `synergy_stsGetMultiAssetItem`
+- `sts_getMultiAssetBalance` / `synergy_stsGetMultiAssetBalance`
+- `sts_getMultiAssetBalances` / `synergy_stsGetMultiAssetBalances`
+- `sts_getCredentialSchema` / `synergy_stsGetCredentialSchema`
+- `sts_getCredential` / `synergy_stsGetCredential`
+- `sts_getCredentialsBySubject` / `synergy_stsGetCredentialsBySubject`
+- `sts_verifyCredential` / `synergy_stsVerifyCredential`
+- `sts_getCredentialStatus` / `synergy_stsGetCredentialStatus`
 - `sts_getEvents` / `synergy_stsGetEvents`
 
 Examples:
@@ -185,9 +201,23 @@ curl -fsS "$SYNERGY_RPC_URL" \
 curl -fsS "$SYNERGY_RPC_URL" \
   -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":4,"method":"sts_getBalance","params":["synw1owner...","synb1..."]}'
+
+curl -fsS "$SYNERGY_RPC_URL" \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":5,"method":"sts_getNft","params":["synn1..."]}'
+
+curl -fsS "$SYNERGY_RPC_URL" \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":6,"method":"sts_getMultiAssetBalances","params":[{"owner":"synw1owner...","collection":"synj..."}]}'
+
+curl -fsS "$SYNERGY_RPC_URL" \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":7,"method":"sts_getCredentialStatus","params":["synk..."]}'
 ```
 
 `sts_getNativeAsset` always returns native SNRG with `token_address: null` and the 41-zero value only as `compatibility_placeholder_address`. STS fungible tokens return `asset_kind: "sts"` and a non-empty `synb*` `token_address`.
+
+The snake-case aliases such as `sts_get_nft` and `sts_get_multi_asset_balance` are also accepted for new NFT, multi-asset, and credential reads.
 
 ## Output Modes
 
@@ -337,6 +367,114 @@ Store token metadata on IPFS, Arweave, or HTTPS and pass its SHA3-256 hash with 
 ```
 
 Required protocol fields are `class`, `name`, `symbol`, `decimals`, `initial_supply`, `creator`, `creator_nonce`, and `created_at`. Recommended metadata fields are all fields shown above so Atlas, wallets, and future SDKs can present the token consistently.
+
+NFT collection metadata uses the same top-level structure with `"standard": "sts-nft-collection-v1"` and an `asset.class` of `nf1` or `nf2`. NFT instance metadata should include an `attributes` array, optional `animation_url`, and any off-chain media checksums:
+
+```json
+{
+  "schema": "synergy.sts.nft.metadata.v1",
+  "chain_id": 1264,
+  "network": "testnet",
+  "standard": "sts-nft-instance-v1",
+  "collection": {
+    "collection_id": "synn1...",
+    "collection_address": "synn1...",
+    "name": "Synergy Badges",
+    "symbol": "SBADGE"
+  },
+  "asset": {
+    "nft_id": "synn1...",
+    "nft_address": "synn1...",
+    "serial_number": 1,
+    "name": "Genesis Badge #1",
+    "description": "Short public description.",
+    "image": "ipfs://bafy.../badge.png",
+    "image_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "animation_url": "",
+    "external_url": "https://example.com/badges/1",
+    "attributes": [
+      {"trait_type": "tier", "value": "genesis"},
+      {"trait_type": "transferable", "value": true}
+    ]
+  },
+  "policy": {
+    "transferable": true,
+    "requires_issuer_approval": false,
+    "expires_at": null,
+    "royalty_basis_points": 250,
+    "royalty_recipient": "synw1..."
+  },
+  "checksums": {
+    "metadata_sha3_256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "image_sha3_256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  }
+}
+```
+
+Multi-asset metadata uses `"standard": "sts-multi-asset-v1"`. Collection metadata describes the inventory namespace; each item can carry its own metadata URI/hash:
+
+```json
+{
+  "schema": "synergy.sts.multi_asset.metadata.v1",
+  "chain_id": 1264,
+  "network": "testnet",
+  "standard": "sts-multi-asset-v1",
+  "collection": {
+    "collection_id": "synj...",
+    "collection_address": "synj...",
+    "name": "Game Inventory",
+    "symbol": "GINV",
+    "image": "ipfs://bafy.../collection.png",
+    "image_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "items": [
+    {
+      "item_id": 1,
+      "item_type": "fungible",
+      "name": "Energy Cell",
+      "symbol": "CELL",
+      "decimals": 0,
+      "max_supply_base_units": "1000000",
+      "transfer_policy": "open",
+      "metadata_uri": "ipfs://bafy.../cell.json",
+      "metadata_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
+  "checksums": {
+    "metadata_sha3_256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}
+```
+
+Credential metadata must avoid private data. Put only schema hashes, credential hashes, and subject commitments on chain:
+
+```json
+{
+  "schema": "synergy.sts.credential.metadata.v1",
+  "chain_id": 1264,
+  "network": "testnet",
+  "standard": "sts-credential-v1",
+  "issuer": {
+    "address": "synw1...",
+    "name": "Issuer Name",
+    "website": "https://issuer.example"
+  },
+  "credential": {
+    "credential_id": "synk...",
+    "schema_id": "kyc-basic-v1",
+    "schema_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "credential_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "subject_commitment": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "status": "active",
+    "expires_at": null
+  },
+  "privacy": {
+    "contains_pii": false,
+    "on_chain_subject_is_commitment": true,
+    "raw_claims_stored_off_chain": true
+  }
+}
+```
 
 ## Token Images
 
@@ -522,6 +660,161 @@ synergy-sts token burn \
   --out ./burn.json
 ```
 
+## NFT Collections And Instances
+
+Create an NF1 collection:
+
+```bash
+synergy-sts nft create-collection \
+  --network testnet \
+  --class nf1 \
+  --name "Synergy Badges" \
+  --symbol SBADGE \
+  --metadata-uri ipfs://bafy.../collection.json \
+  --metadata-file ./collection.json \
+  --image-uri ipfs://bafy.../collection.png \
+  --image-file ./collection.png \
+  --royalty-bps 250 \
+  --royalty-recipient synw1royalty00000000000000000000000 \
+  --from synw1creator0000000000000000000000000 \
+  --creator-nonce 10 \
+  --out ./badge-collection.json
+```
+
+Create an NF2 controlled collection:
+
+```bash
+synergy-sts nft create-collection \
+  --network testnet \
+  --class nf2 \
+  --name "Access Passes" \
+  --symbol PASS \
+  --metadata-uri ipfs://bafy.../passes.json \
+  --metadata-file ./passes.json \
+  --requires-issuer-approval \
+  --from synw1issuer0000000000000000000000000 \
+  --creator-nonce 11 \
+  --out ./passes-collection.json
+```
+
+Mint an NFT:
+
+```bash
+synergy-sts nft mint \
+  --network testnet \
+  --collection synn1... \
+  --to synw1owner00000000000000000000000000 \
+  --metadata-uri ipfs://bafy.../badge-1.json \
+  --metadata-file ./badge-1.json \
+  --from synw1creator0000000000000000000000000 \
+  --out ./badge-1-mint.json
+```
+
+Transfer, burn, and controlled lifecycle commands:
+
+```bash
+synergy-sts nft transfer --network testnet --nft synn1... --from synw1owner... --to synw1next...
+synergy-sts nft burn --network testnet --nft synn1... --from synw1owner...
+synergy-sts nft freeze --network testnet --nft synn2... --from synw1issuer...
+synergy-sts nft thaw --network testnet --nft synn2... --from synw1issuer...
+synergy-sts nft revoke --network testnet --nft synn2... --from synw1issuer...
+synergy-sts nft use --network testnet --nft synn2... --from synw1owner...
+synergy-sts nft update-metadata --network testnet --nft synn1... --metadata-uri ipfs://bafy.../updated.json --metadata-file ./updated.json --from synw1metadata...
+synergy-sts nft verify-collection --network testnet --collection synn1... --from synw1collectionauthority...
+```
+
+NF1 assets are standard transferable NFTs. NF2 assets can enforce issuer approval, expiry, revocation, freeze/thaw, and single-use status. NFT IDs and collection IDs are deterministic `synn1` or `synn2` Bech32m object IDs; they are not signable wallet addresses.
+
+## Multi-Asset Collections
+
+Create a multi-asset collection:
+
+```bash
+synergy-sts ma create \
+  --network testnet \
+  --name "Game Inventory" \
+  --symbol GINV \
+  --metadata-uri ipfs://bafy.../inventory.json \
+  --metadata-file ./inventory.json \
+  --image-uri ipfs://bafy.../inventory.png \
+  --image-file ./inventory.png \
+  --from synw1creator0000000000000000000000000 \
+  --creator-nonce 20 \
+  --out ./inventory-create.json
+```
+
+Create items inside the collection:
+
+```bash
+synergy-sts ma create-item \
+  --network testnet \
+  --collection synj... \
+  --item-id 1 \
+  --type fungible \
+  --name "Energy Cell" \
+  --symbol CELL \
+  --decimals 0 \
+  --max-supply 1000000 \
+  --transfer-policy open \
+  --metadata-uri ipfs://bafy.../cell.json \
+  --metadata-file ./cell.json \
+  --from synw1creator0000000000000000000000000 \
+  --out ./cell-create.json
+```
+
+Mint, transfer, burn, and batch operations:
+
+```bash
+synergy-sts ma mint --network testnet --collection synj... --item-id 1 --amount 100 --to synw1owner... --from synw1creator...
+synergy-sts ma transfer --network testnet --collection synj... --item-id 1 --amount 10 --from synw1owner... --to synw1next...
+synergy-sts ma burn --network testnet --collection synj... --item-id 1 --amount 5 --from synw1owner...
+synergy-sts ma batch-mint --network testnet --collection synj... --item 1:100 --item 2:1 --to synw1owner... --from synw1creator...
+synergy-sts ma batch-transfer --network testnet --collection synj... --item 1:10 --item 2:1 --from synw1owner... --to synw1next...
+synergy-sts ma batch-burn --network testnet --collection synj... --item 1:5 --item 2:1 --from synw1owner...
+```
+
+Batch multi-asset operations are atomic in the runtime: if any item in the batch fails policy, supply, balance, or duplication checks, the whole batch fails.
+
+## Credentials
+
+Create a credential schema:
+
+```bash
+synergy-sts credential schema create \
+  --network testnet \
+  --schema-id kyc-basic-v1 \
+  --name "KYC Basic" \
+  --schema-hash aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+  --description-hash bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+  --from synw1issuer0000000000000000000000000 \
+  --out ./schema-create.json
+```
+
+Issue a credential using a subject address or a precomputed subject commitment:
+
+```bash
+synergy-sts credential issue \
+  --network testnet \
+  --schema-id kyc-basic-v1 \
+  --subject synw1subject000000000000000000000000 \
+  --credential-hash cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc \
+  --expires-at 1893456000 \
+  --from synw1issuer0000000000000000000000000 \
+  --out ./credential-issue.json
+```
+
+Manage credential status:
+
+```bash
+synergy-sts credential verify-status --network testnet --credential synk... --from synw1issuer...
+synergy-sts credential suspend --network testnet --credential synk... --from synw1issuer...
+synergy-sts credential restore --network testnet --credential synk... --from synw1issuer...
+synergy-sts credential revoke --network testnet --credential synk... --reason-hash dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd --from synw1issuer...
+synergy-sts credential expire --network testnet --credential synk... --from synw1issuer...
+```
+
+Credential IDs are non-transferable `synk` object IDs. They are derived from chain ID, issuer, subject commitment, schema ID, credential hash, and issue timestamp.
+
 ## Payload Shape
 
 STS payloads are JSON encoded under a binary prefix before being hex encoded.
@@ -578,12 +871,18 @@ The CLI fails closed when:
 - Name is empty, longer than 64 ASCII bytes, or impersonates `SNRG`/`Synergy`.
 - Symbol contains `SNRG`, duplicates an existing STS token symbol in state, or attempts native-token impersonation.
 - Mint authority exists without a bounded `--max-supply`.
-- Metadata mutability, updateable metadata, allowlists, denylists, or transfer approvals are requested before full protocol enforcement exists.
+- Fungible metadata mutability, allowlists, denylists, or transfer approvals are requested before full protocol enforcement exists.
 - B3 transfer fee exceeds 1000 bps.
 - A create payload is signed by a wallet other than the declared creator.
+- NFT collection or instance IDs do not use the matching `synn1` or `synn2` Bech32m prefix.
+- NFT royalties exceed 10000 bps or omit a royalty recipient when royalties are enabled.
+- Multi-asset collection IDs are not valid `synj` object IDs.
+- Multi-asset batch commands omit `--item`, duplicate item IDs, or use zero amounts.
+- Credential IDs are not valid `synk` object IDs.
+- Credential schema, credential, subject commitment, or reason hashes are not lowercase SHA3-256 hex.
 
 ## Current Limitations
 
 - `synergy-sts` currently builds and inspects payload artifacts. It does not submit them directly.
 - Signing and RPC submission must use the canonical Synergy transaction tooling once the STS wrapper flow is finalized.
-- NFT, multi-asset, and credential CLI commands are planned but not yet implemented in this binary.
+- Atlas currently auto-materializes finalized STS fungible token creates in the public token registry. NFT, multi-asset, and credential explorer views require the expanded Atlas index/API pass after this runtime slice is deployed.
