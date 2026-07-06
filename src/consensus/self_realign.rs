@@ -143,6 +143,21 @@ pub fn snapshot_class_allows_role(snapshot_class: &str, role: &str) -> bool {
     let role = normalize_snapshot_role(role);
     supported.iter().any(|allowed| allowed == &role)
 }
+
+pub fn snapshot_producer_role_is_authorized(role: &str) -> bool {
+    matches!(
+        normalize_snapshot_role(role).as_str(),
+        "validator"
+            | "archive"
+            | "archive_node"
+            | "archive_validator"
+            | "archive_validator_non_consensus"
+            | "archive_observer"
+            | "snapshot_authority"
+            | "explorer_indexer"
+            | "atlas_indexer"
+    )
+}
 const SNAPSHOT_FORBIDDEN_PATH_FRAGMENTS: &[&str] = &[
     "config",
     "node.env",
@@ -380,6 +395,7 @@ pub struct SnapshotVerificationReport {
     pub errors: Vec<String>,
     pub manifest_hash: Option<String>,
     pub snapshot_class: String,
+    pub source_role: String,
     pub allowed_restore_roles: Vec<String>,
     pub snapshot_height: u64,
     pub committed_qc_height: u64,
@@ -1205,9 +1221,8 @@ pub fn verify_signed_snapshot_manifest(
     if manifest.source_node_id.trim().is_empty() || manifest.source_node_id == "unknown-validator" {
         errors.push("snapshot producer identity is invalid".to_string());
     }
-    match manifest.source_role.as_str() {
-        "VALIDATOR" | "ARCHIVE" | "ARCHIVE_NODE" | "EXPLORER_INDEXER" => {}
-        _ => errors.push("snapshot producer role is not authorized".to_string()),
+    if !snapshot_producer_role_is_authorized(&manifest.source_role) {
+        errors.push("snapshot producer role is not authorized".to_string());
     }
     if manifest.runtime_checksum.trim().is_empty() || manifest.runtime_checksum == "unknown" {
         errors.push("snapshot runtime checksum is missing".to_string());
@@ -1264,6 +1279,7 @@ pub fn verify_signed_snapshot_manifest(
         errors,
         manifest_hash,
         snapshot_class: normalized_class,
+        source_role: manifest.source_role.clone(),
         allowed_restore_roles: manifest
             .allowed_restore_roles
             .iter()
@@ -2422,6 +2438,21 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.contains("producer role")));
+    }
+
+    #[test]
+    fn snapshot_accepts_archive_validator_source_role_aliases() {
+        for role in [
+            "ARCHIVE_VALIDATOR",
+            "archive-validator",
+            "archive_validator_non_consensus",
+            "archive observer",
+        ] {
+            assert!(
+                snapshot_producer_role_is_authorized(role),
+                "source role {role} should be authorized"
+            );
+        }
     }
 
     #[test]
