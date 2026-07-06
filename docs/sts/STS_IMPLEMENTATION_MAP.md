@@ -10,6 +10,7 @@ This branch is `feature/native-sts-token-system-testnet`.
 
 - `src/sts.rs` defines the native STS wire payload, class discriminants, deterministic object ID derivation, fungible token registry, balances, snapshots, events, and policy checks.
 - `src/sts.rs` exposes registry, balance, and event query helpers so RPC/SDK/explorer callers resolve fungible assets by either `token_id` or `token_address` without duplicating STS state rules.
+- `src/sts.rs` persists finalized STS state in `data/sts_state.json`, including the latest finalized block height/hash and processed STS transaction outcomes, so compact hot-chain nodes can serve token reads without genesis replay.
 - `src/lib.rs` exposes `pub mod sts`.
 - `src/execution.rs` stores `StsState` inside `ExecutionState`, includes it in the deterministic state root, decodes STS payloads after Aegis authorization, charges native SNRG fees, and applies STS mutations atomically.
 - Native SNRG is represented as the gas asset with `token_address = null`; the 41-zero string `00000000000000000000000000000000000000000` is reserved only as a compatibility placeholder for string-only surfaces.
@@ -18,7 +19,8 @@ This branch is `feature/native-sts-token-system-testnet`.
 - `src/sts.rs` supports token image metadata at creation and `set_fungible_image`, which only the creator can execute and which locks the image after the first set.
 - `src/bin/synergy-sts.rs` provides a dedicated `synergy-sts` CLI for building native STS payloads for create, mint, transfer, burn, freeze, thaw, pause, unpause, clawback, snapshot, set-image, and native-info workflows.
 - The CLI emits `payload_hex` and payload JSON for signed transaction wrapping; it does not mutate chain state directly or call legacy token-manager RPC write methods.
-- `src/rpc/rpc_server.rs` exposes read-only STS RPC methods under both `sts_*` and `synergy_sts*` names. The methods rebuild STS view state from committed `synergy-sts-v1:` transaction data and fail closed when the hot chain is compacted before genesis.
+- `src/token.rs`, consensus finalization, and p2p sync apply finalized `synergy-sts-v1:` transaction data into the persisted STS snapshot, charge native SNRG network fees once, and keep failed STS attempts idempotent by transaction hash.
+- `src/rpc/rpc_server.rs` exposes read-only STS RPC methods under both `sts_*` and `synergy_sts*` names. The methods read finalized `data/sts_state.json` first and fall back to committed-chain replay only when a full genesis chain is available.
 - `.github/workflows/release-synergy-sts-cli.yml` publishes standalone macOS and Linux CLI binaries to `synergy-network-hq/synergy-sts-cli-releases`.
 - `scripts/install-synergy-sts.sh` installs the released CLI on macOS and Linux, verifies release checksums by default, supports pinned versions, and can also install from a local source checkout or an existing binary.
 - Atlas indexing support is implemented in `synergy-atlas`: the indexer decodes `synergy-sts-v1:` payloads, derives non-native `synb*` token addresses, materializes STS token definitions/events/balances/images, and the `/tokens` API merges STS assets into the token registry.
@@ -51,7 +53,6 @@ This branch is `feature/native-sts-token-system-testnet`.
 ## Follow-Up Integration
 
 - Add RPC methods that submit signed STS payload transactions instead of mutating token state directly.
-- Add persisted STS execution-state snapshots so read RPC does not need genesis-to-tip replay when hot-chain retention is enabled.
 - Add RPC-backed `synergy-sts --submit` flow after signed transaction wrapping is finalized.
 - Add SDK builders for `StsSignedPayload` and payload encoding.
 - Add wallet signing/submit support for STS payloads.
@@ -63,5 +64,5 @@ This branch is `feature/native-sts-token-system-testnet`.
 
 - Baseline `cargo test -p synergy-testnet` failed before STS implementation with one consensus test failure and five SynQ fixture failures caused by missing `Counter.compiled.synq`.
 - `cargo check -p synergy-testnet --bin synergy-sts` passes after this slice.
-- `cargo test -p synergy-testnet --lib sts::tests` passes with 12 focused STS tests.
+- `cargo test -p synergy-testnet --lib sts::tests` passes with 15 focused STS tests.
 - `cargo test -p synergy-testnet --bin synergy-sts` passes with 4 focused CLI tests.

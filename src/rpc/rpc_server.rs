@@ -265,9 +265,12 @@ struct CachedSimulation {
 
 #[derive(Debug, Clone)]
 struct StsReplayReport {
+    source: &'static str,
     state: crate::sts::StsState,
     chain_start_height: u64,
     latest_height: u64,
+    snapshot_block_hash: Option<String>,
+    snapshot_updated_at: Option<u64>,
     scanned_blocks: usize,
     scanned_transactions: usize,
     applied_transactions: usize,
@@ -2301,6 +2304,7 @@ fn handle_json_rpc(
                 .unwrap_or_default();
 
             let token_state_hash = stable_json_file_digest("data/token_state.json");
+            let sts_state_hash = stable_json_file_digest(crate::sts::STS_STATE_SNAPSHOT_PATH);
             let validator_registry_hash = stable_json_file_digest("data/validator_registry.json");
             let chain_state_hash =
                 canonical_value_digest(&serde_json::to_value(&chain.chain).unwrap_or(json!([])));
@@ -2309,6 +2313,9 @@ fn handle_json_rpc(
             let mut state_hasher = blake3::Hasher::new();
             state_hasher.update(latest_hash.as_bytes());
             if let Some(hash) = token_state_hash.as_ref() {
+                state_hasher.update(hash.as_bytes());
+            }
+            if let Some(hash) = sts_state_hash.as_ref() {
                 state_hasher.update(hash.as_bytes());
             }
             if let Some(hash) = validator_registry_hash.as_ref() {
@@ -2325,6 +2332,7 @@ fn handle_json_rpc(
                 "state_root": state_root,
                 "receipt_hash": receipt_hash,
                 "token_state_hash": token_state_hash,
+                "sts_state_hash": sts_state_hash,
                 "validator_registry_hash": validator_registry_hash,
                 "chain_state_hash": chain_state_hash
             })
@@ -6111,7 +6119,7 @@ fn sts_rpc_owner_param(params: &Value, array_index: usize) -> Option<String> {
 
 fn sts_tokens_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
     let chain = chain.lock().unwrap();
-    match sts_replay_from_chain(&chain) {
+    match sts_state_from_snapshot_or_chain(&chain) {
         Ok(report) => {
             let sts_items = report
                 .state
@@ -6124,7 +6132,7 @@ fn sts_tokens_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
             items.extend(sts_items.clone());
             json!({
                 "success": true,
-                "source": "committed_chain_replay",
+                "source": report.source,
                 "native": sts_native_asset_json(),
                 "sts": sts_items,
                 "items": items,
@@ -6149,11 +6157,11 @@ fn sts_token_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
     }
 
     let chain = chain.lock().unwrap();
-    match sts_replay_from_chain(&chain) {
+    match sts_state_from_snapshot_or_chain(&chain) {
         Ok(report) => match report.state.fungible_definition(&token_ref) {
             Some(definition) => json!({
                 "success": true,
-                "source": "committed_chain_replay",
+                "source": report.source,
                 "item": sts_fungible_definition_json(definition),
                 "replay": sts_replay_metadata_json(&report),
             }),
@@ -6193,7 +6201,7 @@ fn sts_balance_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
     }
 
     let chain = chain.lock().unwrap();
-    match sts_replay_from_chain(&chain) {
+    match sts_state_from_snapshot_or_chain(&chain) {
         Ok(report) => {
             let Some(definition) = report.state.fungible_definition(&token_ref) else {
                 return json!({
@@ -6212,7 +6220,7 @@ fn sts_balance_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
                 .unwrap_or(false);
             json!({
                 "success": true,
-                "source": "committed_chain_replay",
+                "source": report.source,
                 "asset_kind": "sts",
                 "owner": owner,
                 "token_id": definition.token_id,
@@ -6237,7 +6245,7 @@ fn sts_balances_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
         .get_balance(&owner, crate::sts::NATIVE_SNRG_SYMBOL);
 
     let chain = chain.lock().unwrap();
-    match sts_replay_from_chain(&chain) {
+    match sts_state_from_snapshot_or_chain(&chain) {
         Ok(report) => {
             let mut items = vec![json!({
                 "asset_kind": "native",
@@ -6262,7 +6270,7 @@ fn sts_balances_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
             );
             json!({
                 "success": true,
-                "source": "native_snrg_ledger_and_committed_chain_replay",
+                "source": format!("native_snrg_ledger_and_{}", report.source),
                 "owner": owner,
                 "items": items,
                 "count": items.len(),
@@ -6279,7 +6287,7 @@ fn sts_events_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
     let limit = rpc_u64_param(params, "limit", 2).unwrap_or(100).min(1_000) as usize;
 
     let chain = chain.lock().unwrap();
-    match sts_replay_from_chain(&chain) {
+    match sts_state_from_snapshot_or_chain(&chain) {
         Ok(report) => {
             let events = report
                 .state
@@ -6289,7 +6297,7 @@ fn sts_events_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
                 .collect::<Vec<_>>();
             json!({
                 "success": true,
-                "source": "committed_chain_replay",
+                "source": report.source,
                 "token_ref": token_ref,
                 "owner": owner,
                 "items": events,
@@ -6298,6 +6306,53 @@ fn sts_events_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
             })
         }
         Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_state_from_snapshot_or_chain(chain: &BlockChain) -> Result<StsReplayReport, RpcError> {
+    match crate::sts::load_sts_state_snapshot() {
+        Ok(Some(snapshot)) => {
+            let latest_height = chain
+                .last()
+                .map(|block| block.block_index)
+                .unwrap_or(snapshot.latest_block_height);
+            let applied_transactions = snapshot.processed_transactions.len();
+            let skipped_payloads = snapshot
+                .processed_transactions
+                .values()
+                .filter(|tx| tx.status != "applied")
+                .count();
+            let errors = snapshot
+                .processed_transactions
+                .iter()
+                .filter_map(|(tx_hash, tx)| {
+                    tx.error.as_ref().map(|error| {
+                        format!(
+                            "block {} tx {} skipped: {}",
+                            tx.block_height, tx_hash, error
+                        )
+                    })
+                })
+                .collect();
+            Ok(StsReplayReport {
+                source: "finalized_sts_snapshot",
+                state: snapshot.state,
+                chain_start_height: snapshot.latest_block_height,
+                latest_height,
+                snapshot_block_hash: Some(snapshot.latest_block_hash),
+                snapshot_updated_at: Some(snapshot.updated_at),
+                scanned_blocks: 0,
+                scanned_transactions: 0,
+                applied_transactions,
+                skipped_payloads,
+                errors,
+            })
+        }
+        Ok(None) => sts_replay_from_chain(chain),
+        Err(error) => Err(RpcError::new(
+            -32021,
+            format!("STS state unavailable: finalized STS snapshot is invalid: {error}"),
+        )),
     }
 }
 
@@ -6362,9 +6417,12 @@ fn sts_replay_from_chain(chain: &BlockChain) -> Result<StsReplayReport, RpcError
     }
 
     Ok(StsReplayReport {
+        source: "committed_chain_replay",
         state,
         chain_start_height: first_block.block_index,
         latest_height: chain.last().map(|block| block.block_index).unwrap_or(0),
+        snapshot_block_hash: None,
+        snapshot_updated_at: None,
         scanned_blocks: chain.chain.len(),
         scanned_transactions,
         applied_transactions,
@@ -6376,68 +6434,17 @@ fn sts_replay_from_chain(chain: &BlockChain) -> Result<StsReplayReport, RpcError
 fn extract_sts_payload_from_transaction_data(
     data: &str,
 ) -> Result<Option<crate::sts::StsSignedPayload>, String> {
-    let trimmed = data.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    if trimmed.starts_with(std::str::from_utf8(crate::sts::STS_PAYLOAD_PREFIX).unwrap_or("")) {
-        return crate::sts::decode_sts_payload(trimmed.as_bytes())
-            .map_err(|error| error.to_string());
-    }
-
-    let normalized_hex = trimmed.strip_prefix("0x").unwrap_or(trimmed);
-    let sts_prefix_hex = hex::encode(crate::sts::STS_PAYLOAD_PREFIX);
-    if normalized_hex
-        .to_ascii_lowercase()
-        .starts_with(&sts_prefix_hex)
-    {
-        let bytes = hex::decode(normalized_hex).map_err(|error| error.to_string())?;
-        return crate::sts::decode_sts_payload(&bytes).map_err(|error| error.to_string());
-    }
-
-    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-        return Ok(None);
-    };
-    extract_sts_payload_from_json_value(&value)
-}
-
-fn extract_sts_payload_from_json_value(
-    value: &Value,
-) -> Result<Option<crate::sts::StsSignedPayload>, String> {
-    if looks_like_sts_signed_payload(value) {
-        return serde_json::from_value::<crate::sts::StsSignedPayload>(value.clone())
-            .map(Some)
-            .map_err(|error| error.to_string());
-    }
-    if let Some(payload_hex) = value
-        .get("payload_hex")
-        .or_else(|| value.get("payloadHex"))
-        .and_then(Value::as_str)
-    {
-        return extract_sts_payload_from_transaction_data(payload_hex);
-    }
-    if let Some(payload) = value.get("payload") {
-        if looks_like_sts_signed_payload(payload) {
-            return serde_json::from_value::<crate::sts::StsSignedPayload>(payload.clone())
-                .map(Some)
-                .map_err(|error| error.to_string());
-        }
-        if let Some(payload_text) = payload.as_str() {
-            return extract_sts_payload_from_transaction_data(payload_text);
-        }
-    }
-    Ok(None)
-}
-
-fn looks_like_sts_signed_payload(value: &Value) -> bool {
-    value.get("version").is_some() && value.get("chain_id").is_some() && value.get("tx").is_some()
+    crate::sts::extract_sts_payload_from_transaction_data(data)
 }
 
 fn sts_replay_metadata_json(report: &StsReplayReport) -> Value {
     json!({
+        "source": report.source,
         "complete": report.errors.is_empty(),
         "chain_start_height": report.chain_start_height,
         "latest_height": report.latest_height,
+        "snapshot_block_hash": report.snapshot_block_hash,
+        "snapshot_updated_at": report.snapshot_updated_at,
         "scanned_blocks": report.scanned_blocks,
         "scanned_transactions": report.scanned_transactions,
         "applied_transactions": report.applied_transactions,
@@ -6449,7 +6456,7 @@ fn sts_replay_metadata_json(report: &StsReplayReport) -> Value {
 fn sts_unavailable_json(message: String) -> Value {
     json!({
         "success": false,
-        "source": "committed_chain_replay",
+        "source": "finalized_sts_snapshot_or_committed_chain_replay",
         "state_available": false,
         "error": message,
     })

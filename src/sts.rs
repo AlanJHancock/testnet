@@ -1,19 +1,24 @@
 use bech32::{ToBase32, Variant};
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 use sha3::{Digest, Sha3_256};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const STS_TESTNET_CHAIN_ID: u64 = 1_264;
 pub const STS_TESTNET_NETWORK: &str = "testnet";
 pub const STS_PAYLOAD_PREFIX: &[u8] = b"synergy-sts-v1:";
+pub const STS_STATE_SNAPSHOT_PATH: &str = "data/sts_state.json";
 pub const NATIVE_SNRG_SYMBOL: &str = "SNRG";
 pub const NATIVE_SNRG_NAME: &str = "Synergy Token";
 pub const NATIVE_SNRG_DECIMALS: u8 = 9;
 pub const NATIVE_SNRG_PLACEHOLDER_ADDRESS: &str = "00000000000000000000000000000000000000000";
 pub const STS_MAX_DECIMALS: u8 = 9;
 pub const STS_MAX_TRANSFER_FEE_BPS: u16 = 1_000;
+const STS_STATE_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 const HEX_32_LEN: usize = 64;
 const MAX_TOKEN_SYMBOL_LEN: usize = 12;
 const MAX_TOKEN_NAME_LEN: usize = 64;
@@ -364,6 +369,68 @@ impl StsSignedPayload {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StsProcessedTransaction {
+    pub block_height: u64,
+    pub block_hash: String,
+    pub status: String,
+    pub error: Option<String>,
+    pub processed_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StsStateSnapshot {
+    pub schema_version: u32,
+    pub chain_id: u64,
+    pub network: String,
+    pub latest_block_height: u64,
+    pub latest_block_hash: String,
+    pub updated_at: u64,
+    pub state: StsState,
+    #[serde(default)]
+    pub processed_transactions: BTreeMap<String, StsProcessedTransaction>,
+}
+
+impl StsStateSnapshot {
+    pub fn empty_at(block_height: u64, block_hash: &str) -> Self {
+        Self {
+            schema_version: STS_STATE_SNAPSHOT_SCHEMA_VERSION,
+            chain_id: STS_TESTNET_CHAIN_ID,
+            network: STS_TESTNET_NETWORK.to_string(),
+            latest_block_height: block_height,
+            latest_block_hash: block_hash.to_string(),
+            updated_at: current_unix_timestamp_seconds(),
+            state: StsState::new(),
+            processed_transactions: BTreeMap::new(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != STS_STATE_SNAPSHOT_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported STS snapshot schema_version {}",
+                self.schema_version
+            ));
+        }
+        if self.chain_id != STS_TESTNET_CHAIN_ID || self.network != STS_TESTNET_NETWORK {
+            return Err(format!(
+                "STS snapshot chain/network mismatch: chain_id={} network={}",
+                self.chain_id, self.network
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StsFinalizedTransactionReport {
+    pub payload_present: bool,
+    pub already_processed: bool,
+    pub applied: bool,
+    pub status: String,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1153,6 +1220,305 @@ pub fn decode_sts_payload(bytes: &[u8]) -> Result<Option<StsSignedPayload>, StsE
         .map_err(|_| StsError::InvalidMetadata)
 }
 
+pub fn transaction_data_may_contain_sts_payload(data: &str) -> bool {
+    let trimmed = data.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with(std::str::from_utf8(STS_PAYLOAD_PREFIX).unwrap_or("")) {
+        return true;
+    }
+
+    let normalized_hex = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    let sts_prefix_hex = hex::encode(STS_PAYLOAD_PREFIX);
+    if normalized_hex
+        .to_ascii_lowercase()
+        .starts_with(&sts_prefix_hex)
+    {
+        return true;
+    }
+
+    serde_json::from_str::<Value>(trimmed)
+        .map(|value| {
+            looks_like_sts_signed_payload(&value)
+                || value.get("payload_hex").is_some()
+                || value.get("payloadHex").is_some()
+                || value.get("payload").is_some_and(|payload| {
+                    looks_like_sts_signed_payload(payload)
+                        || payload
+                            .as_str()
+                            .is_some_and(transaction_data_may_contain_sts_payload)
+                })
+        })
+        .unwrap_or(false)
+}
+
+pub fn extract_sts_payload_from_transaction_data(
+    data: &str,
+) -> Result<Option<StsSignedPayload>, String> {
+    let trimmed = data.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.starts_with(std::str::from_utf8(STS_PAYLOAD_PREFIX).unwrap_or("")) {
+        return decode_sts_payload(trimmed.as_bytes()).map_err(|error| error.to_string());
+    }
+
+    let normalized_hex = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    let sts_prefix_hex = hex::encode(STS_PAYLOAD_PREFIX);
+    if normalized_hex
+        .to_ascii_lowercase()
+        .starts_with(&sts_prefix_hex)
+    {
+        let bytes = hex::decode(normalized_hex).map_err(|error| error.to_string())?;
+        return decode_sts_payload(&bytes).map_err(|error| error.to_string());
+    }
+
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+        return Ok(None);
+    };
+    extract_sts_payload_from_json_value(&value)
+}
+
+pub fn extract_sts_payload_from_json_value(
+    value: &Value,
+) -> Result<Option<StsSignedPayload>, String> {
+    if looks_like_sts_signed_payload(value) {
+        return serde_json::from_value::<StsSignedPayload>(value.clone())
+            .map(Some)
+            .map_err(|error| error.to_string());
+    }
+    if let Some(payload_hex) = value
+        .get("payload_hex")
+        .or_else(|| value.get("payloadHex"))
+        .and_then(Value::as_str)
+    {
+        return extract_sts_payload_from_transaction_data(payload_hex);
+    }
+    if let Some(payload) = value.get("payload") {
+        if looks_like_sts_signed_payload(payload) {
+            return serde_json::from_value::<StsSignedPayload>(payload.clone())
+                .map(Some)
+                .map_err(|error| error.to_string());
+        }
+        if let Some(payload_text) = payload.as_str() {
+            return extract_sts_payload_from_transaction_data(payload_text);
+        }
+    }
+    Ok(None)
+}
+
+fn looks_like_sts_signed_payload(value: &Value) -> bool {
+    value.get("version").is_some() && value.get("chain_id").is_some() && value.get("tx").is_some()
+}
+
+pub fn sts_state_snapshot_path() -> PathBuf {
+    crate::utils::resolve_data_path(STS_STATE_SNAPSHOT_PATH)
+}
+
+pub fn load_sts_state_snapshot() -> Result<Option<StsStateSnapshot>, String> {
+    load_sts_state_snapshot_from_path(sts_state_snapshot_path())
+}
+
+pub fn load_sts_state_snapshot_from_path(
+    path: impl AsRef<Path>,
+) -> Result<Option<StsStateSnapshot>, String> {
+    let path = path.as_ref();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(path)
+        .map_err(|error| format!("read STS snapshot {}: {error}", path.display()))?;
+    let snapshot: StsStateSnapshot = serde_json::from_str(&content)
+        .map_err(|error| format!("parse STS snapshot {}: {error}", path.display()))?;
+    snapshot.validate()?;
+    Ok(Some(snapshot))
+}
+
+pub fn save_sts_state_snapshot(snapshot: &StsStateSnapshot) -> Result<(), String> {
+    save_sts_state_snapshot_to_path(sts_state_snapshot_path(), snapshot)
+}
+
+pub fn save_sts_state_snapshot_to_path(
+    path: impl AsRef<Path>,
+    snapshot: &StsStateSnapshot,
+) -> Result<(), String> {
+    snapshot.validate()?;
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("create STS snapshot dir {}: {error}", parent.display()))?;
+    }
+    let tmp_path = path.with_extension("json.tmp");
+    let json = serde_json::to_vec_pretty(snapshot)
+        .map_err(|error| format!("serialize STS snapshot: {error}"))?;
+    std::fs::write(&tmp_path, json)
+        .map_err(|error| format!("write STS snapshot temp {}: {error}", tmp_path.display()))?;
+    std::fs::rename(&tmp_path, path).map_err(|error| {
+        format!(
+            "replace STS snapshot {} with {}: {error}",
+            path.display(),
+            tmp_path.display()
+        )
+    })
+}
+
+pub fn finalized_sts_transaction_processed(tx_hash: &str) -> Result<bool, String> {
+    finalized_sts_transaction_processed_at_path(sts_state_snapshot_path(), tx_hash)
+}
+
+pub fn finalized_sts_transaction_processed_at_path(
+    path: impl AsRef<Path>,
+    tx_hash: &str,
+) -> Result<bool, String> {
+    Ok(load_sts_state_snapshot_from_path(path)?
+        .map(|snapshot| snapshot.processed_transactions.contains_key(tx_hash))
+        .unwrap_or(false))
+}
+
+pub fn process_finalized_sts_transaction_data(
+    sender: &str,
+    data: &str,
+    tx_hash: &str,
+    block_height: u64,
+    block_hash: &str,
+) -> Result<StsFinalizedTransactionReport, String> {
+    process_finalized_sts_transaction_data_at_path(
+        sts_state_snapshot_path(),
+        sender,
+        data,
+        tx_hash,
+        block_height,
+        block_hash,
+    )
+}
+
+pub fn process_finalized_sts_transaction_data_at_path(
+    path: impl AsRef<Path>,
+    sender: &str,
+    data: &str,
+    tx_hash: &str,
+    block_height: u64,
+    block_hash: &str,
+) -> Result<StsFinalizedTransactionReport, String> {
+    let path = path.as_ref();
+    let Some(payload) = extract_sts_payload_from_transaction_data(data)? else {
+        return Ok(StsFinalizedTransactionReport {
+            payload_present: false,
+            already_processed: false,
+            applied: false,
+            status: "not_sts".to_string(),
+            error: None,
+        });
+    };
+
+    let mut snapshot = load_sts_state_snapshot_from_path(path)?
+        .unwrap_or_else(|| StsStateSnapshot::empty_at(block_height.saturating_sub(1), ""));
+    snapshot.validate()?;
+    if snapshot.processed_transactions.contains_key(tx_hash) {
+        return Ok(StsFinalizedTransactionReport {
+            payload_present: true,
+            already_processed: true,
+            applied: false,
+            status: "already_processed".to_string(),
+            error: None,
+        });
+    }
+    if block_height < snapshot.latest_block_height {
+        return Err(format!(
+            "STS snapshot already advanced to h{}; refusing to apply unseen historical tx {} at h{}",
+            snapshot.latest_block_height, tx_hash, block_height
+        ));
+    }
+    if block_height == snapshot.latest_block_height
+        && !snapshot.latest_block_hash.is_empty()
+        && !block_hash.is_empty()
+        && snapshot.latest_block_hash != block_hash
+    {
+        return Err(format!(
+            "STS snapshot h{} hash mismatch: snapshot={} incoming={}",
+            block_height, snapshot.latest_block_hash, block_hash
+        ));
+    }
+
+    let mut candidate = snapshot.state.clone();
+    let apply_result = candidate.apply_signed_payload(sender, &payload);
+    let processed_at = current_unix_timestamp_seconds();
+    let (applied, status, error) = match apply_result {
+        Ok(_) => {
+            snapshot.state = candidate;
+            (true, "applied".to_string(), None)
+        }
+        Err(error) => (false, "failed".to_string(), Some(error.to_string())),
+    };
+
+    snapshot.latest_block_height = block_height;
+    if !block_hash.is_empty() {
+        snapshot.latest_block_hash = block_hash.to_string();
+    }
+    snapshot.updated_at = processed_at;
+    snapshot.processed_transactions.insert(
+        tx_hash.to_string(),
+        StsProcessedTransaction {
+            block_height,
+            block_hash: block_hash.to_string(),
+            status: status.clone(),
+            error: error.clone(),
+            processed_at,
+        },
+    );
+    save_sts_state_snapshot_to_path(path, &snapshot)?;
+
+    Ok(StsFinalizedTransactionReport {
+        payload_present: true,
+        already_processed: false,
+        applied,
+        status,
+        error,
+    })
+}
+
+pub fn note_finalized_sts_block(block_height: u64, block_hash: &str) -> Result<bool, String> {
+    note_finalized_sts_block_at_path(sts_state_snapshot_path(), block_height, block_hash)
+}
+
+pub fn note_finalized_sts_block_at_path(
+    path: impl AsRef<Path>,
+    block_height: u64,
+    block_hash: &str,
+) -> Result<bool, String> {
+    let path = path.as_ref();
+    let mut snapshot = load_sts_state_snapshot_from_path(path)?
+        .unwrap_or_else(|| StsStateSnapshot::empty_at(block_height.saturating_sub(1), ""));
+    snapshot.validate()?;
+    if block_height < snapshot.latest_block_height {
+        return Ok(false);
+    }
+    if block_height == snapshot.latest_block_height {
+        if snapshot.latest_block_hash.is_empty() && !block_hash.is_empty() {
+            snapshot.latest_block_hash = block_hash.to_string();
+            snapshot.updated_at = current_unix_timestamp_seconds();
+            save_sts_state_snapshot_to_path(path, &snapshot)?;
+            return Ok(true);
+        }
+        if !block_hash.is_empty()
+            && !snapshot.latest_block_hash.is_empty()
+            && snapshot.latest_block_hash != block_hash
+        {
+            return Err(format!(
+                "STS snapshot h{} hash mismatch: snapshot={} incoming={}",
+                block_height, snapshot.latest_block_hash, block_hash
+            ));
+        }
+        return Ok(false);
+    }
+    snapshot.latest_block_height = block_height;
+    snapshot.latest_block_hash = block_hash.to_string();
+    snapshot.updated_at = current_unix_timestamp_seconds();
+    save_sts_state_snapshot_to_path(path, &snapshot)?;
+    Ok(true)
+}
+
 pub fn derive_fungible_token_id(
     chain_id: u64,
     token_class: TokenClass,
@@ -1573,6 +1939,13 @@ fn sha3_256_hex(bytes: &[u8]) -> String {
     hex::encode(hash)
 }
 
+fn current_unix_timestamp_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 fn encode_object_id(prefix: &str, hash: &[u8; 32]) -> String {
     bech32::encode(prefix, hash[..20].to_vec().to_base32(), Variant::Bech32m)
         .expect("static STS object id encoding")
@@ -1581,6 +1954,7 @@ fn encode_object_id(prefix: &str, hash: &[u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     const ALICE: &str = "syn1alice00000000000000000000000000000000";
     const BOB: &str = "syn1bob0000000000000000000000000000000000";
@@ -1608,6 +1982,17 @@ mod tests {
             policies: Vec::new(),
             created_at: 1_700_000_000,
         }
+    }
+
+    fn temp_sts_snapshot_path(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("synergy-sts-{label}-{unique}"))
+            .join("data")
+            .join("sts_state.json")
     }
 
     #[test]
@@ -1784,6 +2169,85 @@ mod tests {
         );
         assert!(state.token_registry.is_empty());
         assert!(state.events.is_empty());
+    }
+
+    #[test]
+    fn finalized_sts_snapshot_round_trip_uses_chain_1264() {
+        let path = temp_sts_snapshot_path("snapshot-round-trip");
+        let mut snapshot = StsStateSnapshot::empty_at(77, "block-hash-77");
+        let token_id = snapshot
+            .state
+            .create_fungible(params(TokenClass::B1BasicFungible))
+            .expect("token creates");
+        save_sts_state_snapshot_to_path(&path, &snapshot).expect("snapshot saves");
+
+        let restored = load_sts_state_snapshot_from_path(&path)
+            .expect("snapshot loads")
+            .expect("snapshot exists");
+        assert_eq!(restored.chain_id, STS_TESTNET_CHAIN_ID);
+        assert_eq!(restored.network, STS_TESTNET_NETWORK);
+        assert_eq!(restored.latest_block_height, 77);
+        assert_eq!(
+            restored
+                .state
+                .fungible_definition(&token_id)
+                .unwrap()
+                .symbol,
+            "TEST"
+        );
+    }
+
+    #[test]
+    fn finalized_sts_transaction_is_idempotent_by_hash() {
+        let path = temp_sts_snapshot_path("finalized-transaction");
+        let payload =
+            StsSignedPayload::new(StsTx::CreateFungible(params(TokenClass::B1BasicFungible)));
+        let data = hex::encode(encode_sts_payload(&payload).expect("payload encodes"));
+        let first = process_finalized_sts_transaction_data_at_path(
+            &path,
+            ALICE,
+            &data,
+            "syntxn-finalized-sts",
+            42,
+            "block-hash-42",
+        )
+        .expect("first apply succeeds");
+        assert!(first.payload_present);
+        assert!(first.applied);
+
+        let second = process_finalized_sts_transaction_data_at_path(
+            &path,
+            ALICE,
+            &data,
+            "syntxn-finalized-sts",
+            42,
+            "block-hash-42",
+        )
+        .expect("duplicate apply is safe");
+        assert!(second.already_processed);
+
+        let snapshot = load_sts_state_snapshot_from_path(&path)
+            .expect("snapshot loads")
+            .expect("snapshot exists");
+        assert_eq!(snapshot.latest_block_height, 42);
+        assert_eq!(snapshot.latest_block_hash, "block-hash-42");
+        assert_eq!(snapshot.processed_transactions.len(), 1);
+        assert_eq!(snapshot.state.fungible_definitions().len(), 1);
+        assert_eq!(snapshot.state.events.len(), 1);
+    }
+
+    #[test]
+    fn finalized_empty_block_creates_empty_snapshot() {
+        let path = temp_sts_snapshot_path("empty-block");
+        assert!(note_finalized_sts_block_at_path(&path, 12, "block-hash-12").unwrap());
+        assert!(!note_finalized_sts_block_at_path(&path, 12, "block-hash-12").unwrap());
+        let snapshot = load_sts_state_snapshot_from_path(&path)
+            .expect("snapshot loads")
+            .expect("snapshot exists");
+        assert_eq!(snapshot.latest_block_height, 12);
+        assert_eq!(snapshot.latest_block_hash, "block-hash-12");
+        assert!(snapshot.state.token_registry.is_empty());
+        assert!(note_finalized_sts_block_at_path(&path, 12, "other-hash").is_err());
     }
 
     #[test]

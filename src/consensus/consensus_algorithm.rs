@@ -1591,7 +1591,11 @@ impl ProofOfSynergy {
                                 let mut applied_validator_activations = 0u64;
                                 for tx in &new_block.transactions {
                                     match token_manager
-                                        .process_transaction_in_block(tx, new_block.block_index)
+                                        .process_transaction_in_finalized_block(
+                                            tx,
+                                            new_block.block_index,
+                                            &new_block.hash,
+                                        )
                                     {
                                         Ok(_) => applied_txs += 1,
                                         Err(e) => {
@@ -1628,6 +1632,13 @@ impl ProofOfSynergy {
                                             ),
                                         }
                                     }
+                                }
+
+                                if let Err(e) = crate::sts::note_finalized_sts_block(
+                                    new_block.block_index,
+                                    &new_block.hash,
+                                ) {
+                                    warn!("consensus", "Failed to persist finalized STS state", "error" => e.to_string());
                                 }
 
                                 // Persist token state for explorer continuity across restarts (best-effort).

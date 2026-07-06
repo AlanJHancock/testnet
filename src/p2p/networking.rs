@@ -7281,7 +7281,11 @@ fn apply_token_state_for_blocks(blocks: &[Block]) {
 
     for block in blocks {
         for tx in &block.transactions {
-            match token_manager.process_transaction_in_block(tx, block.block_index) {
+            match token_manager.process_transaction_in_finalized_block(
+                tx,
+                block.block_index,
+                &block.hash,
+            ) {
                 Ok(_) => applied_txs += 1,
                 Err(error) => {
                     failed_txs += 1;
@@ -7330,6 +7334,14 @@ fn apply_token_state_for_blocks(blocks: &[Block]) {
                 "Activated shadow validators after synced finalized boundary",
                 "block_height" => block.block_index,
                 "activated_validators" => activated_validators.join(",")
+            );
+        }
+        if let Err(error) = crate::sts::note_finalized_sts_block(block.block_index, &block.hash) {
+            warn!(
+                "p2p",
+                "Failed to persist synced finalized STS state",
+                "block_height" => block.block_index,
+                "error" => error.to_string()
             );
         }
     }

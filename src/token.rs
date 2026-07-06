@@ -1972,6 +1972,44 @@ impl TokenManager {
         tx: &Transaction,
         block_height: u64,
     ) -> Result<String, String> {
+        self.process_transaction_in_finalized_block(tx, block_height, "")
+    }
+
+    /// Process a transaction included in a finalized block, with block hash
+    /// context for protocol state snapshots that need idempotent replay guards.
+    pub fn process_transaction_in_finalized_block(
+        &self,
+        tx: &Transaction,
+        block_height: u64,
+        block_hash: &str,
+    ) -> Result<String, String> {
+        if let Some(data_str) = tx.data.as_deref() {
+            if crate::sts::transaction_data_may_contain_sts_payload(data_str) {
+                let tx_hash = tx.hash();
+                if crate::sts::finalized_sts_transaction_processed(&tx_hash)? {
+                    return Ok("STS transaction already processed".to_string());
+                }
+
+                let fee = tx.get_total_network_fee_u64()?;
+                self.charge_snrg_fee(&tx.sender, fee)?;
+                let report = crate::sts::process_finalized_sts_transaction_data(
+                    &tx.sender,
+                    data_str,
+                    &tx_hash,
+                    block_height,
+                    block_hash,
+                )?;
+                self.record_included_transaction_fee(tx, fee, block_height)?;
+                if report.applied {
+                    return Ok(format!("Applied STS transaction {tx_hash}"));
+                }
+                return Ok(format!(
+                    "Rejected STS transaction {tx_hash}: {}",
+                    report.error.unwrap_or_else(|| report.status.to_string())
+                ));
+            }
+        }
+
         // Handle token transfers
         if tx
             .data
