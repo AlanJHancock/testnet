@@ -23,8 +23,10 @@ This branch is `feature/native-sts-token-system-testnet`.
 - `src/rpc/rpc_server.rs` exposes read-only STS RPC methods under both `sts_*` and `synergy_sts*` names. The methods read finalized `data/sts_state.json` first and fall back to committed-chain replay only when a full genesis chain is available.
 - `.github/workflows/release-synergy-sts-cli.yml` publishes standalone macOS and Linux CLI binaries to `synergy-network-hq/synergy-sts-cli-releases`.
 - `scripts/install-synergy-sts.sh` installs the released CLI on macOS and Linux, verifies release checksums by default, supports pinned versions, and can also install from a local source checkout or an existing binary.
+- The first public macOS/Linux CLI release is `synergy-sts-v15.0.10` in `synergy-network-hq/synergy-sts-cli-releases`.
 - Atlas indexing support is implemented in `synergy-atlas`: the indexer decodes `synergy-sts-v1:` payloads, derives non-native `synb*` token addresses, materializes STS token definitions/events/balances/images, and the `/tokens` API merges STS assets into the token registry.
 - Atlas exposes a wallet-authenticated `POST /tokens/:tokenAddress/image` fallback for the creator wallet to set an omitted image exactly once from the token detail view.
+- Live Atlas is deployed with the STS token registry and image endpoint. Current live `/tokens` output contains only native `SNRG` until the first signed non-native STS create transaction finalizes; newly created STS tokens will be materialized automatically by the Atlas indexer.
 
 ## Implemented Classes
 
@@ -56,7 +58,6 @@ This branch is `feature/native-sts-token-system-testnet`.
 - Add RPC-backed `synergy-sts --submit` flow after signed transaction wrapping is finalized.
 - Add SDK builders for `StsSignedPayload` and payload encoding.
 - Add wallet signing/submit support for STS payloads.
-- Deploy Atlas STS image migrations and indexer/API/frontend changes, then prove a live STS create transaction appears automatically on Atlas after finality.
 - Add SynQ/AIVM host functions only after native STS execution is stable.
 - Complete native state machines for NFT ownership, multi-asset balances, and credentials.
 
