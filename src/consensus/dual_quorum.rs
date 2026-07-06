@@ -3249,7 +3249,7 @@ mod tests {
                     ],
                     "pending_validators": ["validator7"],
                     "quorum_threshold": 4,
-                    "validator_set_hash": "historical-six-validator-set"
+                    "validator_set_hash": "historical-dynamic-validator-set"
                 }]
             })
             .to_string(),

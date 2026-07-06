@@ -3923,7 +3923,7 @@ mod tests {
                         "active_validators": test_validator_addresses(1, 6),
                         "pending_validators": ["validator-7"],
                         "quorum_threshold": 4,
-                        "validator_set_hash": "six-validator-set"
+                        "validator_set_hash": "dynamic-validator-set-a"
                     },
                     {
                         "chain_id": 1264,
@@ -3933,7 +3933,7 @@ mod tests {
                         "active_validators": test_validator_addresses(1, 7),
                         "pending_validators": [],
                         "quorum_threshold": 5,
-                        "previous_set_hash": "six-validator-set",
+                        "previous_set_hash": "dynamic-validator-set-a",
                         "validator_set_hash": "seven-validator-set"
                     }
                 ]
@@ -3946,7 +3946,7 @@ mod tests {
 
         let before_boundary =
             ProofOfSynergy::consensus_membership_for_next_block(test_validators(1, 7), 198)
-                .expect("next height 199 should resolve to six-validator set");
+                .expect("next height 199 should resolve to first epoch validator set");
         let at_boundary =
             ProofOfSynergy::consensus_membership_for_next_block(test_validators(1, 7), 199)
                 .expect("next height 200 should resolve to seven-validator set");

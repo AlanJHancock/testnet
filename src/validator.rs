@@ -2271,7 +2271,7 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
                 "active_validators": validator_addresses(1, 6),
                 "pending_validators": ["validator-7"],
                 "quorum_threshold": 4,
-                "validator_set_hash": "six-validator-set"
+                "validator_set_hash": "dynamic-validator-set-a"
             }]),
         );
 
@@ -2329,7 +2329,7 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
                     "active_validators": validator_addresses(1, 6),
                     "pending_validators": ["validator-7"],
                     "quorum_threshold": 4,
-                    "validator_set_hash": "six-validator-set"
+                    "validator_set_hash": "dynamic-validator-set-a"
                 },
                 {
                     "chain_id": 1264,
@@ -2339,7 +2339,7 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
                     "active_validators": all_addresses,
                     "pending_validators": [],
                     "quorum_threshold": 5,
-                    "previous_set_hash": "six-validator-set",
+                    "previous_set_hash": "dynamic-validator-set-a",
                     "validator_set_hash": "seven-validator-set"
                 }
             ]),
@@ -2388,7 +2388,7 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
                     "active_validators": all_addresses,
                     "jailed_validators": [],
                     "quorum_threshold": 4,
-                    "validator_set_hash": "six-validator-set"
+                    "validator_set_hash": "dynamic-validator-set-a"
                 },
                 {
                     "chain_id": 1264,
@@ -2398,7 +2398,7 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
                     "active_validators": validator_addresses(1, 5),
                     "jailed_validators": ["validator-6"],
                     "quorum_threshold": 4,
-                    "previous_set_hash": "six-validator-set",
+                    "previous_set_hash": "dynamic-validator-set-a",
                     "validator_set_hash": "jailed-validator-set"
                 }
             ]),
