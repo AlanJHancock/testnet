@@ -1192,6 +1192,65 @@ pub struct RewardLedger {
     pub audit_events: Vec<RewardAuditEvent>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RewardInvariantViolation {
+    pub code: String,
+    pub epoch: Option<u64>,
+    pub subject: Option<String>,
+    pub expected_nwei: Option<u128>,
+    pub actual_nwei: Option<u128>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RewardInvariantReport {
+    pub epoch: Option<u64>,
+    pub passed: bool,
+    pub checked_invariants: Vec<String>,
+    pub violations: Vec<RewardInvariantViolation>,
+}
+
+impl RewardInvariantReport {
+    fn new(epoch: Option<u64>) -> Self {
+        Self {
+            epoch,
+            passed: true,
+            checked_invariants: vec![
+                "fee_events_match_accumulators".to_string(),
+                "fee_distributions_reconcile".to_string(),
+                "reward_allocations_reconcile".to_string(),
+                "cluster_escrows_reconcile".to_string(),
+                "settlements_reconcile".to_string(),
+                "treasury_recovery_reconciles".to_string(),
+                "single_execution_guards_hold".to_string(),
+                "burn_address_is_excluded".to_string(),
+                "settlement_audit_events_exist".to_string(),
+            ],
+            violations: Vec::new(),
+        }
+    }
+
+    fn fail(
+        &mut self,
+        code: &str,
+        epoch: Option<u64>,
+        subject: Option<String>,
+        expected_nwei: Option<u128>,
+        actual_nwei: Option<u128>,
+        message: impl Into<String>,
+    ) {
+        self.passed = false;
+        self.violations.push(RewardInvariantViolation {
+            code: code.to_string(),
+            epoch,
+            subject,
+            expected_nwei,
+            actual_nwei,
+            message: message.into(),
+        });
+    }
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PersistedRewardLedger {
     #[serde(default)]
@@ -1338,6 +1397,652 @@ impl RewardLedger {
         }
         ledger.audit_events = state.audit_events;
         ledger
+    }
+
+    pub fn check_invariants(&self, epoch: Option<u64>) -> RewardInvariantReport {
+        let mut report = RewardInvariantReport::new(epoch);
+        self.check_fee_invariants(epoch, &mut report);
+        self.check_reward_allocation_invariants(epoch, &mut report);
+        self.check_settlement_invariants(epoch, &mut report);
+        self.check_treasury_recovery_invariants(epoch, &mut report);
+        report
+    }
+
+    fn check_fee_invariants(&self, epoch: Option<u64>, report: &mut RewardInvariantReport) {
+        let mut fee_events_by_epoch: HashMap<u64, u128> = HashMap::new();
+        let mut epoch_close_events: HashMap<u64, u64> = HashMap::new();
+        let mut collector_distribution_events: HashMap<u64, u64> = HashMap::new();
+
+        for event in &self.audit_events {
+            match event {
+                RewardAuditEvent::GasFeeCollected {
+                    epoch_id, fee_nwei, ..
+                } => {
+                    if Self::epoch_matches(epoch, *epoch_id) {
+                        let total = fee_events_by_epoch.entry(*epoch_id).or_insert(0);
+                        *total = total.saturating_add(*fee_nwei);
+                    }
+                }
+                RewardAuditEvent::EpochFeesClosed { distribution, .. } => {
+                    if Self::epoch_matches(epoch, distribution.epoch_id) {
+                        let count = epoch_close_events.entry(distribution.epoch_id).or_insert(0);
+                        *count = count.saturating_add(1);
+                    }
+                }
+                RewardAuditEvent::FeeCollectorDistributed(distribution) => {
+                    if Self::epoch_matches(epoch, distribution.epoch_id) {
+                        let count = collector_distribution_events
+                            .entry(distribution.epoch_id)
+                            .or_insert(0);
+                        *count = count.saturating_add(1);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for (epoch_id, event_total) in fee_events_by_epoch {
+            match self.fee_accumulators.get(&epoch_id) {
+                Some(accumulator) if accumulator.total_collected_nwei == event_total => {}
+                Some(accumulator) => report.fail(
+                    "fee_event_total_mismatch",
+                    Some(epoch_id),
+                    Some("fee_accumulator".to_string()),
+                    Some(event_total),
+                    Some(accumulator.total_collected_nwei),
+                    "Fee accumulator total does not equal collected fee audit events",
+                ),
+                None => report.fail(
+                    "fee_accumulator_missing",
+                    Some(epoch_id),
+                    Some("fee_accumulator".to_string()),
+                    Some(event_total),
+                    None,
+                    "Fee audit events exist without an epoch fee accumulator",
+                ),
+            }
+        }
+
+        for accumulator in self
+            .fee_accumulators
+            .values()
+            .filter(|entry| Self::epoch_matches(epoch, entry.epoch_id))
+        {
+            let by_tx_type_total = accumulator
+                .by_tx_type
+                .values()
+                .fold(0u128, |acc, value| acc.saturating_add(*value));
+            if by_tx_type_total != accumulator.total_collected_nwei {
+                report.fail(
+                    "fee_accumulator_tx_type_total_mismatch",
+                    Some(accumulator.epoch_id),
+                    Some("fee_accumulator.by_tx_type".to_string()),
+                    Some(accumulator.total_collected_nwei),
+                    Some(by_tx_type_total),
+                    "Fee accumulator tx-type subtotals do not equal total collected fees",
+                );
+            }
+        }
+
+        for distribution in self
+            .fee_distributions
+            .values()
+            .filter(|entry| Self::epoch_matches(epoch, entry.epoch_id))
+        {
+            let split_total = distribution
+                .validator_share_nwei
+                .saturating_add(distribution.treasury_share_nwei)
+                .saturating_add(distribution.burn_share_nwei);
+            if split_total != distribution.total_fees_nwei {
+                report.fail(
+                    "fee_distribution_split_mismatch",
+                    Some(distribution.epoch_id),
+                    Some("fee_distribution".to_string()),
+                    Some(distribution.total_fees_nwei),
+                    Some(split_total),
+                    "Fee distribution shares do not sum to total fees",
+                );
+            }
+
+            match self.fee_accumulators.get(&distribution.epoch_id) {
+                Some(accumulator)
+                    if accumulator.total_collected_nwei == distribution.total_fees_nwei
+                        && accumulator.status == EpochFeeAccumulatorStatus::Closed => {}
+                Some(accumulator) => report.fail(
+                    "closed_fee_accumulator_mismatch",
+                    Some(distribution.epoch_id),
+                    Some("fee_accumulator".to_string()),
+                    Some(distribution.total_fees_nwei),
+                    Some(accumulator.total_collected_nwei),
+                    "Closed fee distribution does not match a closed fee accumulator",
+                ),
+                None => report.fail(
+                    "fee_distribution_without_accumulator",
+                    Some(distribution.epoch_id),
+                    Some("fee_distribution".to_string()),
+                    Some(distribution.total_fees_nwei),
+                    None,
+                    "Fee distribution exists without a fee accumulator",
+                ),
+            }
+
+            match self.fee_collector_distributions.get(&distribution.epoch_id) {
+                Some(collector_distribution)
+                    if collector_distribution.validator_reward_pool_amount_nwei
+                        == distribution.validator_share_nwei
+                        && collector_distribution.treasury_amount_nwei
+                            == distribution.treasury_share_nwei
+                        && collector_distribution.burn_amount_nwei
+                            == distribution.burn_share_nwei
+                        && collector_distribution.dust_nwei == distribution.rounding_dust_nwei => {}
+                Some(collector_distribution) => report.fail(
+                    "fee_collector_distribution_mismatch",
+                    Some(distribution.epoch_id),
+                    Some("fee_collector_distribution".to_string()),
+                    Some(distribution.total_fees_nwei),
+                    Some(
+                        collector_distribution
+                            .validator_reward_pool_amount_nwei
+                            .saturating_add(collector_distribution.treasury_amount_nwei)
+                            .saturating_add(collector_distribution.burn_amount_nwei),
+                    ),
+                    "Fee collector distribution does not match closed fee split",
+                ),
+                None => report.fail(
+                    "fee_collector_distribution_missing",
+                    Some(distribution.epoch_id),
+                    Some("fee_collector_distribution".to_string()),
+                    Some(distribution.total_fees_nwei),
+                    None,
+                    "Closed fee distribution has no fee collector distribution record",
+                ),
+            }
+        }
+
+        for (epoch_id, count) in epoch_close_events {
+            if count > 1 {
+                report.fail(
+                    "duplicate_epoch_fee_close_event",
+                    Some(epoch_id),
+                    Some("audit_events".to_string()),
+                    Some(1),
+                    Some(count as u128),
+                    "More than one EpochFeesClosed audit event exists for one epoch",
+                );
+            }
+        }
+
+        for (epoch_id, count) in collector_distribution_events {
+            if count > 1 {
+                report.fail(
+                    "duplicate_fee_collector_distribution_event",
+                    Some(epoch_id),
+                    Some("audit_events".to_string()),
+                    Some(1),
+                    Some(count as u128),
+                    "More than one FeeCollectorDistributed audit event exists for one epoch",
+                );
+            }
+        }
+    }
+
+    fn check_reward_allocation_invariants(
+        &self,
+        epoch: Option<u64>,
+        report: &mut RewardInvariantReport,
+    ) {
+        for allocation in self
+            .epoch_reward_allocations
+            .values()
+            .filter(|entry| Self::epoch_matches(epoch, entry.epoch_id))
+        {
+            if let Some(distribution) = self.fee_distributions.get(&allocation.epoch_id) {
+                if allocation.pool_amount_nwei != distribution.validator_share_nwei {
+                    report.fail(
+                        "validator_pool_distribution_mismatch",
+                        Some(allocation.epoch_id),
+                        Some("epoch_reward_allocation".to_string()),
+                        Some(distribution.validator_share_nwei),
+                        Some(allocation.pool_amount_nwei),
+                        "Validator reward pool allocation does not equal epoch validator fee share",
+                    );
+                }
+            }
+
+            let cluster_total = allocation
+                .cluster_allocations
+                .iter()
+                .fold(0u128, |acc, cluster| {
+                    acc.saturating_add(cluster.cluster_reward_nwei)
+                });
+            if cluster_total != allocation.total_cluster_rewards_nwei
+                || cluster_total != allocation.pool_amount_nwei
+            {
+                report.fail(
+                    "cluster_allocation_total_mismatch",
+                    Some(allocation.epoch_id),
+                    Some("cluster_allocations".to_string()),
+                    Some(allocation.pool_amount_nwei),
+                    Some(cluster_total),
+                    "Cluster allocations do not sum to validator reward pool amount",
+                );
+            }
+
+            let pending_total = allocation
+                .cluster_allocations
+                .iter()
+                .flat_map(|cluster| cluster.validator_pending_rewards.iter())
+                .fold(0u128, |acc, reward| {
+                    acc.saturating_add(reward.pending_reward_nwei)
+                });
+            if pending_total != allocation.total_validator_pending_rewards_nwei {
+                report.fail(
+                    "validator_pending_total_mismatch",
+                    Some(allocation.epoch_id),
+                    Some("validator_pending_rewards".to_string()),
+                    Some(allocation.total_validator_pending_rewards_nwei),
+                    Some(pending_total),
+                    "Validator pending rewards do not sum to recorded allocation total",
+                );
+            }
+            if allocation.rounding_dust_nwei
+                != allocation.pool_amount_nwei.saturating_sub(pending_total)
+            {
+                report.fail(
+                    "allocation_dust_mismatch",
+                    Some(allocation.epoch_id),
+                    Some("epoch_reward_allocation.rounding_dust_nwei".to_string()),
+                    Some(allocation.pool_amount_nwei.saturating_sub(pending_total)),
+                    Some(allocation.rounding_dust_nwei),
+                    "Allocation dust does not match pool minus pending rewards",
+                );
+            }
+
+            for cluster in &allocation.cluster_allocations {
+                if !cluster.cluster_address.starts_with("syngrp1")
+                    || crate::address::is_network_burn_address(&cluster.cluster_address)
+                {
+                    report.fail(
+                        "invalid_cluster_reward_escrow_address",
+                        Some(allocation.epoch_id),
+                        Some(cluster.cluster_address.clone()),
+                        None,
+                        None,
+                        "Cluster reward escrow is not a valid syngrp1 protocol escrow",
+                    );
+                }
+
+                let cluster_pending_total = cluster
+                    .validator_pending_rewards
+                    .iter()
+                    .fold(0u128, |acc, reward| {
+                        acc.saturating_add(reward.pending_reward_nwei)
+                    });
+                if cluster_pending_total > cluster.cluster_reward_nwei {
+                    report.fail(
+                        "cluster_pending_exceeds_reward",
+                        Some(allocation.epoch_id),
+                        Some(cluster.cluster_address.clone()),
+                        Some(cluster.cluster_reward_nwei),
+                        Some(cluster_pending_total),
+                        "Validator pending rewards exceed cluster reward allocation",
+                    );
+                }
+
+                match self
+                    .cluster_reward_escrows
+                    .get(&(allocation.epoch_id, cluster.cluster_address.clone()))
+                {
+                    Some(escrow)
+                        if escrow.funded_amount_nwei == cluster.cluster_reward_nwei
+                            && escrow.pending_validator_rewards_nwei == cluster_pending_total
+                            && escrow.dust_nwei
+                                == escrow
+                                    .funded_amount_nwei
+                                    .saturating_sub(escrow.pending_validator_rewards_nwei) => {}
+                    Some(escrow) => report.fail(
+                        "cluster_escrow_mismatch",
+                        Some(allocation.epoch_id),
+                        Some(cluster.cluster_address.clone()),
+                        Some(cluster.cluster_reward_nwei),
+                        Some(escrow.funded_amount_nwei),
+                        "Cluster escrow does not match cluster reward allocation",
+                    ),
+                    None => report.fail(
+                        "cluster_escrow_missing",
+                        Some(allocation.epoch_id),
+                        Some(cluster.cluster_address.clone()),
+                        Some(cluster.cluster_reward_nwei),
+                        None,
+                        "Cluster reward allocation has no escrow record",
+                    ),
+                }
+            }
+        }
+
+        for escrow in self
+            .cluster_reward_escrows
+            .values()
+            .filter(|entry| Self::epoch_matches(epoch, entry.epoch_id))
+        {
+            if escrow.funded_amount_nwei
+                != escrow
+                    .pending_validator_rewards_nwei
+                    .saturating_add(escrow.dust_nwei)
+            {
+                report.fail(
+                    "cluster_escrow_dust_mismatch",
+                    Some(escrow.epoch_id),
+                    Some(escrow.cluster_escrow_address.clone()),
+                    Some(escrow.funded_amount_nwei),
+                    Some(
+                        escrow
+                            .pending_validator_rewards_nwei
+                            .saturating_add(escrow.dust_nwei),
+                    ),
+                    "Cluster escrow funded amount does not equal pending rewards plus dust",
+                );
+            }
+            if crate::address::is_network_burn_address(&escrow.cluster_escrow_address) {
+                report.fail(
+                    "burn_address_used_as_cluster_escrow",
+                    Some(escrow.epoch_id),
+                    Some(escrow.cluster_escrow_address.clone()),
+                    None,
+                    None,
+                    "Network burn address cannot be a cluster reward escrow",
+                );
+            }
+        }
+    }
+
+    fn check_settlement_invariants(&self, epoch: Option<u64>, report: &mut RewardInvariantReport) {
+        let mut pending_keys: HashSet<(u64, String, String)> = HashSet::new();
+        let mut pending_by_key: HashMap<(u64, String, String), &ValidatorPendingReward> =
+            HashMap::new();
+        for pending in &self.pending_rewards {
+            if !Self::pending_matches(epoch, pending) {
+                continue;
+            }
+            let key = (
+                pending.original_epoch_id,
+                pending.original_cluster_address.clone(),
+                pending.validator_id.clone(),
+            );
+            if !pending_keys.insert(key.clone()) {
+                report.fail(
+                    "duplicate_pending_reward",
+                    Some(pending.original_epoch_id),
+                    Some(pending.validator_id.clone()),
+                    None,
+                    None,
+                    "Duplicate pending validator reward exists for the same epoch and cluster",
+                );
+            }
+            if crate::address::is_network_burn_address(&pending.reward_payout_address) {
+                report.fail(
+                    "burn_address_used_as_validator_payout",
+                    Some(pending.original_epoch_id),
+                    Some(pending.validator_id.clone()),
+                    None,
+                    None,
+                    "Network burn address cannot be a validator reward payout",
+                );
+            }
+            pending_by_key.insert(key, pending);
+        }
+
+        let settlement_event_keys = self
+            .audit_events
+            .iter()
+            .filter_map(|event| match event {
+                RewardAuditEvent::ValidatorRewardSettled(settlement) => Some((
+                    settlement.original_epoch_id,
+                    settlement.original_cluster_address.clone(),
+                    settlement.validator_id.clone(),
+                )),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let coefficient_event_keys = self
+            .audit_events
+            .iter()
+            .filter_map(|event| match event {
+                RewardAuditEvent::ValidatorReleaseCoefficientCalculated {
+                    accountability_epoch,
+                    validator_id,
+                    ..
+                } => Some((*accountability_epoch, validator_id.clone())),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+
+        let mut settlement_keys: HashSet<(u64, String, String)> = HashSet::new();
+        let mut settled_by_cluster: HashMap<(u64, String), u128> = HashMap::new();
+        for settlement in self
+            .reward_settlements
+            .iter()
+            .filter(|entry| Self::settlement_matches(epoch, entry))
+        {
+            let key = (
+                settlement.original_epoch_id,
+                settlement.original_cluster_address.clone(),
+                settlement.validator_id.clone(),
+            );
+            if !settlement_keys.insert(key.clone()) {
+                report.fail(
+                    "duplicate_validator_settlement",
+                    Some(settlement.original_epoch_id),
+                    Some(settlement.validator_id.clone()),
+                    None,
+                    None,
+                    "Validator reward settlement was recorded more than once",
+                );
+            }
+
+            let settlement_total = settlement
+                .final_reward_nwei
+                .saturating_add(settlement.unreleased_reward_nwei);
+            if settlement_total != settlement.pending_reward_nwei {
+                report.fail(
+                    "settlement_total_mismatch",
+                    Some(settlement.original_epoch_id),
+                    Some(settlement.validator_id.clone()),
+                    Some(settlement.pending_reward_nwei),
+                    Some(settlement_total),
+                    "Released plus unreleased reward does not equal pending reward",
+                );
+            }
+            if settlement.unreleased_reward_nwei > 0
+                && settlement.unreleased_destination != UnreleasedDestination::TreasuryRecovery
+            {
+                report.fail(
+                    "unreleased_reward_not_treasury_recovery",
+                    Some(settlement.original_epoch_id),
+                    Some(settlement.validator_id.clone()),
+                    Some(settlement.unreleased_reward_nwei),
+                    None,
+                    "Unreleased validator reward must go to Treasury Recovery",
+                );
+            }
+            if crate::address::is_network_burn_address(&settlement.reward_payout_address) {
+                report.fail(
+                    "burn_address_used_as_settlement_payout",
+                    Some(settlement.original_epoch_id),
+                    Some(settlement.validator_id.clone()),
+                    None,
+                    None,
+                    "Network burn address cannot receive validator settlement payout",
+                );
+            }
+
+            if let Some(pending) = pending_by_key.get(&key) {
+                if pending.pending_reward_nwei != settlement.pending_reward_nwei {
+                    report.fail(
+                        "settlement_pending_record_mismatch",
+                        Some(settlement.original_epoch_id),
+                        Some(settlement.validator_id.clone()),
+                        Some(pending.pending_reward_nwei),
+                        Some(settlement.pending_reward_nwei),
+                        "Settlement amount does not match pending reward record",
+                    );
+                }
+            } else {
+                report.fail(
+                    "settlement_without_pending_reward",
+                    Some(settlement.original_epoch_id),
+                    Some(settlement.validator_id.clone()),
+                    Some(settlement.pending_reward_nwei),
+                    None,
+                    "Settlement exists without a matching pending reward record",
+                );
+            }
+
+            if !settlement_event_keys.contains(&key) {
+                report.fail(
+                    "settlement_audit_event_missing",
+                    Some(settlement.original_epoch_id),
+                    Some(settlement.validator_id.clone()),
+                    None,
+                    None,
+                    "ValidatorRewardSettled audit event is missing for settlement",
+                );
+            }
+            if !coefficient_event_keys.contains(&(
+                settlement.accountability_epoch,
+                settlement.validator_id.clone(),
+            )) {
+                report.fail(
+                    "release_coefficient_audit_event_missing",
+                    Some(settlement.accountability_epoch),
+                    Some(settlement.validator_id.clone()),
+                    None,
+                    None,
+                    "ValidatorReleaseCoefficientCalculated audit event is missing for settlement",
+                );
+            }
+
+            let cluster_key = (
+                settlement.original_epoch_id,
+                settlement.original_cluster_address.clone(),
+            );
+            let cluster_total = settled_by_cluster.entry(cluster_key).or_insert(0);
+            *cluster_total = cluster_total.saturating_add(settlement.pending_reward_nwei);
+        }
+
+        for ((epoch_id, cluster_address), settled_total) in settled_by_cluster {
+            if let Some(escrow) = self
+                .cluster_reward_escrows
+                .get(&(epoch_id, cluster_address.clone()))
+            {
+                if settled_total > escrow.funded_amount_nwei {
+                    report.fail(
+                        "cluster_escrow_overpaid",
+                        Some(epoch_id),
+                        Some(cluster_address),
+                        Some(escrow.funded_amount_nwei),
+                        Some(settled_total),
+                        "Settlements draw more than the cluster escrow funded amount",
+                    );
+                }
+            }
+        }
+    }
+
+    fn check_treasury_recovery_invariants(
+        &self,
+        epoch: Option<u64>,
+        report: &mut RewardInvariantReport,
+    ) {
+        let mut expected_recovery_by_epoch: HashMap<u64, u128> = HashMap::new();
+        for settlement in &self.reward_settlements {
+            if settlement.unreleased_reward_nwei == 0 {
+                continue;
+            }
+            let total = expected_recovery_by_epoch
+                .entry(settlement.accountability_epoch)
+                .or_insert(0);
+            *total = total.saturating_add(settlement.unreleased_reward_nwei);
+        }
+
+        for (recovery_epoch, expected_total) in expected_recovery_by_epoch
+            .iter()
+            .filter(|(entry_epoch, _)| Self::epoch_matches(epoch, **entry_epoch))
+        {
+            let actual_total = self
+                .treasury_recovery_ledger
+                .get(recovery_epoch)
+                .map(|ledger| ledger.total_recovered_nwei)
+                .unwrap_or(0);
+            if actual_total != *expected_total {
+                report.fail(
+                    "treasury_recovery_total_mismatch",
+                    Some(*recovery_epoch),
+                    Some("treasury_recovery_ledger".to_string()),
+                    Some(*expected_total),
+                    Some(actual_total),
+                    "Treasury Recovery ledger does not equal unreleased validator rewards",
+                );
+            }
+        }
+
+        for recovery in self
+            .treasury_recovery_ledger
+            .values()
+            .filter(|entry| Self::epoch_matches(epoch, entry.epoch))
+        {
+            let entry_total = recovery
+                .entries
+                .iter()
+                .fold(0u128, |acc, entry| acc.saturating_add(entry.amount_nwei));
+            if entry_total != recovery.total_recovered_nwei {
+                report.fail(
+                    "treasury_recovery_entry_total_mismatch",
+                    Some(recovery.epoch),
+                    Some("treasury_recovery_ledger.entries".to_string()),
+                    Some(recovery.total_recovered_nwei),
+                    Some(entry_total),
+                    "Treasury Recovery entries do not sum to ledger total",
+                );
+            }
+            for entry in &recovery.entries {
+                if crate::address::is_network_burn_address(&entry.treasury_recovery_wallet_address)
+                {
+                    report.fail(
+                        "treasury_recovery_sent_to_burn_address",
+                        Some(recovery.epoch),
+                        Some(entry.validator_id.clone()),
+                        Some(entry.amount_nwei),
+                        None,
+                        "Treasury Recovery cannot route unreleased rewards to the burn address",
+                    );
+                }
+            }
+        }
+    }
+
+    fn epoch_matches(filter: Option<u64>, epoch_id: u64) -> bool {
+        filter.map(|epoch| epoch == epoch_id).unwrap_or(true)
+    }
+
+    fn pending_matches(filter: Option<u64>, pending: &ValidatorPendingReward) -> bool {
+        filter
+            .map(|epoch| {
+                pending.original_epoch_id == epoch
+                    || pending.unlock_epoch == epoch
+                    || pending.accountability_epoch == epoch
+            })
+            .unwrap_or(true)
+    }
+
+    fn settlement_matches(filter: Option<u64>, settlement: &ValidatorRewardSettlement) -> bool {
+        filter
+            .map(|epoch| {
+                settlement.original_epoch_id == epoch
+                    || settlement.unlock_epoch == epoch
+                    || settlement.accountability_epoch == epoch
+            })
+            .unwrap_or(true)
     }
 
     pub fn record_fee_charged(
@@ -1771,6 +2476,59 @@ mod tests {
         }
     }
 
+    fn closed_reward_ledger_fixture() -> RewardLedger {
+        let mut ledger = RewardLedger::default();
+        ledger
+            .record_fee_charged(7, "tx-a", "native_snrg_send", 40, 70)
+            .unwrap();
+        ledger
+            .record_fee_charged(7, "tx-b", "native_snrg_send", 60, 71)
+            .unwrap();
+        let distribution = ledger.distribute_epoch_fees(7, 100, 99).unwrap().clone();
+        ledger
+            .record_fee_collector_distribution(FeeCollectorDistribution {
+                epoch_id: 7,
+                from_address: crate::token::FEE_COLLECTOR_ADDRESS.to_string(),
+                validator_reward_pool_address: crate::token::VALIDATOR_REWARDS_POOL_ADDRESS
+                    .to_string(),
+                validator_reward_pool_amount_nwei: distribution.validator_share_nwei,
+                treasury_wallet_address: crate::token::DAO_TREASURY_ADDRESS.to_string(),
+                treasury_amount_nwei: distribution.treasury_share_nwei,
+                burn_amount_nwei: distribution.burn_share_nwei,
+                dust_nwei: distribution.rounding_dust_nwei,
+                distribution_state_id: "epoch-fees:7".to_string(),
+                distributed_block_height: 99,
+            })
+            .unwrap();
+
+        let validators = vec![ValidatorPhase1Input {
+            cluster_address: "syngrp1cluster-a".to_string(),
+            validator_id: "validator-a".to_string(),
+            reward_payout_address: "synw1validator-a".to_string(),
+            metrics: perfect_phase1(),
+        }];
+        let allocation = allocate_epoch_validator_rewards(
+            7,
+            distribution.validator_share_nwei,
+            &validators,
+            100,
+            &RewardConfig::default(),
+        )
+        .unwrap();
+        ledger
+            .record_epoch_reward_allocation(
+                allocation,
+                crate::token::VALIDATOR_REWARDS_POOL_ADDRESS,
+                100,
+            )
+            .unwrap();
+        ledger
+            .settle_pending_rewards(8, &HashMap::from([("validator-a".to_string(), 8_500)]), 200)
+            .unwrap();
+
+        ledger
+    }
+
     #[test]
     fn reward_config_validates_required_sums() {
         assert!(RewardConfig::default().validate().is_ok());
@@ -2134,6 +2892,37 @@ mod tests {
         let duplicate = ledger.distribute_epoch_fees(7, 100, 100).unwrap();
         assert_eq!(duplicate.distribution_block_height, 99);
         assert_eq!(ledger.audit_events.len(), event_count);
+    }
+
+    #[test]
+    fn reward_invariant_report_passes_for_reconciled_epoch_lifecycle() {
+        let ledger = closed_reward_ledger_fixture();
+
+        let report = ledger.check_invariants(None);
+
+        assert!(
+            report.passed,
+            "expected reconciled ledger to pass invariants, got {:?}",
+            report.violations
+        );
+    }
+
+    #[test]
+    fn reward_invariant_report_flags_fee_accumulator_mismatch() {
+        let mut ledger = closed_reward_ledger_fixture();
+        ledger
+            .fee_accumulators
+            .get_mut(&7)
+            .expect("fixture should have epoch accumulator")
+            .total_collected_nwei = 99;
+
+        let report = ledger.check_invariants(Some(7));
+
+        assert!(!report.passed);
+        assert!(report
+            .violations
+            .iter()
+            .any(|violation| violation.code == "fee_event_total_mismatch"));
     }
 
     #[test]

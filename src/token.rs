@@ -2643,6 +2643,27 @@ mod tests {
         }
     }
 
+    fn reward_scenario_validator(
+        address_seed: &str,
+        cluster_address: &str,
+        missed_blocks: u64,
+        status: crate::validator::ValidatorStatus,
+    ) -> crate::validator::Validator {
+        let mut validator = crate::validator::Validator::new(
+            crate::address::generate_validator_address(address_seed, 1),
+            format!("{address_seed}-public-key"),
+            address_seed.to_string(),
+            50_000 * 1_000_000_000,
+        );
+        validator.status = status;
+        validator.cluster_address = Some(cluster_address.to_string());
+        validator.total_blocks_produced = 100;
+        validator.total_transactions_validated = 1_000;
+        validator.missed_blocks = missed_blocks;
+        validator.missed_vote_window = missed_blocks;
+        validator
+    }
+
     #[test]
     fn native_snrg_has_no_token_address_but_custom_tokens_do() {
         let manager = TokenManager::new();
@@ -3011,6 +3032,164 @@ mod tests {
                 .total_recovered_nwei,
             750
         );
+    }
+
+    #[test]
+    fn three_validator_fee_burn_and_reward_lifecycle_reconciles_invariants() {
+        let _guard = ENV_GUARD.lock().unwrap();
+        reset_reward_ledger();
+        let manager = TokenManager::new();
+        seed_snrg_balance(&manager, FEE_COLLECTOR_ADDRESS, 0);
+        seed_snrg_balance(&manager, VALIDATOR_REWARDS_POOL_ADDRESS, 0);
+        seed_snrg_balance(&manager, DAO_TREASURY_ADDRESS, 0);
+        seed_snrg_balance(&manager, TREASURY_RECOVERY_WALLET_ADDRESS, 0);
+
+        let sender = crate::address::generate_wallet_address("reward-scenario-sender");
+        let receiver_a = crate::address::generate_wallet_address("reward-scenario-receiver-a");
+        let receiver_b = crate::address::generate_wallet_address("reward-scenario-receiver-b");
+        seed_snrg_balance(&manager, &sender, 250_000_000_000);
+
+        let one_snrg = Transaction::new(
+            sender.clone(),
+            receiver_a.clone(),
+            1_000_000_000,
+            0,
+            vec![1, 2, 3],
+            1,
+            21_000,
+            None,
+            "fndsa".to_string(),
+        );
+        let hundred_snrg = Transaction::new(
+            sender.clone(),
+            receiver_b.clone(),
+            100_000_000_000,
+            1,
+            vec![1, 2, 3],
+            1,
+            21_000,
+            None,
+            "fndsa".to_string(),
+        );
+        let burn_snrg = Transaction::new(
+            sender.clone(),
+            String::new(),
+            0,
+            2,
+            vec![1, 2, 3],
+            1,
+            21_000,
+            Some(r#"burn:{"asset":"SNRG","amount":10000000000}"#.to_string()),
+            "fndsa".to_string(),
+        );
+
+        let one_fee = one_snrg.get_total_network_fee_u64().unwrap();
+        let hundred_fee = hundred_snrg.get_total_network_fee_u64().unwrap();
+        let burn_fee = burn_snrg.get_total_network_fee_u64().unwrap();
+        assert!(hundred_fee > one_fee);
+
+        manager
+            .process_transaction_in_block(&one_snrg, 100)
+            .expect("one SNRG transfer should apply");
+        manager
+            .process_transaction_in_block(&hundred_snrg, 101)
+            .expect("hundred SNRG transfer should apply");
+        manager
+            .process_transaction_in_block(&burn_snrg, 102)
+            .expect("explicit SNRG burn should apply");
+
+        let failed_tx = Transaction::new(
+            sender.clone(),
+            receiver_a.clone(),
+            u64::MAX / 2,
+            3,
+            vec![1, 2, 3],
+            1,
+            21_000,
+            None,
+            "fndsa".to_string(),
+        );
+        let failed = manager.process_transaction_in_block(&failed_tx, 103);
+        assert_eq!(
+            failed.unwrap_err(),
+            "Insufficient balance for transfer and fee"
+        );
+
+        let expected_fees = one_fee as u128 + hundred_fee as u128 + burn_fee as u128;
+        assert_eq!(
+            manager.get_balance(FEE_COLLECTOR_ADDRESS, SNRG_SYMBOL) as u128,
+            expected_fees
+        );
+        assert_eq!(manager.get_burned_total(SNRG_SYMBOL), 10_000_000_000);
+        {
+            let ledger = crate::rewards::REWARD_LEDGER.lock().unwrap();
+            let accumulator = ledger
+                .fee_accumulators
+                .get(&0)
+                .expect("epoch 0 accumulator should exist");
+            assert_eq!(accumulator.total_collected_nwei, expected_fees);
+        }
+
+        let cluster =
+            crate::address::generate_validator_cluster_address("three-validator-reward-scenario");
+        seed_snrg_balance(&manager, &cluster, 0);
+        let validators = vec![
+            reward_scenario_validator(
+                "reward-scenario-validator-a",
+                &cluster,
+                0,
+                crate::validator::ValidatorStatus::Active,
+            ),
+            reward_scenario_validator(
+                "reward-scenario-validator-b",
+                &cluster,
+                1,
+                crate::validator::ValidatorStatus::Active,
+            ),
+            reward_scenario_validator(
+                "reward-scenario-validator-c",
+                &cluster,
+                2,
+                crate::validator::ValidatorStatus::Jailed,
+            ),
+        ];
+        for validator in &validators {
+            seed_snrg_balance(&manager, &validator.address, 0);
+        }
+
+        let epoch0 = manager
+            .run_epoch_reward_lifecycle(0, 1, 1_000, &validators)
+            .expect("epoch 0 lifecycle should close fees and escrow rewards");
+        let fee_distribution = epoch0
+            .fee_distribution
+            .as_ref()
+            .expect("epoch 0 fees should distribute");
+        assert_eq!(fee_distribution.total_fees_nwei, expected_fees);
+        assert_eq!(manager.get_balance(FEE_COLLECTOR_ADDRESS, SNRG_SYMBOL), 0);
+        assert_eq!(
+            manager.get_balance(DAO_TREASURY_ADDRESS, SNRG_SYMBOL) as u128,
+            fee_distribution.treasury_share_nwei
+        );
+        assert_eq!(
+            manager.get_balance(&cluster, SNRG_SYMBOL) as u128,
+            fee_distribution.validator_share_nwei
+        );
+        {
+            let ledger = crate::rewards::REWARD_LEDGER.lock().unwrap();
+            assert_eq!(ledger.pending_rewards.len(), 3);
+            assert!(ledger.reward_settlements.is_empty());
+        }
+
+        let epoch1 = manager
+            .run_epoch_reward_lifecycle(1, 2, 2_000, &validators)
+            .expect("epoch 1 lifecycle should settle epoch 0 pending rewards");
+        assert_eq!(epoch1.settlements.len(), 3);
+        assert_eq!(manager.get_balance(&cluster, SNRG_SYMBOL), 0);
+        assert!(manager.get_balance(TREASURY_RECOVERY_WALLET_ADDRESS, SNRG_SYMBOL) > 0);
+
+        let ledger = crate::rewards::REWARD_LEDGER.lock().unwrap();
+        let report = ledger.check_invariants(None);
+        assert!(report.passed, "reward invariant violations: {:?}", report);
     }
 
     #[test]

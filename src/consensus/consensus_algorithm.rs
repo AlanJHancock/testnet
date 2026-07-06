@@ -5406,7 +5406,7 @@ mod tests {
     }
 
     #[test]
-    fn leader_selection_preserves_stale_live_local_vote_lock_without_auto_recovery() {
+    fn leader_selection_supersedes_stale_live_local_vote_lock_at_recovery_age() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
 
@@ -5461,10 +5461,10 @@ mod tests {
             1,
         );
 
-        assert_eq!(selected.address, locked.address);
+        assert_eq!(selected.address, scheduled.address);
         let lock = DualQuorumConsensus::local_locked_vote_for_height("validator-local", 55, 810)
             .expect("vote lock lookup should succeed");
-        assert!(lock.is_some());
+        assert!(lock.is_none());
 
         DualQuorumConsensus::set_test_local_vote_lock_path(None);
         if let Some(root) = path.parent().and_then(|data| data.parent()) {

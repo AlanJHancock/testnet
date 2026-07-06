@@ -293,14 +293,13 @@ fn execute_transaction(
         return execute_sts_transaction(id, tx, state, sts_payload, synq_context);
     }
 
-    let receiver = tx.receiver_uma_or_account.clone();
-    let estimated_fee =
-        canonical_network_fee_breakdown(tx, tx.gas_limit.min(21_000), tx.max_fee_nwei, true)?;
-    let sender_balance = state.balances_nwei.get(&sender).copied().unwrap_or(0);
     let synq_verification = state.synq_verifications.get(&id).cloned();
     let synq_error = state.synq_errors.get(&id).cloned();
+    let payload = std::str::from_utf8(&tx.payload).unwrap_or_default();
 
     if crate::address::is_network_burn_address(&sender) {
+        let estimated_fee =
+            canonical_network_fee_breakdown(tx, tx.gas_limit.min(21_000), tx.max_fee_nwei, true)?;
         return Ok(TransactionReceipt {
             tx_id: id,
             status: ReceiptStatus::Failed,
@@ -315,8 +314,47 @@ fn execute_transaction(
         });
     }
 
-    let total_debit = tx
-        .amount_nwei
+    let explicit_native_burn = match parse_explicit_native_burn_payload(payload, tx.amount_nwei) {
+        Ok(burn) => burn,
+        Err(error) => {
+            let gas_used = tx.gas_limit.min(21_000);
+            let fee_breakdown =
+                canonical_network_fee_breakdown(tx, gas_used, tx.max_fee_nwei, false)?;
+            if state.balances_nwei.get(&sender).copied().unwrap_or(0)
+                >= fee_breakdown.total_network_fee_nwei
+            {
+                charge_fee_to_collector(state, &sender, fee_breakdown.total_network_fee_nwei)?;
+                record_fee_event(
+                    state,
+                    &id,
+                    &sender,
+                    &fee_breakdown,
+                    synq_context.runtime_block_height,
+                    false,
+                );
+            }
+            return Ok(TransactionReceipt {
+                tx_id: id,
+                status: ReceiptStatus::Failed,
+                gas_used,
+                error,
+                state_root_after: compute_state_root_after(state)?,
+                synq_verification,
+                synq_aivm: None,
+                synq_error_code: synq_error.as_ref().map(|(code, _)| code.clone()),
+                synq_error_message: synq_error.map(|(_, message)| message),
+                fee_breakdown: Some(fee_breakdown),
+            });
+        }
+    };
+    let transfer_amount_nwei = explicit_native_burn
+        .as_ref()
+        .map(|burn| burn.amount_nwei)
+        .unwrap_or(tx.amount_nwei);
+    let estimated_fee =
+        canonical_network_fee_breakdown(tx, tx.gas_limit.min(21_000), tx.max_fee_nwei, true)?;
+    let sender_balance = state.balances_nwei.get(&sender).copied().unwrap_or(0);
+    let total_debit = transfer_amount_nwei
         .checked_add(estimated_fee.total_network_fee_nwei)
         .ok_or_else(|| "transaction total debit overflow".to_string())?;
     if sender_balance < total_debit {
@@ -390,8 +428,7 @@ fn execute_transaction(
     }
 
     let fee_breakdown = canonical_network_fee_breakdown(tx, gas_used, tx.max_fee_nwei, true)?;
-    let total_debit = tx
-        .amount_nwei
+    let total_debit = transfer_amount_nwei
         .checked_add(fee_breakdown.total_network_fee_nwei)
         .ok_or_else(|| "transaction total debit overflow".to_string())?;
     let sender_balance = state.balances_nwei.get(&sender).copied().unwrap_or(0);
@@ -421,22 +458,34 @@ fn execute_transaction(
             .checked_add(fee_breakdown.total_network_fee_nwei)
             .ok_or_else(|| "fee collector balance overflow".to_string())?,
     );
-    let receiver_balance = state.balances_nwei.get(&receiver).copied().unwrap_or(0);
-    state.balances_nwei.insert(
-        receiver.clone(),
-        receiver_balance
-            .checked_add(tx.amount_nwei)
-            .ok_or_else(|| "receiver balance overflow".to_string())?,
-    );
-    if crate::address::is_network_burn_address(&receiver) && tx.amount_nwei > 0 {
+    if let Some(burn) = explicit_native_burn {
         state.burn_events.push(BurnAddressTransferEvent {
             tx_id: id.clone(),
             from: sender.clone(),
-            to: receiver.clone(),
-            amount_nwei: tx.amount_nwei,
+            to: crate::address::NETWORK_BURN_ADDRESS.to_string(),
+            amount_nwei: burn.amount_nwei,
             block_height: synq_context.runtime_block_height,
-            supply_reduced: false,
+            supply_reduced: true,
         });
+    } else {
+        let receiver = tx.receiver_uma_or_account.clone();
+        let receiver_balance = state.balances_nwei.get(&receiver).copied().unwrap_or(0);
+        state.balances_nwei.insert(
+            receiver.clone(),
+            receiver_balance
+                .checked_add(tx.amount_nwei)
+                .ok_or_else(|| "receiver balance overflow".to_string())?,
+        );
+        if crate::address::is_network_burn_address(&receiver) && tx.amount_nwei > 0 {
+            state.burn_events.push(BurnAddressTransferEvent {
+                tx_id: id.clone(),
+                from: sender.clone(),
+                to: receiver.clone(),
+                amount_nwei: tx.amount_nwei,
+                block_height: synq_context.runtime_block_height,
+                supply_reduced: false,
+            });
+        }
     }
     record_fee_event(
         state,
@@ -646,6 +695,60 @@ fn canonical_network_fee_breakdown(
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeBurnPayload {
+    amount_nwei: u128,
+}
+
+fn parse_explicit_native_burn_payload(
+    payload: &str,
+    fallback_amount_nwei: u128,
+) -> Result<Option<NativeBurnPayload>, String> {
+    let Some(burn_data) = payload.strip_prefix("burn:") else {
+        return Ok(None);
+    };
+    let burn_info: serde_json::Value = serde_json::from_str(burn_data)
+        .map_err(|error| format!("INVALID_BURN_PAYLOAD: {error}"))?;
+    let asset_id = burn_payload_asset(&burn_info).unwrap_or("SNRG");
+    if asset_id != "SNRG" {
+        return Err("NON_NATIVE_BURN_REQUIRES_TOKEN_MODULE".to_string());
+    }
+    let amount_nwei = burn_info
+        .get("amount")
+        .and_then(json_u128)
+        .unwrap_or(fallback_amount_nwei);
+    if amount_nwei == 0 {
+        return Err("BURN_AMOUNT_MUST_BE_GREATER_THAN_ZERO".to_string());
+    }
+    Ok(Some(NativeBurnPayload { amount_nwei }))
+}
+
+fn burn_payload_fee_context(payload: &str, fallback_amount_nwei: u128) -> Option<(String, u128)> {
+    let burn_data = payload.strip_prefix("burn:")?;
+    let burn_info = serde_json::from_str::<serde_json::Value>(burn_data).ok()?;
+    let asset_id = burn_payload_asset(&burn_info).unwrap_or("SNRG").to_string();
+    let amount_nwei = burn_info
+        .get("amount")
+        .and_then(json_u128)
+        .unwrap_or(fallback_amount_nwei);
+    Some((asset_id, amount_nwei))
+}
+
+fn burn_payload_asset(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("asset")
+        .or_else(|| value.get("asset_id"))
+        .or_else(|| value.get("token"))
+        .and_then(|asset| asset.as_str())
+}
+
+fn json_u128(value: &serde_json::Value) -> Option<u128> {
+    if let Some(number) = value.as_u64() {
+        return Some(number as u128);
+    }
+    value.as_str().and_then(|text| text.parse::<u128>().ok())
+}
+
 fn canonical_fee_value_context(
     tx: &Transaction,
     payload: &str,
@@ -661,12 +764,19 @@ fn canonical_fee_value_context(
     if crate::address::is_network_burn_address(&tx.receiver_uma_or_account)
         || payload.starts_with("burn:")
     {
+        let (asset_id, amount_nwei) = burn_payload_fee_context(payload, tx.amount_nwei)
+            .unwrap_or_else(|| ("SNRG".to_string(), tx.amount_nwei));
+        let (amount_snrgequivalent_nwei, valuation_status) = if asset_id == "SNRG" {
+            (amount_nwei, ValuationStatus::NativeSnrg)
+        } else {
+            (0, ValuationStatus::Unavailable)
+        };
         return (
             TransactionFeeType::Burn,
-            "SNRG".to_string(),
-            tx.amount_nwei,
-            tx.amount_nwei,
-            ValuationStatus::NativeSnrg,
+            asset_id,
+            amount_nwei,
+            amount_snrgequivalent_nwei,
+            valuation_status,
         );
     }
     if payload.starts_with("token_transfer:") {
@@ -1416,6 +1526,50 @@ mod tests {
                 .copied(),
             Some(1_000_000_000)
         );
+    }
+
+    #[test]
+    fn explicit_native_burn_reduces_supply_and_charges_total_network_fee() {
+        let mut transaction = tx("alice", "", 0, 0, "alice");
+        transaction.payload = br#"burn:{"asset":"SNRG","amount":"1000000000"}"#.to_vec();
+        transaction.max_fee_nwei = 1_000;
+        let block = block(vec![transaction.clone()]);
+        let mut state = ExecutionState::new().with_balance("alice", 2_000_000_000);
+        state
+            .mark_authorized(&transaction)
+            .expect("transaction authorized");
+
+        let result = execute_block(&block, &state).expect("block executes");
+        let receipt = result.receipts.first().expect("receipt");
+        let fee_breakdown = receipt.fee_breakdown.as_ref().expect("fee breakdown");
+
+        assert_eq!(receipt.status, ReceiptStatus::Success);
+        assert_eq!(fee_breakdown.tx_type, crate::gas::TransactionFeeType::Burn);
+        assert_eq!(fee_breakdown.amount_protocol_fee_nwei, 100_000);
+        assert_eq!(fee_breakdown.total_network_fee_nwei, 101_000);
+        assert_eq!(
+            result.state.balances_nwei.get("alice").copied(),
+            Some(999_899_000)
+        );
+        assert_eq!(
+            result
+                .state
+                .balances_nwei
+                .get(crate::token::FEE_COLLECTOR_ADDRESS)
+                .copied(),
+            Some(101_000)
+        );
+        assert_eq!(
+            result
+                .state
+                .balances_nwei
+                .get(crate::address::NETWORK_BURN_ADDRESS)
+                .copied(),
+            None
+        );
+        assert_eq!(result.state.burn_events.len(), 1);
+        assert_eq!(result.state.burn_events[0].amount_nwei, 1_000_000_000);
+        assert!(result.state.burn_events[0].supply_reduced);
     }
 
     #[test]

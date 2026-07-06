@@ -1289,8 +1289,6 @@ fn infer_synergy_env(config: &NodeConfig) -> &'static str {
     let name = config.network.name.to_ascii_lowercase();
     if name.contains("testnet") {
         "testnet"
-    } else if name.contains("testnet") {
-        "testnet"
     } else {
         "mainnet"
     }
