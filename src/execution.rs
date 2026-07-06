@@ -3,8 +3,8 @@ use crate::sts::{StsSignedPayload, StsState};
 use crate::synergy_types::{Block, CanonicalSerialize, Hash, Transaction, TxId};
 use crate::synq_admission::SynQVerificationSummary;
 use crate::synq_execution::{
-    execute_synq_transaction_at, SynQAivmReceiptSummary, SynQArtifactKey, SynQContractArtifact,
-    SynQDeploymentRecord, SynQExecutionContext,
+    execute_synq_transaction_at, sts_host_context_from_sts_state, SynQAivmReceiptSummary,
+    SynQArtifactKey, SynQContractArtifact, SynQDeploymentRecord, SynQExecutionContext,
 };
 use aivm_core::state::ContractState;
 use std::collections::{BTreeMap, BTreeSet};
@@ -131,13 +131,18 @@ pub fn execute_block(block: &Block, state: &ExecutionState) -> Result<ExecutionR
     let mut receipts = Vec::new();
     let synq_context = SynQExecutionContext {
         runtime_block_height: block.header.height.0,
+        runtime_block_timestamp_unix: block
+            .header
+            .timestamp_ms_consensus_bounded
+            .saturating_div(1_000),
+        sts_host: None,
     };
     for batch in batches {
         let mut batch_receipts = execute_batch_parallel(
             &batch,
             &block.transactions,
             &mut working_state,
-            synq_context,
+            synq_context.clone(),
         )?;
         receipts.append(&mut batch_receipts);
     }
@@ -198,7 +203,12 @@ pub fn execute_batch_parallel(
         let tx = by_id
             .get(tx_id)
             .ok_or_else(|| format!("transaction {} missing from batch input", tx_id.0))?;
-        receipts.push(execute_transaction(tx_id.clone(), tx, state, synq_context)?);
+        receipts.push(execute_transaction(
+            tx_id.clone(),
+            tx,
+            state,
+            synq_context.clone(),
+        )?);
     }
     Ok(receipts)
 }
@@ -325,6 +335,11 @@ fn execute_transaction(
     }
 
     let synq_aivm = if let Some(summary) = synq_verification.as_ref() {
+        let mut synq_context = synq_context.clone();
+        synq_context.sts_host = Some(sts_host_context_from_sts_state(
+            &state.sts_state,
+            synq_context.runtime_block_timestamp_unix,
+        ));
         execute_synq_transaction_at(
             &id,
             tx,

@@ -7531,6 +7531,8 @@ fn replay_synq_receipt_for_legacy_transaction(
         deployments,
         SynQExecutionContext {
             runtime_block_height: block_index,
+            runtime_block_timestamp_unix: legacy_tx.timestamp,
+            sts_host: None,
         },
     ) {
         Ok(Some(aivm)) => Some(json!({
