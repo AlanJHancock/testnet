@@ -45,7 +45,7 @@ Install a specific release tag:
 
 ```bash
 curl -fsSL https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/latest/download/install-synergy-sts.sh \
-  | bash -s -- --version synergy-sts-v15.0.12
+  | bash -s -- --version synergy-sts-v15.0.13
 ```
 
 Install to a different directory:
@@ -73,7 +73,7 @@ The installer verifies release `.sha256` checksums by default. Advanced users ca
 
 ```bash
 ./install-synergy-sts.sh \
-  --url https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/download/synergy-sts-v15.0.12/synergy-sts-linux-amd64 \
+  --url https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/download/synergy-sts-v15.0.13/synergy-sts-linux-amd64 \
   --sha256 <expected_sha256>
 ```
 

@@ -24,7 +24,7 @@ This branch is `feature/native-sts-token-system-testnet`.
 - `docs/sts/STS_RPC_API.md` documents the read methods and response fields for native SNRG, fungible tokens, NFTs, multi-assets, credentials, and events.
 - `.github/workflows/release-synergy-sts-cli.yml` publishes standalone macOS and Linux CLI binaries to `synergy-network-hq/synergy-sts-cli-releases`.
 - `scripts/install-synergy-sts.sh` installs the released CLI on macOS and Linux, verifies release checksums by default, supports pinned versions, and can also install from a local source checkout or an existing binary.
-- `synergy-sts-v15.0.12` is the public CLI release for the expanded native STS command surface, including fungible, NFT, multi-asset, and credential payload builders.
+- `synergy-sts-v15.0.13` is the public CLI release for the expanded native STS command surface, including fungible, NFT, multi-asset, and credential payload builders.
 - Atlas indexing support is implemented in `synergy-atlas`: the indexer decodes `synergy-sts-v1:` payloads, derives non-native `synb*` token addresses, materializes STS token definitions/events/balances/images, and the `/tokens` API merges STS assets into the token registry.
 - Atlas exposes a wallet-authenticated `POST /tokens/:tokenAddress/image` fallback for the creator wallet to set an omitted image exactly once from the token detail view.
 - Live Atlas is deployed with the STS token registry and image endpoint. Current live `/tokens` output contains only native `SNRG` until the first signed non-native STS create transaction finalizes; newly created STS tokens will be materialized automatically by the Atlas indexer.

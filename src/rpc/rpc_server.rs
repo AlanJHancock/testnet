@@ -4222,19 +4222,6 @@ fn handle_json_rpc(
             Err(_) => json!({"error": "Failed to access reward ledger"}),
         },
 
-        // synergy_checkRewardInvariants / synergy_debugRewardsCheckInvariants
-        "synergy_checkRewardInvariants" | "synergy_debugRewardsCheckInvariants" => {
-            let epoch = params.get(0).and_then(|value| {
-                value
-                    .as_u64()
-                    .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
-            });
-            match crate::rewards::REWARD_LEDGER.lock() {
-                Ok(ledger) => json!(ledger.check_invariants(epoch)),
-                Err(_) => json!({"error": "Failed to access reward ledger"}),
-            }
-        }
-
         // synergy_getValidatorPerformance
         "synergy_getValidatorPerformance" => {
             if let Some(address) = params.get(0).and_then(|v| v.as_str()) {
@@ -5111,8 +5098,6 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_getEpochFeeDistribution"
         | "synergy_getClusterRewardEscrow"
         | "synergy_getTreasuryRecovery"
-        | "synergy_checkRewardInvariants"
-        | "synergy_debugRewardsCheckInvariants"
         | "synergy_getValidatorPerformance"
         | "synergy_getValidatorQueue"
         | "synergy_getValidatorSlashingHistory"
