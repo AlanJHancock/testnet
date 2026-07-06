@@ -263,6 +263,18 @@ struct CachedSimulation {
     created_at: u64,
 }
 
+#[derive(Debug, Clone)]
+struct StsReplayReport {
+    state: crate::sts::StsState,
+    chain_start_height: u64,
+    latest_height: u64,
+    scanned_blocks: usize,
+    scanned_transactions: usize,
+    applied_transactions: usize,
+    skipped_payloads: usize,
+    errors: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RpcTransport {
     Http,
@@ -2351,6 +2363,18 @@ fn handle_json_rpc(
                 json!("Missing validator address")
             }
         }
+
+        "synergy_stsGetNativeAsset" | "sts_getNativeAsset" => sts_native_asset_json(),
+
+        "synergy_stsGetTokens" | "sts_getTokens" => sts_tokens_json(chain),
+
+        "synergy_stsGetToken" | "sts_getToken" => sts_token_json(&params, chain),
+
+        "synergy_stsGetBalance" | "sts_getBalance" => sts_balance_json(&params, chain),
+
+        "synergy_stsGetBalances" | "sts_getBalances" => sts_balances_json(&params, chain),
+
+        "synergy_stsGetEvents" | "sts_getEvents" => sts_events_json(&params, chain),
 
         // Token methods
         "synergy_getTokenBalance" => {
@@ -4877,6 +4901,18 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_getValidator"
         | "synergy_getTokenBalance"
         | "synergy_getTokens"
+        | "synergy_stsGetNativeAsset"
+        | "synergy_stsGetTokens"
+        | "synergy_stsGetToken"
+        | "synergy_stsGetBalance"
+        | "synergy_stsGetBalances"
+        | "synergy_stsGetEvents"
+        | "sts_getNativeAsset"
+        | "sts_getTokens"
+        | "sts_getToken"
+        | "sts_getBalance"
+        | "sts_getBalances"
+        | "sts_getEvents"
         | "synergy_getTopValidators"
         | "synergy_getBlockRange"
         | "synergy_getTransactionByHash"
@@ -6033,6 +6069,452 @@ fn u128_rpc_value(value: u128) -> Value {
     u64::try_from(value)
         .map(Value::from)
         .unwrap_or_else(|_| Value::String(value.to_string()))
+}
+
+fn sts_native_asset_json() -> Value {
+    let native = crate::sts::native_snrg_definition();
+    json!({
+        "asset_kind": "native",
+        "native": native.native,
+        "gas_asset": native.gas_asset,
+        "symbol": native.symbol,
+        "name": native.name,
+        "decimals": native.decimals,
+        "token_id": null,
+        "token_address": native.token_address,
+        "compatibility_placeholder_address": crate::sts::NATIVE_SNRG_PLACEHOLDER_ADDRESS,
+        "chain_id": crate::sts::STS_TESTNET_CHAIN_ID,
+        "network": crate::sts::STS_TESTNET_NETWORK,
+    })
+}
+
+fn is_native_snrg_ref(token_ref: &str) -> bool {
+    let token_ref = token_ref.trim();
+    token_ref.eq_ignore_ascii_case(crate::sts::NATIVE_SNRG_SYMBOL)
+        || token_ref == crate::sts::NATIVE_SNRG_PLACEHOLDER_ADDRESS
+}
+
+fn sts_rpc_token_param(params: &Value, array_index: usize) -> Option<String> {
+    rpc_string_param(params, "token", array_index)
+        .or_else(|| rpc_string_param(params, "token_id", array_index))
+        .or_else(|| rpc_string_param(params, "tokenId", array_index))
+        .or_else(|| rpc_string_param(params, "token_address", array_index))
+        .or_else(|| rpc_string_param(params, "tokenAddress", array_index))
+}
+
+fn sts_rpc_owner_param(params: &Value, array_index: usize) -> Option<String> {
+    rpc_string_param(params, "owner", array_index)
+        .or_else(|| rpc_string_param(params, "address", array_index))
+        .or_else(|| rpc_string_param(params, "wallet", array_index))
+        .or_else(|| rpc_string_param(params, "account", array_index))
+}
+
+fn sts_tokens_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let chain = chain.lock().unwrap();
+    match sts_replay_from_chain(&chain) {
+        Ok(report) => {
+            let sts_items = report
+                .state
+                .fungible_definitions()
+                .into_iter()
+                .map(sts_fungible_definition_json)
+                .collect::<Vec<_>>();
+            let mut items = Vec::with_capacity(sts_items.len() + 1);
+            items.push(sts_native_asset_json());
+            items.extend(sts_items.clone());
+            json!({
+                "success": true,
+                "source": "committed_chain_replay",
+                "native": sts_native_asset_json(),
+                "sts": sts_items,
+                "items": items,
+                "count": items.len(),
+                "replay": sts_replay_metadata_json(&report),
+            })
+        }
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_token_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(token_ref) = sts_rpc_token_param(params, 0) else {
+        return json!({"success": false, "error": "Missing token, token_id, or token_address parameter"});
+    };
+    if is_native_snrg_ref(&token_ref) {
+        return json!({
+            "success": true,
+            "source": "native_runtime_identity",
+            "item": sts_native_asset_json(),
+        });
+    }
+
+    let chain = chain.lock().unwrap();
+    match sts_replay_from_chain(&chain) {
+        Ok(report) => match report.state.fungible_definition(&token_ref) {
+            Some(definition) => json!({
+                "success": true,
+                "source": "committed_chain_replay",
+                "item": sts_fungible_definition_json(definition),
+                "replay": sts_replay_metadata_json(&report),
+            }),
+            None => json!({
+                "success": false,
+                "error": "STS token not found",
+                "token_ref": token_ref,
+                "replay": sts_replay_metadata_json(&report),
+            }),
+        },
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_balance_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(owner) = sts_rpc_owner_param(params, 0) else {
+        return json!({"success": false, "error": "Missing owner/address parameter"});
+    };
+    let Some(token_ref) = sts_rpc_token_param(params, 1) else {
+        return json!({"success": false, "error": "Missing token, token_id, or token_address parameter"});
+    };
+    if is_native_snrg_ref(&token_ref) {
+        let balance = TOKEN_MANAGER
+            .clone()
+            .get_balance(&owner, crate::sts::NATIVE_SNRG_SYMBOL);
+        return json!({
+            "success": true,
+            "source": "native_snrg_ledger",
+            "asset_kind": "native",
+            "owner": owner,
+            "symbol": crate::sts::NATIVE_SNRG_SYMBOL,
+            "token_id": null,
+            "token_address": null,
+            "balance": balance,
+            "balance_nwei": balance,
+        });
+    }
+
+    let chain = chain.lock().unwrap();
+    match sts_replay_from_chain(&chain) {
+        Ok(report) => {
+            let Some(definition) = report.state.fungible_definition(&token_ref) else {
+                return json!({
+                    "success": false,
+                    "error": "STS token not found",
+                    "owner": owner,
+                    "token_ref": token_ref,
+                    "replay": sts_replay_metadata_json(&report),
+                });
+            };
+            let balance = report.state.fungible_balance(&owner, &definition.token_id);
+            let frozen = report
+                .state
+                .fungible_balance_entry(&owner, &definition.token_id)
+                .map(|entry| entry.frozen)
+                .unwrap_or(false);
+            json!({
+                "success": true,
+                "source": "committed_chain_replay",
+                "asset_kind": "sts",
+                "owner": owner,
+                "token_id": definition.token_id,
+                "token_address": definition.token_address,
+                "symbol": definition.symbol,
+                "decimals": definition.decimals,
+                "balance": u128_rpc_value(balance),
+                "frozen": frozen,
+                "replay": sts_replay_metadata_json(&report),
+            })
+        }
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_balances_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let Some(owner) = sts_rpc_owner_param(params, 0) else {
+        return json!({"success": false, "error": "Missing owner/address parameter"});
+    };
+    let native_balance = TOKEN_MANAGER
+        .clone()
+        .get_balance(&owner, crate::sts::NATIVE_SNRG_SYMBOL);
+
+    let chain = chain.lock().unwrap();
+    match sts_replay_from_chain(&chain) {
+        Ok(report) => {
+            let mut items = vec![json!({
+                "asset_kind": "native",
+                "owner": owner,
+                "symbol": crate::sts::NATIVE_SNRG_SYMBOL,
+                "token_id": null,
+                "token_address": null,
+                "balance": native_balance,
+                "balance_nwei": native_balance,
+            })];
+            items.extend(
+                report
+                    .state
+                    .fungible_balances_for_owner(&owner)
+                    .into_iter()
+                    .filter_map(|balance| {
+                        report
+                            .state
+                            .fungible_definition(&balance.token_id)
+                            .map(|definition| sts_fungible_balance_json(balance, definition))
+                    }),
+            );
+            json!({
+                "success": true,
+                "source": "native_snrg_ledger_and_committed_chain_replay",
+                "owner": owner,
+                "items": items,
+                "count": items.len(),
+                "replay": sts_replay_metadata_json(&report),
+            })
+        }
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_events_json(params: &Value, chain: &Arc<Mutex<BlockChain>>) -> Value {
+    let token_ref = sts_rpc_token_param(params, 0);
+    let owner = sts_rpc_owner_param(params, 1);
+    let limit = rpc_u64_param(params, "limit", 2).unwrap_or(100).min(1_000) as usize;
+
+    let chain = chain.lock().unwrap();
+    match sts_replay_from_chain(&chain) {
+        Ok(report) => {
+            let events = report
+                .state
+                .events_for(token_ref.as_deref(), owner.as_deref(), limit)
+                .into_iter()
+                .map(sts_event_json)
+                .collect::<Vec<_>>();
+            json!({
+                "success": true,
+                "source": "committed_chain_replay",
+                "token_ref": token_ref,
+                "owner": owner,
+                "items": events,
+                "count": events.len(),
+                "replay": sts_replay_metadata_json(&report),
+            })
+        }
+        Err(error) => sts_unavailable_json(error.message),
+    }
+}
+
+fn sts_replay_from_chain(chain: &BlockChain) -> Result<StsReplayReport, RpcError> {
+    let Some(first_block) = chain.chain.first() else {
+        return Err(RpcError::new(
+            -32021,
+            "STS state unavailable: committed chain is empty and cannot be replayed from genesis",
+        ));
+    };
+    if first_block.block_index != 0 {
+        return Err(RpcError::new(
+            -32021,
+            format!(
+                "STS state unavailable: hot chain starts at height {}, so replay from genesis is incomplete",
+                first_block.block_index
+            ),
+        ));
+    }
+
+    let mut state = crate::sts::StsState::new();
+    let mut scanned_transactions = 0usize;
+    let mut applied_transactions = 0usize;
+    let mut skipped_payloads = 0usize;
+    let mut errors = Vec::new();
+
+    for block in &chain.chain {
+        for transaction in &block.transactions {
+            scanned_transactions = scanned_transactions.saturating_add(1);
+            let Some(data) = transaction.data.as_deref() else {
+                continue;
+            };
+            match extract_sts_payload_from_transaction_data(data) {
+                Ok(Some(payload)) => {
+                    match state.apply_signed_payload(&transaction.sender, &payload) {
+                        Ok(_) => {
+                            applied_transactions = applied_transactions.saturating_add(1);
+                        }
+                        Err(error) => {
+                            skipped_payloads = skipped_payloads.saturating_add(1);
+                            errors.push(format!(
+                                "block {} tx {} skipped: {}",
+                                block.block_index,
+                                transaction.hash(),
+                                error
+                            ));
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    skipped_payloads = skipped_payloads.saturating_add(1);
+                    errors.push(format!(
+                        "block {} tx {} malformed STS payload: {}",
+                        block.block_index,
+                        transaction.hash(),
+                        error
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(StsReplayReport {
+        state,
+        chain_start_height: first_block.block_index,
+        latest_height: chain.last().map(|block| block.block_index).unwrap_or(0),
+        scanned_blocks: chain.chain.len(),
+        scanned_transactions,
+        applied_transactions,
+        skipped_payloads,
+        errors,
+    })
+}
+
+fn extract_sts_payload_from_transaction_data(
+    data: &str,
+) -> Result<Option<crate::sts::StsSignedPayload>, String> {
+    let trimmed = data.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.starts_with(std::str::from_utf8(crate::sts::STS_PAYLOAD_PREFIX).unwrap_or("")) {
+        return crate::sts::decode_sts_payload(trimmed.as_bytes())
+            .map_err(|error| error.to_string());
+    }
+
+    let normalized_hex = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    let sts_prefix_hex = hex::encode(crate::sts::STS_PAYLOAD_PREFIX);
+    if normalized_hex
+        .to_ascii_lowercase()
+        .starts_with(&sts_prefix_hex)
+    {
+        let bytes = hex::decode(normalized_hex).map_err(|error| error.to_string())?;
+        return crate::sts::decode_sts_payload(&bytes).map_err(|error| error.to_string());
+    }
+
+    let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+        return Ok(None);
+    };
+    extract_sts_payload_from_json_value(&value)
+}
+
+fn extract_sts_payload_from_json_value(
+    value: &Value,
+) -> Result<Option<crate::sts::StsSignedPayload>, String> {
+    if looks_like_sts_signed_payload(value) {
+        return serde_json::from_value::<crate::sts::StsSignedPayload>(value.clone())
+            .map(Some)
+            .map_err(|error| error.to_string());
+    }
+    if let Some(payload_hex) = value
+        .get("payload_hex")
+        .or_else(|| value.get("payloadHex"))
+        .and_then(Value::as_str)
+    {
+        return extract_sts_payload_from_transaction_data(payload_hex);
+    }
+    if let Some(payload) = value.get("payload") {
+        if looks_like_sts_signed_payload(payload) {
+            return serde_json::from_value::<crate::sts::StsSignedPayload>(payload.clone())
+                .map(Some)
+                .map_err(|error| error.to_string());
+        }
+        if let Some(payload_text) = payload.as_str() {
+            return extract_sts_payload_from_transaction_data(payload_text);
+        }
+    }
+    Ok(None)
+}
+
+fn looks_like_sts_signed_payload(value: &Value) -> bool {
+    value.get("version").is_some() && value.get("chain_id").is_some() && value.get("tx").is_some()
+}
+
+fn sts_replay_metadata_json(report: &StsReplayReport) -> Value {
+    json!({
+        "complete": report.errors.is_empty(),
+        "chain_start_height": report.chain_start_height,
+        "latest_height": report.latest_height,
+        "scanned_blocks": report.scanned_blocks,
+        "scanned_transactions": report.scanned_transactions,
+        "applied_transactions": report.applied_transactions,
+        "skipped_payloads": report.skipped_payloads,
+        "errors": report.errors,
+    })
+}
+
+fn sts_unavailable_json(message: String) -> Value {
+    json!({
+        "success": false,
+        "source": "committed_chain_replay",
+        "state_available": false,
+        "error": message,
+    })
+}
+
+fn sts_fungible_definition_json(definition: &crate::sts::FungibleDefinition) -> Value {
+    json!({
+        "asset_kind": "sts",
+        "native": false,
+        "gas_asset": false,
+        "token_id": definition.token_id,
+        "token_address": definition.token_address,
+        "class": definition.class,
+        "class_prefix": definition.class.prefix(),
+        "creator": definition.creator,
+        "name": definition.name,
+        "symbol": definition.symbol,
+        "decimals": definition.decimals,
+        "total_supply": u128_rpc_value(definition.total_supply),
+        "max_supply": definition.max_supply.map(u128_rpc_value),
+        "authorities": definition.authorities,
+        "metadata_uri": definition.metadata_uri,
+        "metadata_hash": definition.metadata_hash,
+        "metadata_mutable": definition.metadata_mutable,
+        "image_uri": definition.image_uri,
+        "image_hash": definition.image_hash,
+        "image_locked": definition.image_locked,
+        "created_at": definition.created_at,
+        "updated_at": definition.updated_at,
+        "flags": definition.flags,
+        "policies": definition.policies,
+        "paused": definition.paused,
+        "verified": definition.verified,
+    })
+}
+
+fn sts_fungible_balance_json(
+    balance: &crate::sts::FungibleBalance,
+    definition: &crate::sts::FungibleDefinition,
+) -> Value {
+    json!({
+        "asset_kind": "sts",
+        "owner": balance.owner,
+        "token_id": definition.token_id,
+        "token_address": definition.token_address,
+        "symbol": definition.symbol,
+        "decimals": definition.decimals,
+        "balance": u128_rpc_value(balance.balance),
+        "frozen": balance.frozen,
+        "created_at": balance.created_at,
+        "updated_at": balance.updated_at,
+    })
+}
+
+fn sts_event_json(event: &crate::sts::StsEvent) -> Value {
+    json!({
+        "event_type": event.event_type,
+        "token_id": event.token_id,
+        "sender": event.sender,
+        "owner": event.owner,
+        "recipient": event.recipient,
+        "amount": event.amount,
+        "timestamp": event.timestamp,
+        "attributes": event.attributes,
+    })
 }
 
 fn fee_breakdown_json(breakdown: &crate::gas::NetworkFeeBreakdown) -> Value {
@@ -7561,6 +8043,10 @@ mod tests {
     use crate::block::{Block, BlockChain};
     use crate::consensus::consensus_algorithm::ProofOfSynergy;
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager};
+    use crate::sts::{
+        encode_sts_payload, CreateFungibleParams, FungibleControlFlags, StsSignedPayload, StsTx,
+        TokenClass,
+    };
     use crate::synq_execution::{
         derive_synq_contract_address_from_deploy, synergy_contract_address_from_pqsynq_address,
     };
@@ -7573,6 +8059,125 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::fs;
     use std::path::PathBuf;
+
+    const STS_TEST_CREATOR: &str = "synw1creator000000000000000000000000000";
+    const STS_TEST_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn sts_test_create_params() -> CreateFungibleParams {
+        CreateFungibleParams {
+            class: TokenClass::B1BasicFungible,
+            creator: STS_TEST_CREATOR.to_string(),
+            creator_nonce: 1,
+            name: "Testnet Gold".to_string(),
+            symbol: "TGLD".to_string(),
+            decimals: 9,
+            initial_supply: 1_000_000,
+            max_supply: Some(1_000_000),
+            mint_authority: None,
+            metadata_authority: None,
+            metadata_uri: Some("ipfs://tgld".to_string()),
+            metadata_hash: Some(STS_TEST_HASH.to_string()),
+            metadata_mutable: false,
+            image_uri: None,
+            image_hash: None,
+            flags: FungibleControlFlags::default(),
+            policies: Vec::new(),
+            created_at: 1_700_000_000,
+        }
+    }
+
+    fn sts_test_transaction(data: String) -> Transaction {
+        Transaction {
+            chain_id: crate::synergy_types::SYNERGY_TESTNET_V2_CHAIN_ID,
+            network_id: crate::synergy_types::SYNERGY_TESTNET_V2_NETWORK_ID.to_string(),
+            sender: STS_TEST_CREATOR.to_string(),
+            receiver: "sts".to_string(),
+            amount: 0,
+            nonce: 1,
+            signature: vec![1, 2, 3],
+            signer_public_key: vec![4, 5, 6],
+            timestamp: 1_700_000_001,
+            gas_price: 40,
+            gas_limit: 125_000,
+            data: Some(data),
+            signature_algorithm: "fndsa".to_string(),
+        }
+    }
+
+    fn sts_test_chain(data: String) -> BlockChain {
+        let genesis = Block::new_with_timestamp(
+            0,
+            Vec::new(),
+            "0".to_string(),
+            "genesis".to_string(),
+            0,
+            1_700_000_000,
+        );
+        let block = Block::new_with_timestamp(
+            1,
+            vec![sts_test_transaction(data)],
+            genesis.hash.clone(),
+            "validator-1".to_string(),
+            0,
+            1_700_000_001,
+        );
+        let mut chain = BlockChain::new();
+        chain.add_block(genesis);
+        chain.add_block(block);
+        chain
+    }
+
+    fn sts_test_payload_hex() -> String {
+        let payload = StsSignedPayload::new(StsTx::CreateFungible(sts_test_create_params()));
+        hex::encode(encode_sts_payload(&payload).expect("sts payload encodes"))
+    }
+
+    #[test]
+    fn sts_payload_extractor_reads_cli_artifact_payload_hex() {
+        let artifact = json!({"payload_hex": sts_test_payload_hex()}).to_string();
+        let payload = extract_sts_payload_from_transaction_data(&artifact)
+            .expect("artifact parses")
+            .expect("payload exists");
+
+        assert_eq!(payload.chain_id, crate::sts::STS_TESTNET_CHAIN_ID);
+    }
+
+    #[test]
+    fn sts_replay_from_chain_materializes_fungible_registry() {
+        let chain = sts_test_chain(sts_test_payload_hex());
+        let report = sts_replay_from_chain(&chain).expect("genesis chain replays");
+        let definition = report
+            .state
+            .fungible_definitions()
+            .into_iter()
+            .next()
+            .expect("created token exists");
+
+        assert!(definition.token_address.starts_with("synb1"));
+        assert_eq!(
+            report
+                .state
+                .fungible_balance(STS_TEST_CREATOR, &definition.token_id),
+            1_000_000
+        );
+    }
+
+    #[test]
+    fn sts_replay_from_chain_fails_closed_for_compact_chain() {
+        let compact_block = Block::new_with_timestamp(
+            42,
+            Vec::new(),
+            "previous".to_string(),
+            "validator-1".to_string(),
+            0,
+            1_700_000_000,
+        );
+        let mut chain = BlockChain::new();
+        chain.add_block(compact_block);
+
+        let error = sts_replay_from_chain(&chain).expect_err("compact chain is incomplete");
+        assert_eq!(error.code, -32021);
+    }
 
     #[derive(Clone)]
     struct RpcCounterSynQFixture {

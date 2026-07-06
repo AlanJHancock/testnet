@@ -42,7 +42,7 @@ Install a specific release tag:
 
 ```bash
 curl -fsSL https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/latest/download/install-synergy-sts.sh \
-  | bash -s -- --version synergy-sts-v15.0.6-alpha.1
+  | bash -s -- --version synergy-sts-v15.0.6-alpha.2
 ```
 
 Install to a different directory:
@@ -70,7 +70,7 @@ The installer verifies release `.sha256` checksums by default. Advanced users ca
 
 ```bash
 ./install-synergy-sts.sh \
-  --url https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/download/synergy-sts-v15.0.6-alpha.1/synergy-sts-linux-amd64 \
+  --url https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/download/synergy-sts-v15.0.6-alpha.2/synergy-sts-linux-amd64 \
   --sha256 <expected_sha256>
 ```
 
@@ -153,6 +153,41 @@ Recommended workflow:
 5. Wrap `payload_hex` in the canonical signed transaction format.
 6. Submit the signed transaction to testnet.
 7. Query RPC/Atlas after finality.
+
+## Read-Only STS RPC
+
+The runtime exposes read-only STS RPC methods for wallets, SDKs, and explorer checks. These methods rebuild STS view state by replaying committed `synergy-sts-v1:` payloads from `data/chain.json`; if the local hot chain is compacted and no longer starts at genesis, the methods return `success: false` instead of pretending the STS registry is empty.
+
+Supported method names:
+
+- `sts_getNativeAsset` / `synergy_stsGetNativeAsset`
+- `sts_getTokens` / `synergy_stsGetTokens`
+- `sts_getToken` / `synergy_stsGetToken`
+- `sts_getBalance` / `synergy_stsGetBalance`
+- `sts_getBalances` / `synergy_stsGetBalances`
+- `sts_getEvents` / `synergy_stsGetEvents`
+
+Examples:
+
+```bash
+curl -fsS "$SYNERGY_RPC_URL" \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"sts_getNativeAsset","params":[]}'
+
+curl -fsS "$SYNERGY_RPC_URL" \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"sts_getTokens","params":[]}'
+
+curl -fsS "$SYNERGY_RPC_URL" \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"sts_getToken","params":["synb1..."]}'
+
+curl -fsS "$SYNERGY_RPC_URL" \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":4,"method":"sts_getBalance","params":["synw1owner...","synb1..."]}'
+```
+
+`sts_getNativeAsset` always returns native SNRG with `token_address: null` and the 41-zero value only as `compatibility_placeholder_address`. STS fungible tokens return `asset_kind: "sts"` and a non-empty `synb*` `token_address`.
 
 ## Output Modes
 

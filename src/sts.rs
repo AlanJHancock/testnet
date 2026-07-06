@@ -936,6 +936,80 @@ impl StsState {
             .unwrap_or(0)
     }
 
+    pub fn fungible_definitions(&self) -> Vec<&FungibleDefinition> {
+        self.token_registry.values().collect()
+    }
+
+    pub fn fungible_definition(&self, token_ref: &str) -> Option<&FungibleDefinition> {
+        let token_ref = token_ref.trim();
+        self.token_registry.get(token_ref).or_else(|| {
+            self.token_registry
+                .values()
+                .find(|definition| definition.token_address == token_ref)
+        })
+    }
+
+    pub fn fungible_balance_entry(&self, owner: &str, token_ref: &str) -> Option<&FungibleBalance> {
+        let definition = self.fungible_definition(token_ref)?;
+        self.fungible_balances
+            .get(&balance_key(&definition.token_id, owner))
+    }
+
+    pub fn fungible_balances_for_owner(&self, owner: &str) -> Vec<&FungibleBalance> {
+        self.fungible_balances
+            .values()
+            .filter(|balance| balance.owner == owner)
+            .collect()
+    }
+
+    pub fn fungible_balances_for_token(&self, token_ref: &str) -> Vec<&FungibleBalance> {
+        let Some(definition) = self.fungible_definition(token_ref) else {
+            return Vec::new();
+        };
+        self.fungible_balances
+            .values()
+            .filter(|balance| balance.token_id == definition.token_id)
+            .collect()
+    }
+
+    pub fn events_for(
+        &self,
+        token_ref: Option<&str>,
+        owner: Option<&str>,
+        limit: usize,
+    ) -> Vec<&StsEvent> {
+        let token_id = match token_ref {
+            Some(token_ref) => match self.fungible_definition(token_ref) {
+                Some(definition) => Some(definition.token_id.as_str()),
+                None => return Vec::new(),
+            },
+            None => None,
+        };
+        let mut events = self
+            .events
+            .iter()
+            .filter(|event| {
+                token_id
+                    .map(|token_id| event.token_id.as_deref() == Some(token_id))
+                    .unwrap_or(true)
+            })
+            .filter(|event| {
+                owner
+                    .map(|owner| {
+                        event.owner.as_deref() == Some(owner)
+                            || event.recipient.as_deref() == Some(owner)
+                            || event.sender == owner
+                    })
+                    .unwrap_or(true)
+            })
+            .collect::<Vec<_>>();
+        events.reverse();
+        if limit > 0 && events.len() > limit {
+            events.truncate(limit);
+        }
+        events
+    }
+
     fn credit_balance(
         &mut self,
         token_id: &str,
@@ -1777,6 +1851,50 @@ mod tests {
         assert_eq!(
             state.set_fungible_image(ALICE, &token_id, "ipfs://image2", HASH, 1_700_000_002),
             Err(StsError::ImageAlreadySet)
+        );
+    }
+
+    #[test]
+    fn query_helpers_resolve_fungible_tokens_by_id_or_address() {
+        let mut state = StsState::new();
+        let token_id = state
+            .create_fungible(params(TokenClass::B1BasicFungible))
+            .unwrap();
+        let token_address = state
+            .fungible_definition(&token_id)
+            .unwrap()
+            .token_address
+            .clone();
+
+        assert_eq!(state.fungible_definitions().len(), 1);
+        assert_eq!(
+            state
+                .fungible_definition(&token_address)
+                .map(|definition| definition.token_id.as_str()),
+            Some(token_id.as_str())
+        );
+        assert_eq!(
+            state
+                .fungible_balance_entry(ALICE, &token_address)
+                .map(|balance| balance.balance),
+            Some(1_000)
+        );
+    }
+
+    #[test]
+    fn event_queries_filter_by_token_and_owner() {
+        let mut state = StsState::new();
+        let token_id = state
+            .create_fungible(params(TokenClass::B1BasicFungible))
+            .unwrap();
+        state
+            .transfer_fungible(ALICE, &token_id, ALICE, BOB, 100, 1_700_000_001)
+            .unwrap();
+
+        let bob_events = state.events_for(Some(&token_id), Some(BOB), 10);
+        assert_eq!(
+            bob_events.first().map(|event| event.event_type.as_str()),
+            Some("StsFungibleTransferred")
         );
     }
 }
