@@ -50,6 +50,35 @@ class ArchiveAuthorityPolicyTests(unittest.TestCase):
             ],
         )
 
+    def test_validator_pruned_creation_uses_current_validator_source_role(self) -> None:
+        self.assertEqual(
+            archive_authority.producer_role_for_snapshot_class("validator-pruned"),
+            "VALIDATOR",
+        )
+        self.assertEqual(
+            archive_authority.producer_role_for_snapshot_class("support-rpc"),
+            "ARCHIVE_NODE",
+        )
+
+    def test_validator_pruned_manifest_source_role_must_be_current_validator(self) -> None:
+        self.assertEqual(
+            archive_authority.validate_manifest_source_role(
+                "validator-pruned",
+                {"source_role": "validator"},
+            ),
+            "VALIDATOR",
+        )
+        with self.assertRaisesRegex(RuntimeError, "GENESIS_VALIDATOR.*legacy/stale"):
+            archive_authority.validate_manifest_source_role(
+                "validator-pruned",
+                {"source_role": "GENESIS_VALIDATOR"},
+            )
+        with self.assertRaisesRegex(RuntimeError, "source_role must be VALIDATOR"):
+            archive_authority.validate_manifest_source_role(
+                "validator-pruned",
+                {"source_role": "ARCHIVE_NODE"},
+            )
+
     def test_current_role_class_cadence_and_retention(self) -> None:
         policy = archive_authority.CLASS_POLICY
         self.assertEqual(policy["archive-full"]["cadence"], 15_000)
@@ -328,6 +357,46 @@ class ArchiveAuthorityPolicyTests(unittest.TestCase):
         self.assertEqual(cleaned[0]["verification_status"], "red")
         self.assertEqual(cleaned[0]["superseded_by"], "snapshot-000675736")
         self.assertTrue(archive_authority.entry_has_valid_consensus_fork(cleaned[0]))
+
+    def test_catalog_update_retires_legacy_validator_pruned_source_role(self) -> None:
+        stale = {
+            "snapshot_id": "snapshot-000204216",
+            "snapshot_class": "validator-pruned",
+            "status": "published",
+            "height": archive_authority.FORK_HEIGHT,
+            "source_role": "GENESIS_VALIDATOR",
+            "verification_status": "green",
+        }
+        replacement = {
+            "snapshot_id": "snapshot-000675736",
+            "snapshot_class": "validator-pruned",
+            "height": 675_736,
+            "source_role": "VALIDATOR",
+        }
+
+        cleaned = archive_authority.retire_invalid_source_role_entries(
+            [
+                stale,
+                {
+                    "snapshot_id": "snapshot-000204217",
+                    "snapshot_class": "validator-pruned",
+                    "status": "published",
+                    "height": archive_authority.FORK_HEIGHT + 1,
+                    "verification_status": "green",
+                },
+            ],
+            replacement,
+        )
+
+        self.assertEqual(cleaned[0]["status"], "deleted")
+        self.assertEqual(cleaned[0]["verification_status"], "red")
+        self.assertEqual(cleaned[0]["superseded_by"], "snapshot-000675736")
+        self.assertIn("source_role", cleaned[0]["notes"][0])
+        self.assertTrue(
+            archive_authority.entry_has_current_validator_pruned_source_role(cleaned[0])
+        )
+        self.assertEqual(cleaned[1]["status"], "deleted")
+        self.assertEqual(cleaned[1]["superseded_by"], "snapshot-000675736")
 
     def test_write_signed_catalog_ignores_deleted_invalid_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

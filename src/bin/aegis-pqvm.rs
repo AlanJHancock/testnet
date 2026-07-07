@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use synergy_testnet::consensus::self_realign::{
     create_snapshot_manifest, default_allowed_restore_roles_for_class,
     required_snapshot_quorum_for_validator_count, sign_snapshot_manifest, SnapshotBuildInput,
-    SnapshotQcEvidence,
+    SnapshotQcEvidence, SNAPSHOT_CLASS_VALIDATOR_PRUNED,
 };
 use synergy_testnet::crypto::aegis_pqvm::{
     AegisPqKeyLifecycleRecord, AegisPqvmSigner, AegisPqvmVerifier,
@@ -349,6 +349,11 @@ fn test_only_create_snapshot_fixture(args: &[String]) {
     let signer_public_key = signer
         .public_key_record(&signing_key_id)
         .expect("fixture snapshot signer public key");
+    let source_role = if snapshot_class == SNAPSHOT_CLASS_VALIDATOR_PRUNED {
+        "VALIDATOR"
+    } else {
+        "ARCHIVE_NODE"
+    };
     let manifest = create_snapshot_manifest(SnapshotBuildInput {
         state_dir: output.clone(),
         snapshot_class: snapshot_class.clone(),
@@ -373,7 +378,7 @@ fn test_only_create_snapshot_fixture(args: &[String]) {
         },
         active_validator_set,
         source_node_id: "archive-fixture".to_string(),
-        source_role: "ARCHIVE_NODE".to_string(),
+        source_role: source_role.to_string(),
         runtime_checksum: "fixture-runtime-sha256".to_string(),
         source_node_quarantined: false,
         source_node_majority_branch: true,
