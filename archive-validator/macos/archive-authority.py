@@ -317,6 +317,32 @@ def require_class_role(snapshot_class: str, role: str) -> str:
     return normalized
 
 
+def producer_role_for_snapshot_class(snapshot_class: str) -> str:
+    if snapshot_class == "validator-pruned":
+        return "VALIDATOR"
+    return "ARCHIVE_NODE"
+
+
+def validate_manifest_source_role(snapshot_class: str, manifest: dict[str, Any]) -> str:
+    source_role = str(manifest.get("source_role", "")).strip()
+    normalized = normalize_role(source_role)
+    if normalized == "genesis_validator":
+        raise RuntimeError(
+            "snapshot manifest source_role GENESIS_VALIDATOR is legacy/stale; "
+            "expected current role VALIDATOR"
+        )
+    if snapshot_class == "validator-pruned":
+        if normalized != "validator":
+            raise RuntimeError(
+                "validator-pruned snapshot manifest source_role must be VALIDATOR; "
+                f"got {source_role or '<missing>'}"
+            )
+        return "VALIDATOR"
+    if not source_role:
+        raise RuntimeError("snapshot manifest source_role is missing")
+    return source_role
+
+
 def layout(root: Path, publish_root: Path) -> None:
     for path in [
         root / "keys",
@@ -743,6 +769,7 @@ def update_catalog(
         or existing.get("snapshot_class") != entry["snapshot_class"]
     ]
     snapshots = retire_invalid_consensus_fork_entries(snapshots, entry)
+    snapshots = retire_invalid_source_role_entries(snapshots, entry)
     snapshots.append(entry)
     catalog["snapshots"] = snapshots
     enforce_latest_two_snapshot_retention(catalog)
@@ -788,6 +815,46 @@ def retire_invalid_consensus_fork_entries(
         retired["verification_status"] = "red"
         notes = list(retired.get("notes", []))
         notes.append("retired during publication because consensus fork metadata is invalid or stale")
+        retired["notes"] = notes
+        cleaned.append(retired)
+    return cleaned
+
+
+def entry_has_current_validator_pruned_source_role(entry: dict[str, Any]) -> bool:
+    if entry.get("status") == "deleted":
+        return True
+    if entry.get("snapshot_class") != "validator-pruned":
+        return True
+    source_role = entry.get("source_role")
+    if source_role is None:
+        return False
+    return normalize_role(str(source_role)) == "validator"
+
+
+def retire_invalid_source_role_entries(
+    snapshots: list[dict[str, Any]],
+    replacement: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if replacement.get("snapshot_class") != "validator-pruned":
+        return snapshots
+    if normalize_role(str(replacement.get("source_role", ""))) != "validator":
+        return snapshots
+    timestamp = now()
+    replacement_id = replacement.get("snapshot_id")
+    cleaned: list[dict[str, Any]] = []
+    for entry in snapshots:
+        if entry_has_current_validator_pruned_source_role(entry):
+            cleaned.append(entry)
+            continue
+        retired = dict(entry)
+        retired["status"] = "deleted"
+        retired["deleted_at"] = timestamp
+        retired["superseded_by"] = replacement_id
+        retired["verification_status"] = "red"
+        notes = list(retired.get("notes", []))
+        notes.append(
+            "retired during publication because validator-pruned source_role is not current VALIDATOR"
+        )
         retired["notes"] = notes
         cleaned.append(retired)
     return cleaned
@@ -855,6 +922,7 @@ def package_publish(args: argparse.Namespace, report: dict[str, Any]) -> dict[st
     source_manifest = Path(report["manifest_path"])
     signed_source_manifest = json_load(source_manifest)
     source_manifest_body = signed_source_manifest.get("manifest", signed_source_manifest)
+    source_role = validate_manifest_source_role(snapshot_class, source_manifest_body)
     runtime_verify = verify_source_snapshot(
         runtime, workspace, source_node, source_manifest, snapshot_root, snapshot_class, primary_role
     )
@@ -900,6 +968,7 @@ def package_publish(args: argparse.Namespace, report: dict[str, Any]) -> dict[st
         "hash": report["snapshot_hash"],
         "created_at": now(),
         "producer": source_node,
+        "source_role": source_role,
         "runtime_name": runtime.name,
         "runtime_sha256": sha256_file(runtime),
         "minimum_compatible_runtime": args.minimum_compatible_runtime,
@@ -989,6 +1058,7 @@ def package_publish(args: argparse.Namespace, report: dict[str, Any]) -> dict[st
         "hash": report["snapshot_hash"],
         "created_at": distribution["created_at"],
         "producer": source_node,
+        "source_role": source_role,
         "runtime_sha256": distribution["runtime_sha256"],
         "size_compressed": distribution["size_compressed"],
         "size_uncompressed": uncompressed_size,
@@ -1068,7 +1138,7 @@ def create_snapshot(args: argparse.Namespace) -> dict[str, Any]:
         *runtime_snapshot_args(args.workspace),
         "--source-node-majority-branch-proven",
         "--source-role",
-        "ARCHIVE_NODE",
+        producer_role_for_snapshot_class(args.snapshot_class),
         "--snapshot-class",
         args.snapshot_class,
     ]

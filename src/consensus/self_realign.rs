@@ -158,6 +158,42 @@ pub fn snapshot_producer_role_is_authorized(role: &str) -> bool {
             | "atlas_indexer"
     )
 }
+
+pub fn snapshot_producer_role_validation_error(snapshot_class: &str, role: &str) -> Option<String> {
+    let normalized_role = normalize_snapshot_role(role);
+    if normalized_role == "genesis_validator" {
+        return Some(
+            "snapshot producer role GENESIS_VALIDATOR is legacy/stale; expected current role VALIDATOR"
+                .to_string(),
+        );
+    }
+    if normalize_snapshot_class(snapshot_class) == Some(SNAPSHOT_CLASS_VALIDATOR_PRUNED)
+        && normalized_role != "validator"
+    {
+        return Some(format!(
+            "validator-pruned snapshot producer role must be VALIDATOR; got {}",
+            role.trim()
+        ));
+    }
+    if !snapshot_producer_role_is_authorized(role) {
+        return Some("snapshot producer role is not authorized".to_string());
+    }
+    None
+}
+
+pub fn canonical_snapshot_producer_role_for_class(
+    snapshot_class: &str,
+    role: &str,
+) -> Result<String, String> {
+    if let Some(error) = snapshot_producer_role_validation_error(snapshot_class, role) {
+        return Err(error);
+    }
+    if normalize_snapshot_class(snapshot_class) == Some(SNAPSHOT_CLASS_VALIDATOR_PRUNED) {
+        Ok("VALIDATOR".to_string())
+    } else {
+        Ok(role.trim().to_string())
+    }
+}
 const SNAPSHOT_FORBIDDEN_PATH_FRAGMENTS: &[&str] = &[
     "config",
     "node.env",
@@ -1019,6 +1055,8 @@ pub fn create_snapshot_manifest(input: SnapshotBuildInput) -> Result<SnapshotMan
             ));
         }
     }
+    let source_role =
+        canonical_snapshot_producer_role_for_class(&snapshot_class, &input.source_role)?;
     let quorum_threshold =
         required_snapshot_quorum_for_validator_count(input.active_validator_set.len());
     Ok(SnapshotManifest {
@@ -1043,7 +1081,7 @@ pub fn create_snapshot_manifest(input: SnapshotBuildInput) -> Result<SnapshotMan
         full_archive_sha256,
         created_at: input.created_at,
         source_node_id: input.source_node_id,
-        source_role: input.source_role,
+        source_role,
         runtime_checksum: input.runtime_checksum,
         source_node_quarantined: input.source_node_quarantined,
         source_node_majority_branch: input.source_node_majority_branch,
@@ -1221,8 +1259,10 @@ pub fn verify_signed_snapshot_manifest(
     if manifest.source_node_id.trim().is_empty() || manifest.source_node_id == "unknown-validator" {
         errors.push("snapshot producer identity is invalid".to_string());
     }
-    if !snapshot_producer_role_is_authorized(&manifest.source_role) {
-        errors.push("snapshot producer role is not authorized".to_string());
+    if let Some(error) =
+        snapshot_producer_role_validation_error(&normalized_class, &manifest.source_role)
+    {
+        errors.push(error);
     }
     if manifest.runtime_checksum.trim().is_empty() || manifest.runtime_checksum == "unknown" {
         errors.push("snapshot runtime checksum is missing".to_string());
@@ -1983,6 +2023,88 @@ mod tests {
     }
 
     #[test]
+    fn validator_pruned_manifest_canonicalizes_validator_source_role() {
+        let (mut signer, key_id, public) = signer();
+        let manifest = create_snapshot_manifest(SnapshotBuildInput {
+            state_dir: state_dir(),
+            snapshot_class: SNAPSHOT_CLASS_VALIDATOR_PRUNED.to_string(),
+            allowed_restore_roles: vec!["validator".to_string()],
+            snapshot_height: 100,
+            snapshot_block_hash: "block-hash".to_string(),
+            parent_hash: "parent-hash".to_string(),
+            state_root: None,
+            canonical_lock_height: 100,
+            canonical_lock_hash: "block-hash".to_string(),
+            qc_evidence: qc_evidence(),
+            active_validator_set: validators(),
+            source_node_id: "validator-2".to_string(),
+            source_role: "validator".to_string(),
+            runtime_checksum: "runtime-sha256".to_string(),
+            source_node_quarantined: false,
+            source_node_majority_branch: true,
+            conflict_height_hash: Some("block-hash".to_string()),
+            manifest_signer_uma_id: "archive-1".to_string(),
+            manifest_signing_key_id: key_id,
+            manifest_signer_public_key: public,
+            manifest_signature_epoch: 0,
+            created_at: 1,
+        })
+        .unwrap();
+        assert_eq!(manifest.source_role, "VALIDATOR");
+
+        let signed = sign_snapshot_manifest(&mut signer, manifest).unwrap();
+        assert!(verify(&signed).success);
+    }
+
+    #[test]
+    fn validator_pruned_snapshot_accepts_onboarding_validator_restore_target() {
+        let (mut signer, key_id, public) = signer();
+        let manifest = create_snapshot_manifest(SnapshotBuildInput {
+            state_dir: state_dir(),
+            snapshot_class: SNAPSHOT_CLASS_VALIDATOR_PRUNED.to_string(),
+            allowed_restore_roles: Vec::new(),
+            snapshot_height: 100,
+            snapshot_block_hash: "block-hash".to_string(),
+            parent_hash: "parent-hash".to_string(),
+            state_root: None,
+            canonical_lock_height: 100,
+            canonical_lock_hash: "block-hash".to_string(),
+            qc_evidence: qc_evidence(),
+            active_validator_set: validators(),
+            source_node_id: "validator-2".to_string(),
+            source_role: "validator".to_string(),
+            runtime_checksum: "runtime-sha256".to_string(),
+            source_node_quarantined: false,
+            source_node_majority_branch: true,
+            conflict_height_hash: Some("block-hash".to_string()),
+            manifest_signer_uma_id: "archive-1".to_string(),
+            manifest_signing_key_id: key_id,
+            manifest_signer_public_key: public,
+            manifest_signature_epoch: 0,
+            created_at: 1,
+        })
+        .unwrap();
+        assert_eq!(manifest.source_role, "VALIDATOR");
+        assert!(manifest
+            .allowed_restore_roles
+            .iter()
+            .any(|role| role == "onboarding_validator"));
+
+        let signed = sign_snapshot_manifest(&mut signer, manifest).unwrap();
+        let report = verify_signed_snapshot_manifest(
+            &signed,
+            &SnapshotVerificationPolicy {
+                expected_snapshot_class: Some(SNAPSHOT_CLASS_VALIDATOR_PRUNED.to_string()),
+                target_role: Some("onboarding_validator".to_string()),
+                ..SnapshotVerificationPolicy::default()
+            },
+            None,
+        );
+
+        assert!(report.success, "{:?}", report.errors);
+    }
+
+    #[test]
     fn current_role_snapshot_classes_are_supported() {
         assert!(snapshot_class_allows_role(
             SNAPSHOT_CLASS_VALIDATOR_PRUNED,
@@ -2438,6 +2560,70 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.contains("producer role")));
+    }
+
+    #[test]
+    fn snapshot_creation_rejects_legacy_genesis_validator_source_role() {
+        let (_signer, key_id, public) = signer();
+        let error = create_snapshot_manifest(SnapshotBuildInput {
+            state_dir: state_dir(),
+            snapshot_class: SNAPSHOT_CLASS_VALIDATOR_PRUNED.to_string(),
+            allowed_restore_roles: vec!["validator".to_string()],
+            snapshot_height: 100,
+            snapshot_block_hash: "block-hash".to_string(),
+            parent_hash: "parent-hash".to_string(),
+            state_root: None,
+            canonical_lock_height: 100,
+            canonical_lock_hash: "block-hash".to_string(),
+            qc_evidence: qc_evidence(),
+            active_validator_set: validators(),
+            source_node_id: "validator-2".to_string(),
+            source_role: "GENESIS_VALIDATOR".to_string(),
+            runtime_checksum: "runtime-sha256".to_string(),
+            source_node_quarantined: false,
+            source_node_majority_branch: true,
+            conflict_height_hash: Some("block-hash".to_string()),
+            manifest_signer_uma_id: "archive-1".to_string(),
+            manifest_signing_key_id: key_id,
+            manifest_signer_public_key: public,
+            manifest_signature_epoch: 0,
+            created_at: 1,
+        })
+        .unwrap_err();
+
+        assert!(error.contains("GENESIS_VALIDATOR"));
+        assert!(error.contains("legacy/stale"));
+        assert!(error.contains("VALIDATOR"));
+    }
+
+    #[test]
+    fn snapshot_verification_rejects_legacy_genesis_validator_source_role_as_stale() {
+        let mut signed = signed_manifest();
+        signed.manifest.source_role = "GENESIS_VALIDATOR".to_string();
+
+        let report = verify(&signed);
+
+        assert!(!report.success);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("GENESIS_VALIDATOR")
+                && error.contains("legacy/stale")
+                && error.contains("VALIDATOR")
+        }));
+    }
+
+    #[test]
+    fn validator_pruned_snapshot_rejects_archive_node_source_role() {
+        let mut signed = signed_manifest();
+        signed.manifest.source_role = "ARCHIVE_NODE".to_string();
+
+        let report = verify(&signed);
+
+        assert!(!report.success);
+        assert!(report.errors.iter().any(|error| {
+            error.contains("validator-pruned")
+                && error.contains("producer role must be VALIDATOR")
+                && error.contains("ARCHIVE_NODE")
+        }));
     }
 
     #[test]
