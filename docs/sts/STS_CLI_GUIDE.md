@@ -1,6 +1,6 @@
 # STS CLI Guide
 
-`synergy-sts` is the dedicated command-line tool for building Synergy Token System payloads on testnet.
+`synergy-sts` is the dedicated command-line tool for building, signing, and submitting Synergy Token System transactions on testnet.
 
 Current scope in this branch:
 
@@ -12,9 +12,10 @@ Current scope in this branch:
 - Payload decode and gas/fee estimation.
 - Metadata-file hashing with SHA3-256.
 - Token image URI/hash attachment at creation and one-time post-create image setting.
-- Output artifacts for later signing and transaction submission.
+- On-chain submission through `synergy_sendTransaction` using a Synergy wallet key file.
+- Native SNRG gas/transaction fee payment from the submitting wallet.
 
-The CLI does not mutate chain state by itself. It builds deterministic STS payload bytes that must be wrapped in a signed Synergy transaction and submitted through the normal transaction path.
+By default the CLI emits deterministic STS payload artifacts for review. Add `--submit --wallet <wallet.dec.json>` to sign the Synergy carrier transaction, pay gas in native SNRG, and submit the payload through the public RPC transaction path.
 
 ## Install From GitHub Releases
 
@@ -45,7 +46,7 @@ Install a specific release tag:
 
 ```bash
 curl -fsSL https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/latest/download/install-synergy-sts.sh \
-  | bash -s -- --version synergy-sts-v15.0.13
+  | bash -s -- --version synergy-sts-v15.0.14
 ```
 
 Install to a different directory:
@@ -73,7 +74,7 @@ The installer verifies release `.sha256` checksums by default. Advanced users ca
 
 ```bash
 ./install-synergy-sts.sh \
-  --url https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/download/synergy-sts-v15.0.13/synergy-sts-linux-amd64 \
+  --url https://github.com/synergy-network-hq/synergy-sts-cli-releases/releases/download/synergy-sts-v15.0.14/synergy-sts-linux-amd64 \
   --sha256 <expected_sha256>
 ```
 
@@ -153,9 +154,160 @@ Recommended workflow:
 2. Save the artifact with `--out`.
 3. Review or decode it with `synergy-sts decode`.
 4. Estimate gas with `synergy-sts estimate`.
-5. Wrap `payload_hex` in the canonical signed transaction format.
-6. Submit the signed transaction to testnet.
-7. Query RPC/Atlas after finality.
+5. Submit directly with `synergy-sts submit --file <artifact> --wallet <wallet.dec.json>`, or rebuild the command with `--submit`.
+6. Query RPC/Atlas after finality.
+
+## On-Chain Submit With A Synergy Wallet
+
+`synergy-sts` can submit any STS payload on chain without a helper script. The CLI performs these steps:
+
+1. Loads the submitting Synergy wallet from `--wallet`.
+2. Loads the wallet public key from the same JSON, from `--wallet-public`, or from a sibling `.pub.json` file.
+3. Verifies the public key derives the wallet address.
+4. Reads the current account nonce, gas price, native SNRG balance, and native SNRG identity from the RPC endpoint.
+5. Builds a Synergy transaction whose `data` field is the STS `payload_hex`.
+6. Signs the transaction with FN-DSA and embeds the signer public key.
+7. Submits it with `synergy_sendTransaction`.
+
+Wallet file requirements:
+
+- `--wallet` must point to decrypted Synergy wallet JSON containing `address` and `private_key`.
+- The public key can be in the same file as `public_key`, in `--wallet-public <wallet.pub.json>`, or in a sibling file such as `faucet.pub.json` next to `faucet.dec.json`.
+- The CLI refuses to submit when the wallet public key does not derive the wallet address.
+- The CLI refuses to submit when `--from` does not match the wallet address.
+
+Default RPC:
+
+```bash
+https://testnet-core-rpc.synergy-network.io
+```
+
+Override it with:
+
+```bash
+--rpc-url https://testnet-core-rpc.synergy-network.io
+```
+
+You can also set:
+
+```bash
+export SYNERGY_RPC_URL=https://testnet-core-rpc.synergy-network.io
+export SYNERGY_WALLET_FILE=/path/to/wallet.dec.json
+```
+
+### Direct Submit From A Create Command
+
+When `--submit` is present, `--from` and `--creator-nonce` can be omitted. The CLI derives `--from` from the wallet and defaults `--creator-nonce` to the creation timestamp.
+
+```bash
+synergy-sts token create \
+  --network testnet \
+  --class b1 \
+  --name "CLI Gold" \
+  --symbol CLIG \
+  --decimals 9 \
+  --initial-supply 1000000000 \
+  --max-supply 1000000000 \
+  --submit \
+  --wallet ./wallet.dec.json \
+  --out ./clig-create-submit.json
+```
+
+The response includes the payload review fields and a `submission` object:
+
+```json
+{
+  "expected_token_address": "synb1...",
+  "payload_hex": "73796e657267792d7374732d76313a...",
+  "sender": "synw1...",
+  "submission": {
+    "submitted": true,
+    "tx_hash": "syntxn-...",
+    "mempool_status": "queued",
+    "nonce": 21,
+    "gas_price_nwei": 40,
+    "gas_limit": 150000,
+    "carrier_amount_nwei": 1,
+    "fee_cap_nwei": "6000001"
+  }
+}
+```
+
+### Submit A Saved Artifact
+
+Build and review first:
+
+```bash
+synergy-sts token create \
+  --network testnet \
+  --class b1 \
+  --name "Review First" \
+  --symbol RVW \
+  --decimals 9 \
+  --initial-supply 1000000000 \
+  --max-supply 1000000000 \
+  --from synw1creator... \
+  --creator-nonce 42 \
+  --out ./rvw-create.json
+```
+
+Submit later:
+
+```bash
+synergy-sts submit \
+  --file ./rvw-create.json \
+  --wallet ./wallet.dec.json \
+  --out ./rvw-submit-result.json
+```
+
+### Gas And Carrier Amount
+
+Fees are paid in native SNRG from the submitting wallet. The CLI estimates STS operation gas locally and reads the current RPC gas price when `--gas-price-nwei` is omitted.
+
+Submit options:
+
+```bash
+--gas-price-nwei <u64>       Override RPC gas price.
+--gas-limit <u64>            Override estimated gas plus safety buffer.
+--nonce <u64>                Override RPC account nonce.
+--carrier-amount-nwei <u64>  Native SNRG carrier amount.
+```
+
+The public RPC path currently accepts a one-nwei self-carrier by default. That has no practical balance-transfer effect beyond the SNRG fee charge because the receiver defaults to the sender. Protocol builds with zero-value STS carrier admission can use:
+
+```bash
+--carrier-amount-nwei 0
+```
+
+### Submit Mint, Transfer, Burn, And Images
+
+Every payload-producing command accepts `--submit --wallet`.
+
+```bash
+synergy-sts token mint \
+  --network testnet \
+  --token synb1... \
+  --to synw1holder... \
+  --amount 250000000 \
+  --submit \
+  --wallet ./mint-authority.dec.json
+
+synergy-sts token transfer \
+  --network testnet \
+  --token synb1... \
+  --to synw1recipient... \
+  --amount 100000000 \
+  --submit \
+  --wallet ./holder.dec.json
+
+synergy-sts token set-image \
+  --network testnet \
+  --token synb1... \
+  --image-uri https://example.com/token.png \
+  --image-file ./token.png \
+  --submit \
+  --wallet ./creator.dec.json
+```
 
 ## Read-Only STS RPC
 
@@ -880,9 +1032,28 @@ The CLI fails closed when:
 - Multi-asset batch commands omit `--item`, duplicate item IDs, or use zero amounts.
 - Credential IDs are not valid `synk` object IDs.
 - Credential schema, credential, subject commitment, or reason hashes are not lowercase SHA3-256 hex.
+- `--submit` is used without `--wallet` or `SYNERGY_WALLET_FILE`.
+- The wallet is encrypted, missing `private_key`, or missing a matching `public_key`.
+- The wallet public key does not derive the wallet address.
+- The wallet address does not match the submitted `--from` address.
+- The RPC native asset check does not return chain ID `1264`, native SNRG, and `token_address: null`.
+- The wallet SNRG balance is below the calculated fee cap.
+- `synergy_sendTransaction` rejects the signed transaction.
 
 ## Current Limitations
 
-- `synergy-sts` currently builds and inspects payload artifacts. It does not submit them directly.
-- Signing and RPC submission must use the canonical Synergy transaction tooling once the STS wrapper flow is finalized.
-- Atlas currently auto-materializes finalized STS fungible token creates in the public token registry. NFT, multi-asset, and credential explorer views require the expanded Atlas index/API pass after this runtime slice is deployed.
+- `--wallet` expects decrypted wallet JSON. The CLI does not unlock encrypted wallet files or prompt for seed phrases.
+- `--submit` queues a signed transaction and returns the transaction hash. It does not block until finality; use `sts_getToken`, `sts_getBalance`, `sts_getEvents`, or Atlas after the transaction finalizes.
+- The public RPC-compatible default carrier amount is `1` nWei sent from the wallet back to itself. Use `--carrier-amount-nwei 0` only when the target RPC/runtime has zero-value STS carrier admission deployed.
+- Hardware-wallet and interactive Synergy Wallet app signing are not part of this CLI release. This release signs from local Synergy wallet material.
+
+
+
+
+- `synb1` = standard fungible token.
+- `synb2` = managed fungible token.
+- `synb3` = advanced or regulated fungible token.
+- `synn1` = standard NFT.
+- `synn2` = enhanced or restricted NFT.
+- `synj` = multi-asset collection.
+- `synk` = identity and credential token.

@@ -317,7 +317,10 @@ impl Transaction {
     fn is_zero_value_protocol_transaction(&self) -> bool {
         self.data
             .as_deref()
-            .map(|data| data.starts_with("validator_activation:"))
+            .map(|data| {
+                data.starts_with("validator_activation:")
+                    || crate::sts::transaction_data_may_contain_sts_payload(data)
+            })
             .unwrap_or(false)
     }
 
@@ -936,6 +939,59 @@ mod tests {
         assert!(
             validation.is_valid,
             "validator activation admission failed: {:?}",
+            validation.error_message
+        );
+    }
+
+    #[test]
+    fn admission_allows_signed_zero_value_sts_payload() {
+        let mut manager = PQCManager::new();
+        let (public_key, private_key) = manager
+            .generate_keypair(PQCAlgorithm::FNDSA)
+            .expect("test keypair should generate");
+        let sender = crate::address::generate_wallet_address(&hex::encode(&public_key.key_data));
+        let payload = crate::sts::StsSignedPayload::new(crate::sts::StsTx::CreateFungible(
+            crate::sts::CreateFungibleParams {
+                class: crate::sts::TokenClass::B1BasicFungible,
+                creator: sender.clone(),
+                creator_nonce: 42,
+                name: "CLI Submit Test".to_string(),
+                symbol: "CLISUB".to_string(),
+                decimals: 9,
+                initial_supply: 1_000_000_000,
+                max_supply: Some(1_000_000_000),
+                mint_authority: Some(sender.clone()),
+                metadata_authority: None,
+                metadata_uri: None,
+                metadata_hash: None,
+                metadata_mutable: false,
+                image_uri: None,
+                image_hash: None,
+                flags: crate::sts::FungibleControlFlags::default(),
+                policies: Vec::new(),
+                created_at: 1_700_000_000,
+            },
+        ));
+        let data = hex::encode(crate::sts::encode_sts_payload(&payload).expect("payload encodes"));
+        let mut tx = Transaction::new(
+            sender.clone(),
+            sender,
+            0,
+            1,
+            Vec::new(),
+            100,
+            150_000,
+            Some(data),
+            "fndsa".to_string(),
+        );
+        tx.sign_with_public_key(&public_key, &private_key, &mut manager)
+            .expect("test transaction should sign");
+
+        let validation = tx.validate_for_admission();
+
+        assert!(
+            validation.is_valid,
+            "STS carrier admission failed: {:?}",
             validation.error_message
         );
     }

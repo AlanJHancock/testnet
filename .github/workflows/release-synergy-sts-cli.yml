@@ -276,6 +276,15 @@ jobs:
 
           latest = {
               "version": release_tag,
+              "chain_id": 1264,
+              "network": "testnet",
+              "native_token": {
+                  "symbol": "SNRG",
+                  "name": "Synergy Token",
+                  "decimals": 9,
+                  "token_address": None,
+                  "compatibility_placeholder_address": "00000000000000000000000000000000000000000",
+              },
               "build_date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
               "installers": {
                   "macos_linux": f"{base_url}/install-synergy-sts.sh",
@@ -288,6 +297,11 @@ jobs:
           # Synergy STS CLI {release_tag}
 
           This release publishes standalone `synergy-sts` CLI binaries and a macOS/Linux installer.
+
+          ## Highlights
+
+          - Adds wallet-signed on-chain STS submission with native SNRG fee payment through `synergy_sendTransaction`.
+          - Publishes release metadata with chain ID `1264`, testnet network metadata, and native SNRG token-address semantics.
 
           ## Install
 

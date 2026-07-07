@@ -1,6 +1,11 @@
+use base64::{engine::general_purpose, Engine as _};
 use serde_json::json;
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
+use synergy_testnet::address::address_matches_public_key;
+use synergy_testnet::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPrivateKey, PQCPublicKey};
 use synergy_testnet::sts::{
     decode_sts_payload, encode_sts_payload, estimate_sts_gas, native_snrg_definition,
     validate_sts_object_id, CreateCredentialSchemaParams, CreateFungibleParams,
@@ -9,6 +14,14 @@ use synergy_testnet::sts::{
     MultiAssetItemType, MultiAssetTransferPolicy, StsSignedPayload, StsState, StsTx, TokenClass,
     NATIVE_SNRG_PLACEHOLDER_ADDRESS, STS_TESTNET_CHAIN_ID, STS_TESTNET_NETWORK,
 };
+use synergy_testnet::synergy_types::{SYNERGY_TESTNET_V2_CHAIN_ID, SYNERGY_TESTNET_V2_NETWORK_ID};
+use synergy_testnet::transaction::Transaction;
+
+const DEFAULT_RPC_URL: &str = "https://testnet-core-rpc.synergy-network.io";
+const DEFAULT_GAS_PRICE_NWEI: u64 = 40;
+const DEFAULT_SUBMIT_TIMEOUT_SECONDS: u64 = 30;
+const DEFAULT_STS_GAS_LIMIT_BUFFER: u64 = 25_000;
+const DEFAULT_STS_CARRIER_AMOUNT_NWEI: u64 = 1;
 
 fn main() {
     if let Err(error) = run() {
@@ -32,6 +45,7 @@ fn run() -> Result<(), String> {
         Some("native-info") => print_native_info(&args[1..]),
         Some("decode") => decode_payload_command(&args[1..]),
         Some("estimate") => estimate_payload_command(&args[1..]),
+        Some("submit") | Some("send") => submit_payload_command(&args[1..]),
         Some("token") => run_token_command(&args[1..]),
         Some("nft") => run_nft_command(&args[1..]),
         Some("ma") | Some("multi-asset") => run_multi_asset_command(&args[1..]),
@@ -49,16 +63,18 @@ fn usage() {
     eprintln!(
         "synergy-sts
 
-Build native Synergy Token System payloads for testnet. This tool does not
-mutate chain state directly; wrap the emitted payload_hex in a signed Synergy
-transaction and submit it through the normal transaction path.
+Build and submit native Synergy Token System payloads for testnet. By default,
+commands emit deterministic payload artifacts. Add --submit with a decrypted
+Synergy wallet file to sign a Synergy transaction, pay gas in SNRG, and submit
+through the normal transaction path.
 
 Usage:
   synergy-sts native-info [--output json] [--out <path>]
   synergy-sts decode --payload-hex <hex> [--output json|payload-json] [--out <path>]
   synergy-sts decode --file <artifact.json-or-hex> [--output json|payload-json] [--out <path>]
   synergy-sts estimate --payload-hex <hex> [--gas-price-nwei <u64>]
-  synergy-sts token create --network testnet --class b1|b2|b3 --name <name> --symbol <symbol> --decimals <0-9> --initial-supply <base_units> --from <creator> --creator-nonce <u64> [--created-at <u64>] [--max-supply <base_units>] [--metadata-uri <uri> --metadata-hash <sha3_256_hex>] [--metadata-file <path>] [--image-uri <uri> --image-hash <sha3_256_hex>] [--image-file <path>] [--no-mint-authority|--mint-authority <addr>] [--metadata-authority <addr>] [--can-freeze] [--can-pause] [--can-clawback] [--policy <template>] [--output json|payload-hex|payload-json] [--out <path>]
+  synergy-sts submit --payload-hex <hex>|--file <artifact.json-or-hex> --wallet <wallet.dec.json> [--wallet-public <wallet.pub.json>] [--rpc-url <url>] [--gas-price-nwei <u64>] [--gas-limit <u64>] [--nonce <u64>] [--carrier-amount-nwei <u64>]
+  synergy-sts token create --network testnet --class b1|b2|b3 --name <name> --symbol <symbol> --decimals <0-9> --initial-supply <base_units> [--from <creator>] [--creator-nonce <u64>] [--created-at <u64>] [--max-supply <base_units>] [--metadata-uri <uri> --metadata-hash <sha3_256_hex>] [--metadata-file <path>] [--image-uri <uri> --image-hash <sha3_256_hex>] [--image-file <path>] [--no-mint-authority|--mint-authority <addr>] [--metadata-authority <addr>] [--can-freeze] [--can-pause] [--can-clawback] [--policy <template>] [--submit --wallet <wallet.dec.json>] [--output json|payload-hex|payload-json] [--out <path>]
   synergy-sts token mint --network testnet --token <synb*> --to <owner> --amount <base_units> --from <authority> [--timestamp <u64>]
   synergy-sts token transfer --network testnet --token <synb*> --from <owner> --to <owner> --amount <base_units> [--timestamp <u64>]
   synergy-sts token burn --network testnet --token <synb*> --from <owner> --amount <base_units> [--timestamp <u64>]
@@ -87,6 +103,13 @@ Policy examples:
   --policy transfer_fee_v1:fee_bps=25,recipient=synw1...
   --policy vesting_v1:start_at=1700000000,cliff_at=1700000100,end_at=1700000200
   --policy max_wallet_v1:max_balance=1000000000
+
+Submit options:
+  --submit                      Sign and submit the STS payload on chain.
+  --wallet <wallet.dec.json>    Decrypted Synergy wallet JSON with address/private_key.
+  --wallet-public <pub.json>    Optional public-key JSON. If omitted, a sibling .pub.json is used.
+  --rpc-url <url>               Defaults to https://testnet-core-rpc.synergy-network.io.
+  --carrier-amount-nwei <u64>   Defaults to 1 nWei self-carrier for current public RPC compatibility.
 "
     );
 }
@@ -209,7 +232,8 @@ fn decode_payload_command(args: &[String]) -> Result<(), String> {
 }
 
 fn estimate_payload_command(args: &[String]) -> Result<(), String> {
-    let gas_price_nwei = optional_u64_arg(args, "--gas-price-nwei")?.unwrap_or(40);
+    let gas_price_nwei =
+        optional_u64_arg(args, "--gas-price-nwei")?.unwrap_or(DEFAULT_GAS_PRICE_NWEI);
     let payload_hex = payload_hex_from_args(args)?;
     let payload = decode_payload_hex(&payload_hex)?;
     let gas = estimate_sts_gas(&payload.tx);
@@ -227,6 +251,21 @@ fn estimate_payload_command(args: &[String]) -> Result<(), String> {
             "payload": payload,
         }),
     )
+}
+
+fn submit_payload_command(args: &[String]) -> Result<(), String> {
+    let payload_hex = payload_hex_from_args(args)?;
+    let payload = decode_payload_hex(&payload_hex)?;
+    let sender = sender_arg(args, "--from")?;
+    let mut report = payload_report(payload.clone(), payload_hex.clone(), None, None, None)?;
+    let gas = estimate_sts_gas(&payload.tx);
+    let submission = submit_payload(args, &sender, &payload_hex, gas)?;
+    let report_object = report
+        .as_object_mut()
+        .ok_or_else(|| "payload report was not an object".to_string())?;
+    report_object.insert("sender".to_string(), json!(sender));
+    report_object.insert("submission".to_string(), submission);
+    emit_output(args, report)
 }
 
 fn build_create_fungible(args: &[String]) -> Result<(), String> {
@@ -280,9 +319,9 @@ fn build_create_fungible(args: &[String]) -> Result<(), String> {
         );
     }
 
-    let creator = required_arg(args, "--from")?;
+    let creator = sender_arg(args, "--from")?;
     let created_at = optional_u64_arg(args, "--created-at")?.unwrap_or(current_timestamp()?);
-    let creator_nonce = required_u64_arg(args, "--creator-nonce")?;
+    let creator_nonce = optional_u64_arg(args, "--creator-nonce")?.unwrap_or(created_at);
     let mint_authority = if has_flag(args, "--no-mint-authority") {
         if optional_arg(args, "--mint-authority").is_some() {
             return Err("--no-mint-authority cannot be combined with --mint-authority".to_string());
@@ -350,7 +389,7 @@ fn build_create_fungible(args: &[String]) -> Result<(), String> {
 }
 
 fn build_set_image_tx(args: &[String]) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let token_id = required_arg(args, "--token")?;
     validate_fungible_token_id(&token_id)?;
     let image_uri = required_arg(args, "--image-uri")?;
@@ -397,7 +436,7 @@ fn build_simple_amount_tx(args: &[String], op: &str) -> Result<(), String> {
 
     let (sender, tx) = match op {
         "mint" => {
-            let sender = required_arg(args, "--from")?;
+            let sender = sender_arg(args, "--from")?;
             let to = required_arg(args, "--to")?;
             (
                 sender,
@@ -410,7 +449,7 @@ fn build_simple_amount_tx(args: &[String], op: &str) -> Result<(), String> {
             )
         }
         "transfer" => {
-            let from = required_arg(args, "--from")?;
+            let from = sender_arg(args, "--from")?;
             let to = required_arg(args, "--to")?;
             (
                 from.clone(),
@@ -424,7 +463,7 @@ fn build_simple_amount_tx(args: &[String], op: &str) -> Result<(), String> {
             )
         }
         "burn" => {
-            let from = required_arg(args, "--from")?;
+            let from = sender_arg(args, "--from")?;
             (
                 from.clone(),
                 StsTx::BurnFungible {
@@ -441,7 +480,7 @@ fn build_simple_amount_tx(args: &[String], op: &str) -> Result<(), String> {
 }
 
 fn build_account_control_tx(args: &[String], frozen: bool) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let token_id = required_arg(args, "--token")?;
     validate_sts_object_id(TokenClass::B2ManagedFungible, &token_id)
         .map_err(|_| "--token must be a synb2 managed fungible token ID".to_string())?;
@@ -464,7 +503,7 @@ fn build_account_control_tx(args: &[String], frozen: bool) -> Result<(), String>
 }
 
 fn build_pause_tx(args: &[String], paused: bool) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let token_id = required_arg(args, "--token")?;
     validate_sts_object_id(TokenClass::B2ManagedFungible, &token_id)
         .map_err(|_| "--token must be a synb2 managed fungible token ID".to_string())?;
@@ -484,7 +523,7 @@ fn build_pause_tx(args: &[String], paused: bool) -> Result<(), String> {
 }
 
 fn build_clawback_tx(args: &[String]) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let token_id = required_arg(args, "--token")?;
     validate_sts_object_id(TokenClass::B2ManagedFungible, &token_id)
         .map_err(|_| "--token must be a synb2 managed fungible token ID".to_string())?;
@@ -509,7 +548,7 @@ fn build_clawback_tx(args: &[String]) -> Result<(), String> {
 }
 
 fn build_snapshot_tx(args: &[String]) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let token_id = required_arg(args, "--token")?;
     validate_sts_object_id(TokenClass::B3PolicyFungible, &token_id)
         .map_err(|_| "--token must be a synb3 policy fungible token ID".to_string())?;
@@ -535,7 +574,7 @@ fn build_create_nft_collection(args: &[String]) -> Result<(), String> {
     ) {
         return Err("--class must be nf1 or nf2".to_string());
     }
-    let creator = required_arg(args, "--from")?;
+    let creator = sender_arg(args, "--from")?;
     let created_at = optional_u64_arg(args, "--created-at")?.unwrap_or(current_timestamp()?);
     let (metadata_file, metadata_file_hash, metadata_hash) = metadata_hash_args(args)?;
     let metadata_uri = optional_arg(args, "--metadata-uri");
@@ -611,7 +650,7 @@ fn build_create_nft_collection(args: &[String]) -> Result<(), String> {
 }
 
 fn build_mint_nft(args: &[String]) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let collection_id = required_arg(args, "--collection")?;
     validate_nft_object_id(&collection_id)?;
     let minted_at = optional_u64_arg(args, "--timestamp")?.unwrap_or(current_timestamp()?);
@@ -654,7 +693,7 @@ fn build_mint_nft(args: &[String]) -> Result<(), String> {
 }
 
 fn build_transfer_nft(args: &[String]) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let nft_id = required_arg(args, "--nft")?;
     validate_nft_object_id(&nft_id)?;
     let owner = optional_arg(args, "--owner").unwrap_or_else(|| sender.clone());
@@ -675,7 +714,7 @@ fn build_transfer_nft(args: &[String]) -> Result<(), String> {
 }
 
 fn build_burn_nft(args: &[String]) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let nft_id = required_arg(args, "--nft")?;
     validate_nft_object_id(&nft_id)?;
     let owner = optional_arg(args, "--owner").unwrap_or_else(|| sender.clone());
@@ -695,7 +734,7 @@ fn build_burn_nft(args: &[String]) -> Result<(), String> {
 }
 
 fn build_nft_control(args: &[String], op: &str) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let nft_id = required_arg(args, "--nft")?;
     validate_nft_object_id(&nft_id)?;
     let timestamp = optional_u64_arg(args, "--timestamp")?.unwrap_or(current_timestamp()?);
@@ -710,7 +749,7 @@ fn build_nft_control(args: &[String], op: &str) -> Result<(), String> {
 }
 
 fn build_update_nft_metadata(args: &[String]) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let nft_id = required_arg(args, "--nft")?;
     validate_nft_object_id(&nft_id)?;
     let metadata_uri = required_arg(args, "--metadata-uri")?;
@@ -735,7 +774,7 @@ fn build_update_nft_metadata(args: &[String]) -> Result<(), String> {
 }
 
 fn build_verify_nft_collection(args: &[String]) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let collection_id = required_arg(args, "--collection")?;
     validate_nft_object_id(&collection_id)?;
     let timestamp = optional_u64_arg(args, "--timestamp")?.unwrap_or(current_timestamp()?);
@@ -753,7 +792,7 @@ fn build_verify_nft_collection(args: &[String]) -> Result<(), String> {
 }
 
 fn build_create_multi_asset_collection(args: &[String]) -> Result<(), String> {
-    let creator = required_arg(args, "--from")?;
+    let creator = sender_arg(args, "--from")?;
     let created_at = optional_u64_arg(args, "--created-at")?.unwrap_or(current_timestamp()?);
     let (metadata_file, metadata_file_hash, metadata_hash) = metadata_hash_args(args)?;
     let metadata_uri = optional_arg(args, "--metadata-uri");
@@ -810,7 +849,7 @@ fn build_create_multi_asset_collection(args: &[String]) -> Result<(), String> {
 }
 
 fn build_create_multi_asset_item(args: &[String]) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let collection_id = required_arg(args, "--collection")?;
     validate_multi_asset_collection_id(&collection_id)?;
     let (metadata_file, metadata_file_hash, metadata_hash) = metadata_hash_args(args)?;
@@ -849,7 +888,7 @@ fn build_create_multi_asset_item(args: &[String]) -> Result<(), String> {
 }
 
 fn build_multi_asset_amount_tx(args: &[String], op: &str) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let collection_id = required_arg(args, "--collection")?;
     validate_multi_asset_collection_id(&collection_id)?;
     let item_id = required_u64_arg(args, "--item-id")?;
@@ -888,7 +927,7 @@ fn build_batch_multi_asset_transfer(args: &[String]) -> Result<(), String> {
 }
 
 fn build_batch_multi_asset_amount_tx(args: &[String], op: &str) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let collection_id = required_arg(args, "--collection")?;
     validate_multi_asset_collection_id(&collection_id)?;
     let items = parse_multi_asset_amounts(args)?;
@@ -919,7 +958,7 @@ fn build_batch_multi_asset_amount_tx(args: &[String], op: &str) -> Result<(), St
 }
 
 fn build_create_credential_schema(args: &[String]) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let schema_hash = required_arg(args, "--schema-hash")?;
     validate_sha3_256_hash("--schema-hash", &schema_hash)?;
     let description_hash = optional_arg(args, "--description-hash");
@@ -939,7 +978,7 @@ fn build_create_credential_schema(args: &[String]) -> Result<(), String> {
 }
 
 fn build_issue_credential(args: &[String]) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let subject = optional_arg(args, "--subject");
     let subject_commitment = optional_arg(args, "--subject-commitment")
         .or_else(|| {
@@ -964,7 +1003,7 @@ fn build_issue_credential(args: &[String]) -> Result<(), String> {
 }
 
 fn build_credential_status_tx(args: &[String], op: &str) -> Result<(), String> {
-    let sender = required_arg(args, "--from")?;
+    let sender = sender_arg(args, "--from")?;
     let credential_id = required_arg(args, "--credential")?;
     validate_credential_id(&credential_id)?;
     let timestamp = optional_u64_arg(args, "--timestamp")?.unwrap_or(current_timestamp()?);
@@ -1001,6 +1040,392 @@ fn build_credential_status_tx(args: &[String], op: &str) -> Result<(), String> {
     print_payload(args, &sender, StsSignedPayload::new(tx), None, None, None)
 }
 
+#[derive(Debug, Clone)]
+struct WalletMaterial {
+    address: String,
+    public_key: Vec<u8>,
+    private_key: Vec<u8>,
+    source: String,
+}
+
+#[derive(Debug, Clone)]
+struct CarrierTransactionOptions {
+    nonce: u64,
+    gas_price_nwei: u64,
+    gas_limit: u64,
+    carrier_amount_nwei: u64,
+    receiver: String,
+    timestamp: u64,
+}
+
+struct RpcClient {
+    url: String,
+    client: reqwest::blocking::Client,
+}
+
+impl RpcClient {
+    fn new(url: String, timeout_seconds: u64) -> Result<Self, String> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(timeout_seconds))
+            .build()
+            .map_err(|error| format!("failed to initialize RPC client: {error}"))?;
+        Ok(Self { url, client })
+    }
+
+    fn call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+            "id": 1,
+        });
+        let response = self
+            .client
+            .post(&self.url)
+            .json(&body)
+            .send()
+            .map_err(|error| format!("RPC {method} request failed: {error}"))?;
+        let status = response.status();
+        let value = response
+            .json::<serde_json::Value>()
+            .map_err(|error| format!("RPC {method} returned invalid JSON: {error}"))?;
+        if !status.is_success() {
+            return Err(format!("RPC {method} returned HTTP {status}: {value}"));
+        }
+        if let Some(error) = value.get("error") {
+            if !error.is_null() {
+                return Err(format!("RPC {method} error: {error}"));
+            }
+        }
+        Ok(value
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
+    }
+}
+
+fn submit_payload(
+    args: &[String],
+    sender: &str,
+    payload_hex: &str,
+    estimated_gas: u64,
+) -> Result<serde_json::Value, String> {
+    let wallet = load_wallet_material(args)?;
+    if wallet.address != sender {
+        return Err(format!(
+            "--from ({sender}) must match wallet address ({}) for STS submission",
+            wallet.address
+        ));
+    }
+
+    let rpc_url = optional_arg(args, "--rpc-url")
+        .or_else(|| std::env::var("SYNERGY_RPC_URL").ok())
+        .unwrap_or_else(|| DEFAULT_RPC_URL.to_string());
+    let timeout_seconds =
+        optional_u64_arg(args, "--rpc-timeout-seconds")?.unwrap_or(DEFAULT_SUBMIT_TIMEOUT_SECONDS);
+    let rpc = RpcClient::new(rpc_url, timeout_seconds)?;
+    verify_rpc_native_asset(&rpc)?;
+
+    let gas_price_nwei = match optional_u64_arg(args, "--gas-price-nwei")? {
+        Some(price) => price,
+        None => parse_json_u64(
+            &rpc.call("synergy_gasPrice", json!([]))?,
+            "synergy_gasPrice",
+        )?
+        .max(DEFAULT_GAS_PRICE_NWEI),
+    };
+    let gas_limit = optional_u64_arg(args, "--gas-limit")?
+        .unwrap_or_else(|| estimated_gas.saturating_add(DEFAULT_STS_GAS_LIMIT_BUFFER));
+    if gas_limit < estimated_gas {
+        return Err(format!(
+            "--gas-limit {gas_limit} is below estimated STS gas {estimated_gas}"
+        ));
+    }
+    let carrier_amount_nwei =
+        optional_u64_arg(args, "--carrier-amount-nwei")?.unwrap_or(DEFAULT_STS_CARRIER_AMOUNT_NWEI);
+    let nonce = match optional_u64_arg(args, "--nonce")? {
+        Some(nonce) => nonce,
+        None => parse_json_u64(
+            &rpc.call("synergy_getAccountNonce", json!([sender]))?,
+            "synergy_getAccountNonce",
+        )?,
+    };
+    let balance_nwei = parse_json_u128(
+        &rpc.call("synergy_getTokenBalance", json!([sender, "SNRG"]))?,
+        "synergy_getTokenBalance",
+    )?;
+    let fee_cap_nwei = (gas_limit as u128)
+        .checked_mul(gas_price_nwei as u128)
+        .and_then(|fee| fee.checked_add(carrier_amount_nwei as u128))
+        .ok_or_else(|| "fee cap overflow".to_string())?;
+    if balance_nwei < fee_cap_nwei {
+        return Err(format!(
+            "wallet SNRG balance {balance_nwei} nwei is below fee cap {fee_cap_nwei} nwei"
+        ));
+    }
+
+    let tx_options = CarrierTransactionOptions {
+        nonce,
+        gas_price_nwei,
+        gas_limit,
+        carrier_amount_nwei,
+        receiver: optional_arg(args, "--receiver").unwrap_or_else(|| sender.to_string()),
+        timestamp: optional_u64_arg(args, "--timestamp")?.unwrap_or(current_timestamp()?),
+    };
+    let signed = build_signed_sts_carrier_transaction(&wallet, sender, payload_hex, tx_options)?;
+    let tx_hash = signed.hash();
+    let signed_value = serde_json::to_value(&signed)
+        .map_err(|error| format!("failed to serialize signed transaction: {error}"))?;
+    let submit_result = rpc.call("synergy_sendTransaction", json!([signed_value.clone()]))?;
+    if !submit_result
+        .get("success")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "synergy_sendTransaction did not accept transaction: {submit_result}"
+        ));
+    }
+
+    let mut submission = json!({
+        "submitted": true,
+        "rpc_url": rpc.url,
+        "wallet": {
+            "address": wallet.address,
+            "source": wallet.source,
+        },
+        "chain_id": SYNERGY_TESTNET_V2_CHAIN_ID,
+        "network_id": SYNERGY_TESTNET_V2_NETWORK_ID,
+        "tx_hash": submit_result
+            .get("tx_hash")
+            .and_then(|value| value.as_str())
+            .unwrap_or(tx_hash.as_str()),
+        "mempool_status": submit_result.get("mempool_status").cloned().unwrap_or(serde_json::Value::Null),
+        "nonce": nonce,
+        "gas_price_nwei": gas_price_nwei,
+        "gas_limit": gas_limit,
+        "carrier_amount_nwei": carrier_amount_nwei,
+        "fee_cap_nwei": fee_cap_nwei.to_string(),
+        "message": submit_result.get("message").cloned().unwrap_or(serde_json::Value::Null),
+        "policy_warnings": submit_result.get("policy_warnings").cloned().unwrap_or(json!([])),
+    });
+    if has_flag(args, "--include-signed-transaction") || has_flag(args, "--include-signed-tx") {
+        submission
+            .as_object_mut()
+            .ok_or_else(|| "submission report was not an object".to_string())?
+            .insert("signed_transaction".to_string(), signed_value);
+    }
+    Ok(submission)
+}
+
+fn build_signed_sts_carrier_transaction(
+    wallet: &WalletMaterial,
+    sender: &str,
+    payload_hex: &str,
+    options: CarrierTransactionOptions,
+) -> Result<Transaction, String> {
+    if wallet.address != sender {
+        return Err("wallet address does not match transaction sender".to_string());
+    }
+    let mut tx = Transaction {
+        chain_id: SYNERGY_TESTNET_V2_CHAIN_ID,
+        network_id: SYNERGY_TESTNET_V2_NETWORK_ID.to_string(),
+        sender: sender.to_string(),
+        receiver: options.receiver,
+        amount: options.carrier_amount_nwei,
+        nonce: options.nonce,
+        signature: Vec::new(),
+        signer_public_key: Vec::new(),
+        timestamp: options.timestamp,
+        gas_price: options.gas_price_nwei,
+        gas_limit: options.gas_limit,
+        data: Some(payload_hex.to_string()),
+        signature_algorithm: "fndsa".to_string(),
+    };
+    let private_key = PQCPrivateKey {
+        algorithm: PQCAlgorithm::FNDSA,
+        key_data: wallet.private_key.clone(),
+        public_key_id: wallet.address.clone(),
+        created_at: options.timestamp,
+    };
+    let public_key = PQCPublicKey {
+        algorithm: PQCAlgorithm::FNDSA,
+        key_data: wallet.public_key.clone(),
+        key_id: wallet.address.clone(),
+        created_at: options.timestamp,
+    };
+    let mut manager = PQCManager::new();
+    tx.sign_with_public_key(&public_key, &private_key, &mut manager)?;
+    Ok(tx)
+}
+
+fn verify_rpc_native_asset(rpc: &RpcClient) -> Result<(), String> {
+    let native = rpc.call("sts_getNativeAsset", json!([]))?;
+    let chain_id = parse_json_u64(
+        native
+            .get("chain_id")
+            .ok_or_else(|| "sts_getNativeAsset missing chain_id".to_string())?,
+        "sts_getNativeAsset.chain_id",
+    )?;
+    if chain_id != STS_TESTNET_CHAIN_ID {
+        return Err(format!(
+            "RPC chain_id {chain_id} does not match required STS chain {STS_TESTNET_CHAIN_ID}"
+        ));
+    }
+    if !native
+        .get("token_address")
+        .map(|value| value.is_null())
+        .unwrap_or(false)
+    {
+        return Err("RPC native SNRG token_address must be null".to_string());
+    }
+    Ok(())
+}
+
+fn parse_json_u64(value: &serde_json::Value, label: &str) -> Result<u64, String> {
+    if let Some(value) = value.as_u64() {
+        return Ok(value);
+    }
+    if let Some(value) = value.as_str() {
+        return value
+            .parse::<u64>()
+            .map_err(|_| format!("{label} must be a u64-compatible value"));
+    }
+    Err(format!("{label} must be a u64-compatible value"))
+}
+
+fn parse_json_u128(value: &serde_json::Value, label: &str) -> Result<u128, String> {
+    if let Some(value) = value.as_u64() {
+        return Ok(value as u128);
+    }
+    if let Some(value) = value.as_str() {
+        return value
+            .parse::<u128>()
+            .map_err(|_| format!("{label} must be a u128-compatible value"));
+    }
+    Err(format!("{label} must be a u128-compatible value"))
+}
+
+fn sender_arg(args: &[String], name: &str) -> Result<String, String> {
+    if let Some(sender) = optional_arg(args, name) {
+        return Ok(sender);
+    }
+    if has_flag(args, "--submit") || has_flag(args, "--send") || wallet_path_arg(args).is_some() {
+        return Ok(load_wallet_material(args)?.address);
+    }
+    Err(format!(
+        "{name} is required unless a Synergy wallet is provided with --wallet"
+    ))
+}
+
+fn load_wallet_material(args: &[String]) -> Result<WalletMaterial, String> {
+    let wallet_path = wallet_path_arg(args).ok_or_else(|| {
+        "--wallet <wallet.dec.json> is required for on-chain STS submission".to_string()
+    })?;
+    let wallet_path = PathBuf::from(wallet_path);
+    let wallet_json = read_json_file(&wallet_path)?;
+    let address = json_string_field(&wallet_json, "address")
+        .ok_or_else(|| format!("{} missing address", wallet_path.display()))?;
+    let private_key_text = json_string_field(&wallet_json, "private_key").ok_or_else(|| {
+        format!(
+            "{} must be decrypted and contain private_key",
+            wallet_path.display()
+        )
+    })?;
+    let public_key_text = if let Some(public_key) = json_string_field(&wallet_json, "public_key") {
+        public_key
+    } else if let Some(public_key) = public_key_from_optional_file(args) {
+        public_key?
+    } else if let Some(path) = sibling_public_key_path(&wallet_path) {
+        public_key_from_file(&path)?
+    } else {
+        return Err(format!(
+            "{} missing public_key and no sibling .pub.json or --wallet-public was found",
+            wallet_path.display()
+        ));
+    };
+    let public_key = decode_key_material_input(&public_key_text)
+        .map_err(|error| format!("invalid wallet public_key: {error}"))?;
+    let private_key = decode_key_material_input(&private_key_text)
+        .map_err(|error| format!("invalid wallet private_key: {error}"))?;
+    if !address_matches_public_key(&address, &public_key) {
+        return Err("wallet address does not match wallet public_key".to_string());
+    }
+    Ok(WalletMaterial {
+        address,
+        public_key,
+        private_key,
+        source: wallet_path.display().to_string(),
+    })
+}
+
+fn wallet_path_arg(args: &[String]) -> Option<String> {
+    optional_arg(args, "--wallet")
+        .or_else(|| optional_arg(args, "--wallet-file"))
+        .or_else(|| std::env::var("SYNERGY_WALLET_FILE").ok())
+}
+
+fn public_key_from_optional_file(args: &[String]) -> Option<Result<String, String>> {
+    optional_arg(args, "--wallet-public")
+        .or_else(|| optional_arg(args, "--public-wallet"))
+        .map(|path| public_key_from_file(Path::new(&path)))
+}
+
+fn public_key_from_file(path: &Path) -> Result<String, String> {
+    let value = read_json_file(path)?;
+    json_string_field(&value, "public_key")
+        .ok_or_else(|| format!("{} missing public_key", path.display()))
+}
+
+fn sibling_public_key_path(wallet_path: &Path) -> Option<PathBuf> {
+    let file_name = wallet_path.file_name()?.to_string_lossy();
+    let pub_name = if file_name.ends_with(".dec.json") {
+        file_name.replace(".dec.json", ".pub.json")
+    } else {
+        return None;
+    };
+    let path = wallet_path.with_file_name(pub_name);
+    path.exists().then_some(path)
+}
+
+fn read_json_file(path: &Path) -> Result<serde_json::Value, String> {
+    let contents = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    serde_json::from_str(&contents)
+        .map_err(|error| format!("failed to parse {} as JSON: {error}", path.display()))
+}
+
+fn json_string_field(value: &serde_json::Value, field: &str) -> Option<String> {
+    value
+        .get(field)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn decode_key_material_input(input: &str) -> Result<Vec<u8>, String> {
+    let mut normalized = input.trim().trim_matches('"').trim();
+    if let Some((prefix, value)) = normalized.split_once(':') {
+        let prefix = prefix.to_ascii_lowercase();
+        if prefix.contains("fndsa") || prefix.contains("fn-dsa") || prefix.contains("falcon") {
+            normalized = value.trim();
+        }
+    }
+    let normalized = normalized.strip_prefix("0x").unwrap_or(normalized);
+    if normalized.is_empty() {
+        return Err("empty key material".to_string());
+    }
+    if normalized.len() % 2 == 0 && normalized.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        if let Ok(bytes) = hex::decode(normalized) {
+            return Ok(bytes);
+        }
+    }
+    general_purpose::STANDARD
+        .decode(normalized.as_bytes())
+        .map_err(|error| error.to_string())
+}
+
 fn print_payload(
     args: &[String],
     sender: &str,
@@ -1017,13 +1442,12 @@ fn print_payload(
             .map_err(|error| format!("payload encoding failed: {error}"))?,
     );
     let gas = estimate_sts_gas(&payload.tx);
-    let gas_price_nwei = optional_u64_arg(args, "--gas-price-nwei")?.unwrap_or(40);
+    let gas_price_nwei =
+        optional_u64_arg(args, "--gas-price-nwei")?.unwrap_or(DEFAULT_GAS_PRICE_NWEI);
     let estimated_fee_nwei = (gas as u128)
         .checked_mul(gas_price_nwei as u128)
         .ok_or_else(|| "estimated fee overflow".to_string())?;
-    emit_output(
-        args,
-        json!({
+    let mut value = json!({
             "network": payload.network,
             "chain_id": payload.chain_id,
             "sender": sender,
@@ -1037,8 +1461,20 @@ fn print_payload(
             "metadata": metadata_artifact,
             "payload_hex": payload_hex,
             "payload": payload,
-        }),
-    )
+    });
+    if has_flag(args, "--submit") || has_flag(args, "--send") {
+        let submission = submit_payload(
+            args,
+            sender,
+            value["payload_hex"].as_str().unwrap_or_default(),
+            gas,
+        )?;
+        value
+            .as_object_mut()
+            .ok_or_else(|| "payload artifact was not an object".to_string())?
+            .insert("submission".to_string(), submission);
+    }
+    emit_output(args, value)
 }
 
 fn payload_report(
