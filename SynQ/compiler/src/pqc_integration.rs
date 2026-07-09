@@ -3,7 +3,8 @@ use synq_pqc_shims::kyber::{keygen as kyber_keygen, encaps as kyber_encaps, deca
 use synq_pqc_shims::dilithium;
 use synq_pqc_shims::falcon;
 use synq_pqc_shims::sphincs;
-use synq_pqc_shims::mceliece::{keygen as mceliece_keygen};
+use synq_pqc_shims::mceliece::{keygen as mceliece_keygen, encaps as mceliece_encaps, decaps as mceliece_decaps};
+use synq_pqc_shims::hqc::{keygen as hqc_keygen, encaps as hqc_encaps, decaps as hqc_decaps};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum PQCSecurityLevel {
@@ -53,6 +54,7 @@ impl PQCCompiler {
             "falcon" | "falcon512" => falcon::keygen(),
             "sphincs" | "sphincsplus" => sphincs::keygen(),
             "mceliece" | "classicmceliece" => mceliece_keygen(),
+            "hqc" | "hqc128" => hqc_keygen(),
             _ => return Err(format!("Unsupported PQC algorithm: {}", algorithm)),
         };
 
@@ -100,10 +102,8 @@ impl PQCCompiler {
                     Err(e) => Err(format!("Kyber encapsulation failed: {}", e)),
                 }
             },
-            "mceliece" | "classicmceliece" => {
-                // Classic-McEliece encapsulation would go here
-                Err("Classic-McEliece encapsulation not yet implemented".to_string())
-            },
+            "mceliece" | "classicmceliece" => Ok(mceliece_encaps(public_key)),
+            "hqc" | "hqc128" => Ok(hqc_encaps(public_key)),
             _ => Err(format!("Unsupported KEM algorithm: {}", algorithm)),
         }
     }
@@ -116,10 +116,8 @@ impl PQCCompiler {
                     Err(e) => Err(format!("Kyber decapsulation failed: {}", e)),
                 }
             },
-            "mceliece" | "classicmceliece" => {
-                // Classic-McEliece decapsulation would go here
-                Err("Classic-McEliece decapsulation not yet implemented".to_string())
-            },
+            "mceliece" | "classicmceliece" => Ok(mceliece_decaps(ciphertext, private_key)),
+            "hqc" | "hqc128" => Ok(hqc_decaps(ciphertext, private_key)),
             _ => Err(format!("Unsupported KEM algorithm: {}", algorithm)),
         }
     }
@@ -148,6 +146,7 @@ impl PQCCompiler {
             "falcon".to_string(),
             "sphincs".to_string(),
             "mceliece".to_string(),
+            "hqc".to_string(),
         ]
     }
 
