@@ -72,6 +72,7 @@ pub enum Statement {
     Expression(Expression),
     Require(Expression, String),
     Assignment(String, Expression),
+    Return(Option<Expression>),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -79,6 +80,21 @@ pub enum Expression {
     Call(String, Vec<Expression>),
     Literal(Literal),
     Identifier(String),
+    BinaryOp(Box<Expression>, BinaryOperator, Box<Expression>),
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum BinaryOperator {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 #[derive(Debug, PartialEq, Clone)]

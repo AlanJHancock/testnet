@@ -75,32 +75,158 @@ fn parse_state_variable(pair: Pair<Rule>) -> StateVariableDeclaration {
 }
 
 fn parse_function(pair: Pair<Rule>) -> FunctionDefinition {
-    println!("Parsing function: {:?}", pair);
     let mut inner = pair.into_inner();
     let name = inner.next().unwrap().as_str().to_string();
-    let params = inner
+    let params: Vec<Parameter> = inner
         .clone()
-        .filter(|p| p.as_rule() == Rule::param)
+        .take_while(|p| p.as_rule() == Rule::param)
         .map(parse_param)
         .collect();
-    let _body = inner.last().unwrap(); // ignore for now
+    // The final pair (after all params) is always the block.
+    let block_pair = inner.find(|p| p.as_rule() == Rule::block).unwrap();
+    let body = parse_block(block_pair);
     FunctionDefinition {
         name,
         params,
         returns: None,
-        body: Block { statements: vec![] },
+        body,
         is_public: false,
     }
 }
 
 fn parse_param(pair: Pair<Rule>) -> Parameter {
-    println!("Parsing param: {:?}", pair);
     let mut inner = pair.into_inner();
     let name = inner.next().unwrap().as_str().to_string();
     let ty = parse_type(inner.next().unwrap());
     Parameter { ty, name, is_indexed: false }
 }
 
+fn parse_block(pair: Pair<Rule>) -> Block {
+    let statements = pair.into_inner().map(parse_statement).collect();
+    Block { statements }
+}
+
+fn parse_statement(pair: Pair<Rule>) -> Statement {
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::require_statement => {
+            let mut parts = inner.into_inner();
+            let cond = parse_expression(parts.next().unwrap());
+            let msg_pair = parts.next().unwrap();
+            let msg = unquote(msg_pair.as_str());
+            Statement::Require(cond, msg)
+        }
+        Rule::return_statement => {
+            let expr = inner.into_inner().next().map(parse_expression);
+            Statement::Return(expr)
+        }
+        Rule::assignment_statement => {
+            let mut parts = inner.into_inner();
+            let name = parts.next().unwrap().as_str().to_string();
+            let expr = parse_expression(parts.next().unwrap());
+            Statement::Assignment(name, expr)
+        }
+        Rule::expr_statement => {
+            let expr = parse_expression(inner.into_inner().next().unwrap());
+            Statement::Expression(expr)
+        }
+        _ => unreachable!("unexpected statement rule: {:?}", inner.as_rule()),
+    }
+}
+
+fn unquote(s: &str) -> String {
+    s.trim_matches('"').to_string()
+}
+
+// expression -> comparison_expr
+fn parse_expression(pair: Pair<Rule>) -> Expression {
+    let inner = pair.into_inner().next().unwrap();
+    parse_comparison_expr(inner)
+}
+
+fn parse_comparison_expr(pair: Pair<Rule>) -> Expression {
+    let mut inner = pair.into_inner();
+    let mut left = parse_additive_expr(inner.next().unwrap());
+    while let Some(op_pair) = inner.next() {
+        let op = parse_comparison_op(op_pair.as_str());
+        let right_pair = inner.next().unwrap();
+        let right = parse_additive_expr(right_pair);
+        left = Expression::BinaryOp(Box::new(left), op, Box::new(right));
+    }
+    left
+}
+
+fn parse_additive_expr(pair: Pair<Rule>) -> Expression {
+    let mut inner = pair.into_inner();
+    let mut left = parse_multiplicative_expr(inner.next().unwrap());
+    while let Some(op_pair) = inner.next() {
+        let op = parse_additive_op(op_pair.as_str());
+        let right_pair = inner.next().unwrap();
+        let right = parse_multiplicative_expr(right_pair);
+        left = Expression::BinaryOp(Box::new(left), op, Box::new(right));
+    }
+    left
+}
+
+fn parse_multiplicative_expr(pair: Pair<Rule>) -> Expression {
+    let mut inner = pair.into_inner();
+    let mut left = parse_primary_expr(inner.next().unwrap());
+    while let Some(op_pair) = inner.next() {
+        let op = parse_multiplicative_op(op_pair.as_str());
+        let right_pair = inner.next().unwrap();
+        let right = parse_primary_expr(right_pair);
+        left = Expression::BinaryOp(Box::new(left), op, Box::new(right));
+    }
+    left
+}
+
+fn parse_primary_expr(pair: Pair<Rule>) -> Expression {
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::call_expr => parse_call_expr(inner),
+        Rule::number_literal => Expression::Literal(Literal::Number(inner.as_str().parse().unwrap())),
+        Rule::string_literal => Expression::Literal(Literal::String(unquote(inner.as_str()))),
+        Rule::bool_literal => Expression::Literal(Literal::Bool(inner.as_str() == "true")),
+        Rule::identifier_expr => Expression::Identifier(inner.as_str().to_string()),
+        Rule::expression => parse_expression(inner),
+        _ => unreachable!("unexpected primary rule: {:?}", inner.as_rule()),
+    }
+}
+
+fn parse_call_expr(pair: Pair<Rule>) -> Expression {
+    let mut inner = pair.into_inner();
+    let name = inner.next().unwrap().as_str().to_string();
+    let args = inner.map(parse_expression).collect();
+    Expression::Call(name, args)
+}
+
+fn parse_comparison_op(s: &str) -> BinaryOperator {
+    match s {
+        "==" => BinaryOperator::Eq,
+        "!=" => BinaryOperator::Ne,
+        "<=" => BinaryOperator::Le,
+        ">=" => BinaryOperator::Ge,
+        "<" => BinaryOperator::Lt,
+        ">" => BinaryOperator::Gt,
+        _ => unreachable!("unknown comparison operator: {}", s),
+    }
+}
+
+fn parse_additive_op(s: &str) -> BinaryOperator {
+    match s {
+        "+" => BinaryOperator::Add,
+        "-" => BinaryOperator::Sub,
+        _ => unreachable!("unknown additive operator: {}", s),
+    }
+}
+
+fn parse_multiplicative_op(s: &str) -> BinaryOperator {
+    match s {
+        "*" => BinaryOperator::Mul,
+        "/" => BinaryOperator::Div,
+        _ => unreachable!("unknown multiplicative operator: {}", s),
+    }
+}
 
 fn parse_type(pair: Pair<Rule>) -> Type {
     let mut inner = pair.into_inner();

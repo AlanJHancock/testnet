@@ -15,7 +15,7 @@ fn test_compile_and_run() {
     let mut file = NamedTempFile::new().unwrap();
     write!(file, "{}", contract).unwrap();
 
-    let mut cmd = Command::cargo_bin("cli").unwrap();
+    let mut cmd = Command::cargo_bin("synq-cli").unwrap();
     cmd.arg("compile")
         .arg("--path")
         .arg(file.path());
@@ -25,7 +25,7 @@ fn test_compile_and_run() {
     let bytecode_path = file.path().with_extension("synq_bytecode");
     assert!(bytecode_path.exists());
 
-    let mut run_cmd = Command::cargo_bin("cli").unwrap();
+    let mut run_cmd = Command::cargo_bin("synq-cli").unwrap();
     run_cmd.arg("run")
         .arg("--path")
         .arg(&bytecode_path);
