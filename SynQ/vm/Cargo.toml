@@ -10,7 +10,7 @@ serde_json = { workspace = true }
 hex = { workspace = true }
 
 # PQC shims for SynQ
-synq-pqc-shims = { path = "../pqc-shims" }
+pqc_shims = { package = "synq-pqc-shims", path = "../pqc-shims" }
 
 # PQC libraries
 pqcrypto = { workspace = true }

@@ -1,4 +1,4 @@
-use quantumvm::{Assembler, OpCode, QuantumVM};
+use synq_vm::{Assembler, OpCode, QuantumVM};
 
 #[test]
 fn test_basic_arithmetic() {
@@ -21,25 +21,27 @@ fn test_basic_arithmetic() {
 
 #[test]
 fn test_dilithium_verify_shim() {
+    // Uses a REAL ML-DSA-65 keypair + real signature (not the old zeroed
+    // placeholder bytes) so this test actually exercises the fixed
+    // real-crypto verify path end to end through the VM opcode.
+    let (pk, sk) = pqc_shims::dilithium::keygen();
+    let message = b"Hello, quantum world!";
+    let signature = pqc_shims::dilithium::sign(message, &sk);
+
     let mut assembler = Assembler::new();
 
     // The arguments are popped in reverse order of how they are pushed.
-    // So we push pk, then message, then signature.
-    // The verify function expects (message, signature, pk).
-
-    // Push mock public key
+    // Push order: signature, message, public_key (public_key ends up on
+    // top of the stack, popped first by the VM's DilithiumVerify handler).
     assembler.emit_op(OpCode::LoadImm);
-    assembler.emit_bytes(&vec![0x01; pqc_shims::dilithium::DILITHIUM_PUBLIC_KEY_BYTES]);
+    assembler.emit_bytes(&signature);
 
-    // Push mock message
     assembler.emit_op(OpCode::LoadImm);
-    assembler.emit_bytes(b"Hello, quantum world!");
+    assembler.emit_bytes(message);
 
-    // Push mock signature
     assembler.emit_op(OpCode::LoadImm);
-    assembler.emit_bytes(&vec![0x02; pqc_shims::dilithium::DILITHIUM_SIGNATURE_BYTES]);
+    assembler.emit_bytes(&pk);
 
-    // Verify signature
     assembler.emit_op(OpCode::DilithiumVerify);
     assembler.emit_op(OpCode::Halt);
 
@@ -53,21 +55,52 @@ fn test_dilithium_verify_shim() {
 }
 
 #[test]
+fn test_dilithium_verify_shim_rejects_forged_signature() {
+    // A signature made with a DIFFERENT keypair must not verify against
+    // the original public key — proves the VM path enforces real security
+    // properties rather than the old always-true stub.
+    let (pk, _sk) = pqc_shims::dilithium::keygen();
+    let (_other_pk, other_sk) = pqc_shims::dilithium::keygen();
+    let message = b"Hello, quantum world!";
+    let forged_signature = pqc_shims::dilithium::sign(message, &other_sk);
+
+    let mut assembler = Assembler::new();
+    assembler.emit_op(OpCode::LoadImm);
+    assembler.emit_bytes(&forged_signature);
+    assembler.emit_op(OpCode::LoadImm);
+    assembler.emit_bytes(message);
+    assembler.emit_op(OpCode::LoadImm);
+    assembler.emit_bytes(&pk);
+    assembler.emit_op(OpCode::DilithiumVerify);
+    assembler.emit_op(OpCode::Halt);
+
+    let bytecode = assembler.build();
+    let mut vm = QuantumVM::new();
+    vm.load_bytecode(&bytecode).unwrap();
+    vm.execute().unwrap();
+
+    let result = vm.stack.pop().unwrap().as_bool().unwrap();
+    assert_eq!(result, false);
+}
+
+#[test]
 fn test_kyber_decaps_shim() {
+    // Uses a REAL Kyber-768 keypair + real encapsulation (not the old
+    // fake fixed-size byte arrays) so decapsulation inside the VM must
+    // recover the exact same shared secret that encaps produced.
+    let (pk, sk) = pqc_shims::kyber::keygen().unwrap();
+    let (ciphertext, expected_shared_secret) = pqc_shims::kyber::encaps(&pk).unwrap();
+
     let mut assembler = Assembler::new();
 
-    // The decaps function expects (ciphertext, private_key)
-    // So we push private_key, then ciphertext.
-
-    // Push mock private key
+    // The decaps function expects (ciphertext, private_key), and the VM
+    // pops private_key first, so push order is: ciphertext, private_key.
     assembler.emit_op(OpCode::LoadImm);
-    assembler.emit_bytes(&vec![0x01; pqc_shims::kyber::KYBER_SECRET_KEY_BYTES]);
+    assembler.emit_bytes(&ciphertext);
 
-    // Push mock ciphertext
     assembler.emit_op(OpCode::LoadImm);
-    assembler.emit_bytes(&vec![0x02; pqc_shims::kyber::KYBER_CIPHERTEXT_BYTES]);
+    assembler.emit_bytes(&sk);
 
-    // Decapsulate
     assembler.emit_op(OpCode::KyberKeyExchange); // This opcode maps to decaps
     assembler.emit_op(OpCode::Halt);
 
@@ -77,5 +110,5 @@ fn test_kyber_decaps_shim() {
     vm.execute().unwrap();
 
     let shared_secret = vm.stack.pop().unwrap().as_bytes().unwrap().to_vec();
-    assert_eq!(shared_secret, vec![0u8; pqc_shims::kyber::KYBER_SHARED_SECRET_BYTES]);
+    assert_eq!(shared_secret, expected_shared_secret);
 }

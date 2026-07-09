@@ -16,7 +16,37 @@ state_variable_declaration = { IDENT ~ ":" ~ type_decl ~ ("public"?) ~ ";" }
 
 function_definition = { "function" ~ IDENT ~ "(" ~ (param ~ ("," ~ param)*)? ~ ")" ~ block }
 param = { IDENT ~ ":" ~ type_decl }
-block = { "{" ~ "}" } // Empty block for now
+
+block = { "{" ~ statement* ~ "}" }
+
+statement = { require_statement | return_statement | assignment_statement | expr_statement }
+
+require_statement = { "require" ~ "(" ~ expression ~ "," ~ string_literal ~ ")" ~ ";" }
+return_statement = { "return" ~ expression? ~ ";" }
+assignment_statement = { IDENT ~ "=" ~ expression ~ ";" }
+expr_statement = { expression ~ ";" }
+
+// Precedence-climbing expression grammar (avoids left recursion):
+// comparison -> additive -> multiplicative -> primary
+expression = { comparison_expr }
+
+comparison_expr = { additive_expr ~ (comparison_op ~ additive_expr)* }
+comparison_op = { "==" | "!=" | "<=" | ">=" | "<" | ">" }
+
+additive_expr = { multiplicative_expr ~ (additive_op ~ multiplicative_expr)* }
+additive_op = { "+" | "-" }
+
+multiplicative_expr = { primary_expr ~ (multiplicative_op ~ primary_expr)* }
+multiplicative_op = { "*" | "/" }
+
+primary_expr = { call_expr | number_literal | string_literal | bool_literal | identifier_expr | ("(" ~ expression ~ ")") }
+
+call_expr = { IDENT ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" }
+identifier_expr = { IDENT }
+
+number_literal = @{ ASCII_DIGIT+ }
+string_literal = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+bool_literal = { "true" | "false" }
 
 type_decl = { IDENT }
 IDENT = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }

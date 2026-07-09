@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use synq_pqc_shims::kyber::{keygen as kyber_keygen, encaps as kyber_encaps, decaps as kyber_decaps};
-use synq_pqc_shims::dilithium::{keygen as dilithium_keygen};
-use synq_pqc_shims::falcon::{keygen as falcon_keygen};
-use synq_pqc_shims::sphincs::{keygen as sphincs_keygen};
+use synq_pqc_shims::dilithium;
+use synq_pqc_shims::falcon;
+use synq_pqc_shims::sphincs;
 use synq_pqc_shims::mceliece::{keygen as mceliece_keygen};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -47,30 +47,12 @@ impl PQCCompiler {
                     Err(e) => return Err(format!("Kyber key generation failed: {}", e)),
                 }
             },
-            "dilithium" | "dilithium3" => {
-                match dilithium_keygen() {
-                    Ok((pk, sk)) => (pk, sk),
-                    Err(e) => return Err(format!("Dilithium key generation failed: {}", e)),
-                }
-            },
-            "falcon" | "falcon512" => {
-                match falcon_keygen() {
-                    Ok((pk, sk)) => (pk, sk),
-                    Err(e) => return Err(format!("Falcon key generation failed: {}", e)),
-                }
-            },
-            "sphincs" | "sphincsplus" => {
-                match sphincs_keygen() {
-                    Ok((pk, sk)) => (pk, sk),
-                    Err(e) => return Err(format!("SPHINCS+ key generation failed: {}", e)),
-                }
-            },
-            "mceliece" | "classicmceliece" => {
-                match mceliece_keygen() {
-                    Ok((pk, sk)) => (pk, sk),
-                    Err(e) => return Err(format!("Classic-McEliece key generation failed: {}", e)),
-                }
-            },
+            // Dilithium/Falcon/SPHINCS+/McEliece shims return the keypair
+            // directly (they cannot fail at keygen time) rather than a Result.
+            "dilithium" | "dilithium3" => dilithium::keygen(),
+            "falcon" | "falcon512" => falcon::keygen(),
+            "sphincs" | "sphincsplus" => sphincs::keygen(),
+            "mceliece" | "classicmceliece" => mceliece_keygen(),
             _ => return Err(format!("Unsupported PQC algorithm: {}", algorithm)),
         };
 
@@ -82,8 +64,10 @@ impl PQCCompiler {
         })
     }
 
+    /// Signs a message with a REAL PQC signature — dispatches to the matching
+    /// pqc-shims algorithm (Dilithium / Falcon / SPHINCS+) instead of the
+    /// previous fake SHA3-hash-only placeholder.
     pub fn sign_message(&self, private_key: &[u8], message: &[u8], algorithm: &str) -> Result<PQCSignature, String> {
-        // For now, create a simple signature (would use actual PQC signing in production)
         let signature = self.create_signature(private_key, message, algorithm)?;
 
         Ok(PQCSignature {
@@ -94,13 +78,18 @@ impl PQCCompiler {
         })
     }
 
+    /// Verifies a REAL PQC signature — dispatches to the matching pqc-shims
+    /// algorithm's verify() instead of the previous fake hash-equality check
+    /// (which compared hash(message) to hash(signature) and could never
+    /// meaningfully validate anything).
     pub fn verify_signature(&self, public_key: &[u8], signature: &[u8], message: &[u8], algorithm: &str) -> Result<bool, String> {
-        // For now, simple verification (would use actual PQC verification in production)
-        let expected_hash = self.hash_message(message);
-        let signature_hash = self.hash_message(signature);
-
-        // Simple verification logic (would be replaced with actual PQC verification)
-        Ok(expected_hash == signature_hash)
+        let result = match algorithm.to_lowercase().as_str() {
+            "dilithium" | "dilithium3" => dilithium::verify(message, signature, public_key),
+            "falcon" | "falcon512" => falcon::verify(message, signature, public_key),
+            "sphincs" | "sphincsplus" => sphincs::verify(message, signature, public_key),
+            _ => return Err(format!("Unsupported signature algorithm: {}", algorithm)),
+        };
+        Ok(result)
     }
 
     pub fn encapsulate_key(&self, public_key: &[u8], algorithm: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
@@ -135,14 +124,14 @@ impl PQCCompiler {
         }
     }
 
+    /// Dispatches to the real pqc-shims sign() for the given algorithm.
     fn create_signature(&self, private_key: &[u8], message: &[u8], algorithm: &str) -> Result<Vec<u8>, String> {
-        // Simple signature creation (would be replaced with actual PQC signing)
-        use sha3::{Sha3_256, Digest};
-        let mut hasher = Sha3_256::new();
-        hasher.update(private_key);
-        hasher.update(message);
-        hasher.update(algorithm.as_bytes());
-        Ok(hasher.finalize().to_vec())
+        match algorithm.to_lowercase().as_str() {
+            "dilithium" | "dilithium3" => Ok(dilithium::sign(message, private_key)),
+            "falcon" | "falcon512" => Ok(falcon::sign(message, private_key)),
+            "sphincs" | "sphincsplus" => Ok(sphincs::sign(message, private_key)),
+            _ => Err(format!("Unsupported signature algorithm: {}", algorithm)),
+        }
     }
 
     fn hash_message(&self, message: &[u8]) -> Vec<u8> {
@@ -172,5 +161,3 @@ impl Default for PQCCompiler {
         PQCCompiler::new(PQCSecurityLevel::Enhanced)
     }
 }
-
-

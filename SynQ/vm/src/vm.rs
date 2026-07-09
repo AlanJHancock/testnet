@@ -82,6 +82,59 @@ impl Header {
 }
 
 
+/// A single entry in the function dispatch table, parsed from the
+/// bytecode's data section. Lets `call_function` marshal arguments into
+/// the callee's fixed parameter memory slots and jump to its entry point.
+#[derive(Debug, Clone)]
+pub struct FunctionEntry {
+    pub name: String,
+    pub address: u32,
+    pub param_addresses: Vec<u32>,
+    pub has_return: bool,
+}
+
+fn parse_function_table(data: &[u8]) -> Result<HashMap<String, FunctionEntry>, VMError> {
+    let mut table = HashMap::new();
+    if data.len() < 4 {
+        return Ok(table);
+    }
+    let mut pos = 0usize;
+    let read_u32 = |data: &[u8], pos: &mut usize| -> Result<u32, VMError> {
+        if *pos + 4 > data.len() {
+            return Err(VMError::InvalidBytecode("truncated function table".to_string()));
+        }
+        let bytes = [data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]];
+        *pos += 4;
+        Ok(u32::from_le_bytes(bytes))
+    };
+
+    let count = read_u32(data, &mut pos)?;
+    for _ in 0..count {
+        let name_len = read_u32(data, &mut pos)? as usize;
+        if pos + name_len > data.len() {
+            return Err(VMError::InvalidBytecode("truncated function name".to_string()));
+        }
+        let name = String::from_utf8_lossy(&data[pos..pos + name_len]).to_string();
+        pos += name_len;
+
+        let address = read_u32(data, &mut pos)?;
+        let param_count = read_u32(data, &mut pos)? as usize;
+        let mut param_addresses = Vec::with_capacity(param_count);
+        for _ in 0..param_count {
+            param_addresses.push(read_u32(data, &mut pos)?);
+        }
+        if pos >= data.len() {
+            return Err(VMError::InvalidBytecode("truncated has_return flag".to_string()));
+        }
+        let has_return = data[pos] != 0;
+        pos += 1;
+
+        table.insert(name.clone(), FunctionEntry { name, address, param_addresses, has_return });
+    }
+
+    Ok(table)
+}
+
 // The main VM struct
 pub struct QuantumVM {
     pub stack: Vec<Value>,
@@ -91,6 +144,7 @@ pub struct QuantumVM {
     pc: usize,
     call_stack: Vec<usize>,
     halted: bool,
+    functions: HashMap<String, FunctionEntry>,
 }
 
 impl QuantumVM {
@@ -103,6 +157,7 @@ impl QuantumVM {
             pc: 0,
             call_stack: Vec::new(),
             halted: false,
+            functions: HashMap::new(),
         }
     }
 
@@ -121,8 +176,66 @@ impl QuantumVM {
         self.data = bytecode[code_end..data_end].to_vec();
         self.pc = 0;
         self.halted = false;
+        self.functions = parse_function_table(&self.data)?;
 
         Ok(())
+    }
+
+    /// Returns the names of all functions in the dispatch table (for CLI
+    /// introspection, e.g. `--list-functions`).
+    pub fn list_functions(&self) -> Vec<String> {
+        self.functions.keys().cloned().collect()
+    }
+
+    /// Calls a named contract function directly: marshals `args` into the
+    /// callee's fixed parameter memory slots, pushes a sentinel return
+    /// address, jumps to the function's entry point, and runs until it
+    /// hits `Return` (or `Halt`). State persists in `self.memory` across
+    /// calls made on the same VM instance.
+    pub fn call_function(&mut self, name: &str, args: &[Value]) -> Result<Option<Value>, VMError> {
+        let entry = self
+            .functions
+            .get(name)
+            .cloned()
+            .ok_or_else(|| VMError::RuntimeError(format!("Unknown function: {}", name)))?;
+
+        if args.len() != entry.param_addresses.len() {
+            return Err(VMError::RuntimeError(format!(
+                "Function '{}' expects {} argument(s), got {}",
+                name,
+                entry.param_addresses.len(),
+                args.len()
+            )));
+        }
+
+        for (addr, value) in entry.param_addresses.iter().zip(args.iter()) {
+            self.memory.insert(*addr as usize, value.clone());
+        }
+
+        // Sentinel return address: points past the end of the code, so a
+        // top-level `Return` executed via this call cleanly signals
+        // completion by popping this sentinel and immediately halting.
+        let sentinel = self.code.len();
+        self.call_stack.push(sentinel);
+        self.pc = entry.address as usize;
+        self.halted = false;
+
+        while !self.halted {
+            if self.pc == sentinel {
+                self.halted = true;
+                break;
+            }
+            if self.pc >= self.code.len() {
+                return Err(VMError::InvalidAddress(self.pc));
+            }
+            self.execute_instruction()?;
+        }
+
+        if entry.has_return {
+            Ok(self.stack.pop())
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn execute(&mut self) -> Result<(), VMError> {
@@ -240,16 +353,20 @@ impl QuantumVM {
                 if let Some(return_addr) = self.call_stack.pop() {
                     self.pc = return_addr;
                 } else {
-                    return Err(VMError::RuntimeError("Return without call".to_string()));
+                    // Top-level Return (the plain `execute()` calling
+                    // convention, pc starting at 0 with an empty call
+                    // stack): gracefully halt instead of erroring, so
+                    // existing tests/CLI usage keeps working unchanged.
+                    self.halted = true;
                 }
             }
             OpCode::Load => {
                 let addr = self.pop()?.as_i32()? as usize;
-                if let Some(value) = self.memory.get(&addr) {
-                    self.push(value.clone())?;
-                } else {
-                    return Err(VMError::InvalidAddress(addr));
-                }
+                // Standard contract-storage convention: an address that has
+                // never been written to (e.g. a state variable's very first
+                // read) defaults to zero instead of erroring.
+                let value = self.memory.get(&addr).cloned().unwrap_or(Value::I32(0));
+                self.push(value)?;
             }
             OpCode::Store => {
                 let addr = self.pop()?.as_i32()? as usize;
@@ -274,7 +391,8 @@ impl QuantumVM {
                 let private_key = self.pop()?.as_bytes()?.to_vec();
                 let ciphertext = self.pop()?.as_bytes()?.to_vec();
 
-                let shared_secret = kyber::decaps(&ciphertext, &private_key);
+                let shared_secret = kyber::decaps(&ciphertext, &private_key)
+                    .map_err(VMError::RuntimeError)?;
                 self.push(Value::Bytes(shared_secret))?;
             }
             OpCode::FalconVerify => {
