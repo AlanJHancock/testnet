@@ -113,6 +113,13 @@ jobs:
         shell: bash
         run: scripts/testnet/check-no-hardcoded-validator-topology.sh
 
+      - name: Verify confirmed stake replay
+        shell: bash
+        run: >-
+          cargo test --locked -p synergy-testnet
+          replay_chain_transactions_restores_staking_state
+          --lib -- --exact
+
       - name: Build release binaries
         shell: bash
         run: |

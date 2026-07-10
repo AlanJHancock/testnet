@@ -1802,8 +1802,9 @@ mod tests {
             )),
             "fndsa".to_string(),
         );
-        let fee = tx.get_total_network_fee_u64().unwrap();
-        seed_snrg_balance(&manager, &staker, 50_000 + fee);
+        // Staking is processed before native transfers and currently debits only
+        // the staked amount, not a transaction fee from the token ledger.
+        seed_snrg_balance(&manager, &staker, 50_000);
 
         let mut chain = crate::block::BlockChain::new();
         chain.add_block(crate::block::Block::new(
