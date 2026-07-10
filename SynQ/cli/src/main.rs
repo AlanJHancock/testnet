@@ -135,27 +135,55 @@ fn compile(path: &PathBuf) {
 
 fn verify(path: &PathBuf) {
     println!("Verifying PQC signature for: {}", path.display());
-    let bytecode = fs::read(path).expect("Failed to read bytecode file");
+
+    let bytecode = match fs::read(path) {
+        Ok(b) => b,
+        Err(_) => {
+            eprintln!("❌ Error: bytecode file not found: {}", path.display());
+            std::process::exit(1);
+        }
+    };
 
     let sig_path = sig_sidecar_path(path);
-    let sig_content = fs::read_to_string(&sig_path).unwrap_or_else(|_| {
-        panic!(
-            "No signature sidecar file found at {} -- was this file compiled with real signing?",
-            sig_path.display()
-        )
-    });
-    let sig_json: serde_json::Value =
-        serde_json::from_str(&sig_content).expect("Malformed signature sidecar file");
+    let sig_content = match fs::read_to_string(&sig_path) {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!(
+                "❌ Error: no signature sidecar found at {}",
+                sig_path.display()
+            );
+            eprintln!("   Was this file compiled with synq-cli? Server-compiled .qvm files");
+            eprintln!("   do not have a local sidecar -- signature is embedded in the response.");
+            std::process::exit(1);
+        }
+    };
 
-    let algorithm = sig_json["algorithm"].as_str().expect("missing algorithm field");
-    let public_key = hex_decode(sig_json["public_key"].as_str().expect("missing public_key field"));
-    let signature = hex_decode(sig_json["signature"].as_str().expect("missing signature field"));
+    let sig_json: serde_json::Value = match serde_json::from_str(&sig_content) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("❌ Error: malformed signature sidecar file at {}", sig_path.display());
+            std::process::exit(1);
+        }
+    };
+
+    let algorithm = match sig_json["algorithm"].as_str() {
+        Some(a) => a,
+        None => { eprintln!("❌ Error: missing 'algorithm' field in sidecar"); std::process::exit(1); }
+    };
+    let public_key = match sig_json["public_key"].as_str() {
+        Some(h) => hex_decode(h),
+        None => { eprintln!("❌ Error: missing 'public_key' field in sidecar"); std::process::exit(1); }
+    };
+    let signature = match sig_json["signature"].as_str() {
+        Some(h) => hex_decode(h),
+        None => { eprintln!("❌ Error: missing 'signature' field in sidecar"); std::process::exit(1); }
+    };
 
     let pqc = PQCCompiler::new(PQCSecurityLevel::Enhanced);
     match pqc.verify_signature(&public_key, &signature, &bytecode, algorithm) {
-        Ok(true) => println!("✅ Signature valid ({}) -- bytecode is untampered", algorithm),
-        Ok(false) => println!("❌ Signature INVALID -- bytecode does not match the signature on file"),
-        Err(e) => println!("❌ Verification error: {}", e),
+        Ok(true)  => println!("✅ Signature valid ({}) -- bytecode is untampered", algorithm),
+        Ok(false) => println!("❌ Signature INVALID -- bytecode does not match signature on file"),
+        Err(e)    => println!("❌ Verification error: {}", e),
     }
 }
 
