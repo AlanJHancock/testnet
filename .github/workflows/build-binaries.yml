@@ -152,7 +152,8 @@ jobs:
             fi
           fi
 
-          version_line="$("target/release/synergy-testnet${MATRIX_SUFFIX}" --version | head -n 1)"
+          version_output="$("target/release/synergy-testnet${MATRIX_SUFFIX}" --version)"
+          version_line="${version_output%%$'\n'*}"
           expected_version_line="Synergy Testnet Node v${package_version}"
           if [[ "${version_line}" != "${expected_version_line}" ]]; then
             echo "Native Testnet binary reported '${version_line}', expected '${expected_version_line}'" >&2
