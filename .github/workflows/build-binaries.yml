@@ -24,7 +24,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             label: linux-amd64
             binary_suffix: ""
           - os: windows-latest
@@ -135,6 +135,30 @@ jobs:
             --bin synergy-archive \
             --bin synergy-node \
             --bin synergy-indexer-and-explorer-node
+
+      - name: Verify release tag, package, and native binary versions
+        shell: bash
+        env:
+          MATRIX_SUFFIX: ${{ matrix.binary_suffix }}
+        run: |
+          set -euo pipefail
+
+          package_version="$(awk -F '"' '/^version = "/ { print $2; exit }' src/Cargo.toml)"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag_version="${GITHUB_REF_NAME#v}"
+            if [[ "${package_version}" != "${tag_version}" ]]; then
+              echo "Testnet package ${package_version} does not match release tag ${GITHUB_REF_NAME}" >&2
+              exit 1
+            fi
+          fi
+
+          version_line="$("target/release/synergy-testnet${MATRIX_SUFFIX}" --version | head -n 1)"
+          expected_version_line="Synergy Testnet Node v${package_version}"
+          if [[ "${version_line}" != "${expected_version_line}" ]]; then
+            echo "Native Testnet binary reported '${version_line}', expected '${expected_version_line}'" >&2
+            exit 1
+          fi
+          echo "Native Testnet binary version verified: ${version_line}"
 
       - name: Package binaries
         id: package
