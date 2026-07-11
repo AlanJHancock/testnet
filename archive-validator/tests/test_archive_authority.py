@@ -16,6 +16,37 @@ SPEC.loader.exec_module(archive_authority)
 
 
 class ArchiveAuthorityPolicyTests(unittest.TestCase):
+    def test_sign_json_replaces_prior_signature_before_signing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            aegis = root / "synergy-aegis"
+            aegis.write_text("#!/bin/sh\n", encoding="utf-8")
+            aegis.chmod(0o700)
+            payload = root / "payload.json"
+            payload.write_text("{}\n", encoding="utf-8")
+            signature = root / "payload.sig"
+            signature.write_text("stale", encoding="utf-8")
+
+            original_run = archive_authority.run
+
+            def fake_run(_command):
+                self.assertFalse(signature.exists())
+                return '{"ok": true}'
+
+            try:
+                archive_authority.run = fake_run
+                result = archive_authority.sign_json(
+                    aegis,
+                    root,
+                    "SYNERGY_TEST_DOMAIN",
+                    payload,
+                    signature,
+                )
+            finally:
+                archive_authority.run = original_run
+
+            self.assertEqual(result, {"ok": True})
+
     def valid_consensus_fork(self) -> dict:
         return {
             "fork_height": archive_authority.FORK_HEIGHT,

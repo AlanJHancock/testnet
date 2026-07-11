@@ -385,6 +385,8 @@ def init_identity(aegis: Path, root: Path, uma_id: str) -> dict[str, Any]:
 
 
 def sign_json(aegis: Path, root: Path, domain: str, payload: Path, signature: Path) -> dict[str, Any]:
+    signature.parent.mkdir(parents=True, exist_ok=True)
+    signature.unlink(missing_ok=True)
     output = run(
         [
             str(require_executable(aegis)),
