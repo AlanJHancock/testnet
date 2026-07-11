@@ -560,7 +560,7 @@ impl DualQuorumConsensus {
                 pending_votes,
             );
 
-            if self.has_commit_quorum(&active_validators, &votes) {
+            if self.has_commit_quorum(&active_validators, &votes, epoch_number, round_number) {
                 if !qc_threshold_reported {
                     timing_trace::emit(
                         "qc_threshold_reached",
@@ -600,7 +600,8 @@ impl DualQuorumConsensus {
         votes.retain(|vote| {
             self.vote_is_eligible_for_collection(vote, block_hash, epoch_number, round_number)
         });
-        let final_quorum_met = self.has_commit_quorum(&active_validators, &votes);
+        let final_quorum_met =
+            self.has_commit_quorum(&active_validators, &votes, epoch_number, round_number);
         if final_quorum_met && !qc_threshold_reported {
             timing_trace::emit(
                 "qc_threshold_reached",
@@ -1307,8 +1308,7 @@ impl DualQuorumConsensus {
 
         for vote in pending_votes {
             if vote.block_hash != block_hash
-                || vote.epoch_number != epoch_number
-                || vote.round_number > round_number
+                || !Self::vote_matches_context(&vote, epoch_number, round_number)
             {
                 continue;
             }
@@ -1318,29 +1318,16 @@ impl DualQuorumConsensus {
                 vote.block_index,
                 vote.round_number,
             ) {
-                if vote.round_number < round_number {
-                    warn!(
-                        "consensus",
-                        "Accepting prior-round same-block recovery vote despite retained equivocation evidence",
-                        "validator" => vote.validator_address.clone(),
-                        "block_hash" => vote.block_hash.clone(),
-                        "height" => vote.block_index,
-                        "epoch" => vote.epoch_number,
-                        "vote_round" => vote.round_number,
-                        "collection_round" => round_number
-                    );
-                } else {
-                    warn!(
-                        "consensus",
-                        "Discarding equivocating vote",
-                        "validator" => vote.validator_address.clone(),
-                        "block_hash" => vote.block_hash.clone(),
-                        "height" => vote.block_index,
-                        "epoch" => vote.epoch_number,
-                        "round" => vote.round_number
-                    );
-                    continue;
-                }
+                warn!(
+                    "consensus",
+                    "Discarding equivocating vote",
+                    "validator" => vote.validator_address.clone(),
+                    "block_hash" => vote.block_hash.clone(),
+                    "height" => vote.block_index,
+                    "epoch" => vote.epoch_number,
+                    "round" => vote.round_number
+                );
+                continue;
             }
             if !expected_validators.contains(&vote.validator_address) {
                 continue;
@@ -1451,8 +1438,13 @@ impl DualQuorumConsensus {
         round_number: u64,
         votes: &[Vote],
     ) -> Result<QuorumCertificate, String> {
-        let cumulative_weight = self.calculate_cumulative_vote_weight(votes);
-        let validator_count = votes.len();
+        let matching_votes = votes
+            .iter()
+            .filter(|vote| Self::vote_matches_context(vote, epoch_number, round_number))
+            .cloned()
+            .collect::<Vec<_>>();
+        let cumulative_weight = self.calculate_cumulative_vote_weight(&matching_votes);
+        let validator_count = matching_votes.len();
         let active_validators = self.collect_active_validators();
         let total_validators = active_validators.len();
 
@@ -1487,8 +1479,12 @@ impl DualQuorumConsensus {
 
         if validation_quorum_met && cooperation_quorum_met {
             // Create quorum certificate
-            let qc =
-                self.create_quorum_certificate(block_hash, epoch_number, round_number, votes)?;
+            let qc = self.create_quorum_certificate(
+                block_hash,
+                epoch_number,
+                round_number,
+                &matching_votes,
+            )?;
             self.quorum_certificates
                 .insert(block_hash.to_string(), qc.clone());
             Ok(qc)
@@ -1524,13 +1520,24 @@ impl DualQuorumConsensus {
         required_validator_quorum(total_validators).max(1)
     }
 
-    fn has_commit_quorum(&self, live_validators: &[Validator], votes: &[Vote]) -> bool {
+    fn has_commit_quorum(
+        &self,
+        live_validators: &[Validator],
+        votes: &[Vote],
+        epoch_number: u64,
+        round_number: u64,
+    ) -> bool {
         if live_validators.is_empty() {
             return false;
         }
 
+        let matching_votes = votes
+            .iter()
+            .filter(|vote| Self::vote_matches_context(vote, epoch_number, round_number))
+            .cloned()
+            .collect::<Vec<_>>();
         let required_validator_votes = self.required_validator_votes(live_validators.len());
-        if votes.len() < required_validator_votes {
+        if matching_votes.len() < required_validator_votes {
             return false;
         }
 
@@ -1539,7 +1546,7 @@ impl DualQuorumConsensus {
             return false;
         }
 
-        let cumulative_weight = self.calculate_cumulative_vote_weight(votes);
+        let cumulative_weight = self.calculate_cumulative_vote_weight(&matching_votes);
         let required_validation_ratio =
             self.validation_quorum_threshold.max(VALIDATOR_QUORUM_RATIO);
         cumulative_weight + 0.000_001 >= total_live_weight * required_validation_ratio
@@ -1595,14 +1602,20 @@ impl DualQuorumConsensus {
         round_number: u64,
         votes: &[Vote],
     ) -> Result<QuorumCertificate, String> {
+        let matching_votes = votes
+            .iter()
+            .filter(|vote| Self::vote_matches_context(vote, epoch_number, round_number))
+            .cloned()
+            .collect::<Vec<_>>();
+
         // Aggregate signatures
-        let aggregate_sig = self.aggregate_signatures(votes)?;
+        let aggregate_sig = self.aggregate_signatures(&matching_votes)?;
 
         // Create participation bitmap
-        let participant_bitmap = self.create_participant_bitmap(votes);
+        let participant_bitmap = self.create_participant_bitmap(&matching_votes);
 
         // Calculate cumulative weight
-        let cumulative_weight = self.calculate_cumulative_vote_weight(votes);
+        let cumulative_weight = self.calculate_cumulative_vote_weight(&matching_votes);
 
         let qc = QuorumCertificate {
             block_hash: block_hash.to_string(),
@@ -1615,7 +1628,7 @@ impl DualQuorumConsensus {
             cooperation_quorum_met: true,
             timestamp: Self::current_timestamp(),
             votes: {
-                let mut sorted_votes = votes.to_vec();
+                let mut sorted_votes = matching_votes;
                 sorted_votes.sort_by(|a, b| a.validator_address.cmp(&b.validator_address));
                 sorted_votes
             },
@@ -1834,7 +1847,7 @@ impl DualQuorumConsensus {
             if vote.block_index != block.block_index {
                 return Err("QC vote signs a different block height".to_string());
             }
-            if vote.epoch_number != qc.epoch_number || vote.round_number > qc.round_number {
+            if vote.epoch_number != qc.epoch_number || vote.round_number != qc.round_number {
                 return Err("QC vote context does not match QC epoch/round".to_string());
             }
             if !seen.insert(vote.validator_address.clone()) {
@@ -2866,8 +2879,7 @@ impl DualQuorumConsensus {
         round_number: u64,
     ) -> bool {
         if vote.block_hash != block_hash
-            || vote.epoch_number != epoch_number
-            || vote.round_number > round_number
+            || !Self::vote_matches_context(vote, epoch_number, round_number)
         {
             return false;
         }
@@ -2882,7 +2894,7 @@ impl DualQuorumConsensus {
             vote.block_index,
             vote.round_number,
         ) {
-            return vote.round_number < round_number;
+            return false;
         }
 
         self.vote_is_eligible(vote)
@@ -2892,6 +2904,10 @@ impl DualQuorumConsensus {
         consensus_membership_validators(self.validator_manager.get_active_validators())
             .into_iter()
             .any(|validator| validator.address == vote.validator_address)
+    }
+
+    fn vote_matches_context(vote: &Vote, epoch_number: u64, round_number: u64) -> bool {
+        vote.epoch_number == epoch_number && vote.round_number == round_number
     }
 
     fn vote_mailbox_key(block_hash: &str, epoch_number: u64, round_number: u64) -> String {
@@ -4208,7 +4224,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_remote_votes_accepts_prior_round_same_block_recovery_votes() {
+    fn merge_remote_votes_rejects_prior_round_same_block_recovery_votes() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
 
@@ -4256,12 +4272,104 @@ mod tests {
             vec![prior_round_vote],
         );
 
-        assert_eq!(votes.len(), 2);
+        assert_eq!(votes.len(), 1);
         votes.retain(|vote| consensus.vote_is_eligible_for_collection(&vote, &block.hash, 12, 4));
-        assert_eq!(votes.len(), 2);
-        assert!(votes
-            .iter()
-            .any(|vote| { vote.validator_address == "validator2" && vote.round_number == 2 }));
+        assert_eq!(votes.len(), 1);
+        assert!(votes.iter().all(|vote| vote.round_number == 4));
+    }
+
+    #[test]
+    fn mixed_round_votes_do_not_form_round_eight_qc() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        let validator_manager =
+            approved_validator_manager(&["validator1", "validator2", "validator3", "validator4"]);
+        let pqc_manager = Arc::new(Mutex::new(PQCManager::new()));
+        let mut consensus = DualQuorumConsensus::new(
+            Arc::clone(&validator_manager),
+            Arc::clone(&pqc_manager),
+            true,
+            1,
+            1,
+            8,
+            5,
+        );
+
+        let block = signed_block(10, 1, "validator1");
+        let votes = [
+            ("validator1", 2),
+            ("validator2", 6),
+            ("validator3", 8),
+            ("validator4", 8),
+        ]
+        .into_iter()
+        .map(|(validator, round)| {
+            DualQuorumConsensus::create_vote_for_validator(validator, &block, 12, round)
+                .expect("test vote should be created")
+        })
+        .collect::<Vec<_>>();
+
+        let error = consensus
+            .check_quorums_and_commit(&block.hash, 12, 8, &votes)
+            .expect_err("mixed-round votes must not form a round-8 QC");
+        assert_eq!(
+            error,
+            "Insufficient validator votes: 2 votes, 3 required for quorum"
+        );
+        assert!(consensus.quorum_certificates.is_empty());
+    }
+
+    #[test]
+    fn qc_with_prior_round_vote_is_rejected_for_declared_round_eight() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        let validator_manager =
+            approved_validator_manager(&["validator1", "validator2", "validator3"]);
+        let block = {
+            let mut block = Block::new(
+                11,
+                vec![],
+                "parent-hash".to_string(),
+                "validator1".to_string(),
+                1,
+            );
+            let (public_key, signature) = sign_with_local_validator_key_for_height(
+                block.block_index,
+                "validator1",
+                block.hash.as_bytes(),
+                &validator_manager,
+            )
+            .expect("test proposer signature should be created");
+            block.proposer_public_key = public_key.key_data;
+            block.block_signature = signature.signature_data;
+            block.block_signature_algorithm = "fndsa".to_string();
+            block
+        };
+        let prior_round_vote =
+            DualQuorumConsensus::create_vote_for_validator("validator2", &block, 12, 2)
+                .expect("prior-round vote should be created");
+        let qc = QuorumCertificate {
+            block_hash: block.hash.clone(),
+            epoch_number: 12,
+            round_number: 8,
+            aggregate_signature: vec![1],
+            participant_bitmap: vec![1],
+            cumulative_weight: 1.0,
+            validation_quorum_met: true,
+            cooperation_quorum_met: true,
+            timestamp: 1_700_000_000,
+            votes: vec![prior_round_vote],
+        };
+
+        let error = DualQuorumConsensus::verify_commit_certificate_for_block_static(
+            &block,
+            &qc,
+            &validator_manager,
+        )
+        .expect_err("a round-8 QC must reject a round-2 vote");
+        assert_eq!(error, "QC vote context does not match QC epoch/round");
     }
 
     #[test]
@@ -4287,11 +4395,11 @@ mod tests {
             DualQuorumConsensus::create_vote_for_validator("validator1", &block, 12, 4)
                 .expect("local vote should be created");
         let mut invalid_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator2", &block, 12, 2)
+            DualQuorumConsensus::create_vote_for_validator("validator2", &block, 12, 4)
                 .expect("invalid candidate vote should be created");
         invalid_vote.signature.signature_data = b"invalid".to_vec();
         let valid_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator2", &block, 12, 3)
+            DualQuorumConsensus::create_vote_for_validator("validator2", &block, 12, 4)
                 .expect("valid duplicate candidate vote should be created");
 
         let expected_validators = ["validator1", "validator2", "validator3"]
@@ -4312,7 +4420,7 @@ mod tests {
         assert_eq!(votes.len(), 2);
         assert!(votes
             .iter()
-            .any(|vote| { vote.validator_address == "validator2" && vote.round_number == 3 }));
+            .any(|vote| { vote.validator_address == "validator2" && vote.round_number == 4 }));
     }
 
     #[test]
@@ -4459,7 +4567,7 @@ mod tests {
             4
         );
         assert!(
-            !consensus.has_commit_quorum(&active_validators, &votes),
+            !consensus.has_commit_quorum(&active_validators, &votes, 1, 1),
             "3 collected votes across six active validators must not satisfy two-thirds quorum"
         );
 
@@ -4483,7 +4591,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(
-            consensus.has_commit_quorum(&active_validators, &four_votes),
+            consensus.has_commit_quorum(&active_validators, &four_votes, 1, 1),
             "4 of 6 equal-weight votes should satisfy exact two-thirds quorum"
         );
     }
@@ -4529,7 +4637,7 @@ mod tests {
             67
         );
         assert!(
-            consensus.has_commit_quorum(&active_validators, &votes),
+            consensus.has_commit_quorum(&active_validators, &votes, 1, 1),
             "exactly 67 of 100 equal-weight votes must satisfy dynamic two-thirds quorum"
         );
     }
@@ -4575,7 +4683,7 @@ mod tests {
             required_validator_quorum(active_validators.len())
         );
         assert!(
-            consensus.has_commit_quorum(&active_validators, &votes),
+            consensus.has_commit_quorum(&active_validators, &votes, 1, 1),
             "dynamic quorum must come from the active validator set, not a stale configured value"
         );
     }
@@ -4626,7 +4734,7 @@ mod tests {
             4
         );
         assert!(
-            !consensus.has_commit_quorum(&active_validators, &votes),
+            !consensus.has_commit_quorum(&active_validators, &votes, 1, 1),
             "configured quorum must not allow 3 collected votes across five active validators"
         );
     }
