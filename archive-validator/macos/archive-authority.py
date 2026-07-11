@@ -361,7 +361,8 @@ def layout(root: Path, publish_root: Path) -> None:
 
 
 def identity_path(root: Path) -> Path:
-    return root / "keys" / "archive-authority-identity.json"
+    configured = os.environ.get("SYNERGY_AEGIS_ARCHIVE_IDENTITY", "").strip()
+    return Path(configured) if configured else root / "keys" / "archive-authority-identity.json"
 
 
 def init_identity(aegis: Path, root: Path, uma_id: str) -> dict[str, Any]:
@@ -418,6 +419,9 @@ def verify_json(
         "--signature",
         str(signature),
     ]
+    expected_signer_sha256 = expected_signer_sha256 or os.environ.get(
+        "SYNERGY_AEGIS_ARCHIVE_SIGNER_SHA256", ""
+    ).strip()
     if expected_signer_sha256:
         command += ["--expected-signer-sha256", expected_signer_sha256]
     return json.loads(run(command))
