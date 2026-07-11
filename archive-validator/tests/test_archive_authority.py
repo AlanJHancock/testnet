@@ -47,6 +47,39 @@ class ArchiveAuthorityPolicyTests(unittest.TestCase):
 
             self.assertEqual(result, {"ok": True})
 
+    def test_public_catalog_entry_has_consumer_urls_and_compatibility(self) -> None:
+        entry = {
+            "height": 843613,
+            "size_compressed": 123,
+            "mirror_urls": ["https://archive.example/"],
+        }
+
+        archive_authority.enrich_public_catalog_entry(entry)
+
+        self.assertEqual(entry["producer_role"], "archive_validator")
+        self.assertEqual(entry["producer_node_kind"], "archive-validator")
+        self.assertEqual(
+            entry["binary_compatibility"],
+            "synergy-testnet-v2-validator-pruned-v1",
+        )
+        self.assertEqual(
+            entry["snapshot_url"],
+            "https://archive.example/snapshots/843613/snapshot.tar.zst",
+        )
+        self.assertEqual(
+            entry["manifest_signature_url"],
+            "https://archive.example/snapshots/843613/signature.sig",
+        )
+        self.assertEqual(entry["compressed_size_bytes"], 123)
+
+    def test_catalog_content_root_is_stable_for_key_order(self) -> None:
+        left = [{"height": 10, "hash": "abc"}]
+        right = [{"hash": "abc", "height": 10}]
+        self.assertEqual(
+            archive_authority.catalog_content_root(left),
+            archive_authority.catalog_content_root(right),
+        )
+
     def valid_consensus_fork(self) -> dict:
         return {
             "fork_height": archive_authority.FORK_HEIGHT,
