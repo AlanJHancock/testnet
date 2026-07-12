@@ -24,7 +24,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Keep release binaries compatible with the Ubuntu 22.04 baseline used
+          # by the control-panel installer and documented Linux requirements.
+          - os: ubuntu-22.04
             label: linux-amd64
             binary_suffix: ""
           - os: windows-latest
