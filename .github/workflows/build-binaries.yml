@@ -100,8 +100,18 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Install Linux release dependencies
+        if: matrix.label == 'linux-amd64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ripgrep
+
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os }}-${{ matrix.label }}
 
       - name: Enforce PQC-only consensus-critical paths
         shell: bash
