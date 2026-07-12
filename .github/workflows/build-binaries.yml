@@ -132,6 +132,27 @@ jobs:
             --bin synergy-node \
             --bin synergy-indexer-and-explorer-node
 
+      - name: Verify Linux glibc compatibility baseline
+        if: matrix.label == 'linux-amd64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          max_glibc="$(
+            readelf --version-info target/release/synergy-testnet \
+              | sed -n 's/.*Name: GLIBC_\([0-9.]\+\).*/\1/p' \
+              | sort -V \
+              | tail -n 1
+          )"
+          if [[ -z "${max_glibc}" ]]; then
+            echo "Unable to determine the Linux runtime glibc requirement." >&2
+            exit 1
+          fi
+          if [[ "$(printf '%s\n%s\n' '2.35' "${max_glibc}" | sort -V | tail -n 1)" != '2.35' ]]; then
+            echo "Linux runtime requires GLIBC_${max_glibc}; maximum supported baseline is GLIBC_2.35." >&2
+            exit 1
+          fi
+          echo "Linux runtime glibc requirement verified: GLIBC_${max_glibc} <= GLIBC_2.35"
+
       - name: Package binaries
         id: package
         shell: bash
