@@ -1,6 +1,6 @@
 [package]
 name = "synergy-testnet"
-version = "15.0.14"
+version = "19.0.8"
 edition = "2021"
 
 [dependencies]

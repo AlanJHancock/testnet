@@ -21,7 +21,7 @@ use sha3::{Digest, Sha3_512};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -56,6 +56,9 @@ pub const MIN_LAUNCH_VOTE_TIMEOUT_SECS: u64 = FAST_CONSENSUS_VOTE_TIMEOUT_SECS;
 const LOCAL_VOTE_LOCK_COMPACTION_MIN_LOCKS: usize = 1024;
 const LOCAL_VOTE_LOCK_FINALIZED_RETENTION_DEPTH: u64 = 16;
 const COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV: &str = "SYNERGY_COMMITTED_QC_HOT_RETENTION_BLOCKS";
+const COMMITTED_QC_HOT_LOAD_MAX_BYTES_ENV: &str = "SYNERGY_COMMITTED_QC_HOT_LOAD_MAX_BYTES";
+const DEFAULT_COMMITTED_QC_HOT_LOAD_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const HARD_MAX_COMMITTED_QC_HOT_LOAD_BYTES: u64 = 64 * 1024 * 1024;
 const COMMITTED_QC_RETENTION_PRUNE_INTERVAL: usize = 1024;
 
 #[derive(Debug, Clone, Default)]
@@ -979,61 +982,58 @@ impl DualQuorumConsensus {
     }
 
     fn load_committed_qc_store_from_disk() -> Result<HashMap<String, QuorumCertificate>, String> {
+        // The JSONL journal is archival. Only its bounded tail is materialized into the hot store.
         let path = Self::committed_qc_store_path();
         let mut loaded = HashMap::new();
         let retention_blocks = Self::configured_committed_qc_hot_retention_blocks();
+        let max_load_bytes = Self::configured_committed_qc_hot_load_max_bytes();
         let mut latest_height = 0_u64;
         let mut seen_log_entries = 0_usize;
 
         if path.exists() {
-            let data = fs::read(&path)
-                .map_err(|err| format!("failed to read committed QC store {:?}: {err}", path))?;
-            if !data.is_empty() {
-                let legacy = serde_json::from_slice::<BTreeMap<String, QuorumCertificate>>(&data)
-                    .map_err(|err| {
-                    format!("failed to parse committed QC store {:?}: {err}", path)
+            let legacy_size = fs::metadata(&path)
+                .map_err(|err| format!("failed to stat committed QC store {:?}: {err}", path))?
+                .len();
+            if legacy_size <= max_load_bytes {
+                let data = fs::read(&path).map_err(|err| {
+                    format!("failed to read committed QC store {:?}: {err}", path)
                 })?;
-                for (block_hash, qc) in legacy {
-                    Self::insert_committed_qc_with_retention(
+                if !data.is_empty() {
+                    let legacy =
+                        serde_json::from_slice::<BTreeMap<String, QuorumCertificate>>(&data)
+                            .map_err(|err| {
+                                format!("failed to parse committed QC store {:?}: {err}", path)
+                            })?;
+                    for (block_hash, qc) in legacy {
+                        Self::insert_committed_qc_with_retention(
+                            &mut loaded,
+                            block_hash,
+                            qc,
+                            retention_blocks,
+                            &mut latest_height,
+                        );
+                    }
+                    Self::prune_committed_qc_store_for_retention_with_latest(
                         &mut loaded,
-                        block_hash,
-                        qc,
                         retention_blocks,
-                        &mut latest_height,
+                        latest_height,
                     );
                 }
-                Self::prune_committed_qc_store_for_retention_with_latest(
-                    &mut loaded,
-                    retention_blocks,
-                    latest_height,
+            } else {
+                warn!(
+                    "consensus",
+                    "Skipping oversized legacy committed QC snapshot during bounded startup load",
+                    "path" => path.display().to_string(),
+                    "bytes" => legacy_size,
+                    "max_load_bytes" => max_load_bytes
                 );
             }
         }
 
         let log_path = Self::committed_qc_log_path();
         if log_path.exists() {
-            let file = fs::File::open(&log_path)
-                .map_err(|err| format!("failed to open committed QC log {:?}: {err}", log_path))?;
-            for (line_number, line) in BufReader::new(file).lines().enumerate() {
-                let line = line.map_err(|err| {
-                    format!(
-                        "failed to read committed QC log {:?} line {}: {err}",
-                        log_path,
-                        line_number + 1
-                    )
-                })?;
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let entry =
-                    serde_json::from_str::<CommittedQcLogEntry>(trimmed).map_err(|err| {
-                        format!(
-                            "failed to parse committed QC log {:?} line {}: {err}",
-                            log_path,
-                            line_number + 1
-                        )
-                    })?;
+            let tail = Self::read_committed_qc_log_tail(&log_path, max_load_bytes)?;
+            for entry in tail {
                 Self::insert_committed_qc_with_retention(
                     &mut loaded,
                     entry.block_hash,
@@ -1061,6 +1061,88 @@ impl DualQuorumConsensus {
         );
         Self::trim_allocator_after_hot_retention();
         Ok(loaded)
+    }
+
+    fn read_committed_qc_log_tail(
+        log_path: &Path,
+        max_load_bytes: u64,
+    ) -> Result<Vec<CommittedQcLogEntry>, String> {
+        let mut file = fs::File::open(log_path)
+            .map_err(|err| format!("failed to open committed QC log {:?}: {err}", log_path))?;
+        let file_len = file
+            .metadata()
+            .map_err(|err| format!("failed to stat committed QC log {:?}: {err}", log_path))?
+            .len();
+        if file_len == 0 {
+            return Ok(Vec::new());
+        }
+
+        let start = file_len.saturating_sub(max_load_bytes);
+        let starts_mid_line = if start == 0 {
+            false
+        } else {
+            file.seek(SeekFrom::Start(start - 1)).map_err(|err| {
+                format!(
+                    "failed to inspect bounded committed QC log boundary {:?}: {err}",
+                    log_path
+                )
+            })?;
+            let mut previous = [0_u8; 1];
+            file.read_exact(&mut previous).map_err(|err| {
+                format!(
+                    "failed to read bounded committed QC log boundary {:?}: {err}",
+                    log_path
+                )
+            })?;
+            previous[0] != b'\n'
+        };
+        file.seek(SeekFrom::Start(start)).map_err(|err| {
+            format!(
+                "failed to seek to bounded committed QC log tail {:?}: {err}",
+                log_path
+            )
+        })?;
+        let read_len = file_len.saturating_sub(start);
+        let mut tail = Vec::with_capacity(read_len.min(usize::MAX as u64) as usize);
+        file.take(read_len).read_to_end(&mut tail).map_err(|err| {
+            format!(
+                "failed to read bounded committed QC log tail {:?}: {err}",
+                log_path
+            )
+        })?;
+
+        let mut entries = Vec::new();
+        for (index, line) in tail.split(|byte| *byte == b'\n').enumerate() {
+            if starts_mid_line && index == 0 {
+                continue;
+            }
+            let trimmed = Self::trim_ascii_whitespace(line);
+            if trimmed.is_empty() {
+                continue;
+            }
+            let entry = serde_json::from_slice::<CommittedQcLogEntry>(trimmed).map_err(|err| {
+                format!(
+                    "failed to parse bounded committed QC log tail {:?} segment {}: {err}",
+                    log_path,
+                    index + 1
+                )
+            })?;
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+
+    fn trim_ascii_whitespace(bytes: &[u8]) -> &[u8] {
+        let start = bytes
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(bytes.len());
+        let end = bytes
+            .iter()
+            .rposition(|byte| !byte.is_ascii_whitespace())
+            .map(|index| index + 1)
+            .unwrap_or(start);
+        &bytes[start..end]
     }
 
     fn insert_committed_qc_with_retention(
@@ -1093,6 +1175,15 @@ impl DualQuorumConsensus {
             .ok()
             .and_then(|value| value.trim().parse::<u64>().ok())
             .filter(|value| *value > 0)
+    }
+
+    fn configured_committed_qc_hot_load_max_bytes() -> u64 {
+        env::var(COMMITTED_QC_HOT_LOAD_MAX_BYTES_ENV)
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_COMMITTED_QC_HOT_LOAD_MAX_BYTES)
+            .min(HARD_MAX_COMMITTED_QC_HOT_LOAD_BYTES)
     }
 
     fn committed_qc_is_within_retention(
@@ -3394,6 +3485,87 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("\"block-z\""));
         assert!(lines[1].contains("\"block-a\""));
+    }
+
+    #[test]
+    fn committed_qc_hot_load_reads_only_a_bounded_tail_and_preserves_archive() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let _retention = EnvVarGuard::set(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV, "100");
+
+        let first_qc = test_qc_at_height("block-1", 1);
+        let line_size = serde_json::to_vec(&CommittedQcLogEntry {
+            block_hash: first_qc.block_hash.clone(),
+            qc: first_qc.clone(),
+        })
+        .unwrap()
+        .len()
+        .saturating_add(1);
+        let _max_load =
+            EnvVarGuard::set(COMMITTED_QC_HOT_LOAD_MAX_BYTES_ENV, &line_size.to_string());
+
+        for height in 1..=8 {
+            DualQuorumConsensus::append_committed_qc_to_log(&test_qc_at_height(
+                &format!("block-{height}"),
+                height,
+            ))
+            .unwrap();
+        }
+        let archive_before = fs::read(DualQuorumConsensus::committed_qc_log_path()).unwrap();
+
+        let loaded = DualQuorumConsensus::load_committed_qc_store_from_disk()
+            .expect("bounded committed QC tail should load");
+
+        assert!(!loaded.contains_key("block-1"));
+        assert!(loaded.contains_key("block-8"));
+        assert_eq!(
+            fs::read(DualQuorumConsensus::committed_qc_log_path()).unwrap(),
+            archive_before,
+            "hot loading must not rewrite or truncate the archival journal"
+        );
+    }
+
+    #[test]
+    fn committed_qc_hot_load_skips_oversized_legacy_snapshot() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let _retention = EnvVarGuard::set(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV, "100");
+        let journal_qc = test_qc_at_height("journal-current", 8);
+        let journal_line_size = serde_json::to_vec(&CommittedQcLogEntry {
+            block_hash: journal_qc.block_hash.clone(),
+            qc: journal_qc.clone(),
+        })
+        .unwrap()
+        .len()
+        .saturating_add(1);
+        let _max_load = EnvVarGuard::set(
+            COMMITTED_QC_HOT_LOAD_MAX_BYTES_ENV,
+            &journal_line_size.to_string(),
+        );
+
+        let mut legacy = BTreeMap::new();
+        for index in 0..16 {
+            let legacy_qc = test_qc(&format!("legacy-{index}"));
+            legacy.insert(legacy_qc.block_hash.clone(), legacy_qc);
+        }
+        fs::write(
+            DualQuorumConsensus::committed_qc_store_path(),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            fs::metadata(DualQuorumConsensus::committed_qc_store_path())
+                .unwrap()
+                .len()
+                > journal_line_size as u64
+        );
+
+        DualQuorumConsensus::append_committed_qc_to_log(&journal_qc).unwrap();
+        let loaded = DualQuorumConsensus::load_committed_qc_store_from_disk()
+            .expect("oversized legacy snapshot must not prevent journal tail load");
+
+        assert!(!loaded.contains_key("legacy-0"));
+        assert!(loaded.contains_key("journal-current"));
     }
 
     #[test]

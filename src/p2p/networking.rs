@@ -3893,6 +3893,29 @@ fn send_vote_to_requester(
 ) -> Result<String, String> {
     let mut failed_peers = Vec::new();
 
+    // The vote request arrived over an authenticated, full-duplex peer stream.
+    // Reuse it before paying for a new TCP connection and signed handshake on
+    // every consensus round. The direct route remains the recovery fallback.
+    if let Some(peer) = peers.get_mut(request_peer_address) {
+        if let Some(ref mut stream) = peer.stream {
+            match send_consensus_message(stream, response) {
+                Ok(()) => {
+                    info!(
+                        "p2p",
+                        "Vote sent over persistent requester path",
+                        "request_peer" => request_peer_address.to_string(),
+                        "response_peer" => request_peer_address.to_string(),
+                        "proposer" => proposer_validator_address.to_string()
+                    );
+                    return Ok(request_peer_address.to_string());
+                }
+                Err(error) => {
+                    failed_peers.push((request_peer_address.to_string(), error.to_string()))
+                }
+            }
+        }
+    }
+
     if let Some(proposer_public_address) =
         configured_public_address_for_validator(config, proposer_validator_address)
     {
@@ -3921,16 +3944,6 @@ fn send_vote_to_requester(
         }
     }
 
-    if let Some(peer) = peers.get_mut(request_peer_address) {
-        if let Some(ref mut stream) = peer.stream {
-            match send_consensus_message(stream, response) {
-                Ok(()) => return Ok(request_peer_address.to_string()),
-                Err(error) => {
-                    failed_peers.push((request_peer_address.to_string(), error.to_string()))
-                }
-            }
-        }
-    }
     for (failed_peer, _) in &failed_peers {
         peers.remove(failed_peer);
     }
@@ -4713,14 +4726,14 @@ fn handle_get_blocks_message(
         return;
     }
     let response_count = count.min(policy.max_blocks);
-    let (blocks, quorum_certificates) = {
+    let blocks = {
         let chain = blockchain.lock().unwrap();
-        let blocks = select_block_sync_response_blocks(&chain, from_height, response_count);
-        let quorum_certificates = DualQuorumConsensus::committed_qcs_for_block_hashes(
-            blocks.iter().map(|block| block.hash.as_str()),
-        );
-        (blocks, quorum_certificates)
+        select_block_sync_response_blocks(&chain, from_height, response_count)
     };
+    // Historical QC lookup may scan the full archive; keep it outside the chain mutex.
+    let quorum_certificates = DualQuorumConsensus::committed_qcs_for_block_hashes(
+        blocks.iter().map(|block| block.hash.as_str()),
+    );
     let response = NetworkMessage::Blocks {
         blocks,
         quorum_certificates,
@@ -6095,9 +6108,9 @@ fn handle_messages(
                             continue;
                         }
 
-                        let (blocks, quorum_certificates) = {
+                        let blocks = {
                             let chain = blockchain.lock().unwrap();
-                            let blocks = hashes
+                            hashes
                                 .iter()
                                 .filter_map(|hash| {
                                     chain
@@ -6106,13 +6119,13 @@ fn handle_messages(
                                         .find(|block| &block.hash == hash)
                                         .cloned()
                                 })
-                                .collect::<Vec<_>>();
-                            let quorum_certificates =
-                                DualQuorumConsensus::committed_qcs_for_block_hashes(
-                                    blocks.iter().map(|block| block.hash.as_str()),
-                                );
-                            (blocks, quorum_certificates)
+                                .collect::<Vec<_>>()
                         };
+                        // Historical QC lookup may scan the full archive; keep it outside the chain mutex.
+                        let quorum_certificates =
+                            DualQuorumConsensus::committed_qcs_for_block_hashes(
+                                blocks.iter().map(|block| block.hash.as_str()),
+                            );
                         let response = NetworkMessage::BlockBodies {
                             blocks,
                             quorum_certificates,
