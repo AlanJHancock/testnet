@@ -5655,6 +5655,7 @@ fn local_node_uses_service_batch_durability(config: &NodeConfig) -> bool {
         "rpc_gateway",
         "indexer_explorer",
         "observer_light",
+        "archive_validator",
     ];
     const SERVICE_COMPILED_PROFILES: &[&str] = &[
         "relayer_node",
@@ -5672,6 +5673,7 @@ fn local_node_uses_service_batch_durability(config: &NodeConfig) -> bool {
         "rpc_gateway_node",
         "indexer_and_explorer_node",
         "observer_light_node",
+        "archive_validator_node",
     ];
 
     let role = config.identity.role.trim().to_ascii_lowercase();
@@ -11659,6 +11661,8 @@ mod tests {
 
         config.identity.role = "relayer".to_string();
         assert!(local_node_uses_service_batch_durability(&config));
+        config.identity.role = "archive_validator".to_string();
+        assert!(local_node_uses_service_batch_durability(&config));
         config.identity.role = "unknown-service".to_string();
         assert!(!local_node_uses_service_batch_durability(&config));
 
@@ -11672,6 +11676,7 @@ mod tests {
 
         config.role.compiled_profile = "archive_validator_node".to_string();
         assert!(!local_node_runs_validator_consensus(&config));
+        assert!(local_node_uses_service_batch_durability(&config));
 
         config.role.compiled_profile.clear();
         config.node.validator_address = "synv1local".to_string();
