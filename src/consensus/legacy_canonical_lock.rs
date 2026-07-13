@@ -21,49 +21,76 @@ pub struct LegacyCanonicalCommitRecord {
 }
 
 pub fn verify_legacy_canonical_lock(block: &Block) -> Result<(), String> {
-    let locks = load_legacy_canonical_locks()?;
-    let Some(existing) = locks.get(&block.block_index) else {
+    verify_legacy_canonical_locks(std::slice::from_ref(&block))
+}
+
+pub fn verify_legacy_canonical_locks(blocks: &[&Block]) -> Result<(), String> {
+    if blocks.is_empty() {
         return Ok(());
-    };
-    if existing.block_hash == block.hash {
-        Ok(())
-    } else {
-        Err(format!(
-            "canonical lock at height {} already binds block {}; refusing conflicting block {}",
-            block.block_index, existing.block_hash, block.hash
-        ))
     }
+
+    let locks = load_legacy_canonical_locks()?;
+    for block in blocks {
+        let Some(existing) = locks.get(&block.block_index) else {
+            continue;
+        };
+        if existing.block_hash != block.hash {
+            return Err(format!(
+                "canonical lock at height {} already binds block {}; refusing conflicting block {}",
+                block.block_index, existing.block_hash, block.hash
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn write_legacy_canonical_lock(block: &Block, qc: &QuorumCertificate) -> Result<(), String> {
-    if qc.block_hash != block.hash {
-        return Err("cannot write canonical lock with QC for a different block".to_string());
+    write_legacy_canonical_locks(&[(block, qc)])
+}
+
+pub fn write_legacy_canonical_locks(
+    entries: &[(&Block, &QuorumCertificate)],
+) -> Result<(), String> {
+    if entries.is_empty() {
+        return Ok(());
     }
 
     let mut locks = load_legacy_canonical_locks()?;
-    if let Some(existing) = locks.get(&block.block_index) {
-        if existing.block_hash == block.hash {
-            return Ok(());
+    let mut changed = false;
+    for (block, qc) in entries {
+        if qc.block_hash != block.hash {
+            return Err("cannot write canonical lock with QC for a different block".to_string());
         }
-        return Err(format!(
-            "canonical lock at height {} already binds block {}; refusing conflicting block {}",
-            block.block_index, existing.block_hash, block.hash
-        ));
+
+        if let Some(existing) = locks.get(&block.block_index) {
+            if existing.block_hash == block.hash {
+                continue;
+            }
+            return Err(format!(
+                "canonical lock at height {} already binds block {}; refusing conflicting block {}",
+                block.block_index, existing.block_hash, block.hash
+            ));
+        }
+
+        locks.insert(
+            block.block_index,
+            LegacyCanonicalCommitRecord {
+                height: block.block_index,
+                block_hash: block.hash.clone(),
+                parent_hash: block.previous_hash.clone(),
+                validator_id: block.validator_id.clone(),
+                transactions_root: block.transactions_root.clone(),
+                qc_block_hash: qc.block_hash.clone(),
+                qc_hash: legacy_qc_hash(qc)?,
+                written_at_unix_secs: current_unix_secs(),
+            },
+        );
+        changed = true;
     }
 
-    locks.insert(
-        block.block_index,
-        LegacyCanonicalCommitRecord {
-            height: block.block_index,
-            block_hash: block.hash.clone(),
-            parent_hash: block.previous_hash.clone(),
-            validator_id: block.validator_id.clone(),
-            transactions_root: block.transactions_root.clone(),
-            qc_block_hash: qc.block_hash.clone(),
-            qc_hash: legacy_qc_hash(qc)?,
-            written_at_unix_secs: current_unix_secs(),
-        },
-    );
+    if !changed {
+        return Ok(());
+    }
     prune_canonical_locks_for_hot_path(&mut locks);
     persist_legacy_canonical_locks(&locks)
 }

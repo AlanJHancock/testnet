@@ -55,23 +55,26 @@ pub fn committed_block_log_path() -> PathBuf {
 }
 
 pub fn append_committed_block_body(block: &Block) -> Result<(), String> {
-    append_committed_block_body_at(block, &committed_block_log_path())
+    append_committed_block_bodies_at(std::slice::from_ref(block), &committed_block_log_path())
 }
 
 pub fn append_committed_block_body_at(block: &Block, path: &Path) -> Result<(), String> {
+    append_committed_block_bodies_at(std::slice::from_ref(block), path)
+}
+
+pub fn append_committed_block_bodies(blocks: &[Block]) -> Result<(), String> {
+    append_committed_block_bodies_at(blocks, &committed_block_log_path())
+}
+
+pub fn append_committed_block_bodies_at(blocks: &[Block], path: &Path) -> Result<(), String> {
+    if blocks.is_empty() {
+        return Ok(());
+    }
+
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create committed block log directory: {error}"))?;
     }
-
-    let entry = CommittedBlockLogEntry {
-        height: block.block_index,
-        hash: block.hash.clone(),
-        previous_hash: block.previous_hash.clone(),
-        block: block.clone(),
-    };
-    let serialized = serde_json::to_vec(&entry)
-        .map_err(|error| format!("failed to encode committed block log entry: {error}"))?;
 
     let mut options = OpenOptions::new();
     options.create(true).append(true);
@@ -83,10 +86,20 @@ pub fn append_committed_block_body_at(block: &Block, path: &Path) -> Result<(), 
             path.display()
         )
     })?;
-    file.write_all(&serialized)
-        .map_err(|error| format!("failed to write committed block log entry: {error}"))?;
-    file.write_all(b"\n")
-        .map_err(|error| format!("failed to write committed block log newline: {error}"))?;
+    for block in blocks {
+        let entry = CommittedBlockLogEntry {
+            height: block.block_index,
+            hash: block.hash.clone(),
+            previous_hash: block.previous_hash.clone(),
+            block: block.clone(),
+        };
+        let serialized = serde_json::to_vec(&entry)
+            .map_err(|error| format!("failed to encode committed block log entry: {error}"))?;
+        file.write_all(&serialized)
+            .map_err(|error| format!("failed to write committed block log entry: {error}"))?;
+        file.write_all(b"\n")
+            .map_err(|error| format!("failed to write committed block log newline: {error}"))?;
+    }
     file.sync_all().map_err(|error| {
         format!(
             "failed to sync committed block log {}: {error}",

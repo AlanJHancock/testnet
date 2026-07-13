@@ -840,6 +840,34 @@ impl DualQuorumConsensus {
         Ok(())
     }
 
+    pub fn record_committed_qcs_checked(qcs: &[QuorumCertificate]) -> Result<(), String> {
+        if qcs.is_empty() {
+            return Ok(());
+        }
+
+        Self::ensure_committed_qc_store_loaded();
+        let mut store = COMMITTED_QC_STORE
+            .lock()
+            .map_err(|_| "failed to lock committed QC store".to_string())?;
+        let mut pending = Vec::new();
+        let mut pending_hashes = HashSet::new();
+        for qc in qcs {
+            if !store.contains_key(&qc.block_hash) && pending_hashes.insert(qc.block_hash.clone()) {
+                pending.push(qc.clone());
+            }
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        Self::append_committed_qcs_to_log(&pending)?;
+        for qc in pending {
+            store.insert(qc.block_hash.clone(), qc);
+        }
+        Self::prune_committed_qc_store_for_retention(&mut store);
+        Ok(())
+    }
+
     pub fn committed_qc_for_block_hash(block_hash: &str) -> Option<QuorumCertificate> {
         Self::ensure_committed_qc_store_loaded();
         COMMITTED_QC_STORE
@@ -1253,18 +1281,19 @@ impl DualQuorumConsensus {
     }
 
     fn append_committed_qc_to_log(qc: &QuorumCertificate) -> Result<(), String> {
+        Self::append_committed_qcs_to_log(std::slice::from_ref(qc))
+    }
+
+    fn append_committed_qcs_to_log(qcs: &[QuorumCertificate]) -> Result<(), String> {
+        if qcs.is_empty() {
+            return Ok(());
+        }
+
         let path = Self::committed_qc_log_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|err| format!("failed to create committed QC log directory: {err}"))?;
         }
-
-        let entry = CommittedQcLogEntry {
-            block_hash: qc.block_hash.clone(),
-            qc: qc.clone(),
-        };
-        let serialized = serde_json::to_vec(&entry)
-            .map_err(|err| format!("failed to encode committed QC log entry: {err}"))?;
 
         let mut options = OpenOptions::new();
         options.create(true).append(true);
@@ -1273,10 +1302,18 @@ impl DualQuorumConsensus {
         let mut file = options
             .open(&path)
             .map_err(|err| format!("failed to open committed QC log file: {err}"))?;
-        file.write_all(&serialized)
-            .map_err(|err| format!("failed to write committed QC log entry: {err}"))?;
-        file.write_all(b"\n")
-            .map_err(|err| format!("failed to write committed QC log newline: {err}"))?;
+        for qc in qcs {
+            let entry = CommittedQcLogEntry {
+                block_hash: qc.block_hash.clone(),
+                qc: qc.clone(),
+            };
+            let serialized = serde_json::to_vec(&entry)
+                .map_err(|err| format!("failed to encode committed QC log entry: {err}"))?;
+            file.write_all(&serialized)
+                .map_err(|err| format!("failed to write committed QC log entry: {err}"))?;
+            file.write_all(b"\n")
+                .map_err(|err| format!("failed to write committed QC log newline: {err}"))?;
+        }
         file.sync_all()
             .map_err(|err| format!("failed to sync committed QC log file: {err}"))
     }

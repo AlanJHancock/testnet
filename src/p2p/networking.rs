@@ -1,11 +1,14 @@
 use crate::block::{Block, BlockChain, HOT_CHAIN_RETENTION_BLOCKS_ENV};
 use crate::config::NodeConfig;
 use crate::consensus::anti_divergence::current_validator_quarantine_duty_block;
-use crate::consensus::chain_durability::append_committed_block_body;
+use crate::consensus::chain_durability::{
+    append_committed_block_bodies, append_committed_block_body,
+};
 use crate::consensus::consensus_algorithm::ProofOfSynergy;
 use crate::consensus::dual_quorum::{DualQuorumConsensus, QuorumCertificate};
 use crate::consensus::legacy_canonical_lock::{
-    legacy_canonical_commit_record, verify_legacy_canonical_lock, write_legacy_canonical_lock,
+    legacy_canonical_commit_record, verify_legacy_canonical_lock, verify_legacy_canonical_locks,
+    write_legacy_canonical_lock, write_legacy_canonical_locks,
 };
 use crate::consensus::timing_trace;
 use crate::crypto::aegis_pqvm::{
@@ -5582,7 +5585,12 @@ fn handle_blocks_message(
         return;
     }
 
-    let applied = apply_block_batch(blockchain, blocks, quorum_certificates);
+    let applied = apply_block_batch_for_role(
+        blockchain,
+        blocks,
+        quorum_certificates,
+        local_node_uses_service_batch_durability(config),
+    );
     if applied > 0 {
         info!(
             "p2p",
@@ -5624,6 +5632,52 @@ fn local_node_runs_validator_consensus(config: &NodeConfig) -> bool {
     identity_role == "validator"
         || compiled_profile == "validator_node"
         || exposes_consensus_service
+}
+
+fn local_node_uses_service_batch_durability(config: &NodeConfig) -> bool {
+    if local_node_runs_validator_consensus(config) {
+        return false;
+    }
+
+    const SERVICE_ROLE_IDS: &[&str] = &[
+        "relayer",
+        "witness",
+        "oracle",
+        "uma_coordinator",
+        "cross_chain_verifier",
+        "synq_execution",
+        "analytics_simulation",
+        "aegis_cryptography",
+        "data_availability",
+        "governance_auditor",
+        "treasury_controller",
+        "security_council",
+        "rpc_gateway",
+        "indexer_explorer",
+        "observer_light",
+    ];
+    const SERVICE_COMPILED_PROFILES: &[&str] = &[
+        "relayer_node",
+        "witness_node",
+        "oracle_node",
+        "uma_coordinator_node",
+        "cross_chain_verifier_node",
+        "synq_execution_node",
+        "analytics_and_simulation_node",
+        "aegis_cryptography_node",
+        "data_availability_node",
+        "governance_auditor_node",
+        "treasury_controller_node",
+        "security_council_node",
+        "rpc_gateway_node",
+        "indexer_and_explorer_node",
+        "observer_light_node",
+    ];
+
+    let role = config.identity.role.trim().to_ascii_lowercase();
+    let compiled_profile = config.role.compiled_profile.trim().to_ascii_lowercase();
+    SERVICE_ROLE_IDS.contains(&role.as_str())
+        || SERVICE_COMPILED_PROFILES.contains(&compiled_profile.as_str())
 }
 
 fn peer_is_active_consensus_validator(peer: &PeerConnection) -> bool {
@@ -7077,7 +7131,12 @@ fn handle_messages(
                         }
 
                         debug!("p2p", "Received block bodies", "peer" => peer_address.clone(), "count" => blocks.len());
-                        let applied = apply_block_batch(&blockchain, blocks, quorum_certificates);
+                        let applied = apply_block_batch_for_role(
+                            &blockchain,
+                            blocks,
+                            quorum_certificates,
+                            local_node_uses_service_batch_durability(&config),
+                        );
                         if applied > 0 {
                             info!("p2p", "Body blocks applied", "count" => applied);
                         }
@@ -8111,7 +8170,266 @@ fn take_pending_block_extending_tip(tip: &Block) -> Option<PendingCommittedBlock
     Some(pending_block)
 }
 
+#[cfg(test)]
 fn apply_block_batch(
+    blockchain: &BlockchainArc,
+    blocks: Vec<Block>,
+    quorum_certificates: Vec<QuorumCertificate>,
+) -> u64 {
+    apply_block_batch_for_role(blockchain, blocks, quorum_certificates, false)
+}
+
+fn apply_block_batch_for_role(
+    blockchain: &BlockchainArc,
+    blocks: Vec<Block>,
+    quorum_certificates: Vec<QuorumCertificate>,
+    service_role_batched_durability: bool,
+) -> u64 {
+    if service_role_batched_durability {
+        return apply_block_batch_batched_durability(blockchain, blocks, quorum_certificates);
+    }
+    apply_block_batch_legacy(blockchain, blocks, quorum_certificates)
+}
+
+fn apply_block_batch_batched_durability(
+    blockchain: &BlockchainArc,
+    mut blocks: Vec<Block>,
+    quorum_certificates: Vec<QuorumCertificate>,
+) -> u64 {
+    if blocks.is_empty() {
+        return 0;
+    }
+
+    blocks.sort_by_key(|block| block.block_index);
+    blocks.dedup_by(|left, right| left.block_index == right.block_index && left.hash == right.hash);
+
+    let qc_by_hash = quorum_certificates
+        .into_iter()
+        .map(|qc| (qc.block_hash.clone(), qc))
+        .collect::<HashMap<_, _>>();
+
+    let locally_matching_prefix = {
+        let chain = blockchain.lock().unwrap();
+        let local_tip_height = chain.last().map(|entry| entry.block_index).unwrap_or(0);
+        blocks
+            .iter()
+            .filter(|block| {
+                chain
+                    .block_at_height(block.block_index)
+                    .map(|local| local.hash == block.hash)
+                    .unwrap_or_else(|| {
+                        block.block_index <= local_tip_height
+                            && block_matches_legacy_canonical_lock(block)
+                    })
+            })
+            .map(|block| block.hash.clone())
+            .collect::<HashSet<_>>()
+    };
+
+    let blocks_to_verify = blocks
+        .iter()
+        .filter(|block| !locally_matching_prefix.contains(&block.hash))
+        .collect::<Vec<_>>();
+    let verification_results = if blocks_to_verify.is_empty() {
+        Vec::new()
+    } else {
+        let commit_verifier = commit_verifier_validator_manager();
+        verify_batch_with_bounded_parallelism(
+            &blocks_to_verify,
+            thread::available_parallelism()
+                .map(|parallelism| parallelism.get())
+                .unwrap_or(1)
+                .min(MAX_BLOCK_BATCH_VERIFY_WORKERS),
+            |block| {
+                let block = *block;
+                verify_network_commit_certificate_with_manager(
+                    block,
+                    qc_by_hash.get(&block.hash),
+                    &commit_verifier,
+                )
+                .map(|_| ())
+            },
+        )
+    };
+
+    for (block, verification_result) in blocks_to_verify.iter().zip(verification_results) {
+        if let Err(error) = verification_result {
+            warn!(
+                "p2p",
+                "Rejecting block batch without valid Aegis PQC quorum certificate",
+                "height" => block.block_index,
+                "hash" => block.hash.clone(),
+                "error" => error
+            );
+            return 0;
+        }
+    }
+    let blocks_to_check = blocks_to_verify
+        .iter()
+        .copied()
+        .filter(|block| block.block_index > 0)
+        .collect::<Vec<_>>();
+    if let Err(error) = verify_legacy_canonical_locks(&blocks_to_check) {
+        warn!(
+            "p2p",
+            "Rejecting service block batch that conflicts with canonical block lock",
+            "error" => error
+        );
+        return 0;
+    }
+
+    let mut confirmed_hashes = HashSet::new();
+    for block in &blocks {
+        confirmed_hashes.extend(transaction_hashes(&block.transactions));
+    }
+
+    let (applied, applied_blocks, rollback_height, tip_height, snapshot) = {
+        let mut chain = blockchain.lock().unwrap();
+        let local_tip_height = chain.last().map(|entry| entry.block_index).unwrap_or(0);
+
+        if let Some(remote_tip) = blocks.last() {
+            if remote_tip.block_index <= local_tip_height
+                && chain
+                    .block_at_height(remote_tip.block_index)
+                    .map(|local| local.hash == remote_tip.hash)
+                    .unwrap_or(false)
+            {
+                return 0;
+            }
+        }
+
+        let rollback_height = blocks.iter().rev().find_map(|block| {
+            if block.block_index > local_tip_height {
+                return None;
+            }
+            chain
+                .block_at_height(block.block_index)
+                .filter(|local| local.hash == block.hash)
+                .map(|_| block.block_index)
+        });
+        let rollback_height = rollback_height.filter(|height| *height < local_tip_height);
+
+        let mut staged_chain = chain.clone();
+        if let Some(common_height) = rollback_height {
+            staged_chain.truncate_to_height(common_height);
+        }
+
+        let mut applied_blocks = Vec::new();
+        let mut applied_qcs = Vec::new();
+        for block in blocks {
+            let Some(tip) = staged_chain.last() else {
+                break;
+            };
+            if block.block_index <= tip.block_index {
+                continue;
+            }
+            if block.block_index != tip.block_index + 1 || block.previous_hash != tip.hash {
+                break;
+            }
+            if block.block_index > 0 {
+                let Some(qc) = qc_by_hash.get(&block.hash) else {
+                    break;
+                };
+                applied_qcs.push(qc.clone());
+            }
+            if staged_chain.add_block_extending_tip(block.clone()).is_err() {
+                break;
+            }
+            applied_blocks.push(block);
+        }
+
+        if applied_blocks.is_empty() {
+            return 0;
+        }
+
+        let durable_blocks = applied_blocks
+            .iter()
+            .filter(|block| block.block_index > 0)
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Err(error) = append_committed_block_bodies(&durable_blocks) {
+            warn!(
+                "p2p",
+                "Rejecting service block batch because durable committed block bodies could not be written",
+                "error" => error
+            );
+            return 0;
+        }
+        if let Err(error) = DualQuorumConsensus::record_committed_qcs_checked(&applied_qcs) {
+            warn!(
+                "p2p",
+                "Rejecting service block batch because durable committed QCs could not be written",
+                "error" => error
+            );
+            return 0;
+        }
+        let canonical_entries = durable_blocks
+            .iter()
+            .zip(applied_qcs.iter())
+            .map(|(block, qc)| (block, qc))
+            .collect::<Vec<_>>();
+        if let Err(error) = write_legacy_canonical_locks(&canonical_entries) {
+            warn!(
+                "p2p",
+                "Rejecting service block batch because canonical locks could not be written",
+                "error" => error
+            );
+            return 0;
+        }
+
+        *chain = staged_chain;
+        compact_hot_chain_state_from_env(&mut chain, "p2p_apply_block_batch_service");
+        let tip_height = chain.last().map(|entry| entry.block_index).unwrap_or(0);
+        let should_snapshot = rollback_height.is_some() || should_persist_chain_tip(tip_height);
+        let snapshot = if should_snapshot {
+            if rollback_height.is_some() {
+                Some(chain.clone())
+            } else {
+                note_chain_persist(tip_height);
+                if can_clone_chain_for_snapshot(tip_height) {
+                    Some(chain.clone())
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        (
+            applied_blocks.len() as u64,
+            applied_blocks,
+            rollback_height,
+            tip_height,
+            snapshot,
+        )
+    };
+
+    if let Some(common_height) = rollback_height {
+        warn!(
+            "p2p",
+            "Rolled back divergent local tip to common ancestor",
+            "common_height" => common_height,
+            "new_tip_height" => tip_height
+        );
+        if let Some(snapshot) = snapshot.as_ref() {
+            crate::dag::rebuild_global_from_chain(snapshot);
+        }
+    } else {
+        crate::dag::commit_blocks(&applied_blocks);
+    }
+
+    if let Some(snapshot) = snapshot {
+        let chain_path = crate::utils::resolve_data_path("data/chain.json");
+        persist_chain_snapshot_async(snapshot, chain_path, tip_height);
+    }
+
+    prune_transaction_hashes_from_pool(&confirmed_hashes);
+    apply_token_state_for_blocks(&applied_blocks);
+    applied
+}
+
+fn apply_block_batch_legacy(
     blockchain: &BlockchainArc,
     mut blocks: Vec<Block>,
     quorum_certificates: Vec<QuorumCertificate>,
@@ -8651,10 +8969,10 @@ fn dial_peer_async(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_block_batch, apply_block_if_new, apply_status_to_peer, background_poll_interval,
-        best_connected_validator_height, block_sync_min_serve_interval_secs,
-        block_sync_request_range, block_sync_request_range_with_overlap,
-        block_sync_response_policy, build_local_handshake,
+        apply_block_batch, apply_block_batch_for_role, apply_block_if_new, apply_status_to_peer,
+        background_poll_interval, best_connected_validator_height,
+        block_sync_min_serve_interval_secs, block_sync_request_range,
+        block_sync_request_range_with_overlap, block_sync_response_policy, build_local_handshake,
         build_local_handshake_with_extra_capabilities, build_local_status_message,
         bypasses_shared_message_queue, cache_peer_state, cache_pending_block,
         canonical_genesis_hash, canonical_validator_public_address, chain_has_block_sync_overlap,
@@ -8665,7 +8983,8 @@ mod tests {
         current_bootstrap_refresh_interval, current_timestamp, dial_with_timeout,
         disconnect_peer_after_poisoned_write, disconnect_peer_entry, dispatch_peer_message,
         ensure_peer_status_allows_chain_data, handle_status_message, hydrate_peer_from_cache,
-        insert_seed_server_target, local_node_runs_validator_consensus, local_peer_identity,
+        insert_seed_server_target, local_node_runs_validator_consensus,
+        local_node_uses_service_batch_durability, local_peer_identity,
         merge_peer_state_from_existing, parse_block_sync_busy_retry, parse_bootnode_dial_address,
         peer_has_identifying_metadata, peer_identity_key, peer_is_eligible_block_sync_source,
         peer_matches_address, peer_readiness_exclusion_reason_at, peer_write_gate,
@@ -11336,9 +11655,16 @@ mod tests {
     fn validator_role_is_detected_from_identity_profile_or_address() {
         let mut config = NodeConfig::default();
         assert!(!local_node_runs_validator_consensus(&config));
+        assert!(!local_node_uses_service_batch_durability(&config));
+
+        config.identity.role = "relayer".to_string();
+        assert!(local_node_uses_service_batch_durability(&config));
+        config.identity.role = "unknown-service".to_string();
+        assert!(!local_node_uses_service_batch_durability(&config));
 
         config.identity.role = "validator".to_string();
         assert!(local_node_runs_validator_consensus(&config));
+        assert!(!local_node_uses_service_batch_durability(&config));
 
         config.identity.role.clear();
         config.role.compiled_profile = "validator_node".to_string();
@@ -12304,10 +12630,11 @@ mod tests {
         let mut invalid_qc = test_quorum_certificate(&block2);
         invalid_qc.block_hash = "not-the-block-hash".to_string();
 
-        let applied = apply_block_batch(
+        let applied = apply_block_batch_for_role(
             &blockchain,
             vec![block1, block2],
             vec![valid_qc, invalid_qc],
+            true,
         );
 
         assert_eq!(applied, 0);
@@ -12319,6 +12646,109 @@ mod tests {
                 .map(|block| block.block_index),
             Some(0)
         );
+    }
+
+    #[test]
+    fn service_batch_matches_validator_chain_result() {
+        let _guard = block_application_test_guard();
+        let genesis = Block::new_with_timestamp(
+            0,
+            Vec::new(),
+            "genesis-parent".to_string(),
+            "genesis".to_string(),
+            0,
+            1_700_000_000,
+        );
+        let block1 = test_block(&genesis, 1, "validator-service", 1);
+        let block2 = test_block(&block1, 2, "validator-service", 2);
+        let qcs = vec![
+            test_quorum_certificate(&block1),
+            test_quorum_certificate(&block2),
+        ];
+
+        let validator_chain = Arc::new(Mutex::new(BlockChain {
+            chain: vec![genesis.clone()],
+        }));
+        assert_eq!(
+            apply_block_batch(
+                &validator_chain,
+                vec![block1.clone(), block2.clone()],
+                qcs.clone(),
+            ),
+            2
+        );
+
+        clear_legacy_canonical_locks_for_tests();
+        let service_chain = Arc::new(Mutex::new(BlockChain {
+            chain: vec![genesis],
+        }));
+        assert_eq!(
+            apply_block_batch_for_role(&service_chain, vec![block1, block2], qcs, true),
+            2
+        );
+        let service_hashes = service_chain
+            .lock()
+            .unwrap()
+            .chain
+            .iter()
+            .map(|block| block.hash.clone())
+            .collect::<Vec<_>>();
+        let validator_hashes = validator_chain
+            .lock()
+            .unwrap()
+            .chain
+            .iter()
+            .map(|block| block.hash.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(service_hashes, validator_hashes);
+    }
+
+    #[test]
+    fn service_batch_write_failure_does_not_advance_tip() {
+        let _guard = block_application_test_guard();
+        let root = std::env::temp_dir().join(format!(
+            "synergy-service-batch-write-failure-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let previous_log = std::env::var("SYNERGY_COMMITTED_BLOCK_LOG_FILE").ok();
+        std::env::set_var("SYNERGY_COMMITTED_BLOCK_LOG_FILE", &root);
+
+        let genesis = Block::new_with_timestamp(
+            0,
+            Vec::new(),
+            "genesis-parent".to_string(),
+            "genesis".to_string(),
+            0,
+            1_700_000_000,
+        );
+        let block1 = test_block(&genesis, 1, "validator-failure", 1);
+        let blockchain = Arc::new(Mutex::new(BlockChain {
+            chain: vec![genesis],
+        }));
+        let applied = apply_block_batch_for_role(
+            &blockchain,
+            vec![block1.clone()],
+            vec![test_quorum_certificate(&block1)],
+            true,
+        );
+
+        assert_eq!(applied, 0);
+        assert_eq!(
+            blockchain
+                .lock()
+                .unwrap()
+                .last()
+                .map(|block| block.block_index),
+            Some(0)
+        );
+
+        match previous_log {
+            Some(value) => std::env::set_var("SYNERGY_COMMITTED_BLOCK_LOG_FILE", value),
+            None => std::env::remove_var("SYNERGY_COMMITTED_BLOCK_LOG_FILE"),
+        }
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
