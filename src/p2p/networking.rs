@@ -121,6 +121,8 @@ const STATUS_READY_TTL_SECS: u64 = STALE_VALIDATOR_STATUS_SECS;
 const DUTY_DISABLED_TTL_SECS: u64 = STALE_VALIDATOR_STATUS_SECS;
 const QUARANTINE_STATUS_TTL_SECS: u64 = STALE_VALIDATOR_STATUS_SECS;
 const BACKGROUND_SYNC_POLL_MILLIS: u64 = 1000;
+const SERVICE_BLOCK_SYNC_RESPONSE_TIMEOUT_SECS: u64 = 10;
+const SERVICE_BLOCK_SYNC_APPLY_TIMEOUT_SECS: u64 = 180;
 const BLOCK_SYNC_RECONCILIATION_LOOKBACK: u64 = 8;
 const BLOCK_SYNC_PROGRESS_OVERLAP: u64 = 2;
 const TESTNET_NATIVE_CAIP2: &str = "synergy:testnet";
@@ -200,6 +202,8 @@ lazy_static! {
     static ref BLOCK_SYNC_APPLY_ACTIVE: Mutex<HashSet<(String, u64)>> = Mutex::new(HashSet::new());
     static ref BLOCK_SYNC_BUSY_ACTIVE: Mutex<HashSet<(String, u64)>> = Mutex::new(HashSet::new());
     static ref BLOCK_SYNC_RETRY_ACTIVE: Mutex<HashSet<(String, u64)>> = Mutex::new(HashSet::new());
+    static ref SERVICE_SYNC_COORDINATOR: Mutex<ServiceSyncCoordinator> =
+        Mutex::new(ServiceSyncCoordinator::default());
 }
 
 static BLOCK_SYNC_WORKERS_INIT: Once = Once::new();
@@ -236,6 +240,43 @@ struct BlockSyncBusyJob {
     session_id: u64,
     reason: &'static str,
     retry_request: Option<(u64, u32)>,
+}
+
+#[derive(Clone)]
+struct ServiceSyncContext {
+    blockchain: BlockchainArc,
+    connected_peers: PeersArc,
+    peer_state_cache: PeerStateCacheArc,
+    config: NodeConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServiceSyncFlightIdentity {
+    peer_address: String,
+    session_id: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceSyncPhase {
+    AwaitingResponse,
+    Applying,
+}
+
+struct ServiceSyncFlight {
+    generation: u64,
+    identity: ServiceSyncFlightIdentity,
+    from_height: u64,
+    count: u32,
+    remote_height: u64,
+    phase: ServiceSyncPhase,
+    phase_started_at: Instant,
+    context: ServiceSyncContext,
+}
+
+#[derive(Default)]
+struct ServiceSyncCoordinator {
+    next_generation: u64,
+    in_flight: Option<ServiceSyncFlight>,
 }
 
 pub struct P2PNetwork {
@@ -2031,6 +2072,454 @@ fn chain_has_block_sync_overlap(
     (start..=local_height).all(|height| chain.block_at_height(height).is_some())
 }
 
+fn service_sync_context(
+    blockchain: &BlockchainArc,
+    connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
+    config: &NodeConfig,
+) -> ServiceSyncContext {
+    ServiceSyncContext {
+        blockchain: Arc::clone(blockchain),
+        connected_peers: Arc::clone(connected_peers),
+        peer_state_cache: Arc::clone(peer_state_cache),
+        config: config.clone(),
+    }
+}
+
+fn service_sync_identity(peer_address: &str, session_id: u64) -> ServiceSyncFlightIdentity {
+    ServiceSyncFlightIdentity {
+        peer_address: peer_address.to_string(),
+        session_id,
+    }
+}
+
+fn service_sync_phase_timeout(phase: ServiceSyncPhase) -> Duration {
+    match phase {
+        ServiceSyncPhase::AwaitingResponse => {
+            Duration::from_secs(SERVICE_BLOCK_SYNC_RESPONSE_TIMEOUT_SECS)
+        }
+        ServiceSyncPhase::Applying => Duration::from_secs(SERVICE_BLOCK_SYNC_APPLY_TIMEOUT_SECS),
+    }
+}
+
+fn service_sync_flight_expired(flight: &ServiceSyncFlight) -> bool {
+    flight.phase_started_at.elapsed() >= service_sync_phase_timeout(flight.phase)
+}
+
+fn service_sync_has_active_flight() -> bool {
+    SERVICE_SYNC_COORDINATOR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .in_flight
+        .as_ref()
+        .map(|flight| !service_sync_flight_expired(flight))
+        .unwrap_or(false)
+}
+
+fn service_sync_expired_identity() -> Option<ServiceSyncFlightIdentity> {
+    SERVICE_SYNC_COORDINATOR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .in_flight
+        .as_ref()
+        .filter(|flight| service_sync_flight_expired(flight))
+        .map(|flight| flight.identity.clone())
+}
+
+fn service_sync_watchdog(generation: u64) {
+    loop {
+        thread::sleep(Duration::from_secs(1));
+        let expired_identity = {
+            let coordinator = SERVICE_SYNC_COORDINATOR
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(flight) = coordinator.in_flight.as_ref() else {
+                return;
+            };
+            if flight.generation != generation {
+                return;
+            }
+            (flight.phase_started_at.elapsed() >= service_sync_phase_timeout(flight.phase))
+                .then(|| flight.identity.clone())
+        };
+        if let Some(identity) = expired_identity {
+            service_sync_release_and_reassign(generation, Some(identity), false);
+            return;
+        }
+    }
+}
+
+fn service_sync_start_flight(
+    context: ServiceSyncContext,
+    peer_address: String,
+    session_id: u64,
+    remote_height: u64,
+    from_height: u64,
+    count: u32,
+) -> bool {
+    if count == 0 {
+        return false;
+    }
+
+    let identity = service_sync_identity(&peer_address, session_id);
+    let (generation, expired_flight) = {
+        let mut coordinator = SERVICE_SYNC_COORDINATOR
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if coordinator
+            .in_flight
+            .as_ref()
+            .map(|flight| !service_sync_flight_expired(flight))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
+        let expired_flight = coordinator.in_flight.take();
+        coordinator.next_generation = coordinator.next_generation.wrapping_add(1);
+        let generation = coordinator.next_generation;
+        coordinator.in_flight = Some(ServiceSyncFlight {
+            generation,
+            identity: identity.clone(),
+            from_height,
+            count,
+            remote_height,
+            phase: ServiceSyncPhase::AwaitingResponse,
+            phase_started_at: Instant::now(),
+            context: context.clone(),
+        });
+        (generation, expired_flight)
+    };
+
+    if let Some(expired) = expired_flight {
+        warn!(
+            "p2p",
+            "Replacing expired service block sync flight",
+            "peer" => expired.identity.peer_address,
+            "phase" => format!("{:?}", expired.phase),
+            "from_height" => expired.from_height,
+            "count" => expired.count as u64
+        );
+    }
+
+    let request = NetworkMessage::GetBlocks { from_height, count };
+    match send_peer_message_for_session(
+        &context.connected_peers,
+        &context.peer_state_cache,
+        &peer_address,
+        session_id,
+        &request,
+        Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+        "service-block-request",
+    ) {
+        Ok(true) => {
+            if !spawn_named_thread("p2p-service-sync-watchdog", move || {
+                service_sync_watchdog(generation);
+            }) {
+                service_sync_release_and_reassign(generation, Some(identity), false);
+                return false;
+            }
+            true
+        }
+        Ok(false) | Err(_) => {
+            service_sync_release_and_reassign(generation, Some(identity), false);
+            false
+        }
+    }
+}
+
+fn service_sync_start_next(
+    context: &ServiceSyncContext,
+    excluded: Option<&ServiceSyncFlightIdentity>,
+    preferred: Option<&ServiceSyncFlightIdentity>,
+) -> bool {
+    if service_sync_has_active_flight() {
+        return false;
+    }
+    let expired_identity = service_sync_expired_identity();
+
+    let local_height = context
+        .blockchain
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .last()
+        .map(|block| block.block_index)
+        .unwrap_or(0);
+    let batch = sync_batch_limit_for_role(&context.config);
+    let include_reconciliation_overlap = {
+        let chain = context
+            .blockchain
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        chain_has_block_sync_overlap(&chain, local_height, batch)
+    };
+    let mut candidates = {
+        let peers = context
+            .connected_peers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        peers
+            .iter()
+            .filter_map(|(address, peer)| {
+                if peer.stream.is_none()
+                    || !peer_is_eligible_block_sync_source(peer)
+                    || peer.last_known_height <= local_height
+                {
+                    return None;
+                }
+                let session_id = current_peer_session_id(address)?;
+                Some((
+                    address.clone(),
+                    session_id,
+                    peer.last_known_height,
+                    peer.status_received_at.unwrap_or(0),
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+    if let Some(identity) = excluded {
+        candidates.retain(|(address, session_id, _, _)| {
+            identity.peer_address != *address || identity.session_id != *session_id
+        });
+    } else if let Some(identity) = expired_identity.as_ref() {
+        if candidates.len() > 1 {
+            candidates.retain(|(address, session_id, _, _)| {
+                identity.peer_address != *address || identity.session_id != *session_id
+            });
+        }
+    }
+    candidates.sort_by(|left, right| {
+        let left_preferred = preferred
+            .map(|identity| identity.peer_address == left.0 && identity.session_id == left.1)
+            .unwrap_or(false);
+        let right_preferred = preferred
+            .map(|identity| identity.peer_address == right.0 && identity.session_id == right.1)
+            .unwrap_or(false);
+        right_preferred
+            .cmp(&left_preferred)
+            .then_with(|| right.2.cmp(&left.2))
+            .then_with(|| right.3.cmp(&left.3))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+
+    for (peer_address, session_id, remote_height, _) in candidates {
+        let Some((from_height, count)) = block_sync_request_range_with_overlap(
+            local_height,
+            remote_height,
+            batch,
+            include_reconciliation_overlap,
+        ) else {
+            continue;
+        };
+        if service_sync_start_flight(
+            context.clone(),
+            peer_address,
+            session_id,
+            remote_height,
+            from_height,
+            count,
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+fn service_sync_release_and_reassign(
+    generation: u64,
+    failed_identity: Option<ServiceSyncFlightIdentity>,
+    continue_with_same_source: bool,
+) {
+    let flight = {
+        let mut coordinator = SERVICE_SYNC_COORDINATOR
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let matches_generation = coordinator
+            .in_flight
+            .as_ref()
+            .map(|flight| flight.generation == generation)
+            .unwrap_or(false);
+        if matches_generation {
+            coordinator.in_flight.take()
+        } else {
+            None
+        }
+    };
+    let Some(flight) = flight else {
+        return;
+    };
+
+    let identity = failed_identity.unwrap_or_else(|| flight.identity.clone());
+    if continue_with_same_source {
+        let _ = service_sync_start_next(&flight.context, None, Some(&identity));
+    } else {
+        let _ = service_sync_start_next(&flight.context, Some(&identity), None);
+    }
+}
+
+fn service_sync_request_from_status(
+    blockchain: &BlockchainArc,
+    connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
+    config: &NodeConfig,
+) -> bool {
+    service_sync_start_next(
+        &service_sync_context(blockchain, connected_peers, peer_state_cache, config),
+        None,
+        None,
+    )
+}
+
+fn service_sync_request_explicit(
+    blockchain: &BlockchainArc,
+    connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
+    config: &NodeConfig,
+    peer_address: &str,
+    session_id: u64,
+    from_height: u64,
+    count: u32,
+) -> bool {
+    let remote_height = connected_peers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(peer_address)
+        .map(|peer| peer.last_known_height)
+        .unwrap_or(0);
+    service_sync_start_flight(
+        service_sync_context(blockchain, connected_peers, peer_state_cache, config),
+        peer_address.to_string(),
+        session_id,
+        remote_height,
+        from_height,
+        count,
+    )
+}
+
+fn service_sync_response_matches(
+    flight: &ServiceSyncFlight,
+    peer_address: &str,
+    session_id: u64,
+    blocks: &[Block],
+) -> bool {
+    if flight.identity.peer_address != peer_address || flight.identity.session_id != session_id {
+        return false;
+    }
+    if blocks.is_empty() {
+        return true;
+    }
+
+    let response_start = blocks
+        .iter()
+        .map(|block| block.block_index)
+        .min()
+        .unwrap_or(0);
+    let response_end = blocks
+        .iter()
+        .map(|block| block.block_index)
+        .max()
+        .unwrap_or(0);
+    let requested_end = flight
+        .from_height
+        .saturating_add(flight.count.saturating_sub(1) as u64);
+    response_start <= flight.remote_height
+        && response_start <= requested_end
+        && response_end >= flight.from_height
+}
+
+fn service_sync_claim_response(
+    peer_address: &str,
+    session_id: u64,
+    blocks: &[Block],
+) -> Option<u64> {
+    let mut coordinator = SERVICE_SYNC_COORDINATOR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let flight = coordinator.in_flight.as_mut()?;
+    if flight.phase != ServiceSyncPhase::AwaitingResponse
+        || !service_sync_response_matches(flight, peer_address, session_id, blocks)
+    {
+        return None;
+    }
+    flight.phase = ServiceSyncPhase::Applying;
+    flight.phase_started_at = Instant::now();
+    Some(flight.generation)
+}
+
+fn service_sync_generation_for_response(
+    peer_address: &str,
+    session_id: u64,
+    blocks: &[Block],
+) -> Option<u64> {
+    let coordinator = SERVICE_SYNC_COORDINATOR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let flight = coordinator.in_flight.as_ref()?;
+    (flight.phase == ServiceSyncPhase::Applying
+        && service_sync_response_matches(flight, peer_address, session_id, blocks))
+    .then_some(flight.generation)
+}
+
+fn service_sync_retry_is_current(
+    peer_address: &str,
+    session_id: u64,
+    from_height: u64,
+    count: u32,
+) -> bool {
+    SERVICE_SYNC_COORDINATOR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .in_flight
+        .as_ref()
+        .map(|flight| {
+            flight.phase == ServiceSyncPhase::AwaitingResponse
+                && flight.identity.peer_address == peer_address
+                && flight.identity.session_id == session_id
+                && flight.from_height == from_height
+                && flight.count == count
+                && !service_sync_flight_expired(flight)
+        })
+        .unwrap_or(false)
+}
+
+fn service_sync_release_disconnected_peer(peer_address: &str, session_id: Option<u64>) {
+    let flight = {
+        let mut coordinator = SERVICE_SYNC_COORDINATOR
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let should_release = coordinator
+            .in_flight
+            .as_ref()
+            .map(|flight| {
+                flight.identity.peer_address == peer_address
+                    && session_id
+                        .map(|session_id| flight.identity.session_id == session_id)
+                        .unwrap_or(true)
+            })
+            .unwrap_or(false);
+        should_release
+            .then(|| coordinator.in_flight.take())
+            .flatten()
+    };
+    let Some(flight) = flight else {
+        return;
+    };
+
+    let identity = flight.identity.clone();
+    let _ = spawn_named_thread("p2p-service-sync-disconnect", move || {
+        let _ = service_sync_start_next(&flight.context, Some(&identity), None);
+    });
+}
+
+#[cfg(test)]
+fn reset_service_sync_coordinator_for_tests() {
+    let mut coordinator = SERVICE_SYNC_COORDINATOR
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    coordinator.next_generation = coordinator.next_generation.wrapping_add(1);
+    coordinator.in_flight = None;
+}
+
 fn handle_status_message(
     blockchain: &BlockchainArc,
     connected_peers: &PeersArc,
@@ -2198,7 +2687,10 @@ fn handle_status_message(
         );
         return;
     }
-    if let Some(batch) = status_sync_batch(config, block_height, local_height) {
+    if local_node_uses_service_batch_durability(config) {
+        let _ =
+            service_sync_request_from_status(blockchain, connected_peers, peer_state_cache, config);
+    } else if let Some(batch) = status_sync_batch(config, block_height, local_height) {
         let Some((request_start, request_count)) =
             block_sync_request_range(local_height, block_height, batch)
         else {
@@ -2270,6 +2762,8 @@ fn disconnect_peer_entry(
 ) {
     let gate = peer_write_gate(peer_key);
     let gate_guard = gate.lock().unwrap();
+    let session_id = current_peer_session_id(peer_key);
+    service_sync_release_disconnected_peer(peer_key, session_id);
     if let Some(mut peer) = peers.remove(peer_key) {
         cache_peer_state(peer_state_cache, &peer);
         if let Some(stream) = peer.stream.take() {
@@ -2288,6 +2782,7 @@ fn remove_peer_write_gate(peer_address: &str) {
 fn begin_peer_session(peer_address: &str) -> u64 {
     let gate = peer_write_gate(peer_address);
     let _gate_guard = gate.lock().unwrap();
+    service_sync_release_disconnected_peer(peer_address, None);
     let session_id = NEXT_PEER_SESSION_ID.fetch_add(1, Ordering::Relaxed);
     PEER_SESSION_IDS
         .lock()
@@ -2556,10 +3051,16 @@ fn schedule_block_sync_retry(
     peer_address: String,
     session_id: u64,
     message: &str,
+    service_single_flight: bool,
 ) {
     let Some((retry_after, from_height, count)) = parse_block_sync_busy_retry(message) else {
         return;
     };
+    if service_single_flight
+        && !service_sync_retry_is_current(&peer_address, session_id, from_height, count)
+    {
+        return;
+    }
     // Keep one delayed retry per session so a peer cannot turn busy errors into
     // an unbounded retry-thread source while the bounded sync workers are full.
     let retry_key = (peer_address.clone(), session_id);
@@ -2575,7 +3076,15 @@ fn schedule_block_sync_retry(
     let thread_retry_key = retry_key.clone();
     let spawned = spawn_named_thread("p2p-block-sync-retry", move || {
         thread::sleep(retry_after);
-        if peer_session_is_current(&retry_peer_address, session_id) {
+        if peer_session_is_current(&retry_peer_address, session_id)
+            && (!service_single_flight
+                || service_sync_retry_is_current(
+                    &retry_peer_address,
+                    session_id,
+                    from_height,
+                    count,
+                ))
+        {
             let request = NetworkMessage::GetBlocks { from_height, count };
             if let Err(error) = send_peer_message_for_session(
                 &connected_peers,
@@ -2646,8 +3155,25 @@ fn ensure_block_sync_workers_started() {
                 };
                 let peer_address = job.peer_address.clone();
                 let session_id = job.session_id;
+                let service_sync_generation =
+                    if local_node_uses_service_batch_durability(&job.config) {
+                        service_sync_generation_for_response(
+                            &job.peer_address,
+                            job.session_id,
+                            &job.blocks,
+                        )
+                    } else {
+                        None
+                    };
                 if catch_unwind(AssertUnwindSafe(|| process_block_apply_job(job))).is_err() {
                     error!("p2p", "Block sync apply worker recovered from a panic");
+                    if let Some(generation) = service_sync_generation {
+                        service_sync_release_and_reassign(
+                            generation,
+                            Some(service_sync_identity(&peer_address, session_id)),
+                            false,
+                        );
+                    }
                 }
                 release_block_sync_peer(&BLOCK_SYNC_APPLY_ACTIVE, &peer_address, session_id);
             }) {
@@ -2750,7 +3276,31 @@ fn enqueue_block_serve_job(job: BlockServeJob) {
 
 fn enqueue_block_apply_job(job: BlockApplyJob) {
     ensure_block_sync_workers_started();
+    let service_sync_generation = if local_node_uses_service_batch_durability(&job.config) {
+        let generation =
+            service_sync_claim_response(&job.peer_address, job.session_id, &job.blocks);
+        if generation.is_none() {
+            debug!(
+                "p2p",
+                "Ignoring overlapping service block response before apply",
+                "peer" => job.peer_address.clone(),
+                "count" => job.blocks.len() as u64
+            );
+            return;
+        }
+        generation
+    } else {
+        None
+    };
     if !reserve_block_sync_peer(&BLOCK_SYNC_APPLY_ACTIVE, &job.peer_address, job.session_id) {
+        if let Some(generation) = service_sync_generation {
+            service_sync_release_and_reassign(
+                generation,
+                Some(service_sync_identity(&job.peer_address, job.session_id)),
+                false,
+            );
+            return;
+        }
         enqueue_block_sync_busy_job(BlockSyncBusyJob {
             connected_peers: Arc::clone(&job.connected_peers),
             peer_state_cache: Arc::clone(&job.peer_state_cache),
@@ -2773,6 +3323,14 @@ fn enqueue_block_apply_job(job: BlockApplyJob) {
             mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job) => job,
         };
         release_block_sync_peer(&BLOCK_SYNC_APPLY_ACTIVE, &job.peer_address, job.session_id);
+        if let Some(generation) = service_sync_generation {
+            service_sync_release_and_reassign(
+                generation,
+                Some(service_sync_identity(&job.peer_address, job.session_id)),
+                false,
+            );
+            return;
+        }
         enqueue_block_sync_busy_job(BlockSyncBusyJob {
             connected_peers: job.connected_peers,
             peer_state_cache: job.peer_state_cache,
@@ -4222,6 +4780,17 @@ impl P2PNetwork {
     }
 
     pub fn request_blocks(&self, from_height: u64, count: u32) {
+        if local_node_uses_service_batch_durability(&self.config) {
+            let target = {
+                let peers = self.connected_peers.lock().unwrap();
+                select_block_sync_targets(&peers, 1).into_iter().next()
+            };
+            if let Some(target) = target {
+                let _ = self.request_blocks_from_peer(&target, from_height, count);
+            }
+            return;
+        }
+
         let message = NetworkMessage::GetBlocks { from_height, count };
 
         let target_sessions = {
@@ -4258,6 +4827,18 @@ impl P2PNetwork {
         else {
             return false;
         };
+        if local_node_uses_service_batch_durability(&self.config) {
+            return service_sync_request_explicit(
+                &self.blockchain,
+                &self.connected_peers,
+                &self.peer_state_cache,
+                &self.config,
+                &resolved_peer_address,
+                session_id,
+                from_height,
+                count,
+            );
+        }
         match send_peer_message_for_session(
             &self.connected_peers,
             &self.peer_state_cache,
@@ -5574,6 +6155,22 @@ fn handle_blocks_message(
         return;
     }
 
+    let service_sync_generation = if local_node_uses_service_batch_durability(config) {
+        let generation = service_sync_generation_for_response(peer_address, session_id, &blocks);
+        if generation.is_none() {
+            debug!(
+                "p2p",
+                "Ignoring service block response without the global sync reservation",
+                "peer" => peer_address.to_string(),
+                "count" => blocks.len()
+            );
+            return;
+        }
+        generation
+    } else {
+        None
+    };
+
     if !ensure_peer_status_allows_chain_data(
         blockchain,
         connected_peers,
@@ -5582,6 +6179,13 @@ fn handle_blocks_message(
         session_id,
         "blocks",
     ) {
+        if let Some(generation) = service_sync_generation {
+            service_sync_release_and_reassign(
+                generation,
+                Some(service_sync_identity(peer_address, session_id)),
+                false,
+            );
+        }
         return;
     }
 
@@ -5597,6 +6201,13 @@ fn handle_blocks_message(
             "Blocks applied",
             "count" => applied,
             "peer" => peer_address.to_string()
+        );
+    }
+    if let Some(generation) = service_sync_generation {
+        service_sync_release_and_reassign(
+            generation,
+            Some(service_sync_identity(peer_address, session_id)),
+            applied > 0,
         );
     }
 }
@@ -7248,6 +7859,7 @@ fn handle_messages(
                             peer_address.clone(),
                             session_id,
                             &message,
+                            local_node_uses_service_batch_durability(&config),
                         );
                         debug!(
                             "p2p",
@@ -8972,7 +9584,7 @@ fn dial_peer_async(
 mod tests {
     use super::{
         apply_block_batch, apply_block_batch_for_role, apply_block_if_new, apply_status_to_peer,
-        background_poll_interval, best_connected_validator_height,
+        background_poll_interval, begin_peer_session, best_connected_validator_height,
         block_sync_min_serve_interval_secs, block_sync_request_range,
         block_sync_request_range_with_overlap, block_sync_response_policy, build_local_handshake,
         build_local_handshake_with_extra_capabilities, build_local_status_message,
@@ -8992,8 +9604,11 @@ mod tests {
         peer_matches_address, peer_readiness_exclusion_reason_at, peer_write_gate,
         pending_incoming_connections_from_host, preferred_connection_direction, receive_message,
         recover_peer_validator_address_for_vote_target, release_block_sync_peer,
-        reserve_block_sync_peer, resolve_bootstrap_dial_targets, resolve_duplicate_connection,
-        select_block_sync_response_blocks, should_canonicalize_validator_public_address,
+        reserve_block_sync_peer, reset_service_sync_coordinator_for_tests,
+        resolve_bootstrap_dial_targets, resolve_duplicate_connection,
+        select_block_sync_response_blocks, service_sync_claim_response, service_sync_identity,
+        service_sync_release_and_reassign, service_sync_request_from_status,
+        should_canonicalize_validator_public_address,
         should_disconnect_for_status_genesis_mismatch, should_prune_stale_peer,
         should_request_missing_blocks, should_resolve_duplicate_session,
         status_ready_validator_addresses, status_ready_validator_addresses_with_local_duty_gate,
@@ -9009,8 +9624,9 @@ mod tests {
         DEFAULT_BOOTSTRAP_REFRESH_SECS, DUTY_DISABLED_TTL_SECS, IMMEDIATE_STATUS_SYNC_BATCH,
         MAX_P2P_FRAME_BYTES, MAX_STATUS_SYNC_BATCH, MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS,
         MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS, NORMAL_BOOTSTRAP_REFRESH_SECS,
-        PEER_WRITE_GATES, PENDING_BLOCKS, QUARANTINE_STATUS_TTL_SECS, STALE_UNIDENTIFIED_PEER_SECS,
-        STALE_VALIDATOR_STATUS_SECS, STATUS_READY_TTL_SECS,
+        PEER_WRITE_GATES, PENDING_BLOCKS, QUARANTINE_STATUS_TTL_SECS,
+        SERVICE_BLOCK_SYNC_RESPONSE_TIMEOUT_SECS, SERVICE_SYNC_COORDINATOR,
+        STALE_UNIDENTIFIED_PEER_SECS, STALE_VALIDATOR_STATUS_SECS, STATUS_READY_TTL_SECS,
         SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, TEST_COMMIT_VERIFIER_VALIDATOR_MANAGER,
         VALIDATOR_SUPPORT_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS,
     };
@@ -9041,15 +9657,69 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::{mpsc, Arc, Barrier, Mutex, MutexGuard};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     // Session and write-gate registries are process-global; serialize tests that exercise them.
     static PEER_SESSION_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static SERVICE_SYNC_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn peer_session_test_guard() -> MutexGuard<'static, ()> {
         PEER_SESSION_TEST_LOCK
             .lock()
             .expect("peer session test lock should not be poisoned")
+    }
+
+    fn service_sync_test_guard() -> MutexGuard<'static, ()> {
+        let guard = SERVICE_SYNC_TEST_LOCK
+            .lock()
+            .expect("service sync test lock should not be poisoned");
+        reset_service_sync_coordinator_for_tests();
+        guard
+    }
+
+    fn service_sync_test_connection() -> Option<(std::net::TcpStream, std::net::TcpStream)> {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return None,
+            Err(error) => panic!("failed to bind service sync test listener: {error}"),
+        };
+        let address = listener
+            .local_addr()
+            .expect("service sync listener should have an address");
+        let client = match std::net::TcpStream::connect(address) {
+            Ok(stream) => stream,
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return None,
+            Err(error) => panic!("failed to connect service sync test stream: {error}"),
+        };
+        let (server, _) = listener
+            .accept()
+            .expect("service sync test stream should be accepted");
+        server
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .expect("service sync test stream should set a read timeout");
+        Some((client, server))
+    }
+
+    fn service_sync_test_config() -> NodeConfig {
+        let mut config = NodeConfig::default();
+        config.identity.role = "relayer".to_string();
+        config
+    }
+
+    fn service_sync_test_peer(
+        client: std::net::TcpStream,
+        address: &str,
+        validator_address: &str,
+        height: u64,
+    ) -> PeerConnection {
+        let mut peer = test_peer_with_validator_address(Some(validator_address));
+        peer.address = address.to_string();
+        peer.stream = Some(client);
+        peer.node_id = Some(address.to_string());
+        peer.last_known_height = height;
+        peer.status_received_at = Some(current_timestamp());
+        peer.genesis_hash = canonical_genesis_hash();
+        peer
     }
 
     fn configure_canonical_genesis_path_for_tests() {
@@ -11126,6 +11796,261 @@ mod tests {
             status_sync_batch(&service_config, 1_001, 1_000),
             Some(MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS)
         );
+    }
+
+    #[test]
+    fn service_statuses_admit_only_one_global_block_sync_request() {
+        let _peer_session_guard = peer_session_test_guard();
+        let _service_sync_guard = service_sync_test_guard();
+        let Some((client_a, mut server_a)) = service_sync_test_connection() else {
+            return;
+        };
+        let Some((client_b, mut server_b)) = service_sync_test_connection() else {
+            return;
+        };
+
+        let blockchain = Arc::new(Mutex::new(BlockChain::new()));
+        let connected_peers = Arc::new(Mutex::new(HashMap::new()));
+        let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
+        connected_peers.lock().unwrap().insert(
+            "peer-a".to_string(),
+            service_sync_test_peer(client_a, "peer-a", "validator-a", 500),
+        );
+        connected_peers.lock().unwrap().insert(
+            "peer-b".to_string(),
+            service_sync_test_peer(client_b, "peer-b", "validator-b", 500),
+        );
+        let session_a = begin_peer_session("peer-a");
+        let session_b = begin_peer_session("peer-b");
+        let config = service_sync_test_config();
+        let genesis_hash = canonical_genesis_hash();
+
+        handle_status_message(
+            &blockchain,
+            &connected_peers,
+            &peer_state_cache,
+            &config,
+            "peer-a",
+            session_a,
+            500,
+            "hash-a",
+            &genesis_hash,
+            Some(current_timestamp()),
+            Some("validator-a"),
+            Some("peer-a"),
+            Some("test-validator-set"),
+            false,
+            false,
+            None,
+        );
+        handle_status_message(
+            &blockchain,
+            &connected_peers,
+            &peer_state_cache,
+            &config,
+            "peer-b",
+            session_b,
+            500,
+            "hash-b",
+            &genesis_hash,
+            Some(current_timestamp()),
+            Some("validator-b"),
+            Some("peer-b"),
+            Some("test-validator-set"),
+            false,
+            false,
+            None,
+        );
+
+        assert!(matches!(
+            receive_message(&mut server_a).expect("first service status should request blocks"),
+            NetworkMessage::GetBlocks { .. }
+        ));
+        assert!(receive_message(&mut server_b).is_err());
+        assert!(service_sync_claim_response("peer-a", session_a, &[]).is_some());
+        reset_service_sync_coordinator_for_tests();
+    }
+
+    #[test]
+    fn service_sync_completion_immediately_requests_the_next_range() {
+        let _peer_session_guard = peer_session_test_guard();
+        let _service_sync_guard = service_sync_test_guard();
+        let Some((client_a, mut server_a)) = service_sync_test_connection() else {
+            return;
+        };
+
+        let blockchain = Arc::new(Mutex::new(BlockChain::new()));
+        let connected_peers = Arc::new(Mutex::new(HashMap::new()));
+        let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
+        connected_peers.lock().unwrap().insert(
+            "peer-a".to_string(),
+            service_sync_test_peer(client_a, "peer-a", "validator-a", 500),
+        );
+        let session_a = begin_peer_session("peer-a");
+        let config = service_sync_test_config();
+        let started = service_sync_request_from_status(
+            &blockchain,
+            &connected_peers,
+            &peer_state_cache,
+            &config,
+        );
+        assert!(started);
+        assert!(matches!(
+            receive_message(&mut server_a).expect("initial request should be sent"),
+            NetworkMessage::GetBlocks { .. }
+        ));
+        let generation = service_sync_claim_response("peer-a", session_a, &[])
+            .expect("initial request should hold the service reservation");
+
+        service_sync_release_and_reassign(
+            generation,
+            Some(service_sync_identity("peer-a", session_a)),
+            true,
+        );
+
+        assert!(matches!(
+            receive_message(&mut server_a).expect("successful apply should continue immediately"),
+            NetworkMessage::GetBlocks { .. }
+        ));
+        reset_service_sync_coordinator_for_tests();
+    }
+
+    #[test]
+    fn service_sync_timeout_releases_and_reassigns_the_source() {
+        let _peer_session_guard = peer_session_test_guard();
+        let _service_sync_guard = service_sync_test_guard();
+        let Some((client_a, mut server_a)) = service_sync_test_connection() else {
+            return;
+        };
+        let Some((client_b, mut server_b)) = service_sync_test_connection() else {
+            return;
+        };
+
+        let blockchain = Arc::new(Mutex::new(BlockChain::new()));
+        let connected_peers = Arc::new(Mutex::new(HashMap::new()));
+        let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
+        connected_peers.lock().unwrap().insert(
+            "peer-a".to_string(),
+            service_sync_test_peer(client_a, "peer-a", "validator-a", 500),
+        );
+        connected_peers.lock().unwrap().insert(
+            "peer-b".to_string(),
+            service_sync_test_peer(client_b, "peer-b", "validator-b", 500),
+        );
+        let _session_a = begin_peer_session("peer-a");
+        let session_b = begin_peer_session("peer-b");
+        let config = service_sync_test_config();
+        assert!(service_sync_request_from_status(
+            &blockchain,
+            &connected_peers,
+            &peer_state_cache,
+            &config,
+        ));
+        assert!(matches!(
+            receive_message(&mut server_a).expect("failed source should have the initial request"),
+            NetworkMessage::GetBlocks { .. }
+        ));
+        {
+            let mut coordinator = SERVICE_SYNC_COORDINATOR.lock().unwrap();
+            let flight = coordinator
+                .in_flight
+                .as_mut()
+                .expect("initial request should hold the service reservation");
+            flight.phase_started_at =
+                Instant::now() - Duration::from_secs(SERVICE_BLOCK_SYNC_RESPONSE_TIMEOUT_SECS + 1);
+        }
+        assert!(service_sync_request_from_status(
+            &blockchain,
+            &connected_peers,
+            &peer_state_cache,
+            &config,
+        ));
+
+        assert!(matches!(
+            receive_message(&mut server_b).expect("timeout should reassign to another source"),
+            NetworkMessage::GetBlocks { .. }
+        ));
+        assert!(service_sync_claim_response("peer-b", session_b, &[]).is_some());
+        reset_service_sync_coordinator_for_tests();
+    }
+
+    #[test]
+    fn validator_status_sync_keeps_independent_requests_and_consensus_role() {
+        let _peer_session_guard = peer_session_test_guard();
+        let _service_sync_guard = service_sync_test_guard();
+        let Some((client_a, mut server_a)) = service_sync_test_connection() else {
+            return;
+        };
+        let Some((client_b, mut server_b)) = service_sync_test_connection() else {
+            return;
+        };
+
+        let blockchain = Arc::new(Mutex::new(BlockChain::new()));
+        let connected_peers = Arc::new(Mutex::new(HashMap::new()));
+        let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
+        connected_peers.lock().unwrap().insert(
+            "peer-a".to_string(),
+            service_sync_test_peer(client_a, "peer-a", "validator-a", 500),
+        );
+        connected_peers.lock().unwrap().insert(
+            "peer-b".to_string(),
+            service_sync_test_peer(client_b, "peer-b", "validator-b", 500),
+        );
+        let session_a = begin_peer_session("peer-a");
+        let session_b = begin_peer_session("peer-b");
+        let mut config = service_sync_test_config();
+        config.identity.role = "validator".to_string();
+        let genesis_hash = canonical_genesis_hash();
+
+        handle_status_message(
+            &blockchain,
+            &connected_peers,
+            &peer_state_cache,
+            &config,
+            "peer-a",
+            session_a,
+            500,
+            "hash-a",
+            &genesis_hash,
+            Some(current_timestamp()),
+            Some("validator-a"),
+            Some("peer-a"),
+            Some("test-validator-set"),
+            false,
+            false,
+            None,
+        );
+        handle_status_message(
+            &blockchain,
+            &connected_peers,
+            &peer_state_cache,
+            &config,
+            "peer-b",
+            session_b,
+            500,
+            "hash-b",
+            &genesis_hash,
+            Some(current_timestamp()),
+            Some("validator-b"),
+            Some("peer-b"),
+            Some("test-validator-set"),
+            false,
+            false,
+            None,
+        );
+
+        assert!(local_node_runs_validator_consensus(&config));
+        assert!(!local_node_uses_service_batch_durability(&config));
+        assert!(matches!(
+            receive_message(&mut server_a).expect("validator A should request blocks"),
+            NetworkMessage::GetBlocks { .. }
+        ));
+        assert!(matches!(
+            receive_message(&mut server_b)
+                .expect("validator B should request blocks independently"),
+            NetworkMessage::GetBlocks { .. }
+        ));
+        reset_service_sync_coordinator_for_tests();
     }
 
     #[test]
