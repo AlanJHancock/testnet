@@ -85,7 +85,7 @@ const PUBLIC_RELAYER_DIAL_ADDRESSES: &[&str] = &[
 const MAX_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 64;
 const MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS: u32 = 64;
 const MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 128;
-const MAX_SUPPORT_PEER_DEEP_SYNC_LAG: u64 = 64_000;
+const MAX_SUPPORT_PEER_DEEP_SYNC_LAG: u64 = 256_000;
 const MAX_P2P_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const BLOCK_SYNC_RESPONSE_WRITE_TIMEOUT_SECS: u64 = 1;
 const SUPPORT_NODE_BLOCK_SYNC_RESPONSE_WRITE_TIMEOUT_SECS: u64 = 2;
@@ -5292,6 +5292,7 @@ fn bypasses_shared_message_queue(message: &NetworkMessage) -> bool {
         NetworkMessage::VoteRequest { .. }
             | NetworkMessage::Vote { .. }
             | NetworkMessage::Block { .. }
+            | NetworkMessage::GetBlocks { .. }
     )
 }
 
@@ -10462,7 +10463,7 @@ mod tests {
                 round_number: 1,
             }
         ));
-        assert!(!bypasses_shared_message_queue(&NetworkMessage::GetBlocks {
+        assert!(bypasses_shared_message_queue(&NetworkMessage::GetBlocks {
             from_height: 10,
             count: 25,
         }));
@@ -10934,6 +10935,11 @@ mod tests {
         let active_peer = test_peer_with_validator_address(Some(active_validator));
 
         assert!(support_peer_sync_request_is_too_deep(
+            Some(&support_peer),
+            500_000,
+            11_666
+        ));
+        assert!(!support_peer_sync_request_is_too_deep(
             Some(&support_peer),
             250_000,
             11_666
