@@ -44,7 +44,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::runtime::{Builder as TokioRuntimeBuilder, Runtime as TokioRuntime};
@@ -97,6 +97,10 @@ const SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS: u64 = 1;
 const MAX_BLOCK_BATCH_VERIFY_WORKERS: usize = 4;
 const MAX_BLOCK_SYNC_SERVE_WORKERS: usize = 2;
 const MAX_BLOCK_SYNC_APPLY_WORKERS: usize = 1;
+const BLOCK_SYNC_SERVE_QUEUE_CAPACITY: usize = 128;
+const BLOCK_SYNC_APPLY_QUEUE_CAPACITY: usize = 64;
+const BLOCK_SYNC_BUSY_QUEUE_CAPACITY: usize = 128;
+const BLOCK_SYNC_BUSY_RETRY_MILLIS: u64 = 1_000;
 const CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS: u64 = 500;
 const CONSENSUS_DIRECT_VOTE_DIAL_TIMEOUT_MILLIS: u64 = 1_200;
 const VOTE_REQUEST_PARENT_SYNC_WAIT_MILLIS: u64 = 900;
@@ -168,27 +172,65 @@ lazy_static! {
         Mutex::new(HashMap::new());
     static ref PEER_SESSION_IDS: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
     static ref NEXT_PEER_SESSION_ID: AtomicU64 = AtomicU64::new(1);
-    static ref BLOCK_SYNC_SERVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
-    static ref BLOCK_SYNC_APPLY_WORKERS: AtomicUsize = AtomicUsize::new(0);
+    static ref BLOCK_SYNC_SERVE_QUEUE: (
+        mpsc::SyncSender<BlockServeJob>,
+        Arc<Mutex<mpsc::Receiver<BlockServeJob>>>,
+    ) = {
+        let (sender, receiver) = mpsc::sync_channel(BLOCK_SYNC_SERVE_QUEUE_CAPACITY);
+        (sender, Arc::new(Mutex::new(receiver)))
+    };
+    static ref BLOCK_SYNC_APPLY_QUEUE: (
+        mpsc::SyncSender<BlockApplyJob>,
+        Arc<Mutex<mpsc::Receiver<BlockApplyJob>>>,
+    ) = {
+        let (sender, receiver) = mpsc::sync_channel(BLOCK_SYNC_APPLY_QUEUE_CAPACITY);
+        (sender, Arc::new(Mutex::new(receiver)))
+    };
+    static ref BLOCK_SYNC_BUSY_QUEUE: (
+        mpsc::SyncSender<BlockSyncBusyJob>,
+        Arc<Mutex<mpsc::Receiver<BlockSyncBusyJob>>>,
+    ) = {
+        let (sender, receiver) = mpsc::sync_channel(BLOCK_SYNC_BUSY_QUEUE_CAPACITY);
+        (sender, Arc::new(Mutex::new(receiver)))
+    };
+    static ref BLOCK_SYNC_SERVE_ACTIVE: Mutex<HashSet<(String, u64)>> = Mutex::new(HashSet::new());
+    static ref BLOCK_SYNC_APPLY_ACTIVE: Mutex<HashSet<(String, u64)>> = Mutex::new(HashSet::new());
+    static ref BLOCK_SYNC_BUSY_ACTIVE: Mutex<HashSet<(String, u64)>> = Mutex::new(HashSet::new());
 }
 
-struct WorkerPermit {
-    counter: &'static AtomicUsize,
+static BLOCK_SYNC_WORKERS_INIT: Once = Once::new();
+static BLOCK_SYNC_SERVE_WORKERS_STARTED: AtomicUsize = AtomicUsize::new(0);
+static BLOCK_SYNC_APPLY_WORKERS_STARTED: AtomicUsize = AtomicUsize::new(0);
+static BLOCK_SYNC_BUSY_WORKERS_STARTED: AtomicUsize = AtomicUsize::new(0);
+
+struct BlockServeJob {
+    blockchain: BlockchainArc,
+    connected_peers: PeersArc,
+    peer_state_cache: PeerStateCacheArc,
+    config: NodeConfig,
+    peer_address: String,
+    session_id: u64,
+    from_height: u64,
+    count: u32,
 }
 
-impl Drop for WorkerPermit {
-    fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::AcqRel);
-    }
+struct BlockApplyJob {
+    blockchain: BlockchainArc,
+    connected_peers: PeersArc,
+    peer_state_cache: PeerStateCacheArc,
+    config: NodeConfig,
+    peer_address: String,
+    session_id: u64,
+    blocks: Vec<Block>,
+    quorum_certificates: Vec<QuorumCertificate>,
 }
 
-fn try_acquire_worker(counter: &'static AtomicUsize, limit: usize) -> Option<WorkerPermit> {
-    counter
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-            (active < limit).then_some(active + 1)
-        })
-        .ok()
-        .map(|_| WorkerPermit { counter })
+struct BlockSyncBusyJob {
+    connected_peers: PeersArc,
+    peer_state_cache: PeerStateCacheArc,
+    peer_address: String,
+    session_id: u64,
+    reason: &'static str,
 }
 
 pub struct P2PNetwork {
@@ -2387,6 +2429,255 @@ where
             );
             false
         }
+    }
+}
+
+fn process_block_serve_job(job: BlockServeJob) {
+    handle_get_blocks_message(
+        &job.blockchain,
+        &job.connected_peers,
+        &job.peer_state_cache,
+        &job.config,
+        &job.peer_address,
+        job.session_id,
+        job.from_height,
+        job.count,
+    );
+}
+
+fn process_block_apply_job(job: BlockApplyJob) {
+    handle_blocks_message(
+        &job.blockchain,
+        &job.connected_peers,
+        &job.peer_state_cache,
+        &job.config,
+        &job.peer_address,
+        job.session_id,
+        job.blocks,
+        job.quorum_certificates,
+    );
+}
+
+fn block_sync_peer_key(peer_address: &str, session_id: u64) -> (String, u64) {
+    (peer_address.to_string(), session_id)
+}
+
+fn reserve_block_sync_peer(
+    active: &Mutex<HashSet<(String, u64)>>,
+    peer_address: &str,
+    session_id: u64,
+) -> bool {
+    active
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(block_sync_peer_key(peer_address, session_id))
+}
+
+fn release_block_sync_peer(
+    active: &Mutex<HashSet<(String, u64)>>,
+    peer_address: &str,
+    session_id: u64,
+) {
+    active
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&block_sync_peer_key(peer_address, session_id));
+}
+
+fn process_block_sync_busy_job(job: &BlockSyncBusyJob) {
+    let response = NetworkMessage::Error {
+        message: format!(
+            "block-sync-busy: {}; retry-after-millis={}",
+            job.reason, BLOCK_SYNC_BUSY_RETRY_MILLIS
+        ),
+    };
+    if let Err(error) = send_peer_message_for_session(
+        &job.connected_peers,
+        &job.peer_state_cache,
+        &job.peer_address,
+        job.session_id,
+        &response,
+        Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+        "block-sync-busy",
+    ) {
+        warn!(
+            "p2p",
+            "Failed to send block sync retry signal",
+            "peer" => job.peer_address.clone(),
+            "error" => error
+        );
+    }
+}
+
+fn ensure_block_sync_workers_started() {
+    BLOCK_SYNC_WORKERS_INIT.call_once(|| {
+        for worker_index in 0..MAX_BLOCK_SYNC_SERVE_WORKERS {
+            let receiver = Arc::clone(&BLOCK_SYNC_SERVE_QUEUE.1);
+            if spawn_named_thread(&format!("p2p-block-serve-{worker_index}"), move || loop {
+                let job = {
+                    let receiver = receiver
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    receiver.recv()
+                };
+                let Ok(job) = job else {
+                    break;
+                };
+                let peer_address = job.peer_address.clone();
+                let session_id = job.session_id;
+                if catch_unwind(AssertUnwindSafe(|| process_block_serve_job(job))).is_err() {
+                    error!("p2p", "Block sync serve worker recovered from a panic");
+                }
+                release_block_sync_peer(&BLOCK_SYNC_SERVE_ACTIVE, &peer_address, session_id);
+            }) {
+                BLOCK_SYNC_SERVE_WORKERS_STARTED.fetch_add(1, Ordering::Release);
+            }
+        }
+
+        for worker_index in 0..MAX_BLOCK_SYNC_APPLY_WORKERS {
+            let receiver = Arc::clone(&BLOCK_SYNC_APPLY_QUEUE.1);
+            if spawn_named_thread(&format!("p2p-block-apply-{worker_index}"), move || loop {
+                let job = {
+                    let receiver = receiver
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    receiver.recv()
+                };
+                let Ok(job) = job else {
+                    break;
+                };
+                let peer_address = job.peer_address.clone();
+                let session_id = job.session_id;
+                if catch_unwind(AssertUnwindSafe(|| process_block_apply_job(job))).is_err() {
+                    error!("p2p", "Block sync apply worker recovered from a panic");
+                }
+                release_block_sync_peer(&BLOCK_SYNC_APPLY_ACTIVE, &peer_address, session_id);
+            }) {
+                BLOCK_SYNC_APPLY_WORKERS_STARTED.fetch_add(1, Ordering::Release);
+            }
+        }
+
+        let receiver = Arc::clone(&BLOCK_SYNC_BUSY_QUEUE.1);
+        if spawn_named_thread("p2p-block-sync-busy", move || loop {
+            let job = {
+                let receiver = receiver
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                receiver.recv()
+            };
+            let Ok(job) = job else {
+                break;
+            };
+            let peer_address = job.peer_address.clone();
+            let session_id = job.session_id;
+            if catch_unwind(AssertUnwindSafe(|| process_block_sync_busy_job(&job))).is_err() {
+                error!(
+                    "p2p",
+                    "Block sync retry-signal worker recovered from a panic"
+                );
+            }
+            release_block_sync_peer(&BLOCK_SYNC_BUSY_ACTIVE, &peer_address, session_id);
+        }) {
+            BLOCK_SYNC_BUSY_WORKERS_STARTED.fetch_add(1, Ordering::Release);
+        }
+    });
+}
+
+fn enqueue_block_sync_busy_job(job: BlockSyncBusyJob) {
+    ensure_block_sync_workers_started();
+    if !reserve_block_sync_peer(&BLOCK_SYNC_BUSY_ACTIVE, &job.peer_address, job.session_id) {
+        return;
+    }
+    if BLOCK_SYNC_BUSY_WORKERS_STARTED.load(Ordering::Acquire) == 0 {
+        process_block_sync_busy_job(&job);
+        release_block_sync_peer(&BLOCK_SYNC_BUSY_ACTIVE, &job.peer_address, job.session_id);
+        return;
+    }
+    if let Err(error) = BLOCK_SYNC_BUSY_QUEUE.0.try_send(job) {
+        let job = match error {
+            mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job) => job,
+        };
+        release_block_sync_peer(&BLOCK_SYNC_BUSY_ACTIVE, &job.peer_address, job.session_id);
+        warn!(
+            "p2p",
+            "Block sync retry-signal queue is unavailable; disconnecting overloaded peer",
+            "peer" => job.peer_address.clone()
+        );
+        let mut peers = job.connected_peers.lock().unwrap();
+        disconnect_peer_entry_for_session(
+            &job.peer_state_cache,
+            &mut peers,
+            &job.peer_address,
+            job.session_id,
+        );
+    }
+}
+
+fn enqueue_block_serve_job(job: BlockServeJob) {
+    ensure_block_sync_workers_started();
+    if !reserve_block_sync_peer(&BLOCK_SYNC_SERVE_ACTIVE, &job.peer_address, job.session_id) {
+        enqueue_block_sync_busy_job(BlockSyncBusyJob {
+            connected_peers: Arc::clone(&job.connected_peers),
+            peer_state_cache: Arc::clone(&job.peer_state_cache),
+            peer_address: job.peer_address,
+            session_id: job.session_id,
+            reason: "a block response for this peer is already pending",
+        });
+        return;
+    }
+    if BLOCK_SYNC_SERVE_WORKERS_STARTED.load(Ordering::Acquire) == 0 {
+        let peer_address = job.peer_address.clone();
+        let session_id = job.session_id;
+        process_block_serve_job(job);
+        release_block_sync_peer(&BLOCK_SYNC_SERVE_ACTIVE, &peer_address, session_id);
+        return;
+    }
+    if let Err(error) = BLOCK_SYNC_SERVE_QUEUE.0.try_send(job) {
+        let job = match error {
+            mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job) => job,
+        };
+        release_block_sync_peer(&BLOCK_SYNC_SERVE_ACTIVE, &job.peer_address, job.session_id);
+        enqueue_block_sync_busy_job(BlockSyncBusyJob {
+            connected_peers: job.connected_peers,
+            peer_state_cache: job.peer_state_cache,
+            peer_address: job.peer_address,
+            session_id: job.session_id,
+            reason: "the bounded block response queue is full",
+        });
+    }
+}
+
+fn enqueue_block_apply_job(job: BlockApplyJob) {
+    ensure_block_sync_workers_started();
+    if !reserve_block_sync_peer(&BLOCK_SYNC_APPLY_ACTIVE, &job.peer_address, job.session_id) {
+        enqueue_block_sync_busy_job(BlockSyncBusyJob {
+            connected_peers: Arc::clone(&job.connected_peers),
+            peer_state_cache: Arc::clone(&job.peer_state_cache),
+            peer_address: job.peer_address,
+            session_id: job.session_id,
+            reason: "a block batch from this peer is already being applied",
+        });
+        return;
+    }
+    if BLOCK_SYNC_APPLY_WORKERS_STARTED.load(Ordering::Acquire) == 0 {
+        let peer_address = job.peer_address.clone();
+        let session_id = job.session_id;
+        process_block_apply_job(job);
+        release_block_sync_peer(&BLOCK_SYNC_APPLY_ACTIVE, &peer_address, session_id);
+        return;
+    }
+    if let Err(error) = BLOCK_SYNC_APPLY_QUEUE.0.try_send(job) {
+        let job = match error {
+            mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job) => job,
+        };
+        release_block_sync_peer(&BLOCK_SYNC_APPLY_ACTIVE, &job.peer_address, job.session_id);
+        enqueue_block_sync_busy_job(BlockSyncBusyJob {
+            connected_peers: job.connected_peers,
+            peer_state_cache: job.peer_state_cache,
+            peer_address: job.peer_address,
+            session_id: job.session_id,
+            reason: "the bounded block apply queue is full",
+        });
     }
 }
 
@@ -5074,6 +5365,13 @@ fn handle_get_blocks_message(
             "count" => count as u64,
             "min_serve_interval_secs" => min_serve_interval_secs
         );
+        enqueue_block_sync_busy_job(BlockSyncBusyJob {
+            connected_peers: Arc::clone(connected_peers),
+            peer_state_cache: Arc::clone(peer_state_cache),
+            peer_address: peer_address.to_string(),
+            session_id,
+            reason: "the peer-specific block response rate limit is active",
+        });
         return;
     }
 
@@ -5386,35 +5684,15 @@ fn dispatch_peer_message(
             Ok(())
         }
         NetworkMessage::GetBlocks { from_height, count } => {
-            let Some(permit) =
-                try_acquire_worker(&BLOCK_SYNC_SERVE_WORKERS, MAX_BLOCK_SYNC_SERVE_WORKERS)
-            else {
-                debug!(
-                    "p2p",
-                    "Block sync serve workers are busy; requester will retry",
-                    "peer" => peer_address.to_string(),
-                    "from_height" => from_height,
-                    "count" => count as u64
-                );
-                return Ok(());
-            };
-            let blockchain = Arc::clone(blockchain);
-            let connected_peers = Arc::clone(connected_peers);
-            let peer_state_cache = Arc::clone(peer_state_cache);
-            let config = config.clone();
-            let peer_address = peer_address.to_string();
-            let _ = spawn_named_thread("p2p-block-serve", move || {
-                let _permit = permit;
-                handle_get_blocks_message(
-                    &blockchain,
-                    &connected_peers,
-                    &peer_state_cache,
-                    &config,
-                    &peer_address,
-                    session_id,
-                    from_height,
-                    count,
-                );
+            enqueue_block_serve_job(BlockServeJob {
+                blockchain: Arc::clone(blockchain),
+                connected_peers: Arc::clone(connected_peers),
+                peer_state_cache: Arc::clone(peer_state_cache),
+                config: config.clone(),
+                peer_address: peer_address.to_string(),
+                session_id,
+                from_height,
+                count,
             });
             Ok(())
         }
@@ -5422,34 +5700,15 @@ fn dispatch_peer_message(
             blocks,
             quorum_certificates,
         } => {
-            let Some(permit) =
-                try_acquire_worker(&BLOCK_SYNC_APPLY_WORKERS, MAX_BLOCK_SYNC_APPLY_WORKERS)
-            else {
-                debug!(
-                    "p2p",
-                    "Block sync apply worker is busy; sender will be polled again",
-                    "peer" => peer_address.to_string(),
-                    "count" => blocks.len() as u64
-                );
-                return Ok(());
-            };
-            let blockchain = Arc::clone(blockchain);
-            let connected_peers = Arc::clone(connected_peers);
-            let peer_state_cache = Arc::clone(peer_state_cache);
-            let config = config.clone();
-            let peer_address = peer_address.to_string();
-            let _ = spawn_named_thread("p2p-block-apply", move || {
-                let _permit = permit;
-                handle_blocks_message(
-                    &blockchain,
-                    &connected_peers,
-                    &peer_state_cache,
-                    &config,
-                    &peer_address,
-                    session_id,
-                    blocks,
-                    quorum_certificates,
-                );
+            enqueue_block_apply_job(BlockApplyJob {
+                blockchain: Arc::clone(blockchain),
+                connected_peers: Arc::clone(connected_peers),
+                peer_state_cache: Arc::clone(peer_state_cache),
+                config: config.clone(),
+                peer_address: peer_address.to_string(),
+                session_id,
+                blocks,
+                quorum_certificates,
             });
             Ok(())
         }
@@ -6819,6 +7078,16 @@ fn handle_messages(
                                 );
                             }
                         }
+                    }
+                    NetworkMessage::Error { message }
+                        if message.starts_with("block-sync-busy:") =>
+                    {
+                        debug!(
+                            "p2p",
+                            "Peer deferred block sync work; background sync will retry",
+                            "peer" => peer_address.clone(),
+                            "message" => message
+                        );
                     }
                     NetworkMessage::Ping => {
                         debug!("p2p", "Ping received", "peer" => peer_address.clone());
@@ -8295,14 +8564,14 @@ mod tests {
         peer_identity_key, peer_is_eligible_block_sync_source, peer_matches_address,
         peer_readiness_exclusion_reason_at, peer_write_gate,
         pending_incoming_connections_from_host, preferred_connection_direction, receive_message,
-        recover_peer_validator_address_for_vote_target, resolve_bootstrap_dial_targets,
-        resolve_duplicate_connection, select_block_sync_response_blocks,
-        should_canonicalize_validator_public_address,
+        recover_peer_validator_address_for_vote_target, release_block_sync_peer,
+        reserve_block_sync_peer, resolve_bootstrap_dial_targets, resolve_duplicate_connection,
+        select_block_sync_response_blocks, should_canonicalize_validator_public_address,
         should_disconnect_for_status_genesis_mismatch, should_prune_stale_peer,
         should_request_missing_blocks, should_resolve_duplicate_session,
         status_ready_validator_addresses, status_ready_validator_addresses_with_local_duty_gate,
         status_ready_validator_participants, status_sync_batch,
-        support_peer_sync_request_is_too_deep, try_acquire_worker, validate_outbound_frame_length,
+        support_peer_sync_request_is_too_deep, validate_outbound_frame_length,
         validate_vote_request_extends_local_tip, validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_batch_with_bounded_parallelism,
         verify_handshake_pq_signature, vote_request_parent_sync_range,
@@ -8348,7 +8617,6 @@ mod tests {
 
     // Session and write-gate registries are process-global; serialize tests that exercise them.
     static PEER_SESSION_TEST_LOCK: Mutex<()> = Mutex::new(());
-    static TEST_BLOCK_SYNC_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
     fn peer_session_test_guard() -> MutexGuard<'static, ()> {
         PEER_SESSION_TEST_LOCK
@@ -11059,13 +11327,16 @@ mod tests {
     }
 
     #[test]
-    fn block_sync_worker_limit_releases_capacity() {
-        TEST_BLOCK_SYNC_WORKERS.store(0, AtomicOrdering::Release);
-        let permit = try_acquire_worker(&TEST_BLOCK_SYNC_WORKERS, 1)
-            .expect("first worker should acquire capacity");
-        assert!(try_acquire_worker(&TEST_BLOCK_SYNC_WORKERS, 1).is_none());
-        drop(permit);
-        assert!(try_acquire_worker(&TEST_BLOCK_SYNC_WORKERS, 1).is_some());
+    fn block_sync_admission_allows_only_one_job_per_peer_session() {
+        let active = Mutex::new(HashSet::new());
+
+        assert!(reserve_block_sync_peer(&active, "peer-a", 7));
+        assert!(!reserve_block_sync_peer(&active, "peer-a", 7));
+        assert!(reserve_block_sync_peer(&active, "peer-a", 8));
+        assert!(reserve_block_sync_peer(&active, "peer-b", 7));
+
+        release_block_sync_peer(&active, "peer-a", 7);
+        assert!(reserve_block_sync_peer(&active, "peer-a", 7));
     }
 
     #[test]
