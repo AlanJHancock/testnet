@@ -2129,19 +2129,41 @@ fn service_sync_expired_identity() -> Option<ServiceSyncFlightIdentity> {
 fn service_sync_watchdog(generation: u64) {
     loop {
         thread::sleep(Duration::from_secs(1));
-        let expired_identity = {
-            let coordinator = SERVICE_SYNC_COORDINATOR
+        let (expired_identity, extended_active_apply) = {
+            let mut coordinator = SERVICE_SYNC_COORDINATOR
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let Some(flight) = coordinator.in_flight.as_ref() else {
+            let Some(flight) = coordinator.in_flight.as_mut() else {
                 return;
             };
             if flight.generation != generation {
                 return;
             }
-            (flight.phase_started_at.elapsed() >= service_sync_phase_timeout(flight.phase))
-                .then(|| flight.identity.clone())
+            if !service_sync_flight_expired(flight) {
+                (None, false)
+            } else if flight.phase == ServiceSyncPhase::Applying
+                && BLOCK_SYNC_APPLY_ACTIVE
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .contains(&block_sync_peer_key(
+                        &flight.identity.peer_address,
+                        flight.identity.session_id,
+                    ))
+            {
+                // The apply worker is ordered and exclusive. Reassigning while it still owns
+                // the slot would only queue overlapping work and strand the replacement flight.
+                flight.phase_started_at = Instant::now();
+                (None, true)
+            } else {
+                (Some(flight.identity.clone()), false)
+            }
         };
+        if extended_active_apply {
+            warn!(
+                "p2p",
+                "Service block sync apply exceeded watchdog interval but remains active"
+            );
+        }
         if let Some(identity) = expired_identity {
             service_sync_release_and_reassign(generation, Some(identity), false);
             return;
@@ -3168,6 +3190,11 @@ fn ensure_block_sync_workers_started() {
                 if catch_unwind(AssertUnwindSafe(|| process_block_apply_job(job))).is_err() {
                     error!("p2p", "Block sync apply worker recovered from a panic");
                     if let Some(generation) = service_sync_generation {
+                        release_block_sync_peer(
+                            &BLOCK_SYNC_APPLY_ACTIVE,
+                            &peer_address,
+                            session_id,
+                        );
                         service_sync_release_and_reassign(
                             generation,
                             Some(service_sync_identity(&peer_address, session_id)),
@@ -6180,6 +6207,7 @@ fn handle_blocks_message(
         "blocks",
     ) {
         if let Some(generation) = service_sync_generation {
+            release_block_sync_peer(&BLOCK_SYNC_APPLY_ACTIVE, peer_address, session_id);
             service_sync_release_and_reassign(
                 generation,
                 Some(service_sync_identity(peer_address, session_id)),
@@ -6204,6 +6232,9 @@ fn handle_blocks_message(
         );
     }
     if let Some(generation) = service_sync_generation {
+        // Release the sole ordered apply slot before requesting the next batch. Otherwise a
+        // fast response can arrive while the completed job still appears active and be discarded.
+        release_block_sync_peer(&BLOCK_SYNC_APPLY_ACTIVE, peer_address, session_id);
         service_sync_release_and_reassign(
             generation,
             Some(service_sync_identity(peer_address, session_id)),
@@ -7739,6 +7770,15 @@ fn handle_messages(
                                 "Bootstrap-only node ignoring block bodies",
                                 "peer" => peer_address.clone(),
                                 "count" => blocks.len()
+                            );
+                            continue;
+                        }
+                        if local_node_uses_service_batch_durability(&config) {
+                            debug!(
+                                "p2p",
+                                "Service node ignoring unsolicited block bodies outside coordinated sync",
+                                "peer" => peer_address.clone(),
+                                "count" => blocks.len() as u64
                             );
                             continue;
                         }
