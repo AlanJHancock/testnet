@@ -18,13 +18,15 @@ use crate::validator::{
 use crate::{debug, warn};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_512};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -34,6 +36,8 @@ lazy_static::lazy_static! {
         Arc::new(Mutex::new(HashMap::new()));
     static ref COMMITTED_QC_STORE: Arc<Mutex<HashMap<String, QuorumCertificate>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    static ref COMMITTED_QC_LOG_LOOKUP_INDEX: Mutex<CommittedQcLogLookupIndex> =
+        Mutex::new(CommittedQcLogLookupIndex::default());
     static ref OBSERVED_VOTES: Arc<Mutex<HashMap<String, Vote>>> = Arc::new(Mutex::new(HashMap::new()));
     static ref EQUIVOCATION_EVIDENCE_LOG: Arc<Mutex<HashMap<String, VoteEquivocationEvidence>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -43,6 +47,11 @@ lazy_static::lazy_static! {
 }
 
 static COMMITTED_QC_STORE_INIT: Once = Once::new();
+
+const COMMITTED_QC_HISTORICAL_INDEX_MAX_ENTRIES: usize = 4096;
+
+#[cfg(test)]
+static COMMITTED_QC_LOG_PARSE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 pub const VALIDATOR_QUORUM_NUMERATOR: usize = 2;
 pub const VALIDATOR_QUORUM_DENOMINATOR: usize = 3;
@@ -203,6 +212,65 @@ pub struct QuorumCertificate {
 struct CommittedQcLogEntry {
     block_hash: String,
     qc: QuorumCertificate,
+}
+
+#[derive(Default)]
+struct CommittedQcLogLookupIndex {
+    path: Option<PathBuf>,
+    initialized: bool,
+    indexed_file_len: u64,
+    indexed_end: u64,
+    forward_scan_offset: u64,
+    offsets: HashMap<String, u64>,
+    order: VecDeque<String>,
+}
+
+impl CommittedQcLogLookupIndex {
+    fn reset_for_path(&mut self, path: &Path) {
+        if self.path.as_deref() == Some(path) {
+            return;
+        }
+
+        *self = Self {
+            path: Some(path.to_path_buf()),
+            ..Self::default()
+        };
+    }
+
+    fn clear_entries(&mut self) {
+        self.offsets.clear();
+        self.order.clear();
+    }
+
+    fn reset_after_truncation(&mut self) {
+        self.initialized = false;
+        self.indexed_file_len = 0;
+        self.indexed_end = 0;
+        self.forward_scan_offset = 0;
+        self.clear_entries();
+    }
+
+    fn insert(&mut self, block_hash: String, offset: u64) {
+        if self.offsets.contains_key(&block_hash) {
+            self.order.retain(|hash| hash != &block_hash);
+        }
+        self.offsets.insert(block_hash.clone(), offset);
+        self.order.push_back(block_hash);
+
+        while self.order.len() > COMMITTED_QC_HISTORICAL_INDEX_MAX_ENTRIES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.offsets.remove(&oldest);
+            }
+        }
+    }
+
+    fn remove_if_matches(&mut self, block_hash: &str, offset: u64) {
+        if self.offsets.get(block_hash) != Some(&offset) {
+            return;
+        }
+        self.offsets.remove(block_hash);
+        self.order.retain(|hash| hash != block_hash);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -929,37 +997,330 @@ impl DualQuorumConsensus {
         }
 
         let log_path = Self::committed_qc_log_path();
-        let file = fs::File::open(&log_path)
+        let mut file = fs::File::open(&log_path)
             .map_err(|err| format!("failed to open committed QC log {:?}: {err}", log_path))?;
+        let file_len = file
+            .metadata()
+            .map_err(|err| format!("failed to stat committed QC log {:?}: {err}", log_path))?
+            .len();
+        let mut index = COMMITTED_QC_LOG_LOOKUP_INDEX
+            .lock()
+            .map_err(|_| "failed to lock committed QC log lookup index".to_string())?;
+        Self::refresh_committed_qc_log_lookup_index(&mut index, &mut file, &log_path, file_len)?;
+
         let mut remaining = block_hashes.clone();
         let mut found = Vec::new();
-        for (line_number, line) in BufReader::new(file).lines().enumerate() {
-            let line = line.map_err(|err| {
-                format!(
-                    "failed to read committed QC log {:?} line {}: {err}",
-                    log_path,
-                    line_number + 1
-                )
-            })?;
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let entry = serde_json::from_str::<CommittedQcLogEntry>(trimmed).map_err(|err| {
-                format!(
-                    "failed to parse committed QC log {:?} line {}: {err}",
-                    log_path,
-                    line_number + 1
-                )
-            })?;
-            if remaining.remove(&entry.block_hash) {
-                found.push(entry.qc);
-                if remaining.is_empty() {
-                    break;
-                }
+        Self::load_committed_qcs_from_log_index(
+            &mut index,
+            &mut file,
+            &log_path,
+            &mut remaining,
+            &mut found,
+        )?;
+
+        if !remaining.is_empty() {
+            let scan_start = index.forward_scan_offset;
+            let scan_end = Self::scan_committed_qc_log_forward(
+                &mut index,
+                &mut file,
+                &log_path,
+                scan_start,
+                file_len,
+                &mut remaining,
+                &mut found,
+            )?;
+            index.forward_scan_offset = scan_end;
+
+            // A request can move backwards after the cursor has advanced. The
+            // bounded index may have evicted that older entry, so fall back to
+            // a complete forward scan to preserve historical correctness.
+            if !remaining.is_empty() && scan_start > 0 {
+                let fallback_end = Self::scan_committed_qc_log_forward(
+                    &mut index,
+                    &mut file,
+                    &log_path,
+                    0,
+                    file_len,
+                    &mut remaining,
+                    &mut found,
+                )?;
+                index.forward_scan_offset = fallback_end;
             }
         }
         Ok(found)
+    }
+
+    fn refresh_committed_qc_log_lookup_index(
+        index: &mut CommittedQcLogLookupIndex,
+        file: &mut fs::File,
+        log_path: &Path,
+        file_len: u64,
+    ) -> Result<(), String> {
+        index.reset_for_path(log_path);
+        if index.initialized && file_len < index.indexed_file_len {
+            index.reset_after_truncation();
+        }
+
+        if !index.initialized {
+            if file_len > 0 {
+                Self::index_committed_qc_log_tail(index, file, log_path, file_len)?;
+            }
+            index.initialized = true;
+            index.indexed_file_len = file_len;
+            index.indexed_end = file_len;
+            return Ok(());
+        }
+
+        if file_len == index.indexed_file_len {
+            return Ok(());
+        }
+
+        let append_start = index.indexed_end;
+        let append_is_line_aligned = append_start <= file_len
+            && (append_start == 0
+                || Self::committed_qc_log_byte_is_newline(file, append_start - 1)?);
+        if !append_is_line_aligned {
+            index.reset_after_truncation();
+            if file_len > 0 {
+                Self::index_committed_qc_log_tail(index, file, log_path, file_len)?;
+            }
+            index.initialized = true;
+            index.indexed_file_len = file_len;
+            index.indexed_end = file_len;
+            return Ok(());
+        }
+
+        Self::index_committed_qc_log_range(index, file, log_path, append_start, file_len, false)?;
+        index.indexed_file_len = file_len;
+        index.indexed_end = file_len;
+        Ok(())
+    }
+
+    fn index_committed_qc_log_tail(
+        index: &mut CommittedQcLogLookupIndex,
+        file: &mut fs::File,
+        log_path: &Path,
+        file_len: u64,
+    ) -> Result<(), String> {
+        index.clear_entries();
+        index.forward_scan_offset = 0;
+        let start = file_len.saturating_sub(Self::configured_committed_qc_hot_load_max_bytes());
+        let skip_partial_first_line =
+            start > 0 && !Self::committed_qc_log_byte_is_newline(file, start - 1)?;
+        Self::index_committed_qc_log_range(
+            index,
+            file,
+            log_path,
+            start,
+            file_len,
+            skip_partial_first_line,
+        )?;
+        index.initialized = true;
+        index.indexed_file_len = file_len;
+        index.indexed_end = file_len;
+        Ok(())
+    }
+
+    fn index_committed_qc_log_range(
+        index: &mut CommittedQcLogLookupIndex,
+        file: &mut fs::File,
+        log_path: &Path,
+        start: u64,
+        end: u64,
+        skip_partial_first_line: bool,
+    ) -> Result<(), String> {
+        if start >= end {
+            return Ok(());
+        }
+
+        file.seek(SeekFrom::Start(start)).map_err(|err| {
+            format!(
+                "failed to seek committed QC log {:?} to byte {}: {err}",
+                log_path, start
+            )
+        })?;
+        let mut reader = BufReader::new(file.take(end.saturating_sub(start)));
+        let mut offset = start;
+        let mut line = String::new();
+
+        if skip_partial_first_line {
+            let bytes_read = reader.read_line(&mut line).map_err(|err| {
+                format!(
+                    "failed to read committed QC log {:?} at byte offset {}: {err}",
+                    log_path, offset
+                )
+            })?;
+            offset = offset.saturating_add(bytes_read as u64);
+            line.clear();
+        }
+
+        loop {
+            let line_start = offset;
+            let bytes_read = reader.read_line(&mut line).map_err(|err| {
+                format!(
+                    "failed to read committed QC log {:?} at byte offset {}: {err}",
+                    log_path, line_start
+                )
+            })?;
+            if bytes_read == 0 {
+                break;
+            }
+            offset = offset.saturating_add(bytes_read as u64);
+            if let Some(entry) = Self::parse_committed_qc_log_line(&line, log_path, line_start)? {
+                index.insert(entry.block_hash, line_start);
+            }
+            line.clear();
+        }
+        Ok(())
+    }
+
+    fn scan_committed_qc_log_forward(
+        index: &mut CommittedQcLogLookupIndex,
+        file: &mut fs::File,
+        log_path: &Path,
+        start: u64,
+        end: u64,
+        remaining: &mut HashSet<String>,
+        found: &mut Vec<QuorumCertificate>,
+    ) -> Result<u64, String> {
+        if start >= end {
+            return Ok(start);
+        }
+
+        file.seek(SeekFrom::Start(start)).map_err(|err| {
+            format!(
+                "failed to seek committed QC log {:?} to byte {}: {err}",
+                log_path, start
+            )
+        })?;
+        let mut reader = BufReader::new(file.take(end.saturating_sub(start)));
+        let mut offset = start;
+        let mut line = String::new();
+
+        loop {
+            let line_start = offset;
+            let bytes_read = reader.read_line(&mut line).map_err(|err| {
+                format!(
+                    "failed to read committed QC log {:?} at byte offset {}: {err}",
+                    log_path, line_start
+                )
+            })?;
+            if bytes_read == 0 {
+                break;
+            }
+            offset = offset.saturating_add(bytes_read as u64);
+            if let Some(entry) = Self::parse_committed_qc_log_line(&line, log_path, line_start)? {
+                let block_hash = entry.block_hash.clone();
+                index.insert(block_hash.clone(), line_start);
+                if remaining.remove(&block_hash) {
+                    found.push(entry.qc);
+                    if remaining.is_empty() {
+                        return Ok(offset);
+                    }
+                }
+            }
+            line.clear();
+        }
+        Ok(offset)
+    }
+
+    fn load_committed_qcs_from_log_index(
+        index: &mut CommittedQcLogLookupIndex,
+        file: &mut fs::File,
+        log_path: &Path,
+        remaining: &mut HashSet<String>,
+        found: &mut Vec<QuorumCertificate>,
+    ) -> Result<(), String> {
+        let indexed_offsets = remaining
+            .iter()
+            .filter_map(|block_hash| {
+                index
+                    .offsets
+                    .get(block_hash)
+                    .copied()
+                    .map(|offset| (block_hash.clone(), offset))
+            })
+            .collect::<Vec<_>>();
+
+        for (requested_hash, offset) in indexed_offsets {
+            let entry = Self::read_committed_qc_log_entry_at_offset(file, log_path, offset)?;
+            if entry.block_hash != requested_hash {
+                index.remove_if_matches(&requested_hash, offset);
+                continue;
+            }
+            if remaining.remove(&requested_hash) {
+                found.push(entry.qc);
+            }
+        }
+        Ok(())
+    }
+
+    fn read_committed_qc_log_entry_at_offset(
+        file: &fs::File,
+        log_path: &Path,
+        offset: u64,
+    ) -> Result<CommittedQcLogEntry, String> {
+        let mut reader = BufReader::new(file.try_clone().map_err(|err| {
+            format!(
+                "failed to clone committed QC log {:?} for byte offset {}: {err}",
+                log_path, offset
+            )
+        })?);
+        reader.seek(SeekFrom::Start(offset)).map_err(|err| {
+            format!(
+                "failed to seek committed QC log {:?} to byte {}: {err}",
+                log_path, offset
+            )
+        })?;
+        let mut line = String::new();
+        let bytes_read = reader.read_line(&mut line).map_err(|err| {
+            format!(
+                "failed to read committed QC log {:?} at byte offset {}: {err}",
+                log_path, offset
+            )
+        })?;
+        if bytes_read == 0 {
+            return Err(format!(
+                "committed QC log {:?} offset {} is past EOF",
+                log_path, offset
+            ));
+        }
+        Self::parse_committed_qc_log_line(&line, log_path, offset)?.ok_or_else(|| {
+            format!(
+                "committed QC log {:?} offset {} points to an empty line",
+                log_path, offset
+            )
+        })
+    }
+
+    fn parse_committed_qc_log_line(
+        line: &str,
+        log_path: &Path,
+        offset: u64,
+    ) -> Result<Option<CommittedQcLogEntry>, String> {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        #[cfg(test)]
+        COMMITTED_QC_LOG_PARSE_COUNT.fetch_add(1, Ordering::Relaxed);
+        serde_json::from_str::<CommittedQcLogEntry>(trimmed)
+            .map(Some)
+            .map_err(|err| {
+                format!(
+                    "failed to parse committed QC log {:?} at byte offset {}: {err}",
+                    log_path, offset
+                )
+            })
+    }
+
+    fn committed_qc_log_byte_is_newline(file: &mut fs::File, offset: u64) -> Result<bool, String> {
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|err| format!("failed to inspect committed QC log byte {}: {err}", offset))?;
+        let mut byte = [0_u8; 1];
+        file.read_exact(&mut byte)
+            .map_err(|err| format!("failed to read committed QC log byte {}: {err}", offset))?;
+        Ok(byte[0] == b'\n')
     }
 
     fn ensure_committed_qc_store_loaded() {
@@ -3130,6 +3491,10 @@ impl DualQuorumConsensus {
         if let Ok(mut qcs) = COMMITTED_QC_STORE.lock() {
             qcs.clear();
         }
+        if let Ok(mut index) = COMMITTED_QC_LOG_LOOKUP_INDEX.lock() {
+            *index = CommittedQcLogLookupIndex::default();
+        }
+        COMMITTED_QC_LOG_PARSE_COUNT.store(0, Ordering::Relaxed);
         let qc_store_path = Self::committed_qc_store_path();
         let _ = fs::remove_file(qc_store_path.with_extension("json.tmp"));
         let _ = fs::remove_file(qc_store_path);
@@ -3681,6 +4046,117 @@ mod tests {
             Some(value) => env::set_var(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV, value),
             None => env::remove_var(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV),
         }
+    }
+
+    #[test]
+    fn committed_qc_historical_lookup_uses_bounded_tail_index() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        for height in 1..=64 {
+            DualQuorumConsensus::append_committed_qc_to_log(&test_qc_at_height(
+                &format!("block-{height}"),
+                height,
+            ))
+            .unwrap();
+        }
+        let raw = fs::read(DualQuorumConsensus::committed_qc_log_path()).unwrap();
+        let line_size = raw.lines().next().unwrap().unwrap().len() + 1;
+        let _max_load = EnvVarGuard::set(
+            COMMITTED_QC_HOT_LOAD_MAX_BYTES_ENV,
+            &(line_size.saturating_mul(2)).to_string(),
+        );
+        COMMITTED_QC_LOG_PARSE_COUNT.store(0, Ordering::Relaxed);
+
+        let requested = HashSet::from(["block-64".to_string()]);
+        let qcs = DualQuorumConsensus::committed_qcs_from_log_for_block_hashes(&requested)
+            .expect("near-tail historical lookup should succeed");
+
+        assert_eq!(
+            qcs.iter()
+                .map(|qc| qc.block_hash.as_str())
+                .collect::<Vec<_>>(),
+            vec!["block-64"]
+        );
+        let parsed = COMMITTED_QC_LOG_PARSE_COUNT.load(Ordering::Relaxed);
+        assert!(
+            parsed < 64,
+            "near-tail lookup parsed the full prefix: {parsed} entries"
+        );
+    }
+
+    #[test]
+    fn committed_qc_historical_lookup_reuses_forward_cursor_for_catch_up_batches() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        for height in 1..=32 {
+            DualQuorumConsensus::append_committed_qc_to_log(&test_qc_at_height(
+                &format!("block-{height}"),
+                height,
+            ))
+            .unwrap();
+        }
+        let raw = fs::read(DualQuorumConsensus::committed_qc_log_path()).unwrap();
+        let line_size = raw.lines().next().unwrap().unwrap().len() + 1;
+        let _max_load = EnvVarGuard::set(
+            COMMITTED_QC_HOT_LOAD_MAX_BYTES_ENV,
+            &(line_size.saturating_mul(2)).to_string(),
+        );
+        COMMITTED_QC_LOG_PARSE_COUNT.store(0, Ordering::Relaxed);
+
+        let lookup = |first: u64, last: u64| {
+            let requested = (first..=last)
+                .map(|height| format!("block-{height}"))
+                .collect::<HashSet<_>>();
+            DualQuorumConsensus::committed_qcs_from_log_for_block_hashes(&requested)
+                .expect("forward historical lookup should succeed")
+        };
+
+        let first = lookup(1, 2);
+        assert_eq!(first.len(), 2);
+        let after_first = COMMITTED_QC_LOG_PARSE_COUNT.load(Ordering::Relaxed);
+
+        let second = lookup(3, 4);
+        assert_eq!(second.len(), 2);
+        let after_second = COMMITTED_QC_LOG_PARSE_COUNT.load(Ordering::Relaxed);
+
+        let third = lookup(5, 6);
+        assert_eq!(third.len(), 2);
+        let after_third = COMMITTED_QC_LOG_PARSE_COUNT.load(Ordering::Relaxed);
+
+        assert!(after_first < 32, "initial lookup parsed the full log");
+        assert!(
+            after_second.saturating_sub(after_first) <= 2,
+            "second catch-up batch rescanned the prefix: {} entries",
+            after_second.saturating_sub(after_first)
+        );
+        assert!(
+            after_third.saturating_sub(after_second) <= 2,
+            "third catch-up batch rescanned the prefix: {} entries",
+            after_third.saturating_sub(after_second)
+        );
+    }
+
+    #[test]
+    fn committed_qc_historical_lookup_fails_closed_on_malformed_tail() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        DualQuorumConsensus::append_committed_qc_to_log(&test_qc_at_height("block-1", 1)).unwrap();
+        let log_path = DualQuorumConsensus::committed_qc_log_path();
+        let mut file = OpenOptions::new().append(true).open(&log_path).unwrap();
+        file.write_all(b"{not-json}\n").unwrap();
+        file.sync_all().unwrap();
+        let _max_load = EnvVarGuard::set(COMMITTED_QC_HOT_LOAD_MAX_BYTES_ENV, "4096");
+
+        let requested = HashSet::from(["block-1".to_string()]);
+        let error = DualQuorumConsensus::committed_qcs_from_log_for_block_hashes(&requested)
+            .expect_err("malformed historical log data must fail closed");
+        assert!(
+            error.contains("failed to parse committed QC log"),
+            "unexpected error: {error}"
+        );
     }
 
     fn signed_block(block_index: u64, nonce: u64, validator_id: &str) -> Block {
