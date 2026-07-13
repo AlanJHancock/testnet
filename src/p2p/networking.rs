@@ -196,6 +196,7 @@ lazy_static! {
     static ref BLOCK_SYNC_SERVE_ACTIVE: Mutex<HashSet<(String, u64)>> = Mutex::new(HashSet::new());
     static ref BLOCK_SYNC_APPLY_ACTIVE: Mutex<HashSet<(String, u64)>> = Mutex::new(HashSet::new());
     static ref BLOCK_SYNC_BUSY_ACTIVE: Mutex<HashSet<(String, u64)>> = Mutex::new(HashSet::new());
+    static ref BLOCK_SYNC_RETRY_ACTIVE: Mutex<HashSet<(String, u64)>> = Mutex::new(HashSet::new());
 }
 
 static BLOCK_SYNC_WORKERS_INIT: Once = Once::new();
@@ -231,6 +232,7 @@ struct BlockSyncBusyJob {
     peer_address: String,
     session_id: u64,
     reason: &'static str,
+    retry_request: Option<(u64, u32)>,
 }
 
 pub struct P2PNetwork {
@@ -1942,12 +1944,24 @@ fn propagate_status_to_matching_peers(
     }
 }
 
-fn status_sync_batch(block_height: u64, local_height: u64) -> Option<u32> {
+fn sync_batch_limit_for_role(config: &NodeConfig) -> u32 {
+    if local_node_runs_validator_consensus(config) {
+        MAX_STATUS_SYNC_BATCH
+    } else {
+        MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS
+    }
+}
+
+fn status_sync_batch(config: &NodeConfig, block_height: u64, local_height: u64) -> Option<u32> {
     if block_height <= local_height {
         return None;
     }
 
     let behind = block_height.saturating_sub(local_height);
+    if !local_node_runs_validator_consensus(config) {
+        return Some(sync_batch_limit_for_role(config));
+    }
+
     Some(if behind > 5000 {
         MAX_STATUS_SYNC_BATCH
     } else if behind > 1000 {
@@ -2181,7 +2195,7 @@ fn handle_status_message(
         );
         return;
     }
-    if let Some(batch) = status_sync_batch(block_height, local_height) {
+    if let Some(batch) = status_sync_batch(config, block_height, local_height) {
         let Some((request_start, request_count)) =
             block_sync_request_range(local_height, block_height, batch)
         else {
@@ -2485,10 +2499,14 @@ fn release_block_sync_peer(
 }
 
 fn process_block_sync_busy_job(job: &BlockSyncBusyJob) {
+    let retry_range = job
+        .retry_request
+        .map(|(from_height, count)| format!("; from-height={from_height}; count={count}"))
+        .unwrap_or_default();
     let response = NetworkMessage::Error {
         message: format!(
-            "block-sync-busy: {}; retry-after-millis={}",
-            job.reason, BLOCK_SYNC_BUSY_RETRY_MILLIS
+            "block-sync-busy: {}; retry-after-millis={}{}",
+            job.reason, BLOCK_SYNC_BUSY_RETRY_MILLIS, retry_range
         ),
     };
     if let Err(error) = send_peer_message_for_session(
@@ -2506,6 +2524,83 @@ fn process_block_sync_busy_job(job: &BlockSyncBusyJob) {
             "peer" => job.peer_address.clone(),
             "error" => error
         );
+    }
+}
+
+fn parse_block_sync_busy_retry(message: &str) -> Option<(Duration, u64, u32)> {
+    let mut retry_after_millis = None;
+    let mut from_height = None;
+    let mut count = None;
+    for field in message.split(';').map(str::trim) {
+        if let Some(value) = field.strip_prefix("retry-after-millis=") {
+            retry_after_millis = value.parse::<u64>().ok();
+        } else if let Some(value) = field.strip_prefix("from-height=") {
+            from_height = value.parse::<u64>().ok();
+        } else if let Some(value) = field.strip_prefix("count=") {
+            count = value.parse::<u32>().ok();
+        }
+    }
+    Some((
+        Duration::from_millis(retry_after_millis?),
+        from_height?,
+        count.filter(|count| *count > 0)?,
+    ))
+}
+
+fn schedule_block_sync_retry(
+    connected_peers: PeersArc,
+    peer_state_cache: PeerStateCacheArc,
+    peer_address: String,
+    session_id: u64,
+    message: &str,
+) {
+    let Some((retry_after, from_height, count)) = parse_block_sync_busy_retry(message) else {
+        return;
+    };
+    // Keep one delayed retry per session so a peer cannot turn busy errors into
+    // an unbounded retry-thread source while the bounded sync workers are full.
+    let retry_key = (peer_address.clone(), session_id);
+    if !BLOCK_SYNC_RETRY_ACTIVE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(retry_key.clone())
+    {
+        return;
+    }
+
+    let retry_peer_address = peer_address.clone();
+    let thread_retry_key = retry_key.clone();
+    let spawned = spawn_named_thread("p2p-block-sync-retry", move || {
+        thread::sleep(retry_after);
+        if peer_session_is_current(&retry_peer_address, session_id) {
+            let request = NetworkMessage::GetBlocks { from_height, count };
+            if let Err(error) = send_peer_message_for_session(
+                &connected_peers,
+                &peer_state_cache,
+                &retry_peer_address,
+                session_id,
+                &request,
+                Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                "block-sync-retry",
+            ) {
+                debug!(
+                    "p2p",
+                    "Failed to retry deferred block sync request",
+                    "peer" => retry_peer_address.clone(),
+                    "error" => error
+                );
+            }
+        }
+        BLOCK_SYNC_RETRY_ACTIVE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&thread_retry_key);
+    });
+    if !spawned {
+        BLOCK_SYNC_RETRY_ACTIVE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&retry_key);
     }
 }
 
@@ -2616,12 +2711,14 @@ fn enqueue_block_sync_busy_job(job: BlockSyncBusyJob) {
 fn enqueue_block_serve_job(job: BlockServeJob) {
     ensure_block_sync_workers_started();
     if !reserve_block_sync_peer(&BLOCK_SYNC_SERVE_ACTIVE, &job.peer_address, job.session_id) {
+        let retry_request = Some((job.from_height, job.count));
         enqueue_block_sync_busy_job(BlockSyncBusyJob {
             connected_peers: Arc::clone(&job.connected_peers),
             peer_state_cache: Arc::clone(&job.peer_state_cache),
             peer_address: job.peer_address,
             session_id: job.session_id,
             reason: "a block response for this peer is already pending",
+            retry_request,
         });
         return;
     }
@@ -2643,6 +2740,7 @@ fn enqueue_block_serve_job(job: BlockServeJob) {
             peer_address: job.peer_address,
             session_id: job.session_id,
             reason: "the bounded block response queue is full",
+            retry_request: Some((job.from_height, job.count)),
         });
     }
 }
@@ -2656,6 +2754,7 @@ fn enqueue_block_apply_job(job: BlockApplyJob) {
             peer_address: job.peer_address,
             session_id: job.session_id,
             reason: "a block batch from this peer is already being applied",
+            retry_request: None,
         });
         return;
     }
@@ -2677,6 +2776,7 @@ fn enqueue_block_apply_job(job: BlockApplyJob) {
             peer_address: job.peer_address,
             session_id: job.session_id,
             reason: "the bounded block apply queue is full",
+            retry_request: None,
         });
     }
 }
@@ -3704,6 +3804,10 @@ impl P2PNetwork {
         }
     }
 
+    pub fn sync_batch_limit(&self) -> u64 {
+        sync_batch_limit_for_role(&self.config) as u64
+    }
+
     pub fn start(&mut self, listen_address: &str) {
         let is_running = Arc::clone(&self.is_running);
         let blockchain = Arc::clone(&self.blockchain);
@@ -4324,16 +4428,10 @@ impl P2PNetwork {
                         };
                         (local, best)
                     };
-                    let behind = best_peer_height.saturating_sub(local_height);
-                    // Keep background catch-up batches small so a syncing node cannot
-                    // monopolize validator peer locks while consensus is active.
-                    let batch = if behind > 5000 {
-                        MAX_STATUS_SYNC_BATCH
-                    } else if behind > 1000 {
-                        MAX_STATUS_SYNC_BATCH
-                    } else {
-                        IMMEDIATE_STATUS_SYNC_BATCH
-                    };
+                    // Keep validator catch-up batches bounded while allowing service
+                    // roles to use the support-peer response budget.
+                    let batch = status_sync_batch(&network.config, best_peer_height, local_height)
+                        .unwrap_or(IMMEDIATE_STATUS_SYNC_BATCH);
                     let include_reconciliation_overlap = {
                         let chain = network.blockchain.lock().unwrap();
                         chain_has_block_sync_overlap(&chain, local_height, batch)
@@ -5371,6 +5469,7 @@ fn handle_get_blocks_message(
             peer_address: peer_address.to_string(),
             session_id,
             reason: "the peer-specific block response rate limit is active",
+            retry_request: Some((from_height, count)),
         });
         return;
     }
@@ -7082,9 +7181,16 @@ fn handle_messages(
                     NetworkMessage::Error { message }
                         if message.starts_with("block-sync-busy:") =>
                     {
+                        schedule_block_sync_retry(
+                            Arc::clone(&connected_peers),
+                            Arc::clone(&peer_state_cache),
+                            peer_address.clone(),
+                            session_id,
+                            &message,
+                        );
                         debug!(
                             "p2p",
-                            "Peer deferred block sync work; background sync will retry",
+                            "Peer deferred block sync work; scheduled block sync retry",
                             "peer" => peer_address.clone(),
                             "message" => message
                         );
@@ -8560,9 +8666,9 @@ mod tests {
         disconnect_peer_after_poisoned_write, disconnect_peer_entry, dispatch_peer_message,
         ensure_peer_status_allows_chain_data, handle_status_message, hydrate_peer_from_cache,
         insert_seed_server_target, local_node_runs_validator_consensus, local_peer_identity,
-        merge_peer_state_from_existing, parse_bootnode_dial_address, peer_has_identifying_metadata,
-        peer_identity_key, peer_is_eligible_block_sync_source, peer_matches_address,
-        peer_readiness_exclusion_reason_at, peer_write_gate,
+        merge_peer_state_from_existing, parse_block_sync_busy_retry, parse_bootnode_dial_address,
+        peer_has_identifying_metadata, peer_identity_key, peer_is_eligible_block_sync_source,
+        peer_matches_address, peer_readiness_exclusion_reason_at, peer_write_gate,
         pending_incoming_connections_from_host, preferred_connection_direction, receive_message,
         recover_peer_validator_address_for_vote_target, release_block_sync_peer,
         reserve_block_sync_peer, resolve_bootstrap_dial_targets, resolve_duplicate_connection,
@@ -8571,8 +8677,9 @@ mod tests {
         should_request_missing_blocks, should_resolve_duplicate_session,
         status_ready_validator_addresses, status_ready_validator_addresses_with_local_duty_gate,
         status_ready_validator_participants, status_sync_batch,
-        support_peer_sync_request_is_too_deep, validate_outbound_frame_length,
-        validate_vote_request_extends_local_tip, validator_status_genesis_grace_remaining_secs,
+        support_peer_sync_request_is_too_deep, sync_batch_limit_for_role,
+        validate_outbound_frame_length, validate_vote_request_extends_local_tip,
+        validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_batch_with_bounded_parallelism,
         verify_handshake_pq_signature, vote_request_parent_sync_range,
         with_peer_stream_outside_peers_lock, ConnectionDirection, DialTargetsArc,
@@ -10667,10 +10774,37 @@ mod tests {
 
     #[test]
     fn status_sync_batch_only_requests_blocks_for_ahead_peer() {
-        assert_eq!(status_sync_batch(10, 10), None);
-        assert_eq!(status_sync_batch(11, 10), Some(IMMEDIATE_STATUS_SYNC_BATCH));
-        assert_eq!(status_sync_batch(2_500, 1_000), Some(MAX_STATUS_SYNC_BATCH));
-        assert_eq!(status_sync_batch(7_000, 1_000), Some(MAX_STATUS_SYNC_BATCH));
+        let mut validator_config = NodeConfig::default();
+        validator_config.identity.role = "validator".to_string();
+
+        assert_eq!(status_sync_batch(&validator_config, 10, 10), None);
+        assert_eq!(
+            status_sync_batch(&validator_config, 11, 10),
+            Some(IMMEDIATE_STATUS_SYNC_BATCH)
+        );
+        assert_eq!(
+            status_sync_batch(&validator_config, 2_500, 1_000),
+            Some(MAX_STATUS_SYNC_BATCH)
+        );
+        assert_eq!(
+            status_sync_batch(&validator_config, 7_000, 1_000),
+            Some(MAX_STATUS_SYNC_BATCH)
+        );
+    }
+
+    #[test]
+    fn service_sync_batch_uses_support_peer_budget() {
+        let service_config = NodeConfig::default();
+
+        assert!(!local_node_runs_validator_consensus(&service_config));
+        assert_eq!(
+            sync_batch_limit_for_role(&service_config),
+            MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS
+        );
+        assert_eq!(
+            status_sync_batch(&service_config, 1_001, 1_000),
+            Some(MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS)
+        );
     }
 
     #[test]
@@ -11642,7 +11776,7 @@ mod tests {
             .map(|block| block.block_index)
             .unwrap_or(0);
         let (expected_from_height, expected_count) =
-            block_sync_request_range(local_height, 195_000, MAX_STATUS_SYNC_BATCH)
+            block_sync_request_range(local_height, 195_000, sync_batch_limit_for_role(&config))
                 .expect("support peer should advertise blocks above the local tip");
 
         match receive_message(&mut server).expect("status handling should request blocks") {
@@ -11652,6 +11786,22 @@ mod tests {
             }
             other => panic!("expected GetBlocks request from support peer, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn block_sync_busy_retry_preserves_range_and_delay() {
+        assert_eq!(
+            parse_block_sync_busy_retry(
+                "block-sync-busy: a block response is pending; retry-after-millis=1000; from-height=973360; count=128"
+            ),
+            Some((Duration::from_secs(1), 973_360, 128))
+        );
+        assert_eq!(
+            parse_block_sync_busy_retry(
+                "block-sync-busy: legacy response; retry-after-millis=1000"
+            ),
+            None
+        );
     }
 
     #[test]

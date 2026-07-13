@@ -143,6 +143,7 @@ pub struct SyncManager {
     pub peers: Vec<PeerInfo>,
     blockchain: Arc<Mutex<BlockChain>>,
     p2p_network: Option<Arc<P2PNetwork>>,
+    max_sync_batch_blocks: u64,
     progress: SyncProgress,
 }
 
@@ -163,11 +164,13 @@ impl SyncManager {
             peers: Vec::new(),
             blockchain,
             p2p_network: None,
+            max_sync_batch_blocks: MAX_SYNC_BATCH_BLOCKS,
             progress: SyncProgress::new(tip_height, tip_height),
         }
     }
 
     pub fn attach_network(&mut self, network: Arc<P2PNetwork>) {
+        self.max_sync_batch_blocks = network.sync_batch_limit().max(1);
         self.p2p_network = Some(network);
     }
 
@@ -344,13 +347,7 @@ impl SyncManager {
             }
             let sync_tip = self.local_height;
             let remaining = self.network_height - self.local_height;
-            let batch_size = if remaining > 5000 {
-                MAX_SYNC_BATCH_BLOCKS
-            } else if remaining > 1000 {
-                MAX_SYNC_BATCH_BLOCKS
-            } else {
-                std::cmp::min(remaining, 64)
-            };
+            let batch_size = remaining.min(self.max_sync_batch_blocks.max(1));
             let target_height = std::cmp::min(self.network_height, sync_tip + batch_size);
             let request_overlap = self.sync_request_overlap(batch_size, sync_tip);
             let request_start = sync_tip.saturating_sub(request_overlap);
