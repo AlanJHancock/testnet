@@ -25,7 +25,7 @@ class PublicP2PTopologyGenerationTests(unittest.TestCase):
         self.assertEqual(self.topology["schema_version"], 1)
         self.assertEqual(self.topology["network"]["environment_id"], "testnet")
         self.assertEqual(len(self.topology["validators"]), 6)
-        self.assertEqual(len(self.configs), 18)
+        self.assertEqual(len(self.configs), 19)
         self.assertEqual(self.topology["seed_registry"]["register_endpoint"], "/register")
         self.assertEqual(self.topology["seed_registry"]["heartbeat_endpoint"], "/heartbeat")
 
@@ -118,10 +118,36 @@ class PublicP2PTopologyGenerationTests(unittest.TestCase):
         self.assertIn(Path("explorer-indexer") / "explorer-indexer.toml", self.configs)
         config = self.configs[Path("explorer-indexer") / "explorer-indexer.toml"]
         self.assertEqual(config["network"]["public_p2p_address"], "74.208.227.23:5622")
-        self.assertIn("rpc.synergynode.xyz:5623", config["network"]["persistent_peers"])
-        self.assertIn("archive.synergynode.xyz:5615", config["network"]["persistent_peers"])
-        for validator in self.topology["validators"]:
-            self.assertIn(validator["public_endpoint"], config["network"]["persistent_peers"])
+        self.assertEqual(
+            config["network"]["persistent_peers"],
+            self.topology["common"]["relayer_peers"],
+        )
+
+    def test_public_support_nodes_are_relayer_only(self) -> None:
+        expected = self.topology["common"]["relayer_peers"]
+        paths = [
+            Path("rpc-gateway") / "rpc-gateway.toml",
+            Path("observer") / "observer.toml",
+            Path("explorer-indexer") / "explorer-indexer.toml",
+            Path("archive-validator") / "archive-validator.toml",
+        ]
+        validator_endpoints = {
+            validator["public_endpoint"] for validator in self.topology["validators"]
+        }
+
+        self.assertEqual(
+            expected,
+            [
+                "relay1.synergynode.xyz:5622",
+                "relay2.synergynode.xyz:5622",
+                "relay3.synergynode.xyz:5622",
+            ],
+        )
+        for path in paths:
+            with self.subTest(path=str(path)):
+                peers = self.configs[path]["network"]["persistent_peers"]
+                self.assertEqual(peers, expected)
+                self.assertTrue(validator_endpoints.isdisjoint(peers))
 
     def test_seed_registry_rejects_private_endpoints(self) -> None:
         bad_endpoints = [

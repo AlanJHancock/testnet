@@ -25,25 +25,10 @@ DEFAULT_SEEDS = [
     "http://seed3.synergynode.xyz:5621",
 ]
 
-EXPECTED_VALIDATORS = {
-    "62.146.182.207:5622",
-    "62.146.182.208:5622",
-    "62.146.182.209:5622",
-    "73.79.66.255:5622",
-    "194.163.183.166:5622",
-    "157.173.192.45:5622",
-}
-
-EXPECTED_STABLE = {
-    "bootnode1.synergynode.xyz:5620",
-    "bootnode2.synergynode.xyz:5620",
-    "bootnode3.synergynode.xyz:5620",
-    "seed1.synergynode.xyz:5621",
-    "seed2.synergynode.xyz:5621",
-    "seed3.synergynode.xyz:5621",
+EXPECTED_PUBLIC_RELAYS = {
     "relay1.synergynode.xyz:5622",
     "relay2.synergynode.xyz:5622",
-    "rpc.synergynode.xyz:5623",
+    "relay3.synergynode.xyz:5622",
 }
 
 ROLE_FILTERS = [
@@ -111,6 +96,15 @@ def iter_peer_objects(payload: Any) -> list[Any]:
         if all(isinstance(value, dict) for value in payload.values()):
             return list(payload.values())
     return []
+
+
+def iter_registry_objects(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    registry = payload.get("registry")
+    if not isinstance(registry, list):
+        return []
+    return [record for record in registry if isinstance(record, dict)]
 
 
 def extract_endpoint(peer: Any) -> str | None:
@@ -212,21 +206,34 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed-url", action="append", default=[])
     parser.add_argument("--timeout", type=float, default=4.0)
-    parser.add_argument("--require-archive", action="store_true")
+    parser.add_argument(
+        "--require-archive",
+        action="store_true",
+        help="Deprecated fail-closed flag; archive nodes must not be advertised by public bootstrap.",
+    )
     parser.add_argument("--probe-private-rejection", action="store_true")
     parser.add_argument("--chain-id", default="synergy-testnet")
     parser.add_argument("--format", choices=("text", "json"), default="text")
     parser.add_argument("--output", help="Write report to PATH. Defaults to stdout.")
     args = parser.parse_args()
 
+    if args.require_archive:
+        print(
+            "--require-archive is incompatible with the relayer-only public registry; verify archive readiness through the signed snapshot catalog instead",
+            file=sys.stderr,
+        )
+        return 2
+
     seeds = args.seed_url or DEFAULT_SEEDS
     checks: list[Check] = []
     seed_sets: dict[str, set[str]] = {}
     role_sets: dict[str, dict[str, set[str]]] = {}
+    registry_records: dict[str, list[dict[str, Any]]] = {}
 
     for seed in seeds:
         seed_sets[seed] = set()
         role_sets[seed] = {}
+        registry_records[seed] = []
 
         for path in ("/health", "/metrics", "/peer-list.json", "/peers"):
             url = url_join(seed, path)
@@ -236,6 +243,8 @@ def main() -> int:
                 if path in {"/peer-list.json", "/peers"}:
                     payload = parse_json(body)
                     seed_sets[seed].update(peer_endpoints(payload))
+                    if path == "/peer-list.json":
+                        registry_records[seed] = iter_registry_objects(payload)
             except Exception as exc:  # noqa: BLE001 - report endpoint failures
                 checks.append(Check("FAIL", f"{seed} {path}", str(exc)))
 
@@ -245,12 +254,21 @@ def main() -> int:
                 status, body, _content_type = http_get(url, args.timeout)
                 payload = parse_json(body)
                 endpoints = peer_endpoints(payload)
+                objects = iter_peer_objects(payload)
+                invalid_roles = [
+                    peer
+                    for peer in objects
+                    if not isinstance(peer, dict)
+                    or str(peer.get("role", "")).strip().lower() != role
+                ]
                 role_sets[seed][role] = endpoints
                 checks.append(
                     Check(
-                        "PASS",
+                        "FAIL" if invalid_roles else "PASS",
                         f"{seed} role filter {role}",
-                        f"HTTP {status}, endpoints={len(endpoints)}",
+                        f"HTTP {status}, endpoints={len(endpoints)}"
+                        if not invalid_roles
+                        else f"role filter returned {len(invalid_roles)} mislabeled or endpoint-only records",
                     )
                 )
                 seed_sets[seed].update(endpoints)
@@ -269,52 +287,43 @@ def main() -> int:
         else:
             checks.append(Check("PASS", f"{seed} public endpoint hygiene", "no private endpoints advertised"))
 
-        validators = role_sets[seed].get("validator", set())
-        missing_validators = sorted(EXPECTED_VALIDATORS - validators)
-        if missing_validators:
+        if seed_sets[seed] != EXPECTED_PUBLIC_RELAYS:
             checks.append(
                 Check(
                     "FAIL",
-                    f"{seed} validator registry",
-                    "missing validators: " + ", ".join(missing_validators),
+                    f"{seed} relayer-only bootstrap",
+                    f"expected={sorted(EXPECTED_PUBLIC_RELAYS)}, actual={sorted(seed_sets[seed])}",
                 )
             )
         else:
-            checks.append(Check("PASS", f"{seed} validator registry", "all six validators present by public IP"))
+            checks.append(Check("PASS", f"{seed} relayer-only bootstrap", "all three relayers and no direct validator or service-node targets"))
 
-        missing_stable = sorted(EXPECTED_STABLE - seed_sets[seed])
-        if missing_stable:
-            checks.append(
-                Check(
-                    "FAIL",
-                    f"{seed} stable infrastructure registry",
-                    "missing stable endpoints: " + ", ".join(missing_stable),
-                )
-            )
-        else:
-            checks.append(Check("PASS", f"{seed} stable infrastructure registry", "stable endpoints use DNS"))
+        non_relayer_roles = {
+            role: sorted(endpoints)
+            for role, endpoints in role_sets[seed].items()
+            if role != "relayer" and endpoints
+        }
+        checks.append(Check(
+            "FAIL" if non_relayer_roles else "PASS",
+            f"{seed} direct topology isolation",
+            f"unexpected public role endpoints: {non_relayer_roles}" if non_relayer_roles else "validator and service-node records are not public dial targets",
+        ))
 
-        archive_endpoints = role_sets[seed].get("archive_validator", set())
-        if "73.79.66.255:5622" in archive_endpoints:
-            checks.append(
-                Check(
-                    "FAIL",
-                    f"{seed} archive registry",
-                    "archive advertises validator P2P endpoint 73.79.66.255:5622",
-                )
+        advertised_registry = {
+            (extract_endpoint(record), str(record.get("role", "")).strip().lower())
+            for record in registry_records[seed]
+            if extract_endpoint(record)
+        }
+        expected_registry = {(endpoint, "relayer") for endpoint in EXPECTED_PUBLIC_RELAYS}
+        checks.append(
+            Check(
+                "PASS" if advertised_registry == expected_registry else "FAIL",
+                f"{seed} registry role integrity",
+                "all advertised records are canonical relayers"
+                if advertised_registry == expected_registry
+                else f"expected={sorted(expected_registry)}, actual={sorted(advertised_registry)}",
             )
-        elif "archive.synergynode.xyz:5615" in archive_endpoints:
-            checks.append(Check("PASS", f"{seed} archive registry", "archive uses archive.synergynode.xyz:5615"))
-        elif args.require_archive:
-            checks.append(Check("FAIL", f"{seed} archive registry", "archive endpoint missing"))
-        else:
-            checks.append(
-                Check(
-                    "SKIP",
-                    f"{seed} archive registry",
-                    "archive absent; acceptable until dial-back health succeeds",
-                )
-            )
+        )
 
         if args.probe_private_rejection:
             payload = {

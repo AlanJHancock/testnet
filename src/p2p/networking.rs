@@ -39,9 +39,10 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufReader, BufWriter, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -61,6 +62,7 @@ type PeersArc = Arc<Mutex<PeerMap>>;
 type DialTargetsArc = Arc<Mutex<Vec<String>>>;
 type PeerStateCacheArc = Arc<Mutex<HashMap<String, CachedPeerState>>>;
 type DialRegistryArc = Arc<Mutex<HashMap<String, DialReservation>>>;
+type PeerMessage = (String, u64, NetworkMessage);
 
 #[cfg(test)]
 const DEFAULT_BOOTSTRAP_REFRESH_SECS: u64 = 10;
@@ -75,6 +77,11 @@ const PUBLIC_HISTORY_GATEWAY_DIAL_ADDRESSES: &[&str] = &[
     "archive.synergynode.xyz:5615",
     "73.79.66.255:5615",
 ];
+const PUBLIC_RELAYER_DIAL_ADDRESSES: &[&str] = &[
+    "relay1.synergynode.xyz:5622",
+    "relay2.synergynode.xyz:5622",
+    "relay3.synergynode.xyz:5622",
+];
 const MAX_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 64;
 const MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS: u32 = 64;
 const MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 128;
@@ -83,9 +90,11 @@ const MAX_P2P_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const BLOCK_SYNC_RESPONSE_WRITE_TIMEOUT_SECS: u64 = 1;
 const SUPPORT_NODE_BLOCK_SYNC_RESPONSE_WRITE_TIMEOUT_SECS: u64 = 2;
 const VALIDATOR_SUPPORT_SYNC_RESPONSE_WRITE_TIMEOUT_MILLIS: u64 = 500;
+const P2P_MESSAGE_WRITE_TIMEOUT_MILLIS: u64 = 2_000;
 const BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS: u64 = 1;
 const VALIDATOR_SUPPORT_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS: u64 = 2;
 const SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS: u64 = 1;
+const MAX_BLOCK_BATCH_VERIFY_WORKERS: usize = 4;
 const CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS: u64 = 500;
 const CONSENSUS_DIRECT_VOTE_DIAL_TIMEOUT_MILLIS: u64 = 1_200;
 const VOTE_REQUEST_PARENT_SYNC_WAIT_MILLIS: u64 = 900;
@@ -153,6 +162,10 @@ lazy_static! {
         Mutex::new(BTreeMap::new());
     static ref CHAIN_PERSIST_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
     static ref BLOCK_SYNC_LAST_SERVED: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
+    static ref PEER_WRITE_GATES: Mutex<HashMap<String, Arc<Mutex<()>>>> =
+        Mutex::new(HashMap::new());
+    static ref PEER_SESSION_IDS: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
+    static ref NEXT_PEER_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 }
 
 pub struct P2PNetwork {
@@ -163,8 +176,8 @@ pub struct P2PNetwork {
     discovered_dial_targets: DialTargetsArc,
     outbound_dial_registry: DialRegistryArc,
     is_running: Arc<Mutex<bool>>,
-    message_sender: mpsc::Sender<(String, NetworkMessage)>,
-    message_receiver: Arc<Mutex<mpsc::Receiver<(String, NetworkMessage)>>>,
+    message_sender: mpsc::Sender<PeerMessage>,
+    message_receiver: Arc<Mutex<mpsc::Receiver<PeerMessage>>>,
 }
 
 struct PeerConnection {
@@ -193,6 +206,14 @@ struct PeerConnection {
     quarantined: bool,
     consensus_duties_disabled: bool,
     recovery_state: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PeerStreamIdentity {
+    session_id: u64,
+    connected_at: u64,
+    local_address: SocketAddr,
+    peer_address: SocketAddr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,6 +261,7 @@ struct CachedPeerState {
 
 struct PeerEntryGuard {
     peer_address: String,
+    session_id: u64,
     connected_peers: PeersArc,
     peer_state_cache: PeerStateCacheArc,
 }
@@ -252,11 +274,13 @@ struct BootstrapDnsResolver {
 impl PeerEntryGuard {
     fn new(
         peer_address: String,
+        session_id: u64,
         connected_peers: PeersArc,
         peer_state_cache: PeerStateCacheArc,
     ) -> Self {
         Self {
             peer_address,
+            session_id,
             connected_peers,
             peer_state_cache,
         }
@@ -266,7 +290,9 @@ impl PeerEntryGuard {
 impl Drop for PeerEntryGuard {
     fn drop(&mut self) {
         if let Ok(mut peers) = self.connected_peers.lock() {
-            if peers.contains_key(&self.peer_address) {
+            if peer_session_is_current(&self.peer_address, self.session_id)
+                && peers.contains_key(&self.peer_address)
+            {
                 disconnect_peer_entry(&self.peer_state_cache, &mut peers, &self.peer_address);
                 info!("p2p", "Peer disconnected", "peer" => self.peer_address.clone());
             }
@@ -728,25 +754,29 @@ fn ensure_peer_status_allows_chain_data(
     connected_peers: &PeersArc,
     peer_state_cache: &PeerStateCacheArc,
     peer_address: &str,
+    session_id: u64,
     message_kind: &str,
 ) -> bool {
     let local_genesis_hash = resolve_local_genesis_hash(blockchain);
-    let mut peers = connected_peers.lock().unwrap();
-    let Some((
+    let (
         remote_genesis_hash,
         peer_validator_address,
         status_received_at,
         authenticated_public_history_gateway,
-    )) = peers.get(peer_address).map(|peer| {
+    ) = {
+        let peers = connected_peers.lock().unwrap();
+        if !peer_session_is_current(peer_address, session_id) {
+            return false;
+        }
+        let Some(peer) = peers.get(peer_address) else {
+            return false;
+        };
         (
             peer.genesis_hash.clone(),
             peer.validator_address.clone(),
             peer.status_received_at,
             peer_has_authenticated_public_history_gateway_status(peer, &local_genesis_hash),
         )
-    })
-    else {
-        return false;
     };
 
     if should_disconnect_for_status_genesis_mismatch(
@@ -762,7 +792,8 @@ fn ensure_peer_status_allows_chain_data(
             "local_genesis_hash" => local_genesis_hash,
             "remote_genesis_hash" => remote_genesis_hash
         );
-        disconnect_peer_entry(peer_state_cache, &mut peers, peer_address);
+        let mut peers = connected_peers.lock().unwrap();
+        disconnect_peer_entry_for_session(peer_state_cache, &mut peers, peer_address, session_id);
         return false;
     }
 
@@ -775,7 +806,12 @@ fn ensure_peer_status_allows_chain_data(
             "peer" => peer_address.to_string(),
             "message_kind" => message_kind.to_string()
         );
-        request_status_from_connected_peer(&mut peers, peer_address);
+        request_status_from_connected_peer(
+            connected_peers,
+            peer_state_cache,
+            peer_address,
+            session_id,
+        );
         return false;
     }
 
@@ -1919,6 +1955,7 @@ fn handle_status_message(
     peer_state_cache: &PeerStateCacheArc,
     config: &NodeConfig,
     peer_address: &str,
+    session_id: u64,
     block_height: u64,
     best_block_hash: &str,
     genesis_hash: &str,
@@ -1943,6 +1980,9 @@ fn handle_status_message(
     let local_genesis_hash = resolve_local_genesis_hash(blockchain);
     let (peer_validator_address, peer_node_id, peer_connected_at) = {
         let peers = connected_peers.lock().unwrap();
+        if !peer_session_is_current(peer_address, session_id) {
+            return;
+        }
         peers
             .get(peer_address)
             .map(|peer| {
@@ -1962,23 +2002,33 @@ fn handle_status_message(
             .unwrap_or(false)
         && validator_status_genesis_within_grace_window(peer_connected_at, now);
     if validator_genesis_pending {
-        let mut peers = connected_peers.lock().unwrap();
-        propagate_status_to_matching_peers(
-            &mut peers,
+        {
+            let mut peers = connected_peers.lock().unwrap();
+            if !peer_session_is_current(peer_address, session_id) {
+                return;
+            }
+            propagate_status_to_matching_peers(
+                &mut peers,
+                peer_state_cache,
+                peer_address,
+                block_height,
+                best_block_hash,
+                genesis_hash,
+                status_reported_at,
+                status_validator_address,
+                status_source_session_id,
+                active_validator_set_hash,
+                quarantined,
+                consensus_duties_disabled,
+                recovery_state,
+            );
+        }
+        request_status_from_connected_peer(
+            connected_peers,
             peer_state_cache,
             peer_address,
-            block_height,
-            best_block_hash,
-            genesis_hash,
-            status_reported_at,
-            status_validator_address,
-            status_source_session_id,
-            active_validator_set_hash,
-            quarantined,
-            consensus_duties_disabled,
-            recovery_state,
+            session_id,
         );
-        request_status_from_connected_peer(&mut peers, peer_address);
         info!(
             "p2p",
             "Validator status pending canonical genesis sync",
@@ -2004,7 +2054,7 @@ fn handle_status_message(
             "remote_genesis_hash" => genesis_hash.to_string()
         );
         let mut peers = connected_peers.lock().unwrap();
-        disconnect_peer_entry(peer_state_cache, &mut peers, peer_address);
+        disconnect_peer_entry_for_session(peer_state_cache, &mut peers, peer_address, session_id);
         return;
     }
 
@@ -2018,6 +2068,9 @@ fn handle_status_message(
 
     {
         let mut peers = connected_peers.lock().unwrap();
+        if !peer_session_is_current(peer_address, session_id) {
+            return;
+        }
         propagate_status_to_matching_peers(
             &mut peers,
             peer_state_cache,
@@ -2069,8 +2122,14 @@ fn handle_status_message(
         else {
             return;
         };
-        let mut peers = connected_peers.lock().unwrap();
-        request_blocks_from_connected_peer(&mut peers, peer_address, request_start, request_count);
+        request_blocks_from_connected_peer(
+            connected_peers,
+            peer_state_cache,
+            peer_address,
+            session_id,
+            request_start,
+            request_count,
+        );
     }
 }
 
@@ -2118,16 +2177,70 @@ fn resolve_duplicate_connection(
     }
 }
 
+fn should_resolve_duplicate_session(direct_vote_session: bool) -> bool {
+    !direct_vote_session
+}
+
 fn disconnect_peer_entry(
     peer_state_cache: &PeerStateCacheArc,
     peers: &mut PeerMap,
     peer_key: &str,
 ) {
+    let gate = peer_write_gate(peer_key);
+    let gate_guard = gate.lock().unwrap();
     if let Some(mut peer) = peers.remove(peer_key) {
         cache_peer_state(peer_state_cache, &peer);
         if let Some(stream) = peer.stream.take() {
             let _ = stream.shutdown(Shutdown::Both);
         }
+    }
+    PEER_SESSION_IDS.lock().unwrap().remove(peer_key);
+    drop(gate_guard);
+    remove_peer_write_gate(peer_key);
+}
+
+fn remove_peer_write_gate(peer_address: &str) {
+    PEER_WRITE_GATES.lock().unwrap().remove(peer_address);
+}
+
+fn begin_peer_session(peer_address: &str) -> u64 {
+    let gate = peer_write_gate(peer_address);
+    let _gate_guard = gate.lock().unwrap();
+    let session_id = NEXT_PEER_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+    PEER_SESSION_IDS
+        .lock()
+        .unwrap()
+        .insert(peer_address.to_string(), session_id);
+    session_id
+}
+
+fn current_peer_session_id(peer_address: &str) -> Option<u64> {
+    PEER_SESSION_IDS.lock().unwrap().get(peer_address).copied()
+}
+
+fn peer_session_is_current(peer_address: &str, session_id: u64) -> bool {
+    current_peer_session_id(peer_address) == Some(session_id)
+}
+
+fn peer_for_session_mut<'a>(
+    peers: &'a mut PeerMap,
+    peer_address: &str,
+    session_id: u64,
+) -> Option<&'a mut PeerConnection> {
+    if !peer_session_is_current(peer_address, session_id) {
+        return None;
+    }
+    peers.get_mut(peer_address)
+}
+
+fn disconnect_peer_entry_for_session(
+    peer_state_cache: &PeerStateCacheArc,
+    peers: &mut PeerMap,
+    peer_address: &str,
+    session_id: u64,
+) {
+    if peer_session_is_current(peer_address, session_id) {
+        disconnect_peer_entry(peer_state_cache, peers, peer_address);
     }
 }
 
@@ -2144,6 +2257,96 @@ fn disconnect_peer_after_poisoned_write(
         "reason" => reason.to_string()
     );
     disconnect_peer_entry(peer_state_cache, peers, peer_key);
+}
+
+fn peer_write_gate(peer_address: &str) -> Arc<Mutex<()>> {
+    let mut gates = PEER_WRITE_GATES.lock().unwrap();
+    gates
+        .entry(peer_address.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+fn with_peer_stream_outside_peers_lock<T>(
+    connected_peers: &PeersArc,
+    peer_address: &str,
+    expected_session_id: u64,
+    write: impl FnOnce(&mut TcpStream) -> T,
+) -> Option<(PeerStreamIdentity, T)> {
+    let (session_identity, mut stream) = {
+        let peers = connected_peers.lock().unwrap();
+        let peer = peers.get(peer_address)?;
+        let stream = peer.stream.as_ref()?;
+        if current_peer_session_id(peer_address)? != expected_session_id {
+            return None;
+        }
+        let session_identity = PeerStreamIdentity {
+            session_id: expected_session_id,
+            connected_at: peer.connected_at,
+            local_address: stream.local_addr().ok()?,
+            peer_address: stream.peer_addr().ok()?,
+        };
+        (session_identity, stream.try_clone().ok()?)
+    };
+
+    let gate = peer_write_gate(peer_address);
+    let _write_guard = gate.lock().unwrap();
+    if current_peer_session_id(peer_address) != Some(expected_session_id) {
+        return None;
+    }
+    let result = write(&mut stream);
+    Some((session_identity, result))
+}
+
+fn send_peer_message_for_session(
+    connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
+    peer_address: &str,
+    session_id: u64,
+    message: &NetworkMessage,
+    timeout: Duration,
+    message_kind: &str,
+) -> Result<bool, String> {
+    let Some((session_identity, send_result)) =
+        with_peer_stream_outside_peers_lock(connected_peers, peer_address, session_id, |stream| {
+            send_message_with_write_timeout(stream, message, timeout)
+        })
+    else {
+        return Ok(false);
+    };
+
+    match send_result {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            let error = error.to_string();
+            let mut peers = connected_peers.lock().unwrap();
+            if peers.get(peer_address).is_some_and(|peer| {
+                peer_stream_matches_identity(peer_address, peer, &session_identity)
+            }) {
+                let reason = format!("{message_kind}-send-failed: {error}");
+                disconnect_peer_after_poisoned_write(
+                    peer_state_cache,
+                    &mut peers,
+                    peer_address,
+                    &reason,
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
+fn peer_stream_matches_identity(
+    peer_address: &str,
+    peer: &PeerConnection,
+    identity: &PeerStreamIdentity,
+) -> bool {
+    peer_session_is_current(peer_address, identity.session_id)
+        && peer.connected_at == identity.connected_at
+        && peer.stream.as_ref().is_some_and(|stream| {
+            stream.local_addr().ok().as_ref() == Some(&identity.local_address)
+                && stream.peer_addr().ok().as_ref() == Some(&identity.peer_address)
+        })
 }
 
 fn spawn_named_thread<F>(name: &str, task: F) -> bool
@@ -2866,8 +3069,9 @@ fn resolve_seed_server_targets(seed_servers: &[String]) -> Vec<String> {
     };
 
     let mut out = HashSet::<String>::new();
+    let configured_seed_endpoints = configured_seed_server_dial_targets(seed_servers);
     for seed_server in seed_servers {
-        fetch_seed_server_targets(&client, seed_server, &mut out);
+        fetch_seed_server_targets(&client, seed_server, &configured_seed_endpoints, &mut out);
     }
 
     let mut ordered = out.into_iter().collect::<Vec<_>>();
@@ -2875,9 +3079,37 @@ fn resolve_seed_server_targets(seed_servers: &[String]) -> Vec<String> {
     ordered
 }
 
+fn configured_seed_server_dial_targets(seed_servers: &[String]) -> HashSet<String> {
+    seed_servers
+        .iter()
+        .filter_map(|seed_server| {
+            let raw = seed_server.trim();
+            let authority = raw
+                .strip_prefix("http://")
+                .or_else(|| raw.strip_prefix("https://"))
+                .unwrap_or(raw)
+                .split(['/', '?', '#'])
+                .next()
+                .unwrap_or_default();
+            parse_bootnode_dial_address(authority)
+        })
+        .collect()
+}
+
+fn insert_seed_server_target(
+    out: &mut HashSet<String>,
+    configured_seed_endpoints: &HashSet<String>,
+    dial: String,
+) {
+    if !configured_seed_endpoints.contains(&dial) {
+        out.insert(dial);
+    }
+}
+
 fn fetch_seed_server_targets(
     client: &reqwest::blocking::Client,
     seed_server: &str,
+    configured_seed_endpoints: &HashSet<String>,
     out: &mut HashSet<String>,
 ) {
     let json_url = normalize_seed_server_url(seed_server, "/peer-list.json");
@@ -2890,21 +3122,21 @@ fn fetch_seed_server_targets(
                             if bootnode.reachable.unwrap_or(true) {
                                 let dial = format!("{}:{}", bootnode.hostname, bootnode.port);
                                 if is_assigned_or_validator_vpn_dial_address(&dial) {
-                                    out.insert(dial);
+                                    insert_seed_server_target(out, configured_seed_endpoints, dial);
                                 }
                             }
                         }
                         for value in payload.dnsaddr_bootstrap {
                             if let Some(dial) = parse_dnsaddr_multiaddr_to_dial_address(&value) {
                                 if is_assigned_or_validator_vpn_dial_address(&dial) {
-                                    out.insert(dial);
+                                    insert_seed_server_target(out, configured_seed_endpoints, dial);
                                 }
                             }
                         }
                         for peer in payload.peers {
                             if let Some(dial) = parse_bootnode_dial_address(&peer) {
                                 if is_assigned_or_validator_vpn_dial_address(&dial) {
-                                    out.insert(dial);
+                                    insert_seed_server_target(out, configured_seed_endpoints, dial);
                                 }
                             }
                         }
@@ -2955,7 +3187,7 @@ fn fetch_seed_server_targets(
                     if let Some(dial) = parse_dnsaddr_multiaddr_to_dial_address(
                         value.strip_prefix("dnsaddr=").unwrap_or(value),
                     ) {
-                        out.insert(dial);
+                        insert_seed_server_target(out, configured_seed_endpoints, dial);
                     }
                 }
             }
@@ -3298,22 +3530,31 @@ impl P2PNetwork {
             quorum_certificate: Some(qc.clone()),
         };
 
-        let mut peers = self.connected_peers.lock().unwrap();
         let mut sent = 0usize;
         let mut failed_peers = Vec::new();
-        for (address, peer) in peers.iter_mut() {
-            if let Some(ref mut stream) = peer.stream {
-                if let Err(e) = send_consensus_message(stream, &message) {
-                    warn!("p2p", "Failed to send block", "peer" => address.clone(), "error" => e.to_string());
-                    failed_peers.push(address.clone());
-                } else {
-                    peer.blocks_sent += 1;
-                    sent += 1;
+        for (address, session_id) in peer_session_targets(&self.connected_peers) {
+            match send_peer_message_for_session(
+                &self.connected_peers,
+                &self.peer_state_cache,
+                &address,
+                session_id,
+                &message,
+                Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                "committed-block",
+            ) {
+                Ok(true) => {
+                    let mut peers = self.connected_peers.lock().unwrap();
+                    if let Some(peer) = peer_for_session_mut(&mut peers, &address, session_id) {
+                        peer.blocks_sent += 1;
+                        sent += 1;
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    warn!("p2p", "Failed to send block", "peer" => address.clone(), "error" => error);
+                    failed_peers.push(address);
                 }
             }
-        }
-        for address in &failed_peers {
-            peers.remove(address);
         }
 
         info!(
@@ -3347,76 +3588,80 @@ impl P2PNetwork {
         let expected_validator_set_hash = canonical_validator_set_hash();
         let now = current_timestamp();
         let mut sent_validator_addresses = HashSet::new();
-        let mut peers = self.connected_peers.lock().unwrap();
-        for (address, peer) in peers.iter_mut() {
-            let Some(validator_address) = recover_peer_validator_address_for_vote_target(
-                &self.config,
-                peer,
-                &active_validator_addresses,
-            ) else {
-                debug!(
-                    "p2p",
-                    "Skipping vote request to peer without recoverable validator identity",
-                    "peer" => address.clone(),
-                    "node_id" => peer.node_id.clone().unwrap_or_default(),
-                    "public_address" => peer.public_address.clone().unwrap_or_default(),
-                    "height" => block.block_index
-                );
-                continue;
-            };
-            let recovered_validator_identity = peer
-                .validator_address
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_none();
-            if !active_validator_addresses.contains(&validator_address)
-                || sent_validator_addresses.contains(&validator_address)
-            {
-                continue;
-            }
-            if recovered_validator_identity {
-                info!(
-                    "p2p",
-                    "Recovered vote request target validator identity",
-                    "peer" => address.clone(),
-                    "node_id" => peer.node_id.clone().unwrap_or_default(),
-                    "public_address" => peer.public_address.clone().unwrap_or_default(),
-                    "validator_address" => validator_address.clone(),
-                    "height" => block.block_index
-                );
-                peer.validator_address = Some(validator_address.clone());
-            }
-            if let Some(reason) =
-                peer_readiness_exclusion_reason_at(peer, now, Some(&expected_validator_set_hash))
-            {
-                debug!(
-                    "p2p",
-                    "Skipping vote request to non-ready validator peer",
-                    "peer" => address.clone(),
-                    "validator_address" => validator_address.clone(),
-                    "height" => block.block_index,
-                    "reason" => reason
-                );
-                continue;
-            }
-            if let Some(ref mut stream) = peer.stream {
-                if let Err(error) = send_consensus_message(stream, &message) {
-                    warn!(
-                        "p2p",
-                        "Failed to send vote request",
-                        "peer" => address.clone(),
-                        "error" => error.to_string()
-                    );
-                    failed_peers.push(address.clone());
-                } else {
+        let vote_targets = {
+            let mut peers = self.connected_peers.lock().unwrap();
+            peers
+                .iter_mut()
+                .filter_map(|(address, peer)| {
+                    peer.stream.as_ref()?;
+                    let session_id = current_peer_session_id(address)?;
+                    let validator_address = recover_peer_validator_address_for_vote_target(
+                        &self.config,
+                        peer,
+                        &active_validator_addresses,
+                    )?;
+                    let recovered_validator_identity = peer
+                        .validator_address
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .is_none();
+                    if !active_validator_addresses.contains(&validator_address)
+                        || sent_validator_addresses.contains(&validator_address)
+                    {
+                        return None;
+                    }
+                    if recovered_validator_identity {
+                        info!(
+                            "p2p",
+                            "Recovered vote request target validator identity",
+                            "peer" => address.clone(),
+                            "node_id" => peer.node_id.clone().unwrap_or_default(),
+                            "public_address" => peer.public_address.clone().unwrap_or_default(),
+                            "validator_address" => validator_address.clone(),
+                            "height" => block.block_index
+                        );
+                        peer.validator_address = Some(validator_address.clone());
+                    }
+                    if let Some(reason) = peer_readiness_exclusion_reason_at(
+                        peer,
+                        now,
+                        Some(&expected_validator_set_hash),
+                    ) {
+                        debug!(
+                            "p2p",
+                            "Skipping vote request to non-ready validator peer",
+                            "peer" => address.clone(),
+                            "validator_address" => validator_address,
+                            "height" => block.block_index,
+                            "reason" => reason
+                        );
+                        return None;
+                    }
+                    Some((address.clone(), session_id, validator_address))
+                })
+                .collect::<Vec<_>>()
+        };
+        for (address, session_id, validator_address) in vote_targets {
+            match send_peer_message_for_session(
+                &self.connected_peers,
+                &self.peer_state_cache,
+                &address,
+                session_id,
+                &message,
+                Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                "vote-request",
+            ) {
+                Ok(true) => {
                     sent_validator_addresses.insert(validator_address);
                     recipients += 1;
                 }
+                Ok(false) => {}
+                Err(error) => {
+                    warn!("p2p", "Failed to send vote request", "peer" => address.clone(), "error" => error);
+                    failed_peers.push(address);
+                }
             }
-        }
-        for address in &failed_peers {
-            peers.remove(address);
         }
 
         let mut sent_validators = sent_validator_addresses.into_iter().collect::<Vec<_>>();
@@ -3439,18 +3684,32 @@ impl P2PNetwork {
             transaction_data: transaction.clone(),
         };
 
-        let mut peers = self.connected_peers.lock().unwrap();
-        for (address, peer) in peers.iter_mut() {
-            if let Some(ref mut stream) = peer.stream {
-                if let Err(e) = send_message(stream, &message) {
-                    warn!("p2p", "Failed to send transaction", "peer" => address.clone(), "error" => e.to_string());
-                } else {
-                    peer.txs_sent += 1;
+        let mut sent = 0usize;
+        for (address, session_id) in peer_session_targets(&self.connected_peers) {
+            match send_peer_message_for_session(
+                &self.connected_peers,
+                &self.peer_state_cache,
+                &address,
+                session_id,
+                &message,
+                Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                "transaction-broadcast",
+            ) {
+                Ok(true) => {
+                    let mut peers = self.connected_peers.lock().unwrap();
+                    if let Some(peer) = peer_for_session_mut(&mut peers, &address, session_id) {
+                        peer.txs_sent += 1;
+                        sent += 1;
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    warn!("p2p", "Failed to send transaction", "peer" => address, "error" => error);
                 }
             }
         }
 
-        info!("p2p", "Transaction broadcast", "peers" => peers.len() as u64, "tx_hash" => transaction.hash());
+        info!("p2p", "Transaction broadcast", "peers" => sent as u64, "tx_hash" => transaction.hash());
     }
 
     pub fn get_peer_count(&self) -> usize {
@@ -3544,16 +3803,24 @@ impl P2PNetwork {
     pub fn request_blocks(&self, from_height: u64, count: u32) {
         let message = NetworkMessage::GetBlocks { from_height, count };
 
-        let mut peers = self.connected_peers.lock().unwrap();
-        let target_addresses = select_block_sync_targets(&peers, 1);
-        for address in target_addresses {
-            let Some(peer) = peers.get_mut(&address) else {
-                continue;
-            };
-            if let Some(ref mut stream) = peer.stream {
-                if let Err(e) = send_message(stream, &message) {
-                    eprintln!("❌ Failed to request blocks from {}: {}", address, e);
-                }
+        let target_sessions = {
+            let peers = self.connected_peers.lock().unwrap();
+            select_block_sync_targets(&peers, 1)
+                .into_iter()
+                .filter_map(|address| Some((address.clone(), current_peer_session_id(&address)?)))
+                .collect::<Vec<_>>()
+        };
+        for (address, session_id) in target_sessions {
+            if let Err(error) = send_peer_message_for_session(
+                &self.connected_peers,
+                &self.peer_state_cache,
+                &address,
+                session_id,
+                &message,
+                Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                "block-request",
+            ) {
+                eprintln!("❌ Failed to request blocks from {}: {}", address, error);
             }
         }
     }
@@ -3565,35 +3832,38 @@ impl P2PNetwork {
         count: u32,
     ) -> bool {
         let message = NetworkMessage::GetBlocks { from_height, count };
-        let mut peers = self.connected_peers.lock().unwrap();
-        let resolved_peer_address = connected_peer_key_for_address(&peers, peer_address)
-            .unwrap_or_else(|| peer_address.to_string());
-        if let Some(peer) = peers.get_mut(&resolved_peer_address) {
-            if let Some(ref mut stream) = peer.stream {
-                if let Err(e) = send_message(stream, &message) {
-                    warn!(
-                        "p2p",
-                        "Failed to request blocks from peer",
-                        "peer" => resolved_peer_address.to_string(),
-                        "requested_peer" => peer_address.to_string(),
-                        "error" => e.to_string()
-                    );
-                    return false;
-                }
-                return true;
-            }
+        let Some((resolved_peer_address, session_id)) =
+            peer_session_target_for_address(&self.connected_peers, peer_address)
+        else {
+            return false;
+        };
+        match send_peer_message_for_session(
+            &self.connected_peers,
+            &self.peer_state_cache,
+            &resolved_peer_address,
+            session_id,
+            &message,
+            Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+            "block-request",
+        ) {
+            Ok(true) => true,
+            Ok(false) | Err(_) => false,
         }
-        false
     }
 
     pub fn request_peers(&self) {
         let message = NetworkMessage::GetPeers;
-        let mut peers = self.connected_peers.lock().unwrap();
-        for (address, peer) in peers.iter_mut() {
-            if let Some(ref mut stream) = peer.stream {
-                if let Err(e) = send_message(stream, &message) {
-                    warn!("p2p", "Failed to request peers", "peer" => address.clone(), "error" => e.to_string());
-                }
+        for (address, session_id) in peer_session_targets(&self.connected_peers) {
+            if let Err(error) = send_peer_message_for_session(
+                &self.connected_peers,
+                &self.peer_state_cache,
+                &address,
+                session_id,
+                &message,
+                Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                "peer-request",
+            ) {
+                warn!("p2p", "Failed to request peers", "peer" => address, "error" => error);
             }
         }
     }
@@ -3601,24 +3871,34 @@ impl P2PNetwork {
     pub fn ping_peers(&self) {
         let message = NetworkMessage::Ping;
 
-        let mut peers = self.connected_peers.lock().unwrap();
-        for (address, peer) in peers.iter_mut() {
-            if let Some(ref mut stream) = peer.stream {
-                if let Err(e) = send_message(stream, &message) {
-                    eprintln!("❌ Failed to ping {}: {}", address, e);
-                }
+        for (address, session_id) in peer_session_targets(&self.connected_peers) {
+            if let Err(error) = send_peer_message_for_session(
+                &self.connected_peers,
+                &self.peer_state_cache,
+                &address,
+                session_id,
+                &message,
+                Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                "ping",
+            ) {
+                eprintln!("❌ Failed to ping {}: {}", address, error);
             }
         }
     }
 
     pub fn request_peer_statuses(&self) {
         let message = NetworkMessage::GetStatus;
-        let mut peers = self.connected_peers.lock().unwrap();
-        for (address, peer) in peers.iter_mut() {
-            if let Some(ref mut stream) = peer.stream {
-                if let Err(e) = send_message(stream, &message) {
-                    warn!("p2p", "Failed to request status", "peer" => address.clone(), "error" => e.to_string());
-                }
+        for (address, session_id) in peer_session_targets(&self.connected_peers) {
+            if let Err(error) = send_peer_message_for_session(
+                &self.connected_peers,
+                &self.peer_state_cache,
+                &address,
+                session_id,
+                &message,
+                Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                "status-request",
+            ) {
+                warn!("p2p", "Failed to request status", "peer" => address, "error" => error);
             }
         }
     }
@@ -3785,7 +4065,7 @@ fn start_listener(
     connected_peers: PeersArc,
     peer_state_cache: PeerStateCacheArc,
     config: NodeConfig,
-    message_sender: mpsc::Sender<(String, NetworkMessage)>,
+    message_sender: mpsc::Sender<PeerMessage>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpListener::bind(listen_address)?;
     info!("p2p", "P2P listener bound", "listen_address" => listen_address.to_string());
@@ -3841,51 +4121,88 @@ fn start_listener(
     Ok(())
 }
 
-fn request_status_from_connected_peer(peers: &mut PeerMap, peer_address: &str) {
-    let message = NetworkMessage::GetStatus;
-    let resolved_peer_address = connected_peer_key_for_address(peers, peer_address)
+fn peer_session_targets(connected_peers: &PeersArc) -> Vec<(String, u64)> {
+    let peers = connected_peers.lock().unwrap();
+    peers
+        .iter()
+        .filter_map(|(address, peer)| {
+            peer.stream.as_ref()?;
+            Some((address.clone(), current_peer_session_id(address)?))
+        })
+        .collect()
+}
+
+fn peer_session_target_for_address(
+    connected_peers: &PeersArc,
+    peer_address: &str,
+) -> Option<(String, u64)> {
+    let peers = connected_peers.lock().unwrap();
+    let resolved_peer_address = connected_peer_key_for_address(&peers, peer_address)
         .unwrap_or_else(|| peer_address.to_string());
-    if let Some(peer) = peers.get_mut(&resolved_peer_address) {
-        if let Some(ref mut stream) = peer.stream {
-            if let Err(error) = send_message(stream, &message) {
-                warn!(
-                    "p2p",
-                    "Failed to request status from peer",
-                    "peer" => resolved_peer_address.to_string(),
-                    "requested_peer" => peer_address.to_string(),
-                    "error" => error.to_string()
-                );
-            }
-        }
+    let peer = peers.get(&resolved_peer_address)?;
+    peer.stream.as_ref()?;
+    Some((
+        resolved_peer_address.clone(),
+        current_peer_session_id(&resolved_peer_address)?,
+    ))
+}
+
+fn request_status_from_connected_peer(
+    connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
+    peer_address: &str,
+    session_id: u64,
+) {
+    let message = NetworkMessage::GetStatus;
+    if let Err(error) = send_peer_message_for_session(
+        connected_peers,
+        peer_state_cache,
+        peer_address,
+        session_id,
+        &message,
+        Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+        "status-request",
+    ) {
+        warn!(
+            "p2p",
+            "Failed to request status from peer",
+            "peer" => peer_address.to_string(),
+            "error" => error
+        );
     }
 }
 
 fn request_blocks_from_connected_peer(
-    peers: &mut PeerMap,
+    connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
     peer_address: &str,
+    session_id: u64,
     from_height: u64,
     count: u32,
 ) {
     let message = NetworkMessage::GetBlocks { from_height, count };
-    let resolved_peer_address = connected_peer_key_for_address(peers, peer_address)
-        .unwrap_or_else(|| peer_address.to_string());
-    if let Some(peer) = peers.get_mut(&resolved_peer_address) {
-        if let Some(ref mut stream) = peer.stream {
-            if let Err(error) = send_message(stream, &message) {
-                warn!(
-                    "p2p",
-                    "Failed to request blocks from peer",
-                    "peer" => resolved_peer_address.to_string(),
-                    "requested_peer" => peer_address.to_string(),
-                    "error" => error.to_string()
-                );
-            }
-        }
+    if let Err(error) = send_peer_message_for_session(
+        connected_peers,
+        peer_state_cache,
+        peer_address,
+        session_id,
+        &message,
+        Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+        "block-request",
+    ) {
+        warn!(
+            "p2p",
+            "Failed to request blocks from peer",
+            "peer" => peer_address.to_string(),
+            "requested_peer" => peer_address.to_string(),
+            "error" => error
+        );
     }
 }
 
 fn send_vote_to_requester(
-    peers: &mut PeerMap,
+    connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
     config: &NodeConfig,
     request_peer_address: &str,
     proposer_validator_address: &str,
@@ -3896,23 +4213,30 @@ fn send_vote_to_requester(
     // The vote request arrived over an authenticated, full-duplex peer stream.
     // Reuse it before paying for a new TCP connection and signed handshake on
     // every consensus round. The direct route remains the recovery fallback.
-    if let Some(peer) = peers.get_mut(request_peer_address) {
-        if let Some(ref mut stream) = peer.stream {
-            match send_consensus_message(stream, response) {
-                Ok(()) => {
-                    info!(
-                        "p2p",
-                        "Vote sent over persistent requester path",
-                        "request_peer" => request_peer_address.to_string(),
-                        "response_peer" => request_peer_address.to_string(),
-                        "proposer" => proposer_validator_address.to_string()
-                    );
-                    return Ok(request_peer_address.to_string());
-                }
-                Err(error) => {
-                    failed_peers.push((request_peer_address.to_string(), error.to_string()))
-                }
+    if let Some((request_peer_key, request_session_id)) =
+        peer_session_target_for_address(connected_peers, request_peer_address)
+    {
+        match send_peer_message_for_session(
+            connected_peers,
+            peer_state_cache,
+            &request_peer_key,
+            request_session_id,
+            response,
+            Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+            "vote-response",
+        ) {
+            Ok(true) => {
+                info!(
+                    "p2p",
+                    "Vote sent over persistent requester path",
+                    "request_peer" => request_peer_address.to_string(),
+                    "response_peer" => request_peer_key.clone(),
+                    "proposer" => proposer_validator_address.to_string()
+                );
+                return Ok(request_peer_key);
             }
+            Ok(false) => {}
+            Err(error) => failed_peers.push((request_peer_key, error)),
         }
     }
 
@@ -3944,32 +4268,31 @@ fn send_vote_to_requester(
         }
     }
 
-    for (failed_peer, _) in &failed_peers {
-        peers.remove(failed_peer);
-    }
-
-    let fallback_peer_key = peers
-        .iter()
-        .find(|(address, peer)| {
-            address.as_str() != request_peer_address
+    let fallback_peer = {
+        let peers = connected_peers.lock().unwrap();
+        peers.iter().find_map(|(address, peer)| {
+            (address != request_peer_address
                 && peer.stream.is_some()
                 && peer.validator_address.as_deref().map(str::trim)
-                    == Some(proposer_validator_address)
+                    == Some(proposer_validator_address))
+            .then(|| Some((address.clone(), current_peer_session_id(address)?)))
+            .flatten()
         })
-        .map(|(address, _)| address.clone());
+    };
 
-    if let Some(fallback_peer_key) = fallback_peer_key {
-        if let Some(peer) = peers.get_mut(&fallback_peer_key) {
-            if let Some(ref mut stream) = peer.stream {
-                match send_consensus_message(stream, response) {
-                    Ok(()) => return Ok(fallback_peer_key),
-                    Err(error) => {
-                        let error = error.to_string();
-                        peers.remove(&fallback_peer_key);
-                        return Err(error);
-                    }
-                }
-            }
+    if let Some((fallback_peer_key, fallback_session_id)) = fallback_peer {
+        match send_peer_message_for_session(
+            connected_peers,
+            peer_state_cache,
+            &fallback_peer_key,
+            fallback_session_id,
+            response,
+            Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+            "vote-response-fallback",
+        ) {
+            Ok(true) => return Ok(fallback_peer_key),
+            Ok(false) => {}
+            Err(error) => return Err(error),
         }
     }
 
@@ -4089,12 +4412,17 @@ fn configured_public_address_for_validator(
 fn handle_vote_request_message(
     blockchain: &BlockchainArc,
     connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
     config: &NodeConfig,
     peer_address: &str,
+    session_id: u64,
     block_data: Block,
     epoch_number: u64,
     round_number: u64,
 ) {
+    if !peer_session_is_current(peer_address, session_id) {
+        return;
+    }
     let vote_request_received_at = Instant::now();
     let local_validator = crate::config::resolve_runtime_validator_address();
     let network_peer_count = connected_peers
@@ -4270,9 +4598,12 @@ fn handle_vote_request_message(
                 }),
             );
             let response = NetworkMessage::Vote { vote };
-            let mut peers = connected_peers.lock().unwrap();
+            if !peer_session_is_current(peer_address, session_id) {
+                return;
+            }
             match send_vote_to_requester(
-                &mut peers,
+                connected_peers,
+                peer_state_cache,
                 config,
                 peer_address,
                 block_data.validator_id.as_str(),
@@ -4483,6 +4814,7 @@ fn handle_vote_message(
     connected_peers: &PeersArc,
     config: &NodeConfig,
     peer_address: &str,
+    session_id: u64,
     vote: crate::consensus::dual_quorum::Vote,
 ) {
     if config.node.bootstrap_only {
@@ -4499,6 +4831,9 @@ fn handle_vote_message(
 
     let announced_validator = {
         let peers = connected_peers.lock().unwrap();
+        if !peer_session_is_current(peer_address, session_id) {
+            return;
+        }
         resolve_announced_validator_for_vote(&peers, peer_address, &vote.validator_address)
             .or_else(|| recover_active_vote_validator_from_payload(config, &vote.validator_address))
     };
@@ -4582,6 +4917,7 @@ fn handle_block_message(
     peer_state_cache: &PeerStateCacheArc,
     config: &NodeConfig,
     peer_address: &str,
+    session_id: u64,
     block_data: Block,
     quorum_certificate: Option<QuorumCertificate>,
 ) {
@@ -4602,6 +4938,7 @@ fn handle_block_message(
         connected_peers,
         peer_state_cache,
         peer_address,
+        session_id,
         "block",
     ) {
         return;
@@ -4609,7 +4946,7 @@ fn handle_block_message(
 
     {
         let mut peers = connected_peers.lock().unwrap();
-        if let Some(peer) = peers.get_mut(peer_address) {
+        if let Some(peer) = peer_for_session_mut(&mut peers, peer_address, session_id) {
             peer.blocks_received += 1;
             peer.last_known_height = block_data.block_index;
             peer.best_block_hash = block_data.hash.clone();
@@ -4640,6 +4977,7 @@ fn handle_get_blocks_message(
     peer_state_cache: &PeerStateCacheArc,
     config: &NodeConfig,
     peer_address: &str,
+    session_id: u64,
     from_height: u64,
     count: u32,
 ) {
@@ -4655,11 +4993,21 @@ fn handle_get_blocks_message(
             blocks: Vec::new(),
             quorum_certificates: Vec::new(),
         };
-        let mut peers = connected_peers.lock().unwrap();
-        if let Some(peer) = peers.get_mut(peer_address) {
-            if let Some(ref mut stream) = peer.stream {
-                let _ = send_message(stream, &response);
-            }
+        if let Err(error) = send_peer_message_for_session(
+            connected_peers,
+            peer_state_cache,
+            peer_address,
+            session_id,
+            &response,
+            Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+            "bootstrap-block-sync",
+        ) {
+            warn!(
+                "p2p",
+                "Failed to send bootstrap-only block response",
+                "peer" => peer_address.to_string(),
+                "error" => error
+            );
         }
         return;
     }
@@ -4670,6 +5018,9 @@ fn handle_get_blocks_message(
             chain.last().map(|block| block.block_index).unwrap_or(0)
         };
         let peers = connected_peers.lock().unwrap();
+        if !peer_session_is_current(peer_address, session_id) {
+            return;
+        }
         let peer = peers.get(peer_address);
         (
             block_sync_response_policy(config, peer),
@@ -4722,7 +5073,7 @@ fn handle_get_blocks_message(
             "max_support_peer_deep_sync_lag" => MAX_SUPPORT_PEER_DEEP_SYNC_LAG
         );
         let mut peers = connected_peers.lock().unwrap();
-        disconnect_peer_entry(peer_state_cache, &mut peers, peer_address);
+        disconnect_peer_entry_for_session(peer_state_cache, &mut peers, peer_address, session_id);
         return;
     }
     let response_count = count.min(policy.max_blocks);
@@ -4739,30 +5090,44 @@ fn handle_get_blocks_message(
         quorum_certificates,
     };
 
+    let Some((session_identity, send_result)) =
+        with_peer_stream_outside_peers_lock(connected_peers, peer_address, session_id, |stream| {
+            send_message_with_write_timeout(stream, &response, policy.write_timeout)
+        })
+    else {
+        return;
+    };
+
     let mut peers = connected_peers.lock().unwrap();
-    let mut poison_reason = None;
-    if let Some(peer) = peers.get_mut(peer_address) {
-        if let Some(ref mut stream) = peer.stream {
-            if let Err(e) = send_message_with_write_timeout(stream, &response, policy.write_timeout)
-            {
-                let error = e.to_string();
-                warn!(
-                    "p2p",
-                    "Failed to send blocks",
-                    "peer" => peer_address.to_string(),
-                    "requested" => count as u64,
-                    "served" => response_count as u64,
-                    "max_blocks" => policy.max_blocks as u64,
-                    "error" => error.clone()
-                );
-                poison_reason = Some(format!("block-sync-send-failed: {error}"));
-            } else {
-                peer.blocks_sent += 1;
-            }
-        }
+    if peers
+        .get(peer_address)
+        .map(|peer| peer_stream_matches_identity(peer_address, peer, &session_identity))
+        != Some(true)
+    {
+        return;
     }
-    if let Some(reason) = poison_reason {
-        disconnect_peer_after_poisoned_write(peer_state_cache, &mut peers, peer_address, &reason);
+    if let Err(e) = send_result {
+        let error = e.to_string();
+        warn!(
+            "p2p",
+            "Failed to send blocks",
+            "peer" => peer_address.to_string(),
+            "requested" => count as u64,
+            "served" => response_count as u64,
+            "max_blocks" => policy.max_blocks as u64,
+            "error" => error.clone()
+        );
+        let reason = format!("block-sync-send-failed: {error}");
+        if peer_session_is_current(peer_address, session_id) {
+            disconnect_peer_after_poisoned_write(
+                peer_state_cache,
+                &mut peers,
+                peer_address,
+                &reason,
+            );
+        }
+    } else if let Some(peer) = peer_for_session_mut(&mut peers, peer_address, session_id) {
+        peer.blocks_sent += 1;
     }
 }
 
@@ -4772,6 +5137,7 @@ fn handle_blocks_message(
     peer_state_cache: &PeerStateCacheArc,
     config: &NodeConfig,
     peer_address: &str,
+    session_id: u64,
     blocks: Vec<Block>,
     quorum_certificates: Vec<QuorumCertificate>,
 ) {
@@ -4790,6 +5156,7 @@ fn handle_blocks_message(
         connected_peers,
         peer_state_cache,
         peer_address,
+        session_id,
         "blocks",
     ) {
         return;
@@ -4835,7 +5202,7 @@ fn local_node_runs_validator_consensus(config: &NodeConfig) -> bool {
         .iter()
         .any(|service| service.trim().eq_ignore_ascii_case("consensus"));
     identity_role == "validator"
-        || compiled_profile.contains("validator")
+        || compiled_profile == "validator_node"
         || exposes_consensus_service
 }
 
@@ -4932,13 +5299,23 @@ fn dispatch_peer_message(
     blockchain: &BlockchainArc,
     connected_peers: &PeersArc,
     peer_state_cache: &PeerStateCacheArc,
-    message_sender: &mpsc::Sender<(String, NetworkMessage)>,
+    message_sender: &mpsc::Sender<PeerMessage>,
     config: &NodeConfig,
     peer_address: &str,
+    session_id: u64,
     message: NetworkMessage,
-) -> Result<(), mpsc::SendError<(String, NetworkMessage)>> {
+) -> Result<(), mpsc::SendError<PeerMessage>> {
+    if !peer_session_is_current(peer_address, session_id) {
+        debug!(
+            "p2p",
+            "Ignoring message from replaced peer session",
+            "peer" => peer_address.to_string(),
+            "session_id" => session_id
+        );
+        return Ok(());
+    }
     if !bypasses_shared_message_queue(&message) {
-        return message_sender.send((peer_address.to_string(), message));
+        return message_sender.send((peer_address.to_string(), session_id, message));
     }
 
     match message {
@@ -4953,8 +5330,10 @@ fn dispatch_peer_message(
             handle_vote_request_message(
                 blockchain,
                 connected_peers,
+                peer_state_cache,
                 config,
                 peer_address,
+                session_id,
                 block_data,
                 epoch_number,
                 round_number,
@@ -4962,7 +5341,7 @@ fn dispatch_peer_message(
             Ok(())
         }
         NetworkMessage::Vote { vote } => {
-            handle_vote_message(connected_peers, config, peer_address, vote);
+            handle_vote_message(connected_peers, config, peer_address, session_id, vote);
             Ok(())
         }
         NetworkMessage::Block {
@@ -4975,6 +5354,7 @@ fn dispatch_peer_message(
                 peer_state_cache,
                 config,
                 peer_address,
+                session_id,
                 block_data,
                 quorum_certificate,
             );
@@ -4987,6 +5367,7 @@ fn dispatch_peer_message(
                 peer_state_cache,
                 config,
                 peer_address,
+                session_id,
                 from_height,
                 count,
             );
@@ -5002,6 +5383,7 @@ fn dispatch_peer_message(
                 peer_state_cache,
                 config,
                 peer_address,
+                session_id,
                 blocks,
                 quorum_certificates,
             );
@@ -5110,36 +5492,35 @@ fn local_vote_only_rejoin_active() -> bool {
             .unwrap_or(false)
 }
 
-fn handle_incoming_connection(
-    stream: TcpStream,
-    peer_address: String,
-    blockchain: BlockchainArc,
-    connected_peers: PeersArc,
-    peer_state_cache: PeerStateCacheArc,
-    message_sender: mpsc::Sender<(String, NetworkMessage)>,
-    config: NodeConfig,
-) -> Result<(), Box<dyn std::error::Error>> {
-    configure_peer_stream(&stream);
-    let mut reader = BufReader::new(stream.try_clone()?);
-    let mut writer = BufWriter::new(stream);
-
-    // Add peer to connected peers
-    {
+fn publish_peer_connection(
+    writer: &BufWriter<TcpStream>,
+    peer_address: &str,
+    direction: ConnectionDirection,
+    connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
+) -> io::Result<PeerEntryGuard> {
+    let stream = writer.get_ref().try_clone()?;
+    let now = current_timestamp();
+    let session_id = {
         let mut peers = connected_peers.lock().unwrap();
+        if peers.contains_key(peer_address) {
+            disconnect_peer_entry(peer_state_cache, &mut peers, peer_address);
+        }
+        let session_id = begin_peer_session(peer_address);
         peers.insert(
-            peer_address.clone(),
+            peer_address.to_string(),
             PeerConnection {
-                address: peer_address.clone(),
-                direction: ConnectionDirection::Incoming,
+                address: peer_address.to_string(),
+                direction,
                 public_address: None,
                 validator_address: None,
-                connected_at: current_timestamp(),
-                last_seen: current_timestamp(),
+                connected_at: now,
+                last_seen: now,
                 blocks_sent: 0,
                 blocks_received: 0,
                 txs_sent: 0,
                 txs_received: 0,
-                stream: Some(writer.get_ref().try_clone()?),
+                stream: Some(stream),
                 node_id: None,
                 version: None,
                 capabilities: Vec::new(),
@@ -5156,12 +5537,29 @@ fn handle_incoming_connection(
                 recovery_state: None,
             },
         );
-    }
-    let _peer_entry_guard = PeerEntryGuard::new(
-        peer_address.clone(),
-        Arc::clone(&connected_peers),
-        Arc::clone(&peer_state_cache),
-    );
+        session_id
+    };
+
+    Ok(PeerEntryGuard::new(
+        peer_address.to_string(),
+        session_id,
+        Arc::clone(connected_peers),
+        Arc::clone(peer_state_cache),
+    ))
+}
+
+fn handle_incoming_connection(
+    stream: TcpStream,
+    peer_address: String,
+    blockchain: BlockchainArc,
+    connected_peers: PeersArc,
+    peer_state_cache: PeerStateCacheArc,
+    message_sender: mpsc::Sender<PeerMessage>,
+    config: NodeConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    configure_peer_stream(&stream);
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut writer = BufWriter::new(stream);
 
     // Send handshake
     let handshake = build_local_handshake(&config)
@@ -5178,9 +5576,17 @@ fn handle_incoming_connection(
             "peer" => peer_address.clone(),
             "error" => error.to_string()
         );
+        return Err(error.into());
     } else {
         writer.flush()?;
     }
+    let peer_entry_guard = publish_peer_connection(
+        &writer,
+        &peer_address,
+        ConnectionDirection::Incoming,
+        &connected_peers,
+        &peer_state_cache,
+    )?;
 
     // Listen for messages
     loop {
@@ -5189,7 +5595,9 @@ fn handle_incoming_connection(
                 // Update last seen
                 {
                     let mut peers = connected_peers.lock().unwrap();
-                    if let Some(peer) = peers.get_mut(&peer_address) {
+                    if let Some(peer) =
+                        peer_for_session_mut(&mut peers, &peer_address, peer_entry_guard.session_id)
+                    {
                         peer.last_seen = current_timestamp();
                     }
                 }
@@ -5201,6 +5609,7 @@ fn handle_incoming_connection(
                     &message_sender,
                     &config,
                     &peer_address,
+                    peer_entry_guard.session_id,
                     message,
                 ) {
                     break;
@@ -5223,52 +5632,12 @@ fn handle_outgoing_connection(
     blockchain: BlockchainArc,
     connected_peers: PeersArc,
     peer_state_cache: PeerStateCacheArc,
-    message_sender: mpsc::Sender<(String, NetworkMessage)>,
+    message_sender: mpsc::Sender<PeerMessage>,
     config: NodeConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     configure_peer_stream(&stream);
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = BufWriter::new(stream);
-
-    // Add peer to connected peers
-    {
-        let mut peers = connected_peers.lock().unwrap();
-        peers.insert(
-            peer_address.clone(),
-            PeerConnection {
-                address: peer_address.clone(),
-                direction: ConnectionDirection::Outgoing,
-                public_address: None,
-                validator_address: None,
-                connected_at: current_timestamp(),
-                last_seen: current_timestamp(),
-                blocks_sent: 0,
-                blocks_received: 0,
-                txs_sent: 0,
-                txs_received: 0,
-                stream: Some(writer.get_ref().try_clone()?),
-                node_id: None,
-                version: None,
-                capabilities: Vec::new(),
-                last_known_height: 0,
-                best_block_hash: String::new(),
-                genesis_hash: String::new(),
-                status_received_at: None,
-                status_reported_at: None,
-                status_validator_address: None,
-                status_source_session_id: None,
-                active_validator_set_hash: None,
-                quarantined: false,
-                consensus_duties_disabled: false,
-                recovery_state: None,
-            },
-        );
-    }
-    let _peer_entry_guard = PeerEntryGuard::new(
-        peer_address.clone(),
-        Arc::clone(&connected_peers),
-        Arc::clone(&peer_state_cache),
-    );
 
     // Send handshake
     let handshake = build_local_handshake(&config)
@@ -5285,9 +5654,17 @@ fn handle_outgoing_connection(
             "peer" => peer_address.clone(),
             "error" => error.to_string()
         );
+        return Err(error.into());
     } else {
         writer.flush()?;
     }
+    let peer_entry_guard = publish_peer_connection(
+        &writer,
+        &peer_address,
+        ConnectionDirection::Outgoing,
+        &connected_peers,
+        &peer_state_cache,
+    )?;
 
     // Listen for messages
     loop {
@@ -5296,7 +5673,9 @@ fn handle_outgoing_connection(
                 // Update last seen
                 {
                     let mut peers = connected_peers.lock().unwrap();
-                    if let Some(peer) = peers.get_mut(&peer_address) {
+                    if let Some(peer) =
+                        peer_for_session_mut(&mut peers, &peer_address, peer_entry_guard.session_id)
+                    {
                         peer.last_seen = current_timestamp();
                     }
                 }
@@ -5308,6 +5687,7 @@ fn handle_outgoing_connection(
                     &message_sender,
                     &config,
                     &peer_address,
+                    peer_entry_guard.session_id,
                     message,
                 ) {
                     break;
@@ -5330,15 +5710,25 @@ fn handle_messages(
     peer_state_cache: PeerStateCacheArc,
     discovered_dial_targets: DialTargetsArc,
     dial_registry: DialRegistryArc,
-    receiver: Arc<Mutex<mpsc::Receiver<(String, NetworkMessage)>>>,
-    message_sender: mpsc::Sender<(String, NetworkMessage)>,
+    receiver: Arc<Mutex<mpsc::Receiver<PeerMessage>>>,
+    message_sender: mpsc::Sender<PeerMessage>,
     config: NodeConfig,
 ) {
     loop {
         let receiver = receiver.lock().unwrap();
         match receiver.recv() {
-            Ok((peer_address, message)) => {
+            Ok((peer_address, session_id, message)) => {
                 drop(receiver); // Release lock before processing
+
+                if !peer_session_is_current(&peer_address, session_id) {
+                    debug!(
+                        "p2p",
+                        "Discarding queued message from replaced peer session",
+                        "peer" => peer_address.clone(),
+                        "session_id" => session_id
+                    );
+                    continue;
+                }
 
                 match message {
                     NetworkMessage::Handshake {
@@ -5399,7 +5789,12 @@ fn handle_messages(
                                 "peer" => peer_address.clone()
                             );
                             let mut peers = connected_peers.lock().unwrap();
-                            disconnect_peer_entry(&peer_state_cache, &mut peers, &peer_address);
+                            disconnect_peer_entry_for_session(
+                                &peer_state_cache,
+                                &mut peers,
+                                &peer_address,
+                                session_id,
+                            );
                             continue;
                         }
 
@@ -5411,7 +5806,12 @@ fn handle_messages(
                                 "node_id" => node_id.clone()
                             );
                             let mut peers = connected_peers.lock().unwrap();
-                            disconnect_peer_entry(&peer_state_cache, &mut peers, &peer_address);
+                            disconnect_peer_entry_for_session(
+                                &peer_state_cache,
+                                &mut peers,
+                                &peer_address,
+                                session_id,
+                            );
                             continue;
                         }
 
@@ -5436,7 +5836,12 @@ fn handle_messages(
                                 "local_network_magic_bytes" => canonical_network_magic_bytes()
                             );
                             let mut peers = connected_peers.lock().unwrap();
-                            disconnect_peer_entry(&peer_state_cache, &mut peers, &peer_address);
+                            disconnect_peer_entry_for_session(
+                                &peer_state_cache,
+                                &mut peers,
+                                &peer_address,
+                                session_id,
+                            );
                             continue;
                         }
 
@@ -5451,7 +5856,12 @@ fn handle_messages(
                                 "reason" => reason
                             );
                             let mut peers = connected_peers.lock().unwrap();
-                            disconnect_peer_entry(&peer_state_cache, &mut peers, &peer_address);
+                            disconnect_peer_entry_for_session(
+                                &peer_state_cache,
+                                &mut peers,
+                                &peer_address,
+                                session_id,
+                            );
                             continue;
                         }
 
@@ -5469,7 +5879,12 @@ fn handle_messages(
                                 "reserved_eip155" => reserved_eip155.unwrap_or_default()
                             );
                             let mut peers = connected_peers.lock().unwrap();
-                            disconnect_peer_entry(&peer_state_cache, &mut peers, &peer_address);
+                            disconnect_peer_entry_for_session(
+                                &peer_state_cache,
+                                &mut peers,
+                                &peer_address,
+                                session_id,
+                            );
                             continue;
                         }
 
@@ -5525,8 +5940,13 @@ fn handle_messages(
                         );
 
                         // Update peer info and deduplicate by stable peer identity.
+                        let mut deferred_status_request = None;
+                        let mut skip_handshake_followup = false;
                         {
                             let mut peers = connected_peers.lock().unwrap();
+                            if !peer_session_is_current(&peer_address, session_id) {
+                                continue;
+                            }
 
                             // Prefer validator identity when present; fall back to node_id for
                             // non-validator/discovery peers.
@@ -5557,7 +5977,11 @@ fn handle_messages(
                                         });
 
                                     if direct_vote_session {
-                                        if let Some(peer) = peers.get_mut(&peer_address) {
+                                        if let Some(peer) = peer_for_session_mut(
+                                            &mut peers,
+                                            &peer_address,
+                                            session_id,
+                                        ) {
                                             peer.node_id = Some(node_id.clone());
                                             peer.version = Some(version.clone());
                                             peer.capabilities = capabilities.clone();
@@ -5578,193 +6002,205 @@ fn handle_messages(
                                             "direct_vote_peer" => peer_address.clone(),
                                             "validator_address" => announced_validator_address.clone().unwrap_or_default()
                                         );
-                                        continue;
+                                        skip_handshake_followup = true;
                                     }
 
-                                    if let (
-                                        Some((
-                                            existing_direction,
-                                            existing_connected_at,
-                                            existing_public_address,
-                                        )),
-                                        Some((new_direction, new_connected_at)),
-                                    ) = (existing_metadata, new_metadata)
-                                    {
-                                        let existing_needs_status_recovery = peers
-                                            .get(&existing_key)
-                                            .map(|peer| {
-                                                peer_has_validator_identity(peer)
-                                                    && !peer_has_remote_status(peer)
-                                            })
-                                            .unwrap_or(false);
-                                        let duplicate_resolution = if existing_needs_status_recovery
-                                        {
-                                            DuplicateResolution::ReplaceExisting
-                                        } else {
-                                            resolve_duplicate_connection(
-                                                &local_identity,
-                                                &peer_identity,
+                                    if should_resolve_duplicate_session(direct_vote_session) {
+                                        if let (
+                                            Some((
                                                 existing_direction,
                                                 existing_connected_at,
-                                                new_direction,
-                                                new_connected_at,
-                                            )
-                                        };
-
-                                        match duplicate_resolution {
-                                            DuplicateResolution::KeepExisting => {
-                                                if let Some(peer) = peers.get_mut(&existing_key) {
-                                                    peer.node_id = Some(node_id.clone());
-                                                    peer.version = Some(version.clone());
-                                                    peer.capabilities = capabilities.clone();
-                                                    if normalized_public_address
-                                                        .as_deref()
-                                                        .map(str::trim)
-                                                        .filter(|value| !value.is_empty())
-                                                        .is_some()
-                                                    {
-                                                        peer.public_address =
-                                                            normalized_public_address.clone();
-                                                    }
-                                                    if announced_validator_address.is_some() {
-                                                        peer.validator_address =
-                                                            announced_validator_address.clone();
-                                                    }
-                                                    if !genesis_hash.trim().is_empty() {
-                                                        peer.genesis_hash = genesis_hash.clone();
-                                                    }
-                                                    peer.active_validator_set_hash =
-                                                        active_validator_set_hash.clone();
-                                                    hydrate_peer_from_cache(
-                                                        &peer_state_cache,
+                                                existing_public_address,
+                                            )),
+                                            Some((new_direction, new_connected_at)),
+                                        ) = (existing_metadata, new_metadata)
+                                        {
+                                            let existing_needs_status_recovery = peers
+                                                .get(&existing_key)
+                                                .map(|peer| {
+                                                    peer_has_validator_identity(peer)
+                                                        && !peer_has_remote_status(peer)
+                                                })
+                                                .unwrap_or(false);
+                                            let duplicate_resolution =
+                                                if existing_needs_status_recovery {
+                                                    DuplicateResolution::ReplaceExisting
+                                                } else {
+                                                    resolve_duplicate_connection(
+                                                        &local_identity,
                                                         &peer_identity,
-                                                        peer,
+                                                        existing_direction,
+                                                        existing_connected_at,
+                                                        new_direction,
+                                                        new_connected_at,
+                                                    )
+                                                };
+
+                                            match duplicate_resolution {
+                                                DuplicateResolution::KeepExisting => {
+                                                    if let Some(peer) = peers.get_mut(&existing_key)
+                                                    {
+                                                        peer.node_id = Some(node_id.clone());
+                                                        peer.version = Some(version.clone());
+                                                        peer.capabilities = capabilities.clone();
+                                                        if normalized_public_address
+                                                            .as_deref()
+                                                            .map(str::trim)
+                                                            .filter(|value| !value.is_empty())
+                                                            .is_some()
+                                                        {
+                                                            peer.public_address =
+                                                                normalized_public_address.clone();
+                                                        }
+                                                        if announced_validator_address.is_some() {
+                                                            peer.validator_address =
+                                                                announced_validator_address.clone();
+                                                        }
+                                                        if !genesis_hash.trim().is_empty() {
+                                                            peer.genesis_hash =
+                                                                genesis_hash.clone();
+                                                        }
+                                                        peer.active_validator_set_hash =
+                                                            active_validator_set_hash.clone();
+                                                        hydrate_peer_from_cache(
+                                                            &peer_state_cache,
+                                                            &peer_identity,
+                                                            peer,
+                                                        );
+                                                        cache_peer_state(&peer_state_cache, peer);
+                                                    }
+                                                    propagate_identity_to_matching_peers(
+                                                        &mut peers,
+                                                        &peer_state_cache,
+                                                        &existing_key,
+                                                        &node_id,
+                                                        &version,
+                                                        &capabilities,
+                                                        normalized_public_address.as_deref(),
+                                                        announced_validator_address.as_deref(),
+                                                        &genesis_hash,
                                                     );
-                                                    cache_peer_state(&peer_state_cache, peer);
+                                                    deferred_status_request =
+                                                        current_peer_session_id(&existing_key).map(
+                                                            |session_id| {
+                                                                (existing_key.clone(), session_id)
+                                                            },
+                                                        );
+                                                    warn!(
+                                                        "p2p",
+                                                        "Duplicate peer session detected; keeping stable connection",
+                                                        "node_id" => node_id.clone(),
+                                                        "kept_address" => existing_key.clone(),
+                                                        "kept_direction" => format!("{:?}", existing_direction),
+                                                        "dropped_address" => peer_address.clone(),
+                                                        "dropped_direction" => format!("{:?}", new_direction),
+                                                        "preferred_direction" => format!(
+                                                            "{:?}",
+                                                            preferred_connection_direction(
+                                                                &local_identity,
+                                                                &peer_identity
+                                                            )
+                                                        ),
+                                                        "kept_public_address" => existing_public_address.unwrap_or_default()
+                                                    );
+                                                    disconnect_peer_entry(
+                                                        &peer_state_cache,
+                                                        &mut peers,
+                                                        &peer_address,
+                                                    );
+                                                    skip_handshake_followup = true;
                                                 }
-                                                propagate_identity_to_matching_peers(
-                                                    &mut peers,
-                                                    &peer_state_cache,
-                                                    &existing_key,
-                                                    &node_id,
-                                                    &version,
-                                                    &capabilities,
-                                                    normalized_public_address.as_deref(),
-                                                    announced_validator_address.as_deref(),
-                                                    &genesis_hash,
-                                                );
-                                                request_status_from_connected_peer(
-                                                    &mut peers,
-                                                    &existing_key,
-                                                );
-                                                warn!(
-                                                    "p2p",
-                                                    "Duplicate peer session detected; keeping stable connection",
-                                                    "node_id" => node_id.clone(),
-                                                    "kept_address" => existing_key.clone(),
-                                                    "kept_direction" => format!("{:?}", existing_direction),
-                                                    "dropped_address" => peer_address.clone(),
-                                                    "dropped_direction" => format!("{:?}", new_direction),
-                                                    "preferred_direction" => format!(
-                                                        "{:?}",
-                                                        preferred_connection_direction(
-                                                            &local_identity,
-                                                            &peer_identity
-                                                        )
-                                                    ),
-                                                    "kept_public_address" => existing_public_address.unwrap_or_default()
-                                                );
-                                                disconnect_peer_entry(
-                                                    &peer_state_cache,
-                                                    &mut peers,
-                                                    &peer_address,
-                                                );
-                                                continue;
-                                            }
-                                            DuplicateResolution::ReplaceExisting => {
-                                                if let (Some(existing_state), Some(peer)) = (
-                                                    existing_cached_state.as_ref(),
-                                                    peers.get_mut(&peer_address),
-                                                ) {
-                                                    let existing_peer = PeerConnection {
-                                                        address: String::new(),
-                                                        direction: ConnectionDirection::Outgoing,
-                                                        public_address: existing_state
-                                                            .public_address
-                                                            .clone(),
-                                                        validator_address: existing_state
-                                                            .validator_address
-                                                            .clone(),
-                                                        connected_at: existing_state.connected_at,
-                                                        last_seen: existing_state.last_seen,
-                                                        blocks_sent: 0,
-                                                        blocks_received: 0,
-                                                        txs_sent: 0,
-                                                        txs_received: 0,
-                                                        stream: None,
-                                                        node_id: existing_state.node_id.clone(),
-                                                        version: existing_state.version.clone(),
-                                                        capabilities: existing_state
-                                                            .capabilities
-                                                            .clone(),
-                                                        last_known_height: existing_state
-                                                            .last_known_height,
-                                                        best_block_hash: existing_state
-                                                            .best_block_hash
-                                                            .clone(),
-                                                        genesis_hash: existing_state
-                                                            .genesis_hash
-                                                            .clone(),
-                                                        status_received_at: existing_state
-                                                            .status_received_at,
-                                                        status_reported_at: existing_state
-                                                            .status_reported_at,
-                                                        status_validator_address: existing_state
-                                                            .status_validator_address
-                                                            .clone(),
-                                                        status_source_session_id: existing_state
-                                                            .status_source_session_id
-                                                            .clone(),
-                                                        active_validator_set_hash: existing_state
-                                                            .active_validator_set_hash
-                                                            .clone(),
-                                                        quarantined: existing_state.quarantined,
-                                                        consensus_duties_disabled: existing_state
-                                                            .consensus_duties_disabled,
-                                                        recovery_state: existing_state
-                                                            .recovery_state
-                                                            .clone(),
-                                                    };
-                                                    merge_peer_state_from_existing(
-                                                        &existing_peer,
-                                                        peer,
+                                                DuplicateResolution::ReplaceExisting => {
+                                                    if let (Some(existing_state), Some(peer)) = (
+                                                        existing_cached_state.as_ref(),
+                                                        peers.get_mut(&peer_address),
+                                                    ) {
+                                                        let existing_peer = PeerConnection {
+                                                            address: String::new(),
+                                                            direction:
+                                                                ConnectionDirection::Outgoing,
+                                                            public_address: existing_state
+                                                                .public_address
+                                                                .clone(),
+                                                            validator_address: existing_state
+                                                                .validator_address
+                                                                .clone(),
+                                                            connected_at: existing_state
+                                                                .connected_at,
+                                                            last_seen: existing_state.last_seen,
+                                                            blocks_sent: 0,
+                                                            blocks_received: 0,
+                                                            txs_sent: 0,
+                                                            txs_received: 0,
+                                                            stream: None,
+                                                            node_id: existing_state.node_id.clone(),
+                                                            version: existing_state.version.clone(),
+                                                            capabilities: existing_state
+                                                                .capabilities
+                                                                .clone(),
+                                                            last_known_height: existing_state
+                                                                .last_known_height,
+                                                            best_block_hash: existing_state
+                                                                .best_block_hash
+                                                                .clone(),
+                                                            genesis_hash: existing_state
+                                                                .genesis_hash
+                                                                .clone(),
+                                                            status_received_at: existing_state
+                                                                .status_received_at,
+                                                            status_reported_at: existing_state
+                                                                .status_reported_at,
+                                                            status_validator_address:
+                                                                existing_state
+                                                                    .status_validator_address
+                                                                    .clone(),
+                                                            status_source_session_id:
+                                                                existing_state
+                                                                    .status_source_session_id
+                                                                    .clone(),
+                                                            active_validator_set_hash:
+                                                                existing_state
+                                                                    .active_validator_set_hash
+                                                                    .clone(),
+                                                            quarantined: existing_state.quarantined,
+                                                            consensus_duties_disabled:
+                                                                existing_state
+                                                                    .consensus_duties_disabled,
+                                                            recovery_state: existing_state
+                                                                .recovery_state
+                                                                .clone(),
+                                                        };
+                                                        merge_peer_state_from_existing(
+                                                            &existing_peer,
+                                                            peer,
+                                                        );
+                                                    }
+                                                    if let Some(peer) = peers.get(&existing_key) {
+                                                        cache_peer_state(&peer_state_cache, peer);
+                                                    }
+                                                    warn!(
+                                                        "p2p",
+                                                        "Duplicate peer session detected; replacing non-preferred connection",
+                                                        "node_id" => node_id.clone(),
+                                                        "old_address" => existing_key.clone(),
+                                                        "old_direction" => format!("{:?}", existing_direction),
+                                                        "new_address" => peer_address.clone(),
+                                                        "new_direction" => format!("{:?}", new_direction),
+                                                        "preferred_direction" => format!(
+                                                            "{:?}",
+                                                            preferred_connection_direction(
+                                                                &local_identity,
+                                                                &peer_identity
+                                                            )
+                                                        ),
+                                                        "status_recovery_replacement" => existing_needs_status_recovery
+                                                    );
+                                                    disconnect_peer_entry(
+                                                        &peer_state_cache,
+                                                        &mut peers,
+                                                        &existing_key,
                                                     );
                                                 }
-                                                if let Some(peer) = peers.get(&existing_key) {
-                                                    cache_peer_state(&peer_state_cache, peer);
-                                                }
-                                                warn!(
-                                                    "p2p",
-                                                    "Duplicate peer session detected; replacing non-preferred connection",
-                                                    "node_id" => node_id.clone(),
-                                                    "old_address" => existing_key.clone(),
-                                                    "old_direction" => format!("{:?}", existing_direction),
-                                                    "new_address" => peer_address.clone(),
-                                                    "new_direction" => format!("{:?}", new_direction),
-                                                    "preferred_direction" => format!(
-                                                        "{:?}",
-                                                        preferred_connection_direction(
-                                                            &local_identity,
-                                                            &peer_identity
-                                                        )
-                                                    ),
-                                                    "status_recovery_replacement" => existing_needs_status_recovery
-                                                );
-                                                disconnect_peer_entry(
-                                                    &peer_state_cache,
-                                                    &mut peers,
-                                                    &existing_key,
-                                                );
                                             }
                                         }
                                     }
@@ -5772,7 +6208,9 @@ fn handle_messages(
                             }
 
                             // Update peer info
-                            if let Some(peer) = peers.get_mut(&peer_address) {
+                            if let Some(peer) =
+                                peer_for_session_mut(&mut peers, &peer_address, session_id)
+                            {
                                 peer.node_id = Some(node_id.clone());
                                 peer.version = Some(version.clone());
                                 peer.capabilities = capabilities.clone();
@@ -5796,7 +6234,22 @@ fn handle_messages(
                                 announced_validator_address.as_deref(),
                                 &genesis_hash,
                             );
-                            request_status_from_connected_peer(&mut peers, &peer_address);
+                            if !skip_handshake_followup {
+                                deferred_status_request = current_peer_session_id(&peer_address)
+                                    .map(|session_id| (peer_address.clone(), session_id));
+                            }
+                        }
+
+                        if let Some((status_peer, status_session_id)) = deferred_status_request {
+                            request_status_from_connected_peer(
+                                &connected_peers,
+                                &peer_state_cache,
+                                &status_peer,
+                                status_session_id,
+                            );
+                        }
+                        if skip_handshake_followup {
+                            continue;
                         }
 
                         // Candidate validators are discovered here, but funding and consensus
@@ -5871,6 +6324,7 @@ fn handle_messages(
                             &peer_state_cache,
                             &config,
                             &peer_address,
+                            session_id,
                             block_data,
                             quorum_certificate,
                         );
@@ -5882,15 +6336,21 @@ fn handle_messages(
                     } => handle_vote_request_message(
                         &blockchain,
                         &connected_peers,
+                        &peer_state_cache,
                         &config,
                         &peer_address,
+                        session_id,
                         block_data,
                         epoch_number,
                         round_number,
                     ),
-                    NetworkMessage::Vote { vote } => {
-                        handle_vote_message(&connected_peers, &config, &peer_address, vote)
-                    }
+                    NetworkMessage::Vote { vote } => handle_vote_message(
+                        &connected_peers,
+                        &config,
+                        &peer_address,
+                        session_id,
+                        vote,
+                    ),
                     NetworkMessage::Transaction { transaction_data } => {
                         if config.node.bootstrap_only {
                             debug!(
@@ -5907,7 +6367,9 @@ fn handle_messages(
                         // Update peer stats
                         {
                             let mut peers = connected_peers.lock().unwrap();
-                            if let Some(peer) = peers.get_mut(&peer_address) {
+                            if let Some(peer) =
+                                peer_for_session_mut(&mut peers, &peer_address, session_id)
+                            {
                                 peer.txs_received += 1;
                             }
                         }
@@ -5959,26 +6421,42 @@ fn handle_messages(
 
                         if should_forward {
                             let message = NetworkMessage::Transaction { transaction_data };
-                            let mut peers = connected_peers.lock().unwrap();
                             let mut forwarded_peers = 0u64;
 
-                            for (address, peer) in peers.iter_mut() {
-                                if address == &peer_address {
-                                    continue;
-                                }
-
-                                if let Some(ref mut stream) = peer.stream {
-                                    if let Err(error) = send_message(stream, &message) {
+                            let targets = peer_session_targets(&connected_peers)
+                                .into_iter()
+                                .filter(|(address, _)| address != &peer_address)
+                                .collect::<Vec<_>>();
+                            for (address, target_session_id) in targets {
+                                match send_peer_message_for_session(
+                                    &connected_peers,
+                                    &peer_state_cache,
+                                    &address,
+                                    target_session_id,
+                                    &message,
+                                    Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                                    "transaction-forward",
+                                ) {
+                                    Ok(true) => {
+                                        let mut peers = connected_peers.lock().unwrap();
+                                        if let Some(peer) = peer_for_session_mut(
+                                            &mut peers,
+                                            &address,
+                                            target_session_id,
+                                        ) {
+                                            peer.txs_sent += 1;
+                                            forwarded_peers += 1;
+                                        }
+                                    }
+                                    Ok(false) => {}
+                                    Err(error) => {
                                         warn!(
                                             "p2p",
                                             "Failed to forward transaction",
-                                            "peer" => address.clone(),
+                                            "peer" => address,
                                             "tx_hash" => tx_hash.clone(),
-                                            "error" => error.to_string()
+                                            "error" => error
                                         );
-                                    } else {
-                                        peer.txs_sent += 1;
-                                        forwarded_peers += 1;
                                     }
                                 }
                             }
@@ -5999,6 +6477,7 @@ fn handle_messages(
                             &peer_state_cache,
                             &config,
                             &peer_address,
+                            session_id,
                             from_height,
                             count,
                         );
@@ -6006,13 +6485,16 @@ fn handle_messages(
                     NetworkMessage::GetStatus => {
                         let status = build_local_status_message(&blockchain, &config);
 
-                        let mut peers = connected_peers.lock().unwrap();
-                        if let Some(peer) = peers.get_mut(&peer_address) {
-                            if let Some(ref mut stream) = peer.stream {
-                                if let Err(e) = send_message(stream, &status) {
-                                    warn!("p2p", "Failed to send status", "peer" => peer_address.clone(), "error" => e.to_string());
-                                }
-                            }
+                        if let Err(error) = send_peer_message_for_session(
+                            &connected_peers,
+                            &peer_state_cache,
+                            &peer_address,
+                            session_id,
+                            &status,
+                            Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                            "status-response",
+                        ) {
+                            warn!("p2p", "Failed to send status", "peer" => peer_address.clone(), "error" => error);
                         }
                     }
                     NetworkMessage::Status {
@@ -6033,6 +6515,7 @@ fn handle_messages(
                             &peer_state_cache,
                             &config,
                             &peer_address,
+                            session_id,
                             block_height,
                             &best_block_hash,
                             &genesis_hash,
@@ -6053,11 +6536,16 @@ fn handle_messages(
                             let response = NetworkMessage::BlockHeaders {
                                 headers: Vec::new(),
                             };
-                            let mut peers = connected_peers.lock().unwrap();
-                            if let Some(peer) = peers.get_mut(&peer_address) {
-                                if let Some(ref mut stream) = peer.stream {
-                                    let _ = send_message(stream, &response);
-                                }
+                            if let Err(error) = send_peer_message_for_session(
+                                &connected_peers,
+                                &peer_state_cache,
+                                &peer_address,
+                                session_id,
+                                &response,
+                                Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                                "bootstrap-block-headers",
+                            ) {
+                                warn!("p2p", "Failed to send bootstrap-only block headers", "peer" => peer_address.clone(), "error" => error);
                             }
                             continue;
                         }
@@ -6073,11 +6561,16 @@ fn handle_messages(
                                 .collect::<Vec<_>>()
                         };
                         let response = NetworkMessage::BlockHeaders { headers };
-                        let mut peers = connected_peers.lock().unwrap();
-                        if let Some(peer) = peers.get_mut(&peer_address) {
-                            if let Some(ref mut stream) = peer.stream {
-                                let _ = send_message(stream, &response);
-                            }
+                        if let Err(error) = send_peer_message_for_session(
+                            &connected_peers,
+                            &peer_state_cache,
+                            &peer_address,
+                            session_id,
+                            &response,
+                            Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                            "block-headers",
+                        ) {
+                            warn!("p2p", "Failed to send block headers", "peer" => peer_address.clone(), "error" => error);
                         }
                     }
                     NetworkMessage::BlockHeaders { headers } => {
@@ -6099,11 +6592,16 @@ fn handle_messages(
                                 blocks: Vec::new(),
                                 quorum_certificates: Vec::new(),
                             };
-                            let mut peers = connected_peers.lock().unwrap();
-                            if let Some(peer) = peers.get_mut(&peer_address) {
-                                if let Some(ref mut stream) = peer.stream {
-                                    let _ = send_message(stream, &response);
-                                }
+                            if let Err(error) = send_peer_message_for_session(
+                                &connected_peers,
+                                &peer_state_cache,
+                                &peer_address,
+                                session_id,
+                                &response,
+                                Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                                "bootstrap-block-bodies",
+                            ) {
+                                warn!("p2p", "Failed to send bootstrap-only block bodies", "peer" => peer_address.clone(), "error" => error);
                             }
                             continue;
                         }
@@ -6130,11 +6628,16 @@ fn handle_messages(
                             blocks,
                             quorum_certificates,
                         };
-                        let mut peers = connected_peers.lock().unwrap();
-                        if let Some(peer) = peers.get_mut(&peer_address) {
-                            if let Some(ref mut stream) = peer.stream {
-                                let _ = send_message(stream, &response);
-                            }
+                        if let Err(error) = send_peer_message_for_session(
+                            &connected_peers,
+                            &peer_state_cache,
+                            &peer_address,
+                            session_id,
+                            &response,
+                            Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                            "block-bodies",
+                        ) {
+                            warn!("p2p", "Failed to send block bodies", "peer" => peer_address.clone(), "error" => error);
                         }
                     }
                     NetworkMessage::BlockBodies {
@@ -6167,6 +6670,7 @@ fn handle_messages(
                             &peer_state_cache,
                             &config,
                             &peer_address,
+                            session_id,
                             blocks,
                             quorum_certificates,
                         );
@@ -6184,15 +6688,16 @@ fn handle_messages(
                         };
                         let response = NetworkMessage::Peers { peer_addresses };
 
-                        {
-                            let mut peers = connected_peers.lock().unwrap();
-                            if let Some(peer) = peers.get_mut(&peer_address) {
-                                if let Some(ref mut stream) = peer.stream {
-                                    if let Err(e) = send_message(stream, &response) {
-                                        warn!("p2p", "Failed to send peers list", "peer" => peer_address.clone(), "error" => e.to_string());
-                                    }
-                                }
-                            }
+                        if let Err(error) = send_peer_message_for_session(
+                            &connected_peers,
+                            &peer_state_cache,
+                            &peer_address,
+                            session_id,
+                            &response,
+                            Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                            "peers-response",
+                        ) {
+                            warn!("p2p", "Failed to send peers list", "peer" => peer_address.clone(), "error" => error);
                         }
                     }
                     NetworkMessage::Peers { peer_addresses } => {
@@ -6208,6 +6713,9 @@ fn handle_messages(
                         // Attempt to dial new peers (best-effort).
                         let max_peers = config.network.max_peers as usize;
                         for addr in peer_addresses {
+                            if !peer_session_is_current(&peer_address, session_id) {
+                                break;
+                            }
                             let Some(addr) = normalize_peer_target(&config, &addr) else {
                                 debug!(
                                     "p2p",
@@ -6228,7 +6736,7 @@ fn handle_messages(
                                     connected_peer_key_for_address(&peers, &addr).is_none()
                                 }
                             };
-                            if should_dial {
+                            if should_dial && peer_session_is_current(&peer_address, session_id) {
                                 info!(
                                     "p2p",
                                     "Dialing discovered peer",
@@ -6243,6 +6751,7 @@ fn handle_messages(
                                     Arc::clone(&dial_registry),
                                     message_sender.clone(),
                                     config.clone(),
+                                    Some((peer_address.clone(), session_id)),
                                 );
                             }
                         }
@@ -6250,17 +6759,17 @@ fn handle_messages(
                     NetworkMessage::Ping => {
                         debug!("p2p", "Ping received", "peer" => peer_address.clone());
 
-                        // Send pong
-                        {
-                            let mut peers = connected_peers.lock().unwrap();
-                            if let Some(peer) = peers.get_mut(&peer_address) {
-                                if let Some(ref mut stream) = peer.stream {
-                                    let pong = NetworkMessage::Pong;
-                                    if let Err(e) = send_message(stream, &pong) {
-                                        warn!("p2p", "Failed to send pong", "peer" => peer_address.clone(), "error" => e.to_string());
-                                    }
-                                }
-                            }
+                        let pong = NetworkMessage::Pong;
+                        if let Err(error) = send_peer_message_for_session(
+                            &connected_peers,
+                            &peer_state_cache,
+                            &peer_address,
+                            session_id,
+                            &pong,
+                            Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                            "pong-response",
+                        ) {
+                            warn!("p2p", "Failed to send pong", "peer" => peer_address.clone(), "error" => error);
                         }
                     }
                     NetworkMessage::Pong => {
@@ -6592,10 +7101,26 @@ fn local_validator_vpn_peer_scope(config: &NodeConfig) -> bool {
         && !config.network.validator_vpn_transports.is_empty()
 }
 
+fn local_node_uses_relayer_only_topology(config: &NodeConfig) -> bool {
+    !local_node_runs_validator_consensus(config)
+        && !local_p2p_role(config).eq_ignore_ascii_case("relayer")
+}
+
+fn is_public_relayer_dial_address(value: &str) -> bool {
+    let Some(normalized) = parse_bootnode_dial_address(value) else {
+        return false;
+    };
+    PUBLIC_RELAYER_DIAL_ADDRESSES
+        .iter()
+        .any(|relay| *relay == normalized)
+}
+
 fn peer_target_allowed_by_local_scope(config: &NodeConfig, value: &str) -> bool {
     if local_validator_vpn_peer_scope(config) {
         normalize_validator_address_target(value).is_some()
             || is_validator_vpn_relayer_dial_address(value)
+    } else if local_node_uses_relayer_only_topology(config) {
+        is_public_relayer_dial_address(value)
     } else {
         normalize_validator_address_target(value).is_some()
             || is_assigned_or_validator_vpn_dial_address(value)
@@ -6663,7 +7188,14 @@ fn verify_network_commit_certificate(
     qc: Option<&QuorumCertificate>,
 ) -> Result<QuorumCertificate, String> {
     let validator_manager = commit_verifier_validator_manager();
+    verify_network_commit_certificate_with_manager(block, qc, &validator_manager)
+}
 
+fn verify_network_commit_certificate_with_manager(
+    block: &Block,
+    qc: Option<&QuorumCertificate>,
+    validator_manager: &Arc<ValidatorManager>,
+) -> Result<QuorumCertificate, String> {
     if let Err(error) = verify_network_block(block) {
         return Err(format!("invalid Aegis PQC proposer signature: {error}"));
     }
@@ -6692,6 +7224,84 @@ fn verify_network_commit_certificate(
         &validator_manager,
     )?;
     Ok(qc)
+}
+
+fn verify_batch_with_bounded_parallelism<T, F>(
+    items: &[T],
+    max_workers: usize,
+    verify: F,
+) -> Vec<Result<(), String>>
+where
+    T: Sync,
+    F: Fn(&T) -> Result<(), String> + Sync,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+
+    let worker_count = max_workers.max(1).min(items.len());
+    let next_index = AtomicUsize::new(0);
+    let spawn_error = Mutex::new(None::<String>);
+    let results = Mutex::new(
+        (0..items.len())
+            .map(|_| None)
+            .collect::<Vec<Option<Result<(), String>>>>(),
+    );
+
+    thread::scope(|scope| {
+        for worker_index in 0..worker_count {
+            let spawned = thread::Builder::new()
+                .name(format!("block-batch-verify-{worker_index}"))
+                .spawn_scoped(scope, || {
+                    let _ = catch_unwind(AssertUnwindSafe(|| loop {
+                        let index = next_index.fetch_add(1, Ordering::Relaxed);
+                        if index >= items.len() {
+                            break;
+                        }
+                        let result = catch_unwind(AssertUnwindSafe(|| verify(&items[index])))
+                            .unwrap_or_else(|_| {
+                                Err(format!("batch verifier panicked for item {index}"))
+                            });
+                        let mut results = match results.lock() {
+                            Ok(results) => results,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                        results[index] = Some(result);
+                    }));
+                });
+            if let Err(error) = spawned {
+                let mut spawn_error = match spawn_error.lock() {
+                    Ok(spawn_error) => spawn_error,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                *spawn_error = Some(format!("failed to spawn batch verifier worker: {error}"));
+            }
+        }
+    });
+
+    let spawn_error = match spawn_error.into_inner() {
+        Ok(spawn_error) => spawn_error,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(error) = spawn_error {
+        return (0..items.len()).map(|_| Err(error.clone())).collect();
+    }
+
+    let results = match results.into_inner() {
+        Ok(results) => results,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    results
+        .into_iter()
+        .enumerate()
+        .map(|(index, result)| {
+            result.unwrap_or_else(|| {
+                Err(format!(
+                    "batch verifier worker terminated before item {index} completed"
+                ))
+            })
+        })
+        .collect()
 }
 
 fn commit_verifier_validator_manager() -> Arc<ValidatorManager> {
@@ -7079,11 +7689,34 @@ fn apply_block_batch(
             .collect::<HashSet<_>>()
     };
 
-    for block in blocks
+    let blocks_to_verify = blocks
         .iter()
         .filter(|block| !locally_matching_prefix.contains(&block.hash))
-    {
-        if let Err(error) = verify_network_commit_certificate(block, qc_by_hash.get(&block.hash)) {
+        .collect::<Vec<_>>();
+    let verification_results = if blocks_to_verify.is_empty() {
+        Vec::new()
+    } else {
+        let commit_verifier = commit_verifier_validator_manager();
+        verify_batch_with_bounded_parallelism(
+            &blocks_to_verify,
+            thread::available_parallelism()
+                .map(|parallelism| parallelism.get())
+                .unwrap_or(1)
+                .min(MAX_BLOCK_BATCH_VERIFY_WORKERS),
+            |block| {
+                let block = *block;
+                verify_network_commit_certificate_with_manager(
+                    block,
+                    qc_by_hash.get(&block.hash),
+                    &commit_verifier,
+                )
+                .map(|_| ())
+            },
+        )
+    };
+
+    for (block, verification_result) in blocks_to_verify.iter().zip(verification_results) {
+        if let Err(error) = verification_result {
             warn!(
                 "p2p",
                 "Rejecting block batch without valid Aegis PQC quorum certificate",
@@ -7488,11 +8121,17 @@ fn dial_peer_async(
     connected_peers: PeersArc,
     peer_state_cache: PeerStateCacheArc,
     dial_registry: DialRegistryArc,
-    message_sender: mpsc::Sender<(String, NetworkMessage)>,
+    message_sender: mpsc::Sender<PeerMessage>,
     config: NodeConfig,
+    source_session: Option<(String, u64)>,
 ) -> Result<(), ()> {
     let peer_address = normalize_peer_target(&config, &peer_address)
         .unwrap_or_else(|| peer_address.trim().to_string());
+    if let Some((source_peer, source_session_id)) = source_session.as_ref() {
+        if !peer_session_is_current(source_peer, *source_session_id) {
+            return Ok(());
+        }
+    }
     let Some(transport_address) = resolve_peer_transport_address(&config, &peer_address) else {
         debug!(
             "p2p",
@@ -7514,6 +8153,12 @@ fn dial_peer_async(
     let cleanup_address_for_thread = cleanup_address.clone();
     let dial_registry_for_thread = Arc::clone(&dial_registry);
     let spawned = spawn_named_thread("p2p-discovery-dial", move || {
+        if let Some((source_peer, source_session_id)) = source_session.as_ref() {
+            if !peer_session_is_current(source_peer, *source_session_id) {
+                release_outbound_dial(&dial_registry_for_thread, &cleanup_address_for_thread);
+                return;
+            }
+        }
         match dial_with_timeout(&transport_address, std::time::Duration::from_secs(5)) {
             Ok(stream) => {
                 if let Err(e) = handle_outgoing_connection(
@@ -7557,32 +8202,36 @@ mod tests {
         bypasses_shared_message_queue, cache_peer_state, cache_pending_block,
         canonical_genesis_hash, canonical_validator_public_address, chain_has_block_sync_overlap,
         chain_snapshot_clone_allowed, collect_known_peer_addresses,
-        configured_public_address_for_validator, configured_validator_p2p_dials,
-        configured_validator_public_address_map, connected_peer_key_for_address,
-        connected_validator_participants, current_bootstrap_refresh_interval, current_timestamp,
-        dial_with_timeout, disconnect_peer_after_poisoned_write, dispatch_peer_message,
+        configured_public_address_for_validator, configured_seed_server_dial_targets,
+        configured_validator_p2p_dials, configured_validator_public_address_map,
+        connected_peer_key_for_address, connected_validator_participants,
+        current_bootstrap_refresh_interval, current_timestamp, dial_with_timeout,
+        disconnect_peer_after_poisoned_write, disconnect_peer_entry, dispatch_peer_message,
         ensure_peer_status_allows_chain_data, handle_status_message, hydrate_peer_from_cache,
-        local_node_runs_validator_consensus, local_peer_identity, merge_peer_state_from_existing,
-        parse_bootnode_dial_address, peer_has_identifying_metadata, peer_identity_key,
-        peer_is_eligible_block_sync_source, peer_matches_address,
-        peer_readiness_exclusion_reason_at, pending_incoming_connections_from_host,
-        preferred_connection_direction, receive_message,
+        insert_seed_server_target, local_node_runs_validator_consensus, local_peer_identity,
+        merge_peer_state_from_existing, parse_bootnode_dial_address, peer_has_identifying_metadata,
+        peer_identity_key, peer_is_eligible_block_sync_source, peer_matches_address,
+        peer_readiness_exclusion_reason_at, peer_write_gate,
+        pending_incoming_connections_from_host, preferred_connection_direction, receive_message,
         recover_peer_validator_address_for_vote_target, resolve_bootstrap_dial_targets,
         resolve_duplicate_connection, select_block_sync_response_blocks,
         should_canonicalize_validator_public_address,
         should_disconnect_for_status_genesis_mismatch, should_prune_stale_peer,
-        should_request_missing_blocks, status_ready_validator_addresses,
-        status_ready_validator_addresses_with_local_duty_gate, status_ready_validator_participants,
-        status_sync_batch, support_peer_sync_request_is_too_deep,
-        validate_vote_request_extends_local_tip, validator_status_genesis_grace_remaining_secs,
-        validator_status_genesis_within_grace_window, verify_handshake_pq_signature,
-        vote_request_parent_sync_range, ConnectionDirection, DialTargetsArc, DuplicateResolution,
-        P2PNetwork, PeerConnection, PeerEntryGuard, BACKGROUND_SYNC_POLL_MILLIS,
-        BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, DEFAULT_BOOTSTRAP_REFRESH_SECS, DUTY_DISABLED_TTL_SECS,
-        IMMEDIATE_STATUS_SYNC_BATCH, MAX_P2P_FRAME_BYTES, MAX_STATUS_SYNC_BATCH,
-        MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS, MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS,
-        NORMAL_BOOTSTRAP_REFRESH_SECS, PENDING_BLOCKS, QUARANTINE_STATUS_TTL_SECS,
-        STALE_UNIDENTIFIED_PEER_SECS, STALE_VALIDATOR_STATUS_SECS, STATUS_READY_TTL_SECS,
+        should_request_missing_blocks, should_resolve_duplicate_session,
+        status_ready_validator_addresses, status_ready_validator_addresses_with_local_duty_gate,
+        status_ready_validator_participants, status_sync_batch,
+        support_peer_sync_request_is_too_deep, validate_vote_request_extends_local_tip,
+        validator_status_genesis_grace_remaining_secs,
+        validator_status_genesis_within_grace_window, verify_batch_with_bounded_parallelism,
+        verify_handshake_pq_signature, vote_request_parent_sync_range,
+        with_peer_stream_outside_peers_lock, ConnectionDirection, DialTargetsArc,
+        DuplicateResolution, P2PNetwork, PeerConnection, PeerEntryGuard,
+        BACKGROUND_SYNC_POLL_MILLIS, BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS,
+        DEFAULT_BOOTSTRAP_REFRESH_SECS, DUTY_DISABLED_TTL_SECS, IMMEDIATE_STATUS_SYNC_BATCH,
+        MAX_P2P_FRAME_BYTES, MAX_STATUS_SYNC_BATCH, MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS,
+        MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS, NORMAL_BOOTSTRAP_REFRESH_SECS,
+        PEER_WRITE_GATES, PENDING_BLOCKS, QUARANTINE_STATUS_TTL_SECS, STALE_UNIDENTIFIED_PEER_SECS,
+        STALE_VALIDATOR_STATUS_SECS, STATUS_READY_TTL_SECS,
         SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, TEST_COMMIT_VERIFIER_VALIDATOR_MANAGER,
         VALIDATOR_SUPPORT_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS,
     };
@@ -7610,9 +8259,19 @@ mod tests {
     use std::fs;
     use std::io;
     use std::net::TcpListener;
-    use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{mpsc, Arc, Barrier, Mutex, MutexGuard};
     use std::thread;
     use std::time::Duration;
+
+    // Session and write-gate registries are process-global; serialize tests that exercise them.
+    static PEER_SESSION_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn peer_session_test_guard() -> MutexGuard<'static, ()> {
+        PEER_SESSION_TEST_LOCK
+            .lock()
+            .expect("peer session test lock should not be poisoned")
+    }
 
     fn configure_canonical_genesis_path_for_tests() {
         std::env::set_var(
@@ -8312,6 +8971,12 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_direct_vote_session_bypasses_stable_connection_resolution() {
+        assert!(!should_resolve_duplicate_session(true));
+        assert!(should_resolve_duplicate_session(false));
+    }
+
+    #[test]
     fn validator_duplicate_resolution_prefers_opposite_directions_on_each_side() {
         let local_a = "validator:synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs";
         let local_b = "validator:synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt";
@@ -8546,6 +9211,8 @@ mod tests {
     #[test]
     fn collect_known_peer_addresses_includes_assigned_synergy_targets() {
         let mut config = NodeConfig::default();
+        config.identity.role = "relayer".to_string();
+        config.role.compiled_profile = "relayer_node".to_string();
         config.p2p.public_address = "genesisval1.synergy-network.io:5622".to_string();
         config.network.additional_dial_targets =
             vec!["genesisval2.synergy-network.io:5622".to_string()];
@@ -8958,6 +9625,7 @@ mod tests {
     #[test]
     fn resolve_bootstrap_dial_targets_includes_persistent_peers() {
         let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
         config.node.validator_address = "synv1validator1".to_string();
         config.p2p.public_address = "genesisval1.synergy-network.io:5622".to_string();
         config.p2p.listen_address = "0.0.0.0:5622".to_string();
@@ -8970,6 +9638,92 @@ mod tests {
 
         assert!(targets.contains(&"genesisval2.synergy-network.io:5622".to_string()));
         assert!(targets.contains(&"62.146.182.208:5622".to_string()));
+    }
+
+    #[test]
+    fn public_support_nodes_only_dial_canonical_relayers() {
+        for role in [
+            "observer",
+            "rpc_gateway",
+            "archive_validator",
+            "explorer_indexer",
+            "bootnode",
+            "seed_server",
+        ] {
+            let mut config = NodeConfig::default();
+            config.identity.role = role.to_string();
+            config.role.compiled_profile = role.to_string();
+            config.role.services.clear();
+            config.network.persistent_peers = vec![
+                "relay1.synergynode.xyz:5622".to_string(),
+                "relay2.synergynode.xyz:5622".to_string(),
+                "relay3.synergynode.xyz:5622".to_string(),
+                "62.146.182.207:5622".to_string(),
+                "rpc.synergynode.xyz:5623".to_string(),
+                "archive.synergynode.xyz:5615".to_string(),
+            ];
+
+            assert_eq!(
+                resolve_bootstrap_dial_targets(&config),
+                vec![
+                    "relay1.synergynode.xyz:5622".to_string(),
+                    "relay2.synergynode.xyz:5622".to_string(),
+                    "relay3.synergynode.xyz:5622".to_string(),
+                ],
+                "role {role} must not dial validators or sibling support nodes"
+            );
+        }
+    }
+
+    #[test]
+    fn relayers_can_dial_validators_and_public_support_nodes() {
+        let mut config = NodeConfig::default();
+        config.identity.role = "relayer".to_string();
+        config.role.compiled_profile = "relayer".to_string();
+        config.role.services.clear();
+        config.network.persistent_peers = vec![
+            "relay2.synergynode.xyz:5622".to_string(),
+            "62.146.182.207:5622".to_string(),
+            "rpc.synergynode.xyz:5623".to_string(),
+            "archive.synergynode.xyz:5615".to_string(),
+        ];
+
+        let targets = resolve_bootstrap_dial_targets(&config);
+
+        assert!(targets.contains(&"relay2.synergynode.xyz:5622".to_string()));
+        assert!(targets.contains(&"62.146.182.207:5622".to_string()));
+        assert!(targets.contains(&"rpc.synergynode.xyz:5623".to_string()));
+        assert!(targets.contains(&"archive.synergynode.xyz:5615".to_string()));
+    }
+
+    #[test]
+    fn http_seed_endpoints_never_become_p2p_dial_targets() {
+        let configured_seed_endpoints = configured_seed_server_dial_targets(&[
+            "http://seed1.synergy-network.io:5621".to_string(),
+            "https://seed2.synergy-network.io:5621/peer-list.json".to_string(),
+        ]);
+        let mut targets = HashSet::new();
+
+        insert_seed_server_target(
+            &mut targets,
+            &configured_seed_endpoints,
+            "seed1.synergy-network.io:5621".to_string(),
+        );
+        insert_seed_server_target(
+            &mut targets,
+            &configured_seed_endpoints,
+            "seed2.synergy-network.io:5621".to_string(),
+        );
+        insert_seed_server_target(
+            &mut targets,
+            &configured_seed_endpoints,
+            "genesisval1.synergy-network.io:5622".to_string(),
+        );
+
+        assert_eq!(
+            targets,
+            HashSet::from(["genesisval1.synergy-network.io:5622".to_string()])
+        );
     }
 
     #[test]
@@ -9001,6 +9755,7 @@ mod tests {
         .expect("manifest should write");
 
         let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
         config.storage.path = data_dir.to_string_lossy().to_string();
         config.network.p2p_port = 5622;
         config.p2p.public_address = "62.146.182.207:5622".to_string();
@@ -9061,7 +9816,9 @@ mod tests {
 
     #[test]
     fn collect_known_peer_addresses_excludes_unassigned_outgoing_ip_targets() {
-        let config = NodeConfig::default();
+        let mut config = NodeConfig::default();
+        config.identity.role = "relayer".to_string();
+        config.role.compiled_profile = "relayer_node".to_string();
         let mut peers = HashMap::new();
         peers.insert(
             "incoming".to_string(),
@@ -9297,6 +10054,7 @@ mod tests {
 
     #[test]
     fn peer_entry_guard_removes_pending_peer_on_drop() {
+        let _session_guard = peer_session_test_guard();
         let peer_address = "62.146.182.208:54001".to_string();
         let connected_peers = Arc::new(Mutex::new(HashMap::new()));
         connected_peers.lock().unwrap().insert(
@@ -9330,16 +10088,39 @@ mod tests {
             },
         );
         let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
+        let session_id = super::begin_peer_session(&peer_address);
 
         {
             let _guard = PeerEntryGuard::new(
                 peer_address.clone(),
+                session_id,
                 Arc::clone(&connected_peers),
                 Arc::clone(&peer_state_cache),
             );
         }
 
         assert!(!connected_peers.lock().unwrap().contains_key(&peer_address));
+    }
+
+    #[test]
+    fn disconnecting_peer_removes_peer_write_gate() {
+        let peer_address = "gate-cleanup-peer".to_string();
+        let connected_peers = Arc::new(Mutex::new(HashMap::new()));
+        let mut peer = test_peer_with_validator_address(None);
+        peer.address = peer_address.clone();
+        connected_peers
+            .lock()
+            .unwrap()
+            .insert(peer_address.clone(), peer);
+        let _gate = peer_write_gate(&peer_address);
+        assert!(PEER_WRITE_GATES.lock().unwrap().contains_key(&peer_address));
+
+        let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
+        let mut peers = connected_peers.lock().unwrap();
+        disconnect_peer_entry(&peer_state_cache, &mut peers, &peer_address);
+        drop(peers);
+
+        assert!(!PEER_WRITE_GATES.lock().unwrap().contains_key(&peer_address));
     }
 
     #[test]
@@ -9417,6 +10198,7 @@ mod tests {
 
     #[test]
     fn chain_data_is_rejected_until_peer_status_confirms_genesis() {
+        let _session_guard = peer_session_test_guard();
         configure_canonical_genesis_path_for_tests();
         let mut chain = BlockChain::new();
         chain.genesis().expect("genesis block should load");
@@ -9454,12 +10236,14 @@ mod tests {
                 recovery_state: None,
             },
         );
+        let session_id = super::begin_peer_session("peer-pending");
 
         assert!(!ensure_peer_status_allows_chain_data(
             &blockchain,
             &connected_peers,
             &peer_state_cache,
             "peer-pending",
+            session_id,
             "blocks",
         ));
         assert!(connected_peers.lock().unwrap().contains_key("peer-pending"));
@@ -9467,6 +10251,7 @@ mod tests {
 
     #[test]
     fn chain_data_disconnects_peer_with_mismatched_genesis() {
+        let _session_guard = peer_session_test_guard();
         configure_canonical_genesis_path_for_tests();
         let mut chain = BlockChain::new();
         chain.genesis().expect("genesis block should load");
@@ -9504,12 +10289,14 @@ mod tests {
                 recovery_state: None,
             },
         );
+        let session_id = super::begin_peer_session("peer-mismatch");
 
         assert!(!ensure_peer_status_allows_chain_data(
             &blockchain,
             &connected_peers,
             &peer_state_cache,
             "peer-mismatch",
+            session_id,
             "block",
         ));
         assert!(!connected_peers
@@ -10072,6 +10859,9 @@ mod tests {
         config.role.compiled_profile = "validator_node".to_string();
         assert!(local_node_runs_validator_consensus(&config));
 
+        config.role.compiled_profile = "archive_validator_node".to_string();
+        assert!(!local_node_runs_validator_consensus(&config));
+
         config.role.compiled_profile.clear();
         config.node.validator_address = "synv1local".to_string();
         assert!(!local_node_runs_validator_consensus(&config));
@@ -10214,6 +11004,7 @@ mod tests {
 
     #[test]
     fn dispatch_peer_message_keeps_votes_off_the_background_queue() {
+        let _session_guard = peer_session_test_guard();
         let connected_peers = Arc::new(Mutex::new(HashMap::new()));
         let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
         connected_peers.lock().unwrap().insert(
@@ -10246,6 +11037,7 @@ mod tests {
                 recovery_state: None,
             },
         );
+        let session_id = super::begin_peer_session("peer-a");
 
         let (sender, receiver) = mpsc::channel();
         let blockchain = Arc::new(Mutex::new(BlockChain::new()));
@@ -10274,6 +11066,7 @@ mod tests {
             &sender,
             &config,
             "peer-a",
+            session_id,
             NetworkMessage::Vote { vote },
         )
         .expect("vote dispatch should succeed");
@@ -10282,10 +11075,29 @@ mod tests {
             receiver.recv_timeout(Duration::from_millis(50)).is_err(),
             "vote dispatch should bypass the shared background queue"
         );
+
+        let replacement_session_id = super::begin_peer_session("peer-a");
+        assert_ne!(replacement_session_id, session_id);
+        dispatch_peer_message(
+            &blockchain,
+            &connected_peers,
+            &peer_state_cache,
+            &sender,
+            &config,
+            "peer-a",
+            session_id,
+            NetworkMessage::Ping,
+        )
+        .expect("stale message dispatch should fail closed without a queue error");
+        assert!(
+            receiver.recv_timeout(Duration::from_millis(50)).is_err(),
+            "stale peer session must not enqueue background messages"
+        );
     }
 
     #[test]
     fn status_handler_records_genesis_hash_and_requests_blocks_without_deadlocking() {
+        let _session_guard = peer_session_test_guard();
         let listener = match TcpListener::bind("127.0.0.1:0") {
             Ok(listener) => listener,
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
@@ -10338,6 +11150,7 @@ mod tests {
                 recovery_state: None,
             },
         );
+        let session_id = super::begin_peer_session("peer-a");
 
         let genesis_hash = canonical_genesis_hash();
         let (done_tx, done_rx) = mpsc::channel();
@@ -10354,6 +11167,7 @@ mod tests {
                 &peer_state_cache_for_thread,
                 &config_for_thread,
                 "peer-a",
+                session_id,
                 12,
                 "best-hash",
                 &genesis_hash_for_thread,
@@ -10392,6 +11206,7 @@ mod tests {
 
     #[test]
     fn status_handler_requests_blocks_from_duty_disabled_support_peer() {
+        let _session_guard = peer_session_test_guard();
         let listener = match TcpListener::bind("127.0.0.1:0") {
             Ok(listener) => listener,
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
@@ -10423,6 +11238,7 @@ mod tests {
             .lock()
             .unwrap()
             .insert("relayer-a".to_string(), support_peer);
+        let session_id = super::begin_peer_session("relayer-a");
 
         let genesis_hash = canonical_genesis_hash();
         handle_status_message(
@@ -10431,6 +11247,7 @@ mod tests {
             &peer_state_cache,
             &config,
             "relayer-a",
+            session_id,
             195_000,
             "best-hash",
             &genesis_hash,
@@ -10939,6 +11756,168 @@ mod tests {
         );
         drop(chain);
         clear_legacy_canonical_locks_for_tests();
+    }
+
+    #[test]
+    fn apply_block_batch_rejects_entire_batch_when_one_certificate_is_invalid() {
+        let _guard = block_application_test_guard();
+        let mut chain = BlockChain::new();
+        let genesis = Block::new_with_timestamp(
+            0,
+            Vec::new(),
+            "genesis-parent".to_string(),
+            "genesis".to_string(),
+            0,
+            1_700_000_000,
+        );
+        chain.add_block(genesis.clone());
+        let block1 = test_block(&genesis, 1, "validator-a", 1);
+        let block2 = test_block(&block1, 2, "validator-b", 2);
+        let blockchain = Arc::new(Mutex::new(chain));
+
+        let valid_qc = test_quorum_certificate(&block1);
+        let mut invalid_qc = test_quorum_certificate(&block2);
+        invalid_qc.block_hash = "not-the-block-hash".to_string();
+
+        let applied = apply_block_batch(
+            &blockchain,
+            vec![block1, block2],
+            vec![valid_qc, invalid_qc],
+        );
+
+        assert_eq!(applied, 0);
+        assert_eq!(
+            blockchain
+                .lock()
+                .unwrap()
+                .last()
+                .map(|block| block.block_index),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn bounded_batch_verifier_caps_workers_and_keeps_result_order() {
+        let items = (0..8).collect::<Vec<_>>();
+        let active_workers = Arc::new(AtomicUsize::new(0));
+        let peak_workers = Arc::new(AtomicUsize::new(0));
+        let active_workers_for_verify = active_workers.clone();
+        let peak_workers_for_verify = peak_workers.clone();
+
+        let results = verify_batch_with_bounded_parallelism(&items, 2, move |item| {
+            let active = active_workers_for_verify.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            peak_workers_for_verify.fetch_max(active, AtomicOrdering::SeqCst);
+            thread::sleep(Duration::from_millis(5));
+            active_workers_for_verify.fetch_sub(1, AtomicOrdering::SeqCst);
+
+            if *item == 3 {
+                panic!("deterministic verifier panic");
+            } else if *item == 5 {
+                Err("deterministic test failure".to_string())
+            } else {
+                Ok(())
+            }
+        });
+
+        assert!(peak_workers.load(AtomicOrdering::SeqCst) <= 2);
+        assert_eq!(results.len(), items.len());
+        assert!(results[..3].iter().all(Result::is_ok));
+        assert!(matches!(
+            results[3].as_ref(),
+            Err(error) if error == "batch verifier panicked for item 3"
+        ));
+        assert!(results[4].is_ok());
+        assert!(matches!(
+            results[5].as_ref(),
+            Err(error) if error == "deterministic test failure"
+        ));
+        assert!(results[6..].iter().all(Result::is_ok));
+    }
+
+    #[test]
+    fn get_blocks_write_does_not_hold_connected_peers_lock() {
+        let _session_guard = peer_session_test_guard();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("test listener should expose its address");
+        let accept_handle = thread::spawn(move || {
+            listener
+                .accept()
+                .expect("test listener should accept the sync connection")
+                .0
+        });
+        let _client =
+            std::net::TcpStream::connect(address).expect("test sync client should connect");
+        let server_stream = accept_handle
+            .join()
+            .expect("test accept thread should join");
+
+        let connected_peers = Arc::new(Mutex::new(HashMap::new()));
+        let mut peer = test_peer_with_validator_address(None);
+        peer.address = "sync-peer".to_string();
+        peer.connected_at = 42;
+        peer.stream = Some(server_stream);
+        connected_peers
+            .lock()
+            .unwrap()
+            .insert(peer.address.clone(), peer);
+        let session_id = super::begin_peer_session("sync-peer");
+
+        let write_started = Arc::new(Barrier::new(2));
+        let release_write = Arc::new(Barrier::new(2));
+        let peers_for_write = Arc::clone(&connected_peers);
+        let started_for_write = Arc::clone(&write_started);
+        let release_for_write = Arc::clone(&release_write);
+        let write_handle = thread::spawn(move || {
+            with_peer_stream_outside_peers_lock(
+                &peers_for_write,
+                "sync-peer",
+                session_id,
+                move |_stream| {
+                    started_for_write.wait();
+                    release_for_write.wait();
+                },
+            )
+            .expect("sync peer stream should be captured")
+        });
+
+        write_started.wait();
+        assert!(connected_peers.try_lock().is_ok());
+        let (replacement_tx, replacement_rx) = mpsc::channel();
+        let replacement_handle = thread::spawn(move || {
+            let session_id = super::begin_peer_session("sync-peer");
+            replacement_tx
+                .send(session_id)
+                .expect("replacement session result should be observed");
+        });
+        assert!(
+            replacement_rx
+                .recv_timeout(Duration::from_millis(25))
+                .is_err(),
+            "replacement session must wait for the in-flight session-bound write"
+        );
+        release_write.wait();
+        let (session_identity, ()) = write_handle
+            .join()
+            .expect("blocked sync write thread should join");
+
+        let replacement_session_id = replacement_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("replacement session should start after the write completes");
+        replacement_handle
+            .join()
+            .expect("replacement session thread should join");
+        assert_ne!(replacement_session_id, session_identity.session_id);
+        let peers = connected_peers.lock().unwrap();
+        let peer = peers
+            .get("sync-peer")
+            .expect("replacement peer should remain present");
+        assert!(!super::peer_stream_matches_identity(
+            "sync-peer",
+            peer,
+            &session_identity
+        ));
     }
 
     #[test]

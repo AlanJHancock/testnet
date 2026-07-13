@@ -360,6 +360,7 @@ def base_config(
 
 def generate_configs(topology: dict[str, Any]) -> dict[PurePosixPath, dict[str, dict[str, Any]]]:
     configs: dict[PurePosixPath, dict[str, dict[str, Any]]] = {}
+    public_support_peers = list(topology["common"]["relayer_peers"])
 
     for validator in topology["validators"]:
         peers = validator_peer_endpoints(topology, validator["public_endpoint"])
@@ -385,7 +386,7 @@ def generate_configs(topology: dict[str, Any]) -> dict[PurePosixPath, dict[str, 
             topology,
             seed,
             "seed_server",
-            [*topology["common"]["bootnodes"], *topology["common"]["relayer_peers"]],
+            public_support_peers,
             strict_validator_allowlist=False,
         )
         config["seed_registry_policy"] = {
@@ -418,7 +419,7 @@ def generate_configs(topology: dict[str, Any]) -> dict[PurePosixPath, dict[str, 
             topology,
             rpc_gateway,
             "rpc_gateway",
-            list(rpc_gateway["peers"]),
+            public_support_peers,
             strict_validator_allowlist=False,
         )
         config["rpc_gateway"] = {
@@ -433,11 +434,11 @@ def generate_configs(topology: dict[str, Any]) -> dict[PurePosixPath, dict[str, 
             topology,
             observer,
             "observer",
-            list(observer["p2p_peers"]),
+            public_support_peers,
             strict_validator_allowlist=False,
         )
         config["observer"] = {
-            "p2p_peers": list(observer["p2p_peers"]),
+            "p2p_peers": public_support_peers,
             "monitoring_targets": list(observer["monitoring_targets"]),
         }
         configs[PurePosixPath("observer") / f"{observer['name']}.toml"] = config
@@ -447,7 +448,7 @@ def generate_configs(topology: dict[str, Any]) -> dict[PurePosixPath, dict[str, 
             topology,
             indexer,
             "explorer_indexer",
-            list(indexer["peers"]),
+            public_support_peers,
             strict_validator_allowlist=False,
         )
         config["explorer_indexer"] = {
@@ -461,7 +462,7 @@ def generate_configs(topology: dict[str, Any]) -> dict[PurePosixPath, dict[str, 
             topology,
             archive,
             "archive_validator",
-            list(archive["peers"]),
+            public_support_peers,
             strict_validator_allowlist=False,
         )
         config["archive_validator"] = {

@@ -26,6 +26,7 @@ seed_servers = [
 relayer_peers = [
   "relay1.synergynode.xyz:5622",
   "relay2.synergynode.xyz:5622",
+  "relay3.synergynode.xyz:5622",
 ]
 bootstrap_dns_records = [
   "_dnsaddr.bootstrap.synergynode.xyz",
@@ -189,6 +190,7 @@ port = 5622
 public_endpoint = "relay1.synergynode.xyz:5622"
 peers = [
   "relay2.synergynode.xyz:5622",
+  "relay3.synergynode.xyz:5622",
   "rpc.synergynode.xyz:5623",
   "archive.synergynode.xyz:5615",
   "209.145.50.9:5622",
@@ -209,6 +211,28 @@ port = 5622
 public_endpoint = "relay2.synergynode.xyz:5622"
 peers = [
   "relay1.synergynode.xyz:5622",
+  "relay3.synergynode.xyz:5622",
+  "rpc.synergynode.xyz:5623",
+  "archive.synergynode.xyz:5615",
+  "209.145.50.9:5622",
+  "62.146.182.207:5622",
+  "62.146.182.208:5622",
+  "62.146.182.209:5622",
+  "73.79.66.255:5622",
+  "194.163.183.166:5622",
+  "157.173.192.45:5622",
+]
+
+[[relayers]]
+name = "relay3"
+node_id = "relay3"
+host = "relay3.synergynode.xyz"
+ip_address = "209.145.48.117"
+port = 5622
+public_endpoint = "relay3.synergynode.xyz:5622"
+peers = [
+  "relay1.synergynode.xyz:5622",
+  "relay2.synergynode.xyz:5622",
   "rpc.synergynode.xyz:5623",
   "archive.synergynode.xyz:5615",
   "209.145.50.9:5622",
@@ -285,14 +309,7 @@ public_json_rpc_endpoint = "https://testnet-core-rpc.synergy-network.io"
 peers = [
   "relay1.synergynode.xyz:5622",
   "relay2.synergynode.xyz:5622",
-  "62.146.182.207:5622",
-  "62.146.182.208:5622",
-  "62.146.182.209:5622",
-  "73.79.66.255:5622",
-  "194.163.183.166:5622",
-  "157.173.192.45:5622",
-  "archive.synergynode.xyz:5615",
-  "209.145.50.9:5622",
+  "relay3.synergynode.xyz:5622",
 ]
 
 [[observers]]
@@ -304,14 +321,7 @@ public_endpoint = "209.145.50.9:5622"
 p2p_peers = [
   "relay1.synergynode.xyz:5622",
   "relay2.synergynode.xyz:5622",
-  "rpc.synergynode.xyz:5623",
-  "archive.synergynode.xyz:5615",
-  "62.146.182.207:5622",
-  "62.146.182.208:5622",
-  "62.146.182.209:5622",
-  "73.79.66.255:5622",
-  "194.163.183.166:5622",
-  "157.173.192.45:5622",
+  "relay3.synergynode.xyz:5622",
 ]
 monitoring_targets = [
   "bootnode1.synergynode.xyz:5620",
@@ -348,14 +358,7 @@ config_paths = [
 peers = [
   "relay1.synergynode.xyz:5622",
   "relay2.synergynode.xyz:5622",
-  "rpc.synergynode.xyz:5623",
-  "archive.synergynode.xyz:5615",
-  "62.146.182.207:5622",
-  "62.146.182.208:5622",
-  "62.146.182.209:5622",
-  "73.79.66.255:5622",
-  "194.163.183.166:5622",
-  "157.173.192.45:5622",
+  "relay3.synergynode.xyz:5622",
 ]
 
 [[archive_validators]]
@@ -374,11 +377,5 @@ forbidden_public_endpoints = [
 peers = [
   "relay1.synergynode.xyz:5622",
   "relay2.synergynode.xyz:5622",
-  "rpc.synergynode.xyz:5623",
-  "62.146.182.207:5622",
-  "62.146.182.208:5622",
-  "62.146.182.209:5622",
-  "73.79.66.255:5622",
-  "194.163.183.166:5622",
-  "157.173.192.45:5622",
+  "relay3.synergynode.xyz:5622",
 ]

@@ -95,11 +95,11 @@ class SeedServiceRegistryTests(unittest.TestCase):
         )
         self.assertEqual(status, HTTPStatus.OK)
         self.assertEqual(response["dialback_status"], "success")
-        self.assertIn(endpoint, state.peers_payload()["endpoints"])
+        self.assertIn(endpoint, [record["public_endpoint"] for record in state.active_records()])
 
         state.dynamic_peers[endpoint]["expires_at"] = seed.utc_now() - 1
 
-        self.assertNotIn(endpoint, state.peers_payload()["endpoints"])
+        self.assertNotIn(endpoint, [record["public_endpoint"] for record in state.active_records()])
         self.assertEqual(state.expired_total, 1)
 
     def test_seed_role_filters_only_return_matching_healthy_peers(self) -> None:
@@ -118,11 +118,44 @@ class SeedServiceRegistryTests(unittest.TestCase):
             replicate=False,
         )
 
-        self.assertEqual(state.peers_payload(role="validator")["endpoints"], [validator_endpoint])
+        self.assertEqual(state.peers_payload(role="validator")["endpoints"], [])
         self.assertEqual(state.peers_payload(role="relayer")["endpoints"], [relayer_endpoint])
+        self.assertEqual(state.peers_payload()["endpoints"], [relayer_endpoint])
+
+    def test_public_bootstrap_payload_is_relayer_only(self) -> None:
+        config = seed.SeedConfig(
+            label="test-seed",
+            seed_id="seed-test",
+            static_dialback_on_start=False,
+            static_registry=[
+                {"role": "validator", "public_endpoint": "62.146.182.207:5622"},
+                {"role": "observer", "public_endpoint": "observer.example:5622"},
+                {"role": "rpc_gateway", "public_endpoint": "rpc.example:5623"},
+                {"role": "archive_validator", "public_endpoint": "archive.example:5615"},
+                {"role": "relayer", "public_endpoint": "relay1.synergynode.xyz:5622"},
+                {"role": "relayer", "public_endpoint": "relay2.synergynode.xyz:5622"},
+                {"role": "relayer", "public_endpoint": "relay3.synergynode.xyz:5622"},
+            ],
+            static_peers=["seed1.synergynode.xyz:5621"],
+            bootnodes=[{"hostname": "bootnode1.synergynode.xyz", "port": 5620}],
+            dnsaddr_bootstrap=["dnsaddr=/dns4/bootnode1.synergynode.xyz/tcp/5620"],
+        )
+        payload = seed.SeedState(config).peer_list_payload()
+
+        expected = [
+            "relay1.synergynode.xyz:5622",
+            "relay2.synergynode.xyz:5622",
+            "relay3.synergynode.xyz:5622",
+        ]
+        self.assertEqual(payload["peers"], expected)
+        self.assertEqual(payload["bootnodes"], [])
         self.assertEqual(
-            sorted(state.peers_payload()["endpoints"]),
-            sorted([validator_endpoint, relayer_endpoint]),
+            payload["dnsaddr_bootstrap"],
+            [f"dnsaddr=/dns4/{endpoint.split(':', 1)[0]}/tcp/5622" for endpoint in expected],
+        )
+        self.assertEqual(
+            [record["public_endpoint"] for record in payload["registry"]],
+            expected,
         )
 
     def test_seed_dialback_status_controls_advertisement_and_heartbeat_recovery(self) -> None:
@@ -140,7 +173,7 @@ class SeedServiceRegistryTests(unittest.TestCase):
         self.assertTrue(response["accepted"])
         self.assertEqual(response["dialback_status"], "failed")
         self.assertEqual(response["health_status"], "unhealthy")
-        self.assertNotIn(endpoint, state.peers_payload(role="validator")["endpoints"])
+        self.assertNotIn(endpoint, [record["public_endpoint"] for record in state.active_records("validator")])
 
         state._dialback = lambda endpoint: (True, None)
         status, response = state.heartbeat(
@@ -152,9 +185,11 @@ class SeedServiceRegistryTests(unittest.TestCase):
         self.assertEqual(status, HTTPStatus.OK)
         self.assertEqual(response["dialback_status"], "success")
         self.assertEqual(response["health_status"], "healthy")
-        self.assertIn(endpoint, state.peers_payload(role="validator")["endpoints"])
+        self.assertIn(endpoint, [record["public_endpoint"] for record in state.active_records("validator")])
         self.assertNotIn(endpoint, response["recommended_peers"])
         self.assertIn("relay1.synergynode.xyz:5622", response["recommended_peers"])
+        self.assertIn("relay3.synergynode.xyz:5622", response["recommended_peers"])
+        self.assertNotIn("62.146.182.208:5622", response["recommended_peers"])
 
 
 if __name__ == "__main__":
