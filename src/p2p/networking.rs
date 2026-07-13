@@ -85,7 +85,7 @@ const PUBLIC_RELAYER_DIAL_ADDRESSES: &[&str] = &[
 const MAX_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 64;
 const MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS: u32 = 64;
 const MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS: u32 = 128;
-const MAX_SUPPORT_PEER_DEEP_SYNC_LAG: u64 = 256_000;
+const MAX_SUPPORT_PEER_DEEP_SYNC_LAG: u64 = 64_000;
 const MAX_P2P_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const BLOCK_SYNC_RESPONSE_WRITE_TIMEOUT_SECS: u64 = 1;
 const SUPPORT_NODE_BLOCK_SYNC_RESPONSE_WRITE_TIMEOUT_SECS: u64 = 2;
@@ -95,6 +95,8 @@ const BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS: u64 = 1;
 const VALIDATOR_SUPPORT_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS: u64 = 2;
 const SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS: u64 = 1;
 const MAX_BLOCK_BATCH_VERIFY_WORKERS: usize = 4;
+const MAX_BLOCK_SYNC_SERVE_WORKERS: usize = 2;
+const MAX_BLOCK_SYNC_APPLY_WORKERS: usize = 1;
 const CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS: u64 = 500;
 const CONSENSUS_DIRECT_VOTE_DIAL_TIMEOUT_MILLIS: u64 = 1_200;
 const VOTE_REQUEST_PARENT_SYNC_WAIT_MILLIS: u64 = 900;
@@ -166,6 +168,27 @@ lazy_static! {
         Mutex::new(HashMap::new());
     static ref PEER_SESSION_IDS: Mutex<HashMap<String, u64>> = Mutex::new(HashMap::new());
     static ref NEXT_PEER_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+    static ref BLOCK_SYNC_SERVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
+    static ref BLOCK_SYNC_APPLY_WORKERS: AtomicUsize = AtomicUsize::new(0);
+}
+
+struct WorkerPermit {
+    counter: &'static AtomicUsize,
+}
+
+impl Drop for WorkerPermit {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn try_acquire_worker(counter: &'static AtomicUsize, limit: usize) -> Option<WorkerPermit> {
+    counter
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            (active < limit).then_some(active + 1)
+        })
+        .ok()
+        .map(|_| WorkerPermit { counter })
 }
 
 pub struct P2PNetwork {
@@ -5293,6 +5316,7 @@ fn bypasses_shared_message_queue(message: &NetworkMessage) -> bool {
             | NetworkMessage::Vote { .. }
             | NetworkMessage::Block { .. }
             | NetworkMessage::GetBlocks { .. }
+            | NetworkMessage::Blocks { .. }
     )
 }
 
@@ -5362,32 +5386,71 @@ fn dispatch_peer_message(
             Ok(())
         }
         NetworkMessage::GetBlocks { from_height, count } => {
-            handle_get_blocks_message(
-                blockchain,
-                connected_peers,
-                peer_state_cache,
-                config,
-                peer_address,
-                session_id,
-                from_height,
-                count,
-            );
+            let Some(permit) =
+                try_acquire_worker(&BLOCK_SYNC_SERVE_WORKERS, MAX_BLOCK_SYNC_SERVE_WORKERS)
+            else {
+                debug!(
+                    "p2p",
+                    "Block sync serve workers are busy; requester will retry",
+                    "peer" => peer_address.to_string(),
+                    "from_height" => from_height,
+                    "count" => count as u64
+                );
+                return Ok(());
+            };
+            let blockchain = Arc::clone(blockchain);
+            let connected_peers = Arc::clone(connected_peers);
+            let peer_state_cache = Arc::clone(peer_state_cache);
+            let config = config.clone();
+            let peer_address = peer_address.to_string();
+            let _ = spawn_named_thread("p2p-block-serve", move || {
+                let _permit = permit;
+                handle_get_blocks_message(
+                    &blockchain,
+                    &connected_peers,
+                    &peer_state_cache,
+                    &config,
+                    &peer_address,
+                    session_id,
+                    from_height,
+                    count,
+                );
+            });
             Ok(())
         }
         NetworkMessage::Blocks {
             blocks,
             quorum_certificates,
         } => {
-            handle_blocks_message(
-                blockchain,
-                connected_peers,
-                peer_state_cache,
-                config,
-                peer_address,
-                session_id,
-                blocks,
-                quorum_certificates,
-            );
+            let Some(permit) =
+                try_acquire_worker(&BLOCK_SYNC_APPLY_WORKERS, MAX_BLOCK_SYNC_APPLY_WORKERS)
+            else {
+                debug!(
+                    "p2p",
+                    "Block sync apply worker is busy; sender will be polled again",
+                    "peer" => peer_address.to_string(),
+                    "count" => blocks.len() as u64
+                );
+                return Ok(());
+            };
+            let blockchain = Arc::clone(blockchain);
+            let connected_peers = Arc::clone(connected_peers);
+            let peer_state_cache = Arc::clone(peer_state_cache);
+            let config = config.clone();
+            let peer_address = peer_address.to_string();
+            let _ = spawn_named_thread("p2p-block-apply", move || {
+                let _permit = permit;
+                handle_blocks_message(
+                    &blockchain,
+                    &connected_peers,
+                    &peer_state_cache,
+                    &config,
+                    &peer_address,
+                    session_id,
+                    blocks,
+                    quorum_certificates,
+                );
+            });
             Ok(())
         }
         other => {
@@ -6794,7 +6857,7 @@ fn send_message(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let json = serde_json::to_string(message)?;
     let data = json.as_bytes();
-    let len = data.len() as u32;
+    let len = validate_outbound_frame_length(data.len())?;
 
     // Send length prefix
     stream.write_all(&len.to_le_bytes())?;
@@ -6803,6 +6866,24 @@ fn send_message(
     stream.flush()?;
 
     Ok(())
+}
+
+fn validate_outbound_frame_length(length: usize) -> io::Result<u32> {
+    if length > MAX_P2P_FRAME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "outbound p2p frame length {} exceeds limit {MAX_P2P_FRAME_BYTES}",
+                length
+            ),
+        ));
+    }
+    u32::try_from(length).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("outbound p2p frame length {length} exceeds u32"),
+        )
+    })
 }
 
 fn send_consensus_message(
@@ -8221,8 +8302,8 @@ mod tests {
         should_request_missing_blocks, should_resolve_duplicate_session,
         status_ready_validator_addresses, status_ready_validator_addresses_with_local_duty_gate,
         status_ready_validator_participants, status_sync_batch,
-        support_peer_sync_request_is_too_deep, validate_vote_request_extends_local_tip,
-        validator_status_genesis_grace_remaining_secs,
+        support_peer_sync_request_is_too_deep, try_acquire_worker, validate_outbound_frame_length,
+        validate_vote_request_extends_local_tip, validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_batch_with_bounded_parallelism,
         verify_handshake_pq_signature, vote_request_parent_sync_range,
         with_peer_stream_outside_peers_lock, ConnectionDirection, DialTargetsArc,
@@ -8267,6 +8348,7 @@ mod tests {
 
     // Session and write-gate registries are process-global; serialize tests that exercise them.
     static PEER_SESSION_TEST_LOCK: Mutex<()> = Mutex::new(());
+    static TEST_BLOCK_SYNC_WORKERS: AtomicUsize = AtomicUsize::new(0);
 
     fn peer_session_test_guard() -> MutexGuard<'static, ()> {
         PEER_SESSION_TEST_LOCK
@@ -10467,7 +10549,7 @@ mod tests {
             from_height: 10,
             count: 25,
         }));
-        assert!(!bypasses_shared_message_queue(&NetworkMessage::Blocks {
+        assert!(bypasses_shared_message_queue(&NetworkMessage::Blocks {
             blocks: vec![Block::new(
                 1,
                 Vec::new(),
@@ -10936,11 +11018,6 @@ mod tests {
 
         assert!(support_peer_sync_request_is_too_deep(
             Some(&support_peer),
-            500_000,
-            11_666
-        ));
-        assert!(!support_peer_sync_request_is_too_deep(
-            Some(&support_peer),
             250_000,
             11_666
         ));
@@ -10968,6 +11045,27 @@ mod tests {
         let error = receive_message(&mut input).expect_err("oversized frame must fail closed");
 
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn oversized_outbound_p2p_frame_is_rejected() {
+        assert_eq!(
+            validate_outbound_frame_length(MAX_P2P_FRAME_BYTES).unwrap(),
+            MAX_P2P_FRAME_BYTES as u32
+        );
+        let error = validate_outbound_frame_length(MAX_P2P_FRAME_BYTES + 1)
+            .expect_err("oversized outbound frame must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn block_sync_worker_limit_releases_capacity() {
+        TEST_BLOCK_SYNC_WORKERS.store(0, AtomicOrdering::Release);
+        let permit = try_acquire_worker(&TEST_BLOCK_SYNC_WORKERS, 1)
+            .expect("first worker should acquire capacity");
+        assert!(try_acquire_worker(&TEST_BLOCK_SYNC_WORKERS, 1).is_none());
+        drop(permit);
+        assert!(try_acquire_worker(&TEST_BLOCK_SYNC_WORKERS, 1).is_some());
     }
 
     #[test]
