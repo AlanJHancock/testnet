@@ -860,12 +860,29 @@ impl ValidatorRegistry {
         epoch: u64,
         height: u64,
     ) -> Result<(), String> {
-        self.current_epoch = epoch;
+        let effective_epoch =
+            match effective_cluster_epoch_for_height(self.current_epoch.max(epoch), height) {
+                Ok(effective_epoch) => effective_epoch,
+                Err(error) => {
+                    self.clear_cluster_assignments();
+                    return Err(error);
+                }
+            };
         let active_validators: Vec<Validator> =
             self.get_active_validators().into_iter().cloned().collect();
-        let cluster_members =
-            canonical_validator_clusters_for_height(active_validators, epoch, height)?;
+        let cluster_members = match canonical_validator_clusters_for_height(
+            active_validators,
+            effective_epoch,
+            height,
+        ) {
+            Ok(cluster_members) => cluster_members,
+            Err(error) => {
+                self.clear_cluster_assignments();
+                return Err(error);
+            }
+        };
         self.apply_cluster_memberships(cluster_members);
+        self.current_epoch = effective_epoch;
         Ok(())
     }
 
@@ -1765,12 +1782,29 @@ pub fn canonical_validator_clusters_for_height(
     epoch: u64,
     height: u64,
 ) -> Result<Vec<(u64, Vec<Validator>)>, String> {
+    let effective_epoch = effective_cluster_epoch_for_height(epoch, height)?;
     let height_scoped_membership =
         consensus_membership_validators_for_height(active_validators, height)?;
     Ok(canonical_validator_clusters_for_epoch(
         &height_scoped_membership,
-        epoch,
+        effective_epoch,
     ))
+}
+
+pub fn effective_cluster_epoch_for_height(supplied_epoch: u64, height: u64) -> Result<u64, String> {
+    let Some(set) = epoch_validator_set_for_height(height)? else {
+        return Ok(supplied_epoch);
+    };
+    set.validate_local_compatibility()?;
+    let Some(manifest_epoch) = set.epoch_id else {
+        return Ok(supplied_epoch);
+    };
+    if manifest_epoch < supplied_epoch {
+        return Err(format!(
+            "height-scoped validator set epoch {manifest_epoch} would regress current epoch {supplied_epoch} at height {height}"
+        ));
+    }
+    Ok(manifest_epoch)
 }
 
 #[cfg(test)]
@@ -3140,10 +3174,6 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
             .is_empty());
         assert_eq!(registry.current_epoch, 12);
 
-        // Epoch advancement is external to shadow promotion. Advance the
-        // registry epoch before promoting so the boundary rebuild uses epoch 13.
-        registry.reorganize_clusters_for_epoch(13);
-        assert_eq!(registry.current_epoch, 13);
         assert_eq!(
             epoch_validator_set_hash_for_height(effective_height)
                 .expect("boundary set hash should resolve")
@@ -3151,8 +3181,17 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
             Some("ten-validator-set")
         );
         assert_eq!(
+            effective_cluster_epoch_for_height(12, effective_height)
+                .expect("boundary epoch should resolve from the authoritative set"),
+            13
+        );
+        assert_eq!(
             registry.apply_pending_shadow_activations(effective_height),
             vec![tenth_address.clone()]
+        );
+        assert_eq!(
+            registry.current_epoch, 13,
+            "shadow promotion must advance the registry from the applicable set epoch"
         );
 
         let mut actual = registry
@@ -3302,8 +3341,9 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
             .is_none());
 
         registry
-            .reorganize_clusters_for_height(13, effective_height)
+            .reorganize_clusters_for_height(12, effective_height)
             .expect("new validator set should be usable at activation boundary");
+        assert_eq!(registry.current_epoch, 13);
         let mut cluster_sizes = registry
             .clusters
             .values()
@@ -3311,6 +3351,43 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
             .collect::<Vec<_>>();
         cluster_sizes.sort_unstable();
         assert_eq!(cluster_sizes, vec![5, 5]);
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn older_height_scoped_epoch_cannot_regress_current_epoch() {
+        let _env_lock = validator_test_env_lock();
+        let height = 80_000;
+        let temp_dir = unique_test_dir("cluster-epoch-regression");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([{
+                "epoch_id": 12,
+                "validator_set_version": 1,
+                "effective_from_height": 0,
+                "effective_to_height": height,
+                "active_validators": validator_addresses(0, 9),
+                "validator_set_hash": "older-validator-set"
+            }]),
+        );
+        let _snapshot_env =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let mut registry = active_registry(10);
+        registry.reorganize_clusters_for_epoch(13);
+        let error = registry
+            .reorganize_clusters_for_height(12, height)
+            .expect_err("an older manifest epoch must fail closed");
+
+        assert!(error.contains("would regress current epoch 13"));
+        assert_eq!(registry.current_epoch, 13);
+        assert!(
+            registry.clusters.is_empty(),
+            "fail-closed reconciliation must not retain stale cluster assignments"
+        );
 
         std::fs::remove_dir_all(temp_dir).ok();
     }
