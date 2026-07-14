@@ -4,11 +4,13 @@ use std::sync::{Arc, Mutex};
 
 use lazy_static::lazy_static;
 
+use crate::epoch::{epoch_for_block_height, TESTNET_EPOCH_LENGTH_BLOCKS};
+
 pub const BPS_DENOMINATOR: u64 = 10_000;
-pub const DEFAULT_REWARD_EPOCH_LENGTH_BLOCKS: u64 = 1_000;
+pub const DEFAULT_REWARD_EPOCH_LENGTH_BLOCKS: u64 = TESTNET_EPOCH_LENGTH_BLOCKS;
 
 pub fn reward_epoch_for_block_height(block_height: u64, epoch_length: u64) -> u64 {
-    block_height / epoch_length.max(1)
+    epoch_for_block_height(block_height, epoch_length)
 }
 
 pub fn default_reward_epoch_for_block_height(block_height: u64) -> u64 {
@@ -2465,6 +2467,15 @@ pub fn ensure_not_duplicate(seen: &mut HashSet<String>, key: String) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reward_epochs_follow_canonical_one_based_block_ranges() {
+        assert_eq!(default_reward_epoch_for_block_height(1), 0);
+        assert_eq!(default_reward_epoch_for_block_height(1_000), 0);
+        assert_eq!(default_reward_epoch_for_block_height(1_001), 1);
+        assert_eq!(default_reward_epoch_for_block_height(2_000), 1);
+        assert_eq!(default_reward_epoch_for_block_height(2_001), 2);
+    }
 
     fn perfect_phase1() -> Phase1Metrics {
         Phase1Metrics {

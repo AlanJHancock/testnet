@@ -547,7 +547,8 @@ impl DualQuorumConsensus {
         let effective_vote_timeout_secs = self.effective_vote_timeout_secs(round_number);
         let timeout_mode = Self::timeout_mode_for_round(round_number);
         let retry_number = round_number.saturating_sub(1);
-        let required_validator_votes = self.required_validator_votes(consensus_validators.len());
+        let required_validator_votes =
+            self.required_validator_votes_for_cluster_context(&cluster_context);
         Self::record_consensus_runtime_metrics(
             proposed_block,
             round_number,
@@ -2089,7 +2090,7 @@ impl DualQuorumConsensus {
         }
 
         let required_validator_votes =
-            self.required_validator_votes(cluster_context.validators.len());
+            self.required_validator_votes_for_cluster_context(&cluster_context);
         if validator_count < required_validator_votes {
             return Err(format!(
                 "Insufficient validator votes: {} votes, {} required for quorum",
@@ -2097,14 +2098,20 @@ impl DualQuorumConsensus {
             ));
         }
 
-        // Check validation quorum against the canonical target cluster's live weight.
-        let total_live_weight = self.total_validator_weight(&cluster_context.validators);
+        // Cluster quorum is an exact member count (3-of-5, 5-of-7, and
+        // ceil(2n/3) for other sizes); Synergy score affects rotation, not vote power.
+        let total_live_weight = if cluster_context.cluster_id.is_some() {
+            cluster_context.validators.len() as f64
+        } else {
+            self.total_validator_weight(&cluster_context.validators)
+        };
         let validation_ratio = if total_live_weight > 0.0 {
             cumulative_weight / total_live_weight
         } else {
             0.0
         };
-        let required_validation_ratio = VALIDATOR_QUORUM_RATIO;
+        let required_validation_ratio =
+            Self::required_validation_ratio_for_cluster_context(&cluster_context);
         let validation_quorum_met = validation_ratio + 0.000_001 >= required_validation_ratio;
 
         // Check cooperation quorum using the same dynamic integer threshold.
@@ -2154,6 +2161,27 @@ impl DualQuorumConsensus {
         required_validator_quorum(total_validators).max(1)
     }
 
+    fn required_validator_votes_for_cluster_context(
+        &self,
+        cluster_context: &ConsensusClusterContext,
+    ) -> usize {
+        if cluster_context.cluster_id.is_some() {
+            required_cluster_quorum(cluster_context.validators.len()).max(1)
+        } else {
+            self.required_validator_votes(cluster_context.validators.len())
+        }
+    }
+
+    fn required_validation_ratio_for_cluster_context(
+        cluster_context: &ConsensusClusterContext,
+    ) -> f64 {
+        if cluster_context.cluster_id.is_some() {
+            required_quorum_weight_ratio(cluster_context.validators.len())
+        } else {
+            VALIDATOR_QUORUM_RATIO
+        }
+    }
+
     #[cfg(test)]
     fn has_commit_quorum(&self, live_validators: &[Validator], votes: &[Vote]) -> bool {
         if live_validators.is_empty() {
@@ -2182,12 +2210,7 @@ impl DualQuorumConsensus {
     ) -> Result<(usize, f64), String> {
         let weights = cluster_validators
             .iter()
-            .map(|validator| {
-                (
-                    validator.address.clone(),
-                    (validator.synergy_score / 100.0).max(0.0),
-                )
-            })
+            .map(|validator| (validator.address.clone(), 1.0f64))
             .collect::<HashMap<_, _>>();
         let mut seen = BTreeSet::new();
         let mut cumulative_weight = 0.0;
@@ -2226,17 +2249,22 @@ impl DualQuorumConsensus {
             return false;
         };
         let required_validator_votes =
-            self.required_validator_votes(cluster_context.validators.len());
+            self.required_validator_votes_for_cluster_context(cluster_context);
         if validator_count < required_validator_votes {
             return false;
         }
 
-        let total_live_weight = self.total_validator_weight(&cluster_context.validators);
+        let total_live_weight = if cluster_context.cluster_id.is_some() {
+            cluster_context.validators.len() as f64
+        } else {
+            self.total_validator_weight(&cluster_context.validators)
+        };
         if total_live_weight <= 0.0 {
             return false;
         }
 
-        let required_validation_ratio = VALIDATOR_QUORUM_RATIO;
+        let required_validation_ratio =
+            Self::required_validation_ratio_for_cluster_context(cluster_context);
         cumulative_weight + 0.000_001 >= total_live_weight * required_validation_ratio
     }
 
@@ -2758,7 +2786,11 @@ impl DualQuorumConsensus {
                 });
             };
             Self::verify_vote_signature_uncached(vote, validator_manager)?;
-            signed_weight += (validator.synergy_score / 100.0).max(0.0);
+            signed_weight += if cluster_context.cluster_id.is_some() {
+                1.0
+            } else {
+                (validator.synergy_score / 100.0).max(0.0)
+            };
         }
 
         if cluster_context.cluster_id.is_some() {
@@ -2773,7 +2805,10 @@ impl DualQuorumConsensus {
             }
         }
 
-        let required_votes = Self::required_qc_validator_votes(cluster_context.validators.len());
+        let required_votes = Self::required_qc_validator_votes(
+            cluster_context.validators.len(),
+            cluster_context.cluster_id.is_some(),
+        );
         if seen.len() < required_votes {
             return Err(format!(
                 "QC has {} signer(s), {} required for dynamic validator quorum",
@@ -2782,23 +2817,36 @@ impl DualQuorumConsensus {
             ));
         }
 
-        let total_weight = cluster_context
-            .validators
-            .iter()
-            .map(|validator| (validator.synergy_score / 100.0).max(0.0))
-            .sum::<f64>();
+        let total_weight = if cluster_context.cluster_id.is_some() {
+            cluster_context.validators.len() as f64
+        } else {
+            cluster_context
+                .validators
+                .iter()
+                .map(|validator| (validator.synergy_score / 100.0).max(0.0))
+                .sum::<f64>()
+        };
         if total_weight <= 0.0 {
             return Err("active validator set has zero voting weight".to_string());
         }
-        if signed_weight + 0.000_001 < total_weight * VALIDATOR_QUORUM_RATIO {
+        let required_weight_ratio = if cluster_context.cluster_id.is_some() {
+            required_quorum_weight_ratio(cluster_context.validators.len())
+        } else {
+            VALIDATOR_QUORUM_RATIO
+        };
+        if signed_weight + 0.000_001 < total_weight * required_weight_ratio {
             return Err("QC signed weight is below validator quorum threshold".to_string());
         }
 
         Ok(())
     }
 
-    fn required_qc_validator_votes(total_validators: usize) -> usize {
-        required_validator_quorum(total_validators).max(1)
+    fn required_qc_validator_votes(total_validators: usize, clustered: bool) -> usize {
+        if clustered {
+            required_cluster_quorum(total_validators).max(1)
+        } else {
+            required_validator_quorum(total_validators).max(1)
+        }
     }
 
     fn vote_signature_cache_contains(&self, cache_key: &str) -> bool {
@@ -3984,6 +4032,24 @@ pub fn required_validator_quorum(total_validators: usize) -> usize {
     }
 }
 
+pub fn required_cluster_quorum(cluster_size: usize) -> usize {
+    if cluster_size == 0 {
+        0
+    } else if cluster_size == 5 {
+        3
+    } else {
+        required_validator_quorum(cluster_size)
+    }
+}
+
+fn required_quorum_weight_ratio(cluster_size: usize) -> f64 {
+    if cluster_size == 0 {
+        0.0
+    } else {
+        required_cluster_quorum(cluster_size) as f64 / cluster_size as f64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4366,19 +4432,19 @@ mod tests {
     }
 
     #[test]
-    fn qc_verification_requires_dynamic_quorum_for_five_validators() {
+    fn qc_verification_requires_three_of_five_cluster_quorum() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
 
-        let required = DualQuorumConsensus::required_qc_validator_votes(5);
+        let required = DualQuorumConsensus::required_qc_validator_votes(5, true);
 
-        assert_eq!(required, required_validator_quorum(5));
+        assert_eq!(required, 3);
     }
 
     #[test]
     fn qc_verification_requires_dynamic_four_of_six_quorum() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
 
-        let required = DualQuorumConsensus::required_qc_validator_votes(6);
+        let required = DualQuorumConsensus::required_qc_validator_votes(6, true);
 
         assert_eq!(required, 4);
         assert_eq!(required, required_validator_quorum(6));
@@ -4388,9 +4454,18 @@ mod tests {
     fn qc_verification_requires_dynamic_quorum_for_expanded_set() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
 
-        let required = DualQuorumConsensus::required_qc_validator_votes(10);
+        let required = DualQuorumConsensus::required_qc_validator_votes(10, false);
 
         assert_eq!(required, required_validator_quorum(10));
+    }
+
+    #[test]
+    fn qc_verification_requires_five_of_seven_cluster_quorum() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+
+        let required = DualQuorumConsensus::required_qc_validator_votes(7, true);
+
+        assert_eq!(required, 5);
     }
 
     #[test]

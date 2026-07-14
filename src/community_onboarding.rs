@@ -2093,7 +2093,7 @@ mod tests {
     }
 
     #[test]
-    fn cluster_assignment_preview_reports_two_five_validator_clusters_with_four_of_five_quorum() {
+    fn cluster_assignment_preview_reports_two_five_validator_clusters_with_three_of_five_quorum() {
         let input = cluster_assignment_for_count(10, "validator-10", 12, 90_000);
         let report = preview_community_cluster_assignment(&input);
 
@@ -2110,9 +2110,9 @@ mod tests {
         assert!(report
             .cluster_memberships
             .iter()
-            .all(|membership| membership.quorum_threshold == 4));
-        assert_eq!(report.dynamic_quorum_threshold, 4);
-        assert_eq!(report.active_liveness_margin, 1);
+            .all(|membership| membership.quorum_threshold == 3));
+        assert_eq!(report.dynamic_quorum_threshold, 3);
+        assert_eq!(report.active_liveness_margin, 2);
         assert_eq!(
             report
                 .cluster_memberships
@@ -2166,15 +2166,19 @@ mod tests {
         assert_eq!(first.cluster_memberships, second.cluster_memberships);
         assert_eq!(first.cluster_memberships, runtime_memberships);
         assert_eq!(first.cluster_assignment, second.cluster_assignment);
-        assert_eq!(first.dynamic_quorum_threshold, 4);
+        assert_eq!(first.dynamic_quorum_threshold, 3);
     }
 
     #[test]
     fn cluster_assignment_preview_scales_at_runtime_cluster_thresholds() {
         for (validator_count, expected_sizes, expected_quorums) in [
-            (11, vec![6, 5], vec![4, 4]),
+            (11, vec![6, 5], vec![4, 3]),
             (14, vec![7, 7], vec![5, 5]),
-            (15, vec![5, 5, 5], vec![4, 4, 4]),
+            (15, vec![8, 7], vec![6, 5]),
+            (20, vec![10, 10], vec![7, 7]),
+            (21, vec![7, 7, 7], vec![5, 5, 5]),
+            (28, vec![7, 7, 7, 7], vec![5, 5, 5, 5]),
+            (35, vec![7, 7, 7, 7, 7], vec![5, 5, 5, 5, 5]),
         ] {
             let input = cluster_assignment_for_count(
                 validator_count,

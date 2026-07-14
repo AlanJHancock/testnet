@@ -12,6 +12,9 @@ use super::validator_keys::{consensus_algorithm_label, load_local_validator_keyp
 use super::vrf::{VRFConsensus, VRFSeed};
 use crate::block::{Block, BlockChain};
 use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPublicKey};
+use crate::epoch::{
+    block_position_in_epoch, epoch_end_height, epoch_for_block_height, epoch_start_height,
+};
 use crate::genesis::canonical_genesis;
 use crate::p2p::networking::P2PNetwork;
 use crate::rpc::rpc_server::{
@@ -642,11 +645,65 @@ impl ProofOfSynergy {
                                 "target_epoch" => target_epoch,
                                 "latest_height" => latest_block.block_index
                             );
-                            let previous_qc = Self::get_previous_quorum_certificate(
+                            let previous_qc = match Self::get_previous_quorum_certificate(
                                 &chain_guard,
                                 next_epoch,
                                 epoch_length,
-                            );
+                            ) {
+                                Ok(qc) => qc,
+                                Err(error) => {
+                                    warn!(
+                                        "consensus",
+                                        "Refusing epoch transition without the finalized boundary QC",
+                                        "current_epoch" => current_epoch,
+                                        "next_epoch" => next_epoch,
+                                        "latest_height" => latest_block.block_index,
+                                        "error" => error
+                                    );
+                                    drop(chain_guard);
+                                    drop(pool);
+                                    thread::sleep(Duration::from_millis(250));
+                                    continue;
+                                }
+                            };
+                            let closing_epoch_validators = validator_manager.get_active_validators();
+                            let finalized_scores = match Self::finalized_synergy_scores_for_epoch(
+                                &chain_guard,
+                                current_epoch,
+                                epoch_length,
+                                &closing_epoch_validators,
+                            ) {
+                                Ok(scores) => scores,
+                                Err(error) => {
+                                    warn!(
+                                        "consensus",
+                                        "Refusing epoch transition without a complete finalized Synergy score snapshot",
+                                        "current_epoch" => current_epoch,
+                                        "next_epoch" => next_epoch,
+                                        "latest_height" => latest_block.block_index,
+                                        "error" => error
+                                    );
+                                    drop(chain_guard);
+                                    drop(pool);
+                                    thread::sleep(Duration::from_millis(250));
+                                    continue;
+                                }
+                            };
+                            if let Err(error) = validator_manager
+                                .apply_finalized_synergy_scores(&finalized_scores)
+                            {
+                                warn!(
+                                    "consensus",
+                                    "Refusing epoch transition because finalized Synergy scores could not be applied",
+                                    "current_epoch" => current_epoch,
+                                    "next_epoch" => next_epoch,
+                                    "error" => error
+                                );
+                                drop(chain_guard);
+                                drop(pool);
+                                thread::sleep(Duration::from_millis(250));
+                                continue;
+                            }
                             info!(
                                 "consensus",
                                 "Applying pending epoch transition before block production",
@@ -996,11 +1053,25 @@ impl ProofOfSynergy {
                         // Rebuild leader rotation from the shared duty-active set. Quarantined
                         // and shadow validators remain registered/history-known, but they must
                         // not be scheduled as live proposers while their duties are disabled.
-                        let epoch_randomness = Self::deterministic_epoch_randomness(
+                        let epoch_randomness = match Self::deterministic_epoch_randomness(
                             &chain_guard,
                             next_block_index,
                             epoch_length,
-                        );
+                        ) {
+                            Ok(randomness) => randomness,
+                            Err(error) => {
+                                warn!(
+                                    "consensus",
+                                    "Refusing leader selection without finalized epoch randomness",
+                                    "next_block_height" => next_block_index,
+                                    "error" => error
+                                );
+                                drop(chain_guard);
+                                drop(pool);
+                                thread::sleep(Duration::from_millis(250));
+                                continue;
+                            }
+                        };
                         let local_validator_address = Self::resolve_local_validator_address();
                         // Leader scheduling must use the canonical consensus membership, not
                         // each node's locally visible peer subset. The live subset is still
@@ -1872,7 +1943,7 @@ impl ProofOfSynergy {
                                     "previous_hash" => new_block.previous_hash.clone(),
                                     "timestamp" => new_block.timestamp,
                                     "epoch" => current_epoch,
-                                    "block_in_epoch" => new_block.block_index % epoch_length,
+                                    "block_in_epoch" => block_position_in_epoch(new_block.block_index, epoch_length),
                                     "validator" => selected_validator.address.clone(),
                                     "validator_name" => selected_validator.name.clone(),
                                     "synergy_score" => format!("{:.2}", selected_validator.synergy_score),
@@ -2524,7 +2595,7 @@ impl ProofOfSynergy {
     // New PoSy Helper Methods
 
     fn epoch_for_block(block_index: u64, epoch_length: u64) -> u64 {
-        block_index / epoch_length.max(1)
+        epoch_for_block_height(block_index, epoch_length)
     }
 
     fn epoch_for_next_block(last_block_index: u64, epoch_length: u64) -> u64 {
@@ -2612,10 +2683,10 @@ impl ProofOfSynergy {
         current_epoch: &mut u64,
         previous_qc: QuorumCertificate,
         validator_manager: &Arc<ValidatorManager>,
-        synergy_calculator: &Arc<SynergyScoreCalculator>,
+        _synergy_calculator: &Arc<SynergyScoreCalculator>,
         dual_quorum_consensus: &Arc<Mutex<DualQuorumConsensus>>,
         entropy_beacon: &Arc<Mutex<EntropyBeacon>>,
-        validator_rotation: &Arc<ValidatorRotation>,
+        _validator_rotation: &Arc<ValidatorRotation>,
         dao_governance: &Arc<Mutex<DAOGovernance>>,
         cartel_detection: &Arc<Mutex<CartelDetectionEngine>>,
         transition_block_height: u64,
@@ -2627,17 +2698,16 @@ impl ProofOfSynergy {
 
         // 1. Generate new epoch randomness
         let mut beacon = entropy_beacon.lock().unwrap();
-        let _epoch_randomness = beacon.generate_epoch_randomness(&previous_qc);
+        let epoch_randomness = beacon.generate_epoch_randomness(&previous_qc);
         drop(beacon);
 
-        // 2. Rotate validators using new entropy
-        validator_rotation.rotate_validators();
-
-        // 3. Recalculate synergy scores
-        Self::recalculate_all_synergy_scores(validator_manager, synergy_calculator);
-
-        // 4. Rebalance validator clusters deterministically for this epoch.
-        validator_manager.reorganize_clusters_for_epoch(*current_epoch);
+        // 2. Rebalance validator clusters from the finalized boundary-QC seed.
+        let cluster_randomness_source = hex::encode(epoch_randomness);
+        validator_manager.reorganize_clusters_for_epoch_with_seed(
+            *current_epoch,
+            &cluster_randomness_source,
+            transition_block_height.saturating_add(1),
+        );
         if let Err(error) = validator_manager.save_registry(VALIDATOR_REGISTRY_PATH) {
             warn!(
                 "consensus",
@@ -2674,59 +2744,185 @@ impl ProofOfSynergy {
         chain: &BlockChain,
         current_epoch: u64,
         epoch_length: u64,
-    ) -> QuorumCertificate {
+    ) -> Result<QuorumCertificate, String> {
         let epoch_length = epoch_length.max(1);
-        let boundary_height = current_epoch.saturating_mul(epoch_length).saturating_sub(1);
+        let boundary_height = current_epoch
+            .checked_sub(1)
+            .map(|closing_epoch| epoch_end_height(closing_epoch, epoch_length))
+            .unwrap_or(0);
 
-        // Reconstruct the epoch seed from the block immediately before the
-        // epoch boundary. Falling back to the chain tip is only a safeguard for
-        // truncated history; normal operation should always find the boundary block.
-        if let Some(block) = chain
+        let block = chain
             .chain
             .iter()
             .rev()
             .find(|block| block.block_index == boundary_height)
-            .or_else(|| chain.last())
-        {
-            QuorumCertificate {
-                block_hash: block.hash.clone(),
-                cluster_id: None,
-                epoch_number: block.block_index / epoch_length,
-                round_number: 1,
-                aggregate_signature: block.block_signature.clone(),
-                participant_bitmap: Vec::new(),
-                cumulative_weight: 0.0,
-                validation_quorum_met: false,
-                cooperation_quorum_met: false,
-                timestamp: Self::current_timestamp(),
-                votes: Vec::new(),
-            }
-        } else {
-            QuorumCertificate {
-                block_hash: "genesis_block".to_string(),
-                cluster_id: None,
-                epoch_number: 0,
-                round_number: 0,
-                aggregate_signature: Vec::new(),
-                participant_bitmap: Vec::new(),
-                cumulative_weight: 0.0,
-                validation_quorum_met: false,
-                cooperation_quorum_met: false,
-                timestamp: Self::current_timestamp(),
-                votes: Vec::new(),
+            .ok_or_else(|| {
+                format!("epoch {current_epoch} boundary block {boundary_height} is unavailable")
+            })?;
+        let qc = DualQuorumConsensus::committed_qc_for_block_hash(&block.hash).ok_or_else(|| {
+            format!(
+                "finalized QC for epoch {current_epoch} boundary block {boundary_height} ({}) is unavailable",
+                block.hash
+            )
+        })?;
+        let expected_epoch = epoch_for_block_height(block.block_index, epoch_length);
+        if qc.epoch_number != expected_epoch {
+            return Err(format!(
+                "boundary QC epoch {} does not match block {} epoch {expected_epoch}",
+                qc.epoch_number, block.block_index
+            ));
+        }
+        if !qc.validation_quorum_met || !qc.cooperation_quorum_met {
+            return Err(format!(
+                "boundary QC for block {} is not a finalized dual-quorum certificate",
+                block.block_index
+            ));
+        }
+        Ok(qc)
+    }
+
+    fn finalized_synergy_scores_for_epoch(
+        chain: &BlockChain,
+        epoch: u64,
+        epoch_length: u64,
+        validators: &[Validator],
+    ) -> Result<HashMap<String, u64>, String> {
+        if validators.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let epoch_length = epoch_length.max(1);
+        let epoch_start = epoch_start_height(epoch, epoch_length);
+        let epoch_end = epoch_end_height(epoch, epoch_length);
+        let assignment_start = validators
+            .iter()
+            .filter_map(|validator| validator.cluster_assignment_effective_height)
+            .max()
+            .unwrap_or(epoch_start)
+            .max(epoch_start);
+        if assignment_start > epoch_end {
+            return Err(format!(
+                "cluster assignment window begins at {assignment_start}, after epoch {epoch} ends at {epoch_end}"
+            ));
+        }
+
+        let mut blocks = chain
+            .chain
+            .iter()
+            .filter(|block| block.block_index >= assignment_start && block.block_index <= epoch_end)
+            .collect::<Vec<_>>();
+        blocks.sort_by_key(|block| block.block_index);
+        let expected_block_count = epoch_end.saturating_sub(assignment_start).saturating_add(1);
+        if blocks.len() as u64 != expected_block_count {
+            return Err(format!(
+                "finalized score window {assignment_start}..={epoch_end} has {} block(s), expected {expected_block_count}",
+                blocks.len()
+            ));
+        }
+        for (offset, block) in blocks.iter().enumerate() {
+            let expected_height = assignment_start.saturating_add(offset as u64);
+            if block.block_index != expected_height {
+                return Err(format!(
+                    "finalized score window is missing block {expected_height}"
+                ));
             }
         }
+
+        let qcs = DualQuorumConsensus::committed_qcs_for_block_hashes(
+            blocks.iter().map(|block| block.hash.as_str()),
+        )
+        .into_iter()
+        .map(|qc| (qc.block_hash.clone(), qc))
+        .collect::<HashMap<_, _>>();
+        let mut opportunities = validators
+            .iter()
+            .map(|validator| (validator.address.clone(), 0u64))
+            .collect::<HashMap<_, _>>();
+        let mut participation = opportunities.clone();
+
+        for block in blocks {
+            let qc = qcs.get(&block.hash).ok_or_else(|| {
+                format!(
+                    "finalized score window is missing the committed QC for block {} ({})",
+                    block.block_index, block.hash
+                )
+            })?;
+            if !qc.validation_quorum_met || !qc.cooperation_quorum_met {
+                return Err(format!(
+                    "block {} QC is not a finalized dual-quorum certificate",
+                    block.block_index
+                ));
+            }
+            let eligible = validators
+                .iter()
+                .filter(|validator| {
+                    qc.cluster_id
+                        .is_none_or(|cluster_id| validator.cluster_id == Some(cluster_id))
+                })
+                .map(|validator| validator.address.as_str())
+                .collect::<HashSet<_>>();
+            if eligible.is_empty() {
+                return Err(format!(
+                    "block {} QC references cluster {:?} with no eligible validators",
+                    block.block_index, qc.cluster_id
+                ));
+            }
+            for address in &eligible {
+                *opportunities.entry((*address).to_string()).or_default() += 1;
+            }
+            let mut seen = HashSet::new();
+            for vote in &qc.votes {
+                if !eligible.contains(vote.validator_address.as_str()) {
+                    return Err(format!(
+                        "block {} QC includes validator {} outside cluster {:?}",
+                        block.block_index, vote.validator_address, qc.cluster_id
+                    ));
+                }
+                if !seen.insert(vote.validator_address.as_str()) {
+                    return Err(format!(
+                        "block {} QC contains duplicate validator vote {}",
+                        block.block_index, vote.validator_address
+                    ));
+                }
+                *participation
+                    .entry(vote.validator_address.clone())
+                    .or_default() += 1;
+            }
+        }
+
+        validators
+            .iter()
+            .map(|validator| {
+                let eligible = opportunities[&validator.address];
+                let score_bps = if eligible == 0 {
+                    validator.finalized_synergy_score_bps
+                } else {
+                    participation[&validator.address]
+                        .saturating_mul(10_000)
+                        .checked_div(eligible)
+                        .unwrap_or(0)
+                };
+                Ok((validator.address.clone(), score_bps))
+            })
+            .collect()
     }
 
     fn deterministic_epoch_randomness(
         chain: &BlockChain,
         block_height: u64,
         epoch_length: u64,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>, String> {
         let epoch_length = epoch_length.max(1);
-        let current_epoch = block_height / epoch_length;
-        let previous_qc = Self::get_previous_quorum_certificate(chain, current_epoch, epoch_length);
-        Self::deterministic_epoch_randomness_from_qc(&previous_qc)
+        let current_epoch = epoch_for_block_height(block_height, epoch_length);
+        if current_epoch == 0 {
+            let genesis_hash = canonical_genesis()?.hash().to_string();
+            let mut hasher = Sha3_512::new();
+            hasher.update(b"synergy-epoch-zero-randomness-v2");
+            hasher.update(genesis_hash.as_bytes());
+            return Ok(hasher.finalize().to_vec());
+        }
+        let previous_qc =
+            Self::get_previous_quorum_certificate(chain, current_epoch, epoch_length)?;
+        Ok(Self::deterministic_epoch_randomness_from_qc(&previous_qc))
     }
 
     fn deterministic_epoch_randomness_from_qc(previous_qc: &QuorumCertificate) -> Vec<u8> {
@@ -2779,8 +2975,8 @@ impl ProofOfSynergy {
         }
 
         // Calculate current epoch from configured epoch length.
-        let current_epoch = block_height / epoch_length;
-        let block_in_epoch = block_height % epoch_length;
+        let current_epoch = epoch_for_block_height(block_height, epoch_length);
+        let block_in_epoch = block_height.saturating_sub(1) % epoch_length;
         let mut candidate_addresses = validators
             .iter()
             .map(|validator| validator.address.clone())
@@ -3761,7 +3957,7 @@ impl ProofOfSynergy {
         epoch_length: u64,
     ) {
         let mut engine = cartel_detection.lock().unwrap();
-        let current_epoch = block_height / epoch_length.max(1);
+        let current_epoch = epoch_for_block_height(block_height, epoch_length);
 
         let vote_record = VoteRecord {
             validator_address: validator_address.to_string(),
@@ -4043,6 +4239,82 @@ mod tests {
             .iter()
             .map(|address| test_validator(address))
             .collect()
+    }
+
+    fn finalized_score_vote(address: &str, block_hash: &str, block_index: u64) -> Vote {
+        Vote {
+            validator_address: address.to_string(),
+            block_hash: block_hash.to_string(),
+            block_index,
+            epoch_number: 0,
+            round_number: 1,
+            signature: crate::crypto::pqc::PQCSignature {
+                algorithm: PQCAlgorithm::FNDSA,
+                signature_data: Vec::new(),
+                message_hash: Vec::new(),
+                public_key_id: String::new(),
+                created_at: block_index,
+            },
+            signer_public_key: Vec::new(),
+            timestamp: block_index,
+        }
+    }
+
+    #[test]
+    fn finalized_synergy_scores_use_only_committed_qc_participation() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let mut chain = BlockChain::new();
+        let mut validators = test_validators(1, 3);
+        for validator in &mut validators {
+            validator.cluster_id = Some(0);
+            validator.cluster_assignment_effective_height = Some(1);
+        }
+
+        for (height, voters) in [
+            (1, vec!["validator-1", "validator-2", "validator-3"]),
+            (2, vec!["validator-1", "validator-2"]),
+            (3, vec!["validator-1"]),
+        ] {
+            let block_hash = format!("score-block-{height}");
+            chain.add_block(Block {
+                block_index: height,
+                timestamp: height,
+                transactions: Vec::new(),
+                previous_hash: format!("score-block-{}", height.saturating_sub(1)),
+                validator_id: "validator-1".to_string(),
+                nonce: height,
+                hash: block_hash.clone(),
+                transactions_root: String::new(),
+                proposer_public_key: Vec::new(),
+                block_signature: Vec::new(),
+                block_signature_algorithm: "fndsa".to_string(),
+            });
+            DualQuorumConsensus::record_committed_qc_checked(QuorumCertificate {
+                block_hash: block_hash.clone(),
+                cluster_id: Some(0),
+                epoch_number: 0,
+                round_number: 1,
+                aggregate_signature: Vec::new(),
+                participant_bitmap: Vec::new(),
+                cumulative_weight: voters.len() as f64,
+                validation_quorum_met: true,
+                cooperation_quorum_met: true,
+                timestamp: height,
+                votes: voters
+                    .into_iter()
+                    .map(|address| finalized_score_vote(address, &block_hash, height))
+                    .collect(),
+            })
+            .unwrap();
+        }
+
+        let scores =
+            ProofOfSynergy::finalized_synergy_scores_for_epoch(&chain, 0, 3, &validators).unwrap();
+
+        assert_eq!(scores["validator-1"], 10_000);
+        assert_eq!(scores["validator-2"], 6_666);
+        assert_eq!(scores["validator-3"], 3_333);
     }
 
     fn validator_membership_addresses(validators: &[Validator]) -> Vec<String> {
@@ -4529,17 +4801,17 @@ mod tests {
     #[test]
     fn next_block_epoch_transitions_at_boundary_only_once() {
         assert_eq!(ProofOfSynergy::epoch_for_next_block(998, 1000), 0);
-        assert_eq!(ProofOfSynergy::epoch_for_next_block(999, 1000), 1);
+        assert_eq!(ProofOfSynergy::epoch_for_next_block(999, 1000), 0);
         assert_eq!(ProofOfSynergy::epoch_for_next_block(1000, 1000), 1);
 
         let mut current_epoch = 0;
-        let target_epoch = ProofOfSynergy::epoch_for_next_block(999, 1000);
+        let target_epoch = ProofOfSynergy::epoch_for_next_block(1000, 1000);
         while current_epoch < target_epoch {
             current_epoch += 1;
         }
         assert_eq!(current_epoch, 1);
 
-        let same_boundary_epoch = ProofOfSynergy::epoch_for_next_block(1000, 1000);
+        let same_boundary_epoch = ProofOfSynergy::epoch_for_next_block(1001, 1000);
         while current_epoch < same_boundary_epoch {
             current_epoch += 1;
         }
@@ -4731,20 +5003,36 @@ mod tests {
 
     #[test]
     fn previous_qc_uses_epoch_boundary_block_on_mid_epoch_restart() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
         let mut chain = BlockChain::new();
         chain.add_block(Block {
-            block_index: 999,
-            timestamp: 999,
+            block_index: 1000,
+            timestamp: 1000,
             transactions: Vec::new(),
-            previous_hash: "998".to_string(),
+            previous_hash: "999".to_string(),
             validator_id: "validator-a".to_string(),
-            nonce: 999,
-            hash: "boundary-999".to_string(),
+            nonce: 1000,
+            hash: "boundary-1000".to_string(),
             transactions_root: String::new(),
             proposer_public_key: Vec::new(),
             block_signature: vec![9, 9, 9],
             block_signature_algorithm: "fndsa".to_string(),
         });
+        DualQuorumConsensus::record_committed_qc_checked(QuorumCertificate {
+            block_hash: "boundary-1000".to_string(),
+            cluster_id: None,
+            epoch_number: 0,
+            round_number: 1,
+            aggregate_signature: vec![9, 9, 9],
+            participant_bitmap: Vec::new(),
+            cumulative_weight: 1.0,
+            validation_quorum_met: true,
+            cooperation_quorum_met: true,
+            timestamp: 1000,
+            votes: Vec::new(),
+        })
+        .unwrap();
         chain.add_block(Block {
             block_index: 1026,
             timestamp: 1026,
@@ -4759,29 +5047,45 @@ mod tests {
             block_signature_algorithm: "fndsa".to_string(),
         });
 
-        let previous_qc = ProofOfSynergy::get_previous_quorum_certificate(&chain, 1, 1000);
+        let previous_qc = ProofOfSynergy::get_previous_quorum_certificate(&chain, 1, 1000).unwrap();
 
-        assert_eq!(previous_qc.block_hash, "boundary-999");
+        assert_eq!(previous_qc.block_hash, "boundary-1000");
         assert_eq!(previous_qc.epoch_number, 0);
         assert_eq!(previous_qc.aggregate_signature, vec![9, 9, 9]);
     }
 
     #[test]
     fn deterministic_epoch_randomness_uses_boundary_qc_only() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
         let mut chain = BlockChain::new();
         chain.add_block(Block {
-            block_index: 999,
-            timestamp: 999,
+            block_index: 1000,
+            timestamp: 1000,
             transactions: Vec::new(),
-            previous_hash: "998".to_string(),
+            previous_hash: "999".to_string(),
             validator_id: "validator-a".to_string(),
-            nonce: 999,
-            hash: "boundary-999".to_string(),
+            nonce: 1000,
+            hash: "boundary-1000".to_string(),
             transactions_root: String::new(),
             proposer_public_key: Vec::new(),
             block_signature: vec![9, 9, 9],
             block_signature_algorithm: "fndsa".to_string(),
         });
+        DualQuorumConsensus::record_committed_qc_checked(QuorumCertificate {
+            block_hash: "boundary-1000".to_string(),
+            cluster_id: None,
+            epoch_number: 0,
+            round_number: 1,
+            aggregate_signature: vec![9, 9, 9],
+            participant_bitmap: Vec::new(),
+            cumulative_weight: 1.0,
+            validation_quorum_met: true,
+            cooperation_quorum_met: true,
+            timestamp: 1000,
+            votes: Vec::new(),
+        })
+        .unwrap();
         chain.add_block(Block {
             block_index: 1026,
             timestamp: 1026,
@@ -4796,9 +5100,9 @@ mod tests {
             block_signature_algorithm: "fndsa".to_string(),
         });
 
-        let direct_qc = ProofOfSynergy::get_previous_quorum_certificate(&chain, 1, 1000);
+        let direct_qc = ProofOfSynergy::get_previous_quorum_certificate(&chain, 1, 1000).unwrap();
         let expected = ProofOfSynergy::deterministic_epoch_randomness_from_qc(&direct_qc);
-        let actual = ProofOfSynergy::deterministic_epoch_randomness(&chain, 1_026, 1_000);
+        let actual = ProofOfSynergy::deterministic_epoch_randomness(&chain, 1_026, 1_000).unwrap();
 
         assert_eq!(actual, expected);
     }

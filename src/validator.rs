@@ -1,6 +1,8 @@
 use crate::address::generate_cluster_address;
 use crate::consensus::consensus_fork;
+use crate::epoch::{epoch_start_height, TESTNET_EPOCH_LENGTH_BLOCKS};
 use crate::genesis::canonical_genesis;
+use crate::synergy_types::SYNERGY_TESTNET_V2_CHAIN_ID;
 use crate::token::TokenManager;
 use crate::transaction::Transaction;
 use serde::{Deserialize, Serialize};
@@ -17,9 +19,14 @@ pub const SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION: u64 = 1;
 
 const VERBOSE_VALIDATOR_LOGS: bool = false;
 pub const INITIAL_VALIDATOR_SYNERGY_SCORE: f64 = 100.0;
+pub const INITIAL_VALIDATOR_SYNERGY_SCORE_BPS: u64 = 10_000;
 pub const TESTNET_VALIDATOR_CLUSTER_SIZE: usize = 7;
 pub const TESTNET_MIN_VALIDATOR_CLUSTER_SIZE: usize = 5;
 pub const TESTNET_FIRST_CLUSTER_SPLIT_THRESHOLD: usize = TESTNET_MIN_VALIDATOR_CLUSTER_SIZE * 2;
+pub const TESTNET_THIRD_CLUSTER_SPLIT_THRESHOLD: usize = TESTNET_VALIDATOR_CLUSTER_SIZE * 3;
+pub const TESTNET_CLUSTER_ROTATION_MIN_CLUSTERS: usize = 3;
+pub const TESTNET_LOW_SCORE_ROTATION_COUNT: usize = 2;
+pub const TESTNET_FULL_CLUSTER_ROTATION_EPOCH_INTERVAL: u64 = 10;
 pub const MISSED_VOTE_JAIL_THRESHOLD: u64 = 3;
 pub const MISSED_VOTE_SLASH_THRESHOLD: u64 = 6;
 pub const VALIDATOR_SHADOW_PHASE_BLOCKS: u64 = 1_000;
@@ -44,56 +51,289 @@ pub fn target_validator_cluster_count(active_validator_count: usize) -> usize {
         0
     } else if active_validator_count < TESTNET_FIRST_CLUSTER_SPLIT_THRESHOLD {
         1
+    } else if active_validator_count < TESTNET_THIRD_CLUSTER_SPLIT_THRESHOLD {
+        2
     } else {
-        2.max(active_validator_count.div_ceil(TESTNET_VALIDATOR_CLUSTER_SIZE))
+        active_validator_count / TESTNET_VALIDATOR_CLUSTER_SIZE
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct CanonicalValidatorClusterPlan {
+    pub clusters: Vec<(u64, Vec<Validator>)>,
+    pub cluster_count: usize,
+    pub full_reshuffle: bool,
+    pub rotation: CanonicalValidatorClusterRotation,
+    pub randomness_source: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalValidatorClusterRotation {
+    None,
+    CapacityExpansion,
+    LowScoreEpoch,
+    FullEpoch,
+    StateRepair,
 }
 
 pub fn canonical_validator_clusters_for_epoch(
     active_validators: &[Validator],
     epoch: u64,
 ) -> Vec<(u64, Vec<Validator>)> {
+    canonical_validator_cluster_plan_for_epoch(active_validators, epoch).clusters
+}
+
+pub fn canonical_validator_cluster_plan_for_epoch(
+    active_validators: &[Validator],
+    epoch: u64,
+) -> CanonicalValidatorClusterPlan {
+    let randomness_source = canonical_epoch_cluster_seed(active_validators, epoch);
+    canonical_validator_cluster_plan_for_epoch_with_seed(
+        active_validators,
+        epoch,
+        &randomness_source,
+    )
+}
+
+pub fn canonical_validator_cluster_plan_for_epoch_with_seed(
+    active_validators: &[Validator],
+    epoch: u64,
+    randomness_source: &str,
+) -> CanonicalValidatorClusterPlan {
     if active_validators.is_empty() {
-        return Vec::new();
+        return CanonicalValidatorClusterPlan {
+            clusters: Vec::new(),
+            cluster_count: 0,
+            full_reshuffle: false,
+            rotation: CanonicalValidatorClusterRotation::None,
+            randomness_source: randomness_source.to_string(),
+        };
     }
 
-    let mut ordered_validators = active_validators.to_vec();
-    ordered_validators.sort_by(|a, b| {
-        epoch_cluster_rank(epoch, &a.address)
-            .cmp(&epoch_cluster_rank(epoch, &b.address))
-            .then_with(|| a.address.cmp(&b.address))
-    });
-
-    let cluster_count = target_validator_cluster_count(ordered_validators.len());
-    let base_cluster_size = ordered_validators.len() / cluster_count;
-    let extra_members = ordered_validators.len() % cluster_count;
-    let target_sizes: Vec<usize> = (0..cluster_count)
-        .map(|index| base_cluster_size + usize::from(index < extra_members))
-        .collect();
+    let cluster_count = target_validator_cluster_count(active_validators.len());
     let mut cluster_members: Vec<Vec<Validator>> = (0..cluster_count).map(|_| Vec::new()).collect();
-    let mut next_cluster_index = 0usize;
 
-    for validator in ordered_validators {
-        while cluster_members[next_cluster_index].len() >= target_sizes[next_cluster_index] {
-            next_cluster_index = (next_cluster_index + 1) % cluster_count;
-        }
-        cluster_members[next_cluster_index].push(validator);
-        next_cluster_index = (next_cluster_index + 1) % cluster_count;
+    if cluster_count == 1 {
+        let mut members = active_validators.to_vec();
+        sort_validators_by_epoch_rank(&mut members, epoch, randomness_source);
+        return CanonicalValidatorClusterPlan {
+            clusters: vec![(0, members)],
+            cluster_count,
+            full_reshuffle: active_validators
+                .iter()
+                .any(|validator| validator.cluster_id != Some(0)),
+            rotation: if active_validators
+                .iter()
+                .any(|validator| validator.cluster_id != Some(0))
+            {
+                CanonicalValidatorClusterRotation::CapacityExpansion
+            } else {
+                CanonicalValidatorClusterRotation::None
+            },
+            randomness_source: randomness_source.to_string(),
+        };
     }
 
-    cluster_members
-        .into_iter()
-        .enumerate()
-        .map(|(cluster_index, members)| (cluster_index as u64, members))
-        .collect()
+    let expected_cluster_ids = (0..cluster_count as u64).collect::<HashSet<_>>();
+    let assigned_cluster_ids = active_validators
+        .iter()
+        .filter_map(|validator| validator.cluster_id)
+        .collect::<HashSet<_>>();
+    let invalid_assignment = active_validators.iter().any(|validator| {
+        validator
+            .cluster_id
+            .is_some_and(|cluster_id| cluster_id >= cluster_count as u64)
+    });
+    let capacity_expansion = assigned_cluster_ids != expected_cluster_ids;
+    let assigned_validators = active_validators
+        .iter()
+        .filter(|validator| validator.cluster_id.is_some())
+        .collect::<Vec<_>>();
+    let has_current_epoch_assignment = assigned_validators
+        .iter()
+        .any(|validator| validator.cluster_assignment_epoch == Some(epoch));
+    let has_stale_epoch_assignment = assigned_validators
+        .iter()
+        .any(|validator| validator.cluster_assignment_epoch != Some(epoch));
+    let mixed_assignment_epochs = has_current_epoch_assignment && has_stale_epoch_assignment;
+    let epoch_transition_due = !assigned_validators.is_empty()
+        && !has_current_epoch_assignment
+        && has_stale_epoch_assignment;
+    let rotations_enabled = cluster_count >= TESTNET_CLUSTER_ROTATION_MIN_CLUSTERS;
+    let full_epoch_rotation = rotations_enabled
+        && epoch > 0
+        && epoch % TESTNET_FULL_CLUSTER_ROTATION_EPOCH_INTERVAL == 0
+        && epoch_transition_due;
+    let low_score_epoch_rotation =
+        rotations_enabled && epoch_transition_due && !full_epoch_rotation;
+    let full_reshuffle =
+        invalid_assignment || capacity_expansion || mixed_assignment_epochs || full_epoch_rotation;
+    let rotation = if capacity_expansion {
+        CanonicalValidatorClusterRotation::CapacityExpansion
+    } else if invalid_assignment || mixed_assignment_epochs {
+        CanonicalValidatorClusterRotation::StateRepair
+    } else if full_epoch_rotation {
+        CanonicalValidatorClusterRotation::FullEpoch
+    } else if low_score_epoch_rotation {
+        CanonicalValidatorClusterRotation::LowScoreEpoch
+    } else {
+        CanonicalValidatorClusterRotation::None
+    };
+
+    if full_reshuffle {
+        let mut ordered_validators = active_validators.to_vec();
+        sort_validators_by_epoch_rank(&mut ordered_validators, epoch, randomness_source);
+        for (index, validator) in ordered_validators.into_iter().enumerate() {
+            cluster_members[index % cluster_count].push(validator);
+        }
+    } else {
+        let mut additions = Vec::new();
+        for validator in active_validators.iter().cloned() {
+            match validator.cluster_id {
+                Some(cluster_id) => cluster_members[cluster_id as usize].push(validator),
+                None => additions.push(validator),
+            }
+        }
+        if low_score_epoch_rotation {
+            rotate_low_score_cluster_members(&mut cluster_members, epoch, randomness_source);
+        }
+        sort_validators_by_epoch_rank(&mut additions, epoch, randomness_source);
+        for validator in additions {
+            let minimum_size = cluster_members.iter().map(Vec::len).min().unwrap_or(0);
+            let least_populated = cluster_members
+                .iter()
+                .enumerate()
+                .filter_map(|(cluster_index, members)| {
+                    (members.len() == minimum_size).then_some(cluster_index)
+                })
+                .collect::<Vec<_>>();
+            let rank = epoch_cluster_rank(epoch, randomness_source, &validator.address);
+            let tie_break = u64::from_be_bytes(rank[..8].try_into().unwrap_or([0; 8])) as usize;
+            let cluster_index = least_populated[tie_break % least_populated.len()];
+            cluster_members[cluster_index].push(validator);
+        }
+    }
+
+    for members in &mut cluster_members {
+        sort_validators_by_epoch_rank(members, epoch, randomness_source);
+    }
+    CanonicalValidatorClusterPlan {
+        clusters: cluster_members
+            .into_iter()
+            .enumerate()
+            .map(|(cluster_index, members)| (cluster_index as u64, members))
+            .collect(),
+        cluster_count,
+        full_reshuffle,
+        rotation,
+        randomness_source: randomness_source.to_string(),
+    }
+}
+
+fn rotate_low_score_cluster_members(
+    cluster_members: &mut [Vec<Validator>],
+    epoch: u64,
+    randomness_source: &str,
+) {
+    if cluster_members.len() < TESTNET_CLUSTER_ROTATION_MIN_CLUSTERS {
+        return;
+    }
+
+    let mut selected_by_cluster = Vec::with_capacity(cluster_members.len());
+    for members in cluster_members.iter_mut() {
+        let mut ranked = members.clone();
+        ranked.sort_by(|left, right| {
+            left.finalized_synergy_score_bps
+                .cmp(&right.finalized_synergy_score_bps)
+                .then_with(|| {
+                    epoch_cluster_rank(epoch, randomness_source, &left.address).cmp(
+                        &epoch_cluster_rank(epoch, randomness_source, &right.address),
+                    )
+                })
+                .then_with(|| left.address.cmp(&right.address))
+        });
+        let selected_addresses = ranked
+            .into_iter()
+            .take(TESTNET_LOW_SCORE_ROTATION_COUNT.min(members.len()))
+            .map(|validator| validator.address)
+            .collect::<HashSet<_>>();
+        let mut selected = Vec::with_capacity(selected_addresses.len());
+        members.retain(|validator| {
+            if selected_addresses.contains(&validator.address) {
+                selected.push(validator.clone());
+                false
+            } else {
+                true
+            }
+        });
+        sort_validators_by_epoch_rank(&mut selected, epoch, randomness_source);
+        selected_by_cluster.push(selected);
+    }
+
+    let mut cluster_order = (0..cluster_members.len()).collect::<Vec<_>>();
+    cluster_order.sort_by(|left, right| {
+        epoch_cluster_rank(epoch, randomness_source, &format!("cluster-{left}"))
+            .cmp(&epoch_cluster_rank(
+                epoch,
+                randomness_source,
+                &format!("cluster-{right}"),
+            ))
+            .then_with(|| left.cmp(right))
+    });
+    for (position, source_cluster) in cluster_order.iter().enumerate() {
+        let target_cluster = cluster_order[(position + 1) % cluster_order.len()];
+        cluster_members[target_cluster].append(&mut selected_by_cluster[*source_cluster]);
+    }
+}
+
+fn sort_validators_by_epoch_rank(
+    validators: &mut [Validator],
+    epoch: u64,
+    randomness_source: &str,
+) {
+    validators.sort_by(|left, right| {
+        epoch_cluster_rank(epoch, randomness_source, &left.address)
+            .cmp(&epoch_cluster_rank(
+                epoch,
+                randomness_source,
+                &right.address,
+            ))
+            .then_with(|| left.address.cmp(&right.address))
+    });
+}
+
+fn canonical_epoch_cluster_seed(active_validators: &[Validator], epoch: u64) -> String {
+    let current_seeds = active_validators
+        .iter()
+        .filter(|validator| validator.cluster_assignment_epoch == Some(epoch))
+        .filter_map(|validator| validator.cluster_assignment_seed.as_deref())
+        .filter(|seed| !seed.trim().is_empty())
+        .collect::<HashSet<_>>();
+    if current_seeds.len() == 1 {
+        return current_seeds
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+    }
+
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"synergy-validator-cluster-bootstrap-seed-v2");
+    hasher.update(SYNERGY_TESTNET_V2_CHAIN_ID.to_be_bytes());
+    if let Ok(genesis) = canonical_genesis() {
+        hasher.update(genesis.hash().as_bytes());
+    }
+    hasher.update(epoch.to_be_bytes());
+    hex::encode(hasher.finalize())
 }
 
 pub fn canonical_validator_cluster_address(cluster_id: u64, members: &[Validator]) -> String {
     let cluster_group = ((cluster_id % 5) + 1) as u8;
-    let validator_addresses = members
+    let mut validator_addresses = members
         .iter()
         .map(|validator| validator.address.clone())
         .collect::<Vec<_>>();
+    validator_addresses.sort();
     let cluster_seed = format!("cluster-{cluster_id}-{}", validator_addresses.join("-"));
     generate_cluster_address(&cluster_seed, cluster_group)
 }
@@ -167,6 +407,8 @@ pub struct Validator {
 
     // Synergy scores
     pub synergy_score: f64,
+    #[serde(default = "default_finalized_synergy_score_bps")]
+    pub finalized_synergy_score_bps: u64,
     pub task_accuracy: f64,
     pub collaboration_score: f64,
     pub reputation_score: f64,
@@ -180,6 +422,12 @@ pub struct Validator {
     pub cluster_id: Option<u64>,
     #[serde(default)]
     pub cluster_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_assignment_epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_assignment_seed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_assignment_effective_height: Option<u64>,
     pub status: ValidatorStatus,
     pub version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -424,6 +672,7 @@ impl Validator {
             last_vote_timestamp: 0,
             equivocation_evidence_count: 0,
             synergy_score: INITIAL_VALIDATOR_SYNERGY_SCORE,
+            finalized_synergy_score_bps: INITIAL_VALIDATOR_SYNERGY_SCORE_BPS,
             task_accuracy: 100.0,
             collaboration_score: 0.0,
             reputation_score: 100.0,
@@ -432,6 +681,9 @@ impl Validator {
             min_stake_required: stake_amount,
             cluster_id: None,
             cluster_address: None,
+            cluster_assignment_epoch: None,
+            cluster_assignment_seed: None,
+            cluster_assignment_effective_height: None,
             status: ValidatorStatus::Pending,
             version: "1.0.0".to_string(),
             activation_tx_hash: None,
@@ -541,7 +793,7 @@ impl ValidatorRegistry {
             min_stake_amount: 0, // Lowered for testnet (production: 1000)
             max_validators: 0,
             cluster_size: TESTNET_VALIDATOR_CLUSTER_SIZE,
-            epoch_length: 30000,
+            epoch_length: TESTNET_EPOCH_LENGTH_BLOCKS,
             current_epoch: 0,
             validator_set_version: 0,
         }
@@ -810,17 +1062,63 @@ impl ValidatorRegistry {
         self.validators.get(address)
     }
 
+    pub fn apply_finalized_synergy_scores(
+        &mut self,
+        scores_bps: &HashMap<String, u64>,
+    ) -> Result<(), String> {
+        let active_addresses = self
+            .get_active_validators()
+            .into_iter()
+            .map(|validator| validator.address.clone())
+            .collect::<Vec<_>>();
+        for address in &active_addresses {
+            let score_bps = scores_bps.get(address).ok_or_else(|| {
+                format!("finalized Synergy score snapshot is missing validator {address}")
+            })?;
+            if *score_bps > INITIAL_VALIDATOR_SYNERGY_SCORE_BPS {
+                return Err(format!(
+                    "finalized Synergy score for {address} exceeds 10000 basis points"
+                ));
+            }
+        }
+        for address in active_addresses {
+            let score_bps = scores_bps[&address];
+            if let Some(validator) = self.validators.get_mut(&address) {
+                validator.finalized_synergy_score_bps = score_bps;
+                validator.synergy_score = score_bps as f64 / 100.0;
+            }
+        }
+        Ok(())
+    }
+
     pub fn reorganize_clusters(&mut self) {
         self.reorganize_clusters_for_epoch(self.current_epoch);
     }
 
     pub fn reorganize_clusters_for_epoch(&mut self, epoch: u64) {
+        let active_validators: Vec<Validator> =
+            self.get_active_validators().into_iter().cloned().collect();
+        let randomness_source = canonical_epoch_cluster_seed(&active_validators, epoch);
+        let effective_height = epoch_start_height(epoch, self.epoch_length);
+        self.reorganize_clusters_for_epoch_with_seed(epoch, &randomness_source, effective_height);
+    }
+
+    pub fn reorganize_clusters_for_epoch_with_seed(
+        &mut self,
+        epoch: u64,
+        randomness_source: &str,
+        effective_height: u64,
+    ) {
         self.current_epoch = epoch;
         let active_validators: Vec<Validator> =
             self.get_active_validators().into_iter().cloned().collect();
 
-        let cluster_members = canonical_validator_clusters_for_epoch(&active_validators, epoch);
-        self.apply_cluster_memberships(cluster_members);
+        let plan = canonical_validator_cluster_plan_for_epoch_with_seed(
+            &active_validators,
+            epoch,
+            randomness_source,
+        );
+        self.apply_cluster_memberships(plan.clusters, epoch, randomness_source, effective_height);
     }
 
     pub fn reorganize_clusters_for_height(
@@ -837,6 +1135,8 @@ impl ValidatorRegistry {
                 }
             };
         let validator_candidates = self.validators.values().cloned().collect::<Vec<_>>();
+        let randomness_source =
+            canonical_epoch_cluster_seed(&validator_candidates, effective_epoch);
         let cluster_members = match canonical_validator_clusters_for_height(
             validator_candidates,
             effective_epoch,
@@ -848,7 +1148,12 @@ impl ValidatorRegistry {
                 return Err(error);
             }
         };
-        self.apply_cluster_memberships(cluster_members);
+        self.apply_cluster_memberships(
+            cluster_members,
+            effective_epoch,
+            &randomness_source,
+            height,
+        );
         self.current_epoch = effective_epoch;
         Ok(())
     }
@@ -858,10 +1163,19 @@ impl ValidatorRegistry {
         for validator in self.validators.values_mut() {
             validator.cluster_id = None;
             validator.cluster_address = None;
+            validator.cluster_assignment_epoch = None;
+            validator.cluster_assignment_seed = None;
+            validator.cluster_assignment_effective_height = None;
         }
     }
 
-    fn apply_cluster_memberships(&mut self, cluster_members: Vec<(u64, Vec<Validator>)>) {
+    fn apply_cluster_memberships(
+        &mut self,
+        cluster_members: Vec<(u64, Vec<Validator>)>,
+        assignment_epoch: u64,
+        assignment_seed: &str,
+        assignment_effective_height: u64,
+    ) {
         self.clear_cluster_assignments();
 
         if cluster_members.is_empty() {
@@ -901,6 +1215,10 @@ impl ValidatorRegistry {
                 if let Some(validator) = self.validators.get_mut(&address) {
                     validator.cluster_id = Some(cluster_id);
                     validator.cluster_address = Some(cluster_address.clone());
+                    validator.cluster_assignment_epoch = Some(assignment_epoch);
+                    validator.cluster_assignment_seed = Some(assignment_seed.to_string());
+                    validator.cluster_assignment_effective_height =
+                        Some(assignment_effective_height);
                 }
             }
         }
@@ -1028,11 +1346,18 @@ impl ValidatorRegistry {
     }
 }
 
-fn epoch_cluster_rank(epoch: u64, address: &str) -> [u8; 32] {
+fn epoch_cluster_rank(epoch: u64, randomness_source: &str, address: &str) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
+    hasher.update(b"synergy-validator-cluster-rank-v2");
+    hasher.update(SYNERGY_TESTNET_V2_CHAIN_ID.to_be_bytes());
     hasher.update(epoch.to_be_bytes());
+    hasher.update(randomness_source.as_bytes());
     hasher.update(address.as_bytes());
     hasher.finalize().into()
+}
+
+fn default_finalized_synergy_score_bps() -> u64 {
+    INITIAL_VALIDATOR_SYNERGY_SCORE_BPS
 }
 
 #[derive(Debug, Clone)]
@@ -1248,9 +1573,34 @@ impl ValidatorManager {
             .unwrap_or(0)
     }
 
+    pub fn apply_finalized_synergy_scores(
+        &self,
+        scores_bps: &HashMap<String, u64>,
+    ) -> Result<(), String> {
+        self.registry
+            .lock()
+            .map_err(|_| "failed to lock validator registry".to_string())?
+            .apply_finalized_synergy_scores(scores_bps)
+    }
+
     pub fn reorganize_clusters_for_epoch(&self, epoch: u64) {
         if let Ok(mut registry) = self.registry.lock() {
             registry.reorganize_clusters_for_epoch(epoch);
+        }
+    }
+
+    pub fn reorganize_clusters_for_epoch_with_seed(
+        &self,
+        epoch: u64,
+        randomness_source: &str,
+        effective_height: u64,
+    ) {
+        if let Ok(mut registry) = self.registry.lock() {
+            registry.reorganize_clusters_for_epoch_with_seed(
+                epoch,
+                randomness_source,
+                effective_height,
+            );
         }
     }
 
@@ -1903,6 +2253,8 @@ mod tests {
             );
             validator.status = ValidatorStatus::Active;
             validator.synergy_score = INITIAL_VALIDATOR_SYNERGY_SCORE - index as f64;
+            validator.finalized_synergy_score_bps =
+                INITIAL_VALIDATOR_SYNERGY_SCORE_BPS.saturating_sub(index as u64);
             registry
                 .validators
                 .insert(validator.address.clone(), validator);
@@ -3323,6 +3675,11 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
             canonical_active_validator_set_hash(&ordered),
             canonical_active_validator_set_hash(&reversed)
         );
+        assert_eq!(
+            canonical_validator_cluster_address(0, &ordered),
+            canonical_validator_cluster_address(0, &reversed),
+            "cluster identity must not depend on epoch-only member ordering"
+        );
     }
 
     #[test]
@@ -3689,7 +4046,7 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
     }
 
     #[test]
-    fn reorganize_clusters_adds_third_cluster_at_fifteen_validators() {
+    fn reorganize_clusters_keeps_fifteen_validators_in_two_balanced_clusters() {
         let registry = active_registry(15);
         let mut cluster_sizes: Vec<usize> = registry
             .clusters
@@ -3698,12 +4055,12 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
             .collect();
         cluster_sizes.sort_unstable();
 
-        assert_eq!(registry.clusters.len(), 3);
-        assert_eq!(cluster_sizes, vec![5, 5, 5]);
+        assert_eq!(registry.clusters.len(), 2);
+        assert_eq!(cluster_sizes, vec![7, 8]);
     }
 
     #[test]
-    fn reorganize_clusters_shuffles_assignments_by_epoch() {
+    fn reorganize_clusters_does_not_rotate_before_three_clusters() {
         let mut registry = active_registry(12);
         let epoch_zero_assignments: HashMap<String, Option<u64>> = registry
             .validators
@@ -3717,10 +4074,156 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
             epoch_zero_assignments.get(address).copied().flatten() != validator.cluster_id
         });
 
-        assert!(
-            moved,
-            "at least one validator should move clusters after an epoch shuffle"
+        assert!(!moved, "two-cluster networks must not run epoch rotations");
+    }
+
+    #[test]
+    fn target_cluster_count_matches_protocol_boundaries() {
+        for (validator_count, expected_clusters) in [
+            (0, 0),
+            (1, 1),
+            (9, 1),
+            (10, 2),
+            (20, 2),
+            (21, 3),
+            (27, 3),
+            (28, 4),
+            (34, 4),
+            (35, 5),
+        ] {
+            assert_eq!(
+                target_validator_cluster_count(validator_count),
+                expected_clusters,
+                "unexpected cluster count for {validator_count} validators"
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_expansion_points_are_evenly_balanced() {
+        for (validator_count, expected_sizes) in [
+            (10, vec![5, 5]),
+            (20, vec![10, 10]),
+            (21, vec![7, 7, 7]),
+            (27, vec![9, 9, 9]),
+            (28, vec![7, 7, 7, 7]),
+            (35, vec![7, 7, 7, 7, 7]),
+        ] {
+            let registry = active_registry(validator_count);
+            let mut sizes = registry
+                .clusters
+                .values()
+                .map(|cluster| cluster.validators.len())
+                .collect::<Vec<_>>();
+            sizes.sort_unstable();
+            assert_eq!(sizes, expected_sizes);
+        }
+    }
+
+    #[test]
+    fn incremental_validator_joins_the_least_populated_cluster_without_moving_existing_members() {
+        let mut registry = active_registry(10);
+        let original_assignments = registry
+            .validators
+            .iter()
+            .map(|(address, validator)| (address.clone(), validator.cluster_id))
+            .collect::<HashMap<_, _>>();
+        let mut validator = active_validator("validator-10");
+        validator.stake_amount = 1_000;
+        validator.min_stake_required = 1_000;
+        registry
+            .validators
+            .insert(validator.address.clone(), validator);
+
+        registry.reorganize_clusters_for_epoch(0);
+
+        for (address, original_cluster) in original_assignments {
+            assert_eq!(registry.validators[&address].cluster_id, original_cluster);
+        }
+        let mut sizes = registry
+            .clusters
+            .values()
+            .map(|cluster| cluster.validators.len())
+            .collect::<Vec<_>>();
+        sizes.sort_unstable();
+        assert_eq!(sizes, vec![5, 6]);
+    }
+
+    #[test]
+    fn epoch_rotation_moves_exactly_two_lowest_scores_per_cluster_once() {
+        let mut registry = active_registry(21);
+        let original_assignments = registry
+            .validators
+            .iter()
+            .map(|(address, validator)| (address.clone(), validator.cluster_id.unwrap()))
+            .collect::<HashMap<_, _>>();
+        let selected = registry
+            .clusters
+            .values()
+            .flat_map(|cluster| {
+                let mut members = cluster
+                    .validators
+                    .iter()
+                    .map(|address| registry.validators[address].clone())
+                    .collect::<Vec<_>>();
+                members.sort_by(|left, right| {
+                    left.finalized_synergy_score_bps
+                        .cmp(&right.finalized_synergy_score_bps)
+                        .then_with(|| left.address.cmp(&right.address))
+                });
+                members
+                    .into_iter()
+                    .take(TESTNET_LOW_SCORE_ROTATION_COUNT)
+                    .map(|validator| validator.address)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<HashSet<_>>();
+
+        registry.reorganize_clusters_for_epoch(1);
+
+        let moved = registry
+            .validators
+            .iter()
+            .filter_map(|(address, validator)| {
+                (original_assignments[address] != validator.cluster_id.unwrap())
+                    .then_some(address.clone())
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(moved, selected);
+        assert!(registry
+            .validators
+            .values()
+            .all(|validator| validator.cluster_assignment_epoch == Some(1)));
+
+        let once = registry
+            .validators
+            .iter()
+            .map(|(address, validator)| (address.clone(), validator.cluster_id))
+            .collect::<HashMap<_, _>>();
+        registry.reorganize_clusters_for_epoch(1);
+        assert!(registry
+            .validators
+            .iter()
+            .all(|(address, validator)| once[address] == validator.cluster_id));
+    }
+
+    #[test]
+    fn every_tenth_epoch_uses_a_full_qc_seeded_reshuffle() {
+        let mut registry = active_registry(21);
+        registry.reorganize_clusters_for_epoch(9);
+        let active = registry
+            .get_active_validators()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let plan = canonical_validator_cluster_plan_for_epoch_with_seed(
+            &active,
+            10,
+            "finalized-boundary-qc-seed",
         );
+
+        assert!(plan.full_reshuffle);
+        assert_eq!(plan.rotation, CanonicalValidatorClusterRotation::FullEpoch);
     }
 
     #[test]

@@ -15,6 +15,7 @@ pub mod contracts;
 pub mod crypto;
 pub mod dag;
 pub mod dag_mempool;
+pub mod epoch;
 pub mod execution;
 pub mod fleet_status;
 pub mod gas;

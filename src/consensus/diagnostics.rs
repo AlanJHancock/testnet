@@ -15,6 +15,10 @@ use crate::consensus::self_realign::{
     BASELINE_VALIDATOR_COUNT, DEFAULT_SHADOW_OBSERVATION_BLOCKS, SNAPSHOT_CLASS_VALIDATOR_PRUNED,
 };
 use crate::crypto::aegis_pqvm::AegisPqvmSigner;
+use crate::epoch::{
+    epoch_end_height, epoch_for_block_height, epoch_start_height, is_epoch_end_height,
+    is_epoch_start_height,
+};
 use crate::synergy_types::{AegisPqKeyRole, Epoch};
 use crate::validator::{consensus_membership_validators, ValidatorRegistry};
 use serde::de::{self, SeqAccess, Visitor};
@@ -173,23 +177,26 @@ fn shadow_epoch_bounds(start_height: u64, latest_height: u64) -> Result<ShadowEp
     if epoch_size == 0 {
         return Err("shadow rejoin epoch size is zero".to_string());
     }
-    let shadow_start_epoch = start_height / epoch_size;
-    let current_epoch_start = (latest_height / epoch_size) * epoch_size;
-    let current_epoch_end = current_epoch_start.saturating_add(epoch_size - 1);
-    let start_epoch_start = shadow_start_epoch * epoch_size;
-    let start_epoch_end = start_epoch_start.saturating_add(epoch_size - 1);
-    let starts_at_epoch_boundary = start_height == start_epoch_start;
+    let first_observed_height = start_height.saturating_add(1);
+    let shadow_start_epoch = epoch_for_block_height(first_observed_height, epoch_size);
+    let current_epoch = epoch_for_block_height(latest_height, epoch_size);
+    let current_epoch_start = epoch_start_height(current_epoch, epoch_size);
+    let current_epoch_end = epoch_end_height(current_epoch, epoch_size);
+    let start_epoch_start = epoch_start_height(shadow_start_epoch, epoch_size);
+    let start_epoch_end = epoch_end_height(shadow_start_epoch, epoch_size);
+    let starts_at_epoch_boundary = is_epoch_start_height(first_observed_height, epoch_size);
     let required_full_shadow_epoch_start = if starts_at_epoch_boundary {
-        start_height
+        first_observed_height
     } else {
-        start_epoch_start.saturating_add(epoch_size)
+        epoch_start_height(shadow_start_epoch.saturating_add(1), epoch_size)
     };
-    let required_full_shadow_epoch_end =
-        required_full_shadow_epoch_start.saturating_add(epoch_size - 1);
+    let required_full_shadow_epoch =
+        epoch_for_block_height(required_full_shadow_epoch_start, epoch_size);
+    let required_full_shadow_epoch_end = epoch_end_height(required_full_shadow_epoch, epoch_size);
     let earliest_activation_height = required_full_shadow_epoch_end.saturating_add(1);
-    if earliest_activation_height % epoch_size != 0 {
+    if !is_epoch_start_height(earliest_activation_height, epoch_size) {
         return Err(format!(
-            "computed earliest activation height {earliest_activation_height} is not an epoch boundary for epoch size {epoch_size}"
+            "computed earliest activation height {earliest_activation_height} is not an epoch start for epoch size {epoch_size}"
         ));
     }
     Ok(ShadowEpochBounds {
@@ -291,29 +298,35 @@ fn shadow_boundary_assessment(
     full_epoch_shadow_completed: bool,
     has_failures: bool,
 ) -> Value {
-    let next_eligible_boundary = if latest_height <= bounds.earliest_activation_height {
+    let next_effective_height = epoch_start_height(
+        epoch_for_block_height(latest_height, bounds.epoch_size).saturating_add(1),
+        bounds.epoch_size,
+    );
+    let next_eligible_boundary = if latest_height < bounds.required_full_shadow_epoch_end {
         bounds.earliest_activation_height
-    } else if latest_height % bounds.epoch_size == 0 {
-        latest_height
     } else {
-        latest_height
-            .saturating_div(bounds.epoch_size)
-            .saturating_add(1)
-            .saturating_mul(bounds.epoch_size)
+        next_effective_height
     };
-    let last_eligible_boundary = if latest_height >= bounds.earliest_activation_height {
-        Some((latest_height / bounds.epoch_size) * bounds.epoch_size)
+    let last_eligible_boundary = if latest_height >= bounds.required_full_shadow_epoch_end {
+        Some(if is_epoch_end_height(latest_height, bounds.epoch_size) {
+            latest_height.saturating_add(1)
+        } else {
+            epoch_start_height(
+                epoch_for_block_height(latest_height, bounds.epoch_size),
+                bounds.epoch_size,
+            )
+        })
     } else {
         None
     };
     let epoch_rejoin_window_open = full_epoch_shadow_completed
         && !has_failures
-        && latest_height >= bounds.earliest_activation_height
-        && latest_height % bounds.epoch_size == 0;
+        && latest_height >= bounds.required_full_shadow_epoch_end
+        && is_epoch_end_height(latest_height, bounds.epoch_size);
     let missed_boundary = full_epoch_shadow_completed
         && !has_failures
-        && latest_height > bounds.earliest_activation_height
-        && latest_height % bounds.epoch_size != 0;
+        && latest_height >= bounds.required_full_shadow_epoch_end
+        && !is_epoch_end_height(latest_height, bounds.epoch_size);
     let mut reasons = Vec::new();
     if has_failures {
         reasons.push("shadow or safety verification has failures".to_string());
@@ -321,18 +334,18 @@ fn shadow_boundary_assessment(
     if !full_epoch_shadow_completed {
         reasons.push("continuous full shadow epoch is incomplete".to_string());
     }
-    if latest_height < bounds.earliest_activation_height {
+    if latest_height < bounds.required_full_shadow_epoch_end {
         reasons.push(format!(
-            "current height {latest_height} is before earliest activation height {}",
-            bounds.earliest_activation_height
+            "current height {latest_height} is before the required full shadow epoch ends at {}",
+            bounds.required_full_shadow_epoch_end
         ));
     }
     if full_epoch_shadow_completed
-        && latest_height >= bounds.earliest_activation_height
-        && latest_height % bounds.epoch_size != 0
+        && latest_height >= bounds.required_full_shadow_epoch_end
+        && !is_epoch_end_height(latest_height, bounds.epoch_size)
     {
         reasons.push(format!(
-            "current height {latest_height} is not an epoch boundary for epoch_size {}",
+            "current height {latest_height} is not an epoch end for epoch_size {}",
             bounds.epoch_size
         ));
     }
@@ -348,10 +361,10 @@ fn shadow_boundary_assessment(
         "next_eligible_boundary": next_eligible_boundary,
         "epoch_rejoin_window_open": epoch_rejoin_window_open,
         "missed_boundary": missed_boundary,
-        "last_missed_boundary": missed_boundary.then_some((latest_height / bounds.epoch_size) * bounds.epoch_size),
+        "last_missed_boundary": missed_boundary.then_some(epoch_start_height(epoch_for_block_height(latest_height, bounds.epoch_size), bounds.epoch_size)),
         "missed_boundary_reason": missed_boundary.then_some(format!(
             "full shadow proof existed but no rejoin transition was executed at epoch boundary {}",
-            (latest_height / bounds.epoch_size) * bounds.epoch_size
+            epoch_start_height(epoch_for_block_height(latest_height, bounds.epoch_size), bounds.epoch_size)
         )),
         "blocked_reasons": reasons,
     })
@@ -3259,10 +3272,10 @@ pub fn shadow_status() -> Value {
         failures.is_empty() && full_epoch_shadow_completed,
         !failures.is_empty(),
     );
-    let epoch_rejoin_window_open = failures.is_empty()
-        && full_epoch_shadow_completed
-        && latest_height >= bounds.earliest_activation_height
-        && latest_height % bounds.epoch_size == 0;
+    let epoch_rejoin_window_open = runtime_boundary_assessment
+        .get("epoch_rejoin_window_open")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let status = if failures.is_empty() {
         if full_epoch_shadow_completed {
             "SHADOW_PASSED"
@@ -3554,9 +3567,9 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
     let mut epoch_blockers = Vec::new();
     match epoch_size {
         Some(size) if size == SHADOW_REJOIN_EPOCH_SIZE && size > 0 => {
-            if common_height % size != 0 {
+            if !is_epoch_end_height(common_height, size) {
                 epoch_blockers.push(format!(
-                    "request-rejoin common_height {common_height} is not an epoch boundary for epoch_size {size}"
+                    "request-rejoin common_height {common_height} is not an epoch end for epoch_size {size}"
                 ));
             }
         }
@@ -3568,9 +3581,9 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
     }
     match earliest_activation_height {
         Some(earliest) => {
-            if common_height < earliest {
+            if common_height.saturating_add(1) < earliest {
                 epoch_blockers.push(format!(
-                    "request-rejoin common_height {common_height} is before earliest_activation_height {earliest}"
+                    "request-rejoin common_height {common_height} cannot activate before earliest_activation_height {earliest}"
                 ));
             }
         }
@@ -6112,19 +6125,19 @@ mod tests {
             report
                 .get("required_full_shadow_epoch_start")
                 .and_then(Value::as_u64),
-            Some(90000)
+            Some(90001)
         );
         assert_eq!(
             report
                 .get("required_full_shadow_epoch_end")
                 .and_then(Value::as_u64),
-            Some(90999)
+            Some(91000)
         );
         assert_eq!(
             report
                 .get("earliest_activation_height")
                 .and_then(Value::as_u64),
-            Some(91000)
+            Some(91001)
         );
     }
 
@@ -6207,9 +6220,9 @@ mod tests {
         write_quarantine_marker(&root);
         write_empty_vote_locks(&root);
         write_shadow_observation(&root, 89957, 500);
-        write_chain_range(&root, 90000, 90999);
-        write_canonical_lock_at_height(&root, 90999);
-        write_legacy_qc_fixture_at_height(&root, 90999);
+        write_chain_range(&root, 90001, 91000);
+        write_canonical_lock_at_height(&root, 91000);
+        write_legacy_qc_fixture_at_height(&root, 91000);
 
         let report = with_runtime_root(&root, shadow_status);
 
@@ -6228,14 +6241,20 @@ mod tests {
             Some(false)
         );
         assert_eq!(
+            report
+                .get("epoch_rejoin_window_open")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
             report.get("latest_height").and_then(Value::as_u64),
-            Some(90999)
+            Some(91000)
         );
         assert_eq!(
             report
                 .get("earliest_activation_height")
                 .and_then(Value::as_u64),
-            Some(91000)
+            Some(91001)
         );
     }
 
@@ -6250,7 +6269,7 @@ mod tests {
         write_quarantine_marker(&root);
         write_empty_vote_locks(&root);
         write_shadow_observation(&root, 89957, 500);
-        write_chain_range(&root, 90000, 94002);
+        write_chain_range(&root, 90001, 94002);
         write_canonical_lock_at_height(&root, 94002);
         write_legacy_qc_fixture_at_height(&root, 94002);
 
@@ -6266,11 +6285,11 @@ mod tests {
         );
         assert_eq!(
             report.get("last_missed_boundary").and_then(Value::as_u64),
-            Some(94000)
+            Some(94001)
         );
         assert_eq!(
             report.get("next_eligible_boundary").and_then(Value::as_u64),
-            Some(95000)
+            Some(95001)
         );
         assert_eq!(
             report
@@ -6595,7 +6614,7 @@ mod tests {
         write_quarantine_marker(&root);
         write_empty_vote_locks(&root);
         write_shadow_observation(&root, 89957, 500);
-        write_chain_range(&root, 90000, 90999);
+        write_chain_range(&root, 90001, 91000);
         write_canonical_lock_at_height(&root, 91001);
         write_legacy_qc_fixture_at_height(&root, 91001);
 
@@ -6627,7 +6646,7 @@ mod tests {
             reason
                 .as_str()
                 .unwrap_or_default()
-                .contains("not an epoch boundary")
+                .contains("not an epoch end")
         }));
     }
 

@@ -35,12 +35,12 @@ use crate::token::TOKEN_MANAGER;
 use crate::transaction::Transaction;
 use crate::validator::{
     balanced_validator_cluster_id, canonical_active_validator_set_hash,
-    canonical_validator_cluster_address, canonical_validator_clusters_digest,
-    canonical_validator_clusters_for_epoch, canonical_validator_clusters_for_height,
-    consensus_membership_validators_for_height, effective_cluster_epoch_for_height,
-    target_validator_cluster_count, Validator, ValidatorManager, ValidatorRegistry,
-    ValidatorStatus, INITIAL_VALIDATOR_SYNERGY_SCORE, TESTNET_MIN_VALIDATOR_STAKE_NWEI,
-    VALIDATOR_MANAGER,
+    canonical_validator_cluster_address, canonical_validator_cluster_plan_for_epoch,
+    canonical_validator_clusters_digest, canonical_validator_clusters_for_epoch,
+    canonical_validator_clusters_for_height, consensus_membership_validators_for_height,
+    effective_cluster_epoch_for_height, target_validator_cluster_count, Validator,
+    ValidatorManager, ValidatorRegistry, ValidatorStatus, INITIAL_VALIDATOR_SYNERGY_SCORE,
+    TESTNET_MIN_VALIDATOR_STAKE_NWEI, VALIDATOR_MANAGER,
 };
 use crate::wallet::WALLET_MANAGER;
 use crate::{info, warn};
@@ -50,6 +50,7 @@ use crate::{info, warn};
 use hex;
 use lazy_static::lazy_static;
 use serde_json::{json, Value};
+use sha3::{Digest, Sha3_256};
 use tungstenite::handshake::server::{Request as WsRequest, Response as WsResponse};
 use tungstenite::{accept_hdr, Error as WsError, Message as WsMessage};
 
@@ -872,6 +873,7 @@ fn synthesize_validator(
         last_vote_timestamp: 0,
         equivocation_evidence_count: 0,
         synergy_score: 0.0,
+        finalized_synergy_score_bps: 0,
         task_accuracy: 0.0,
         collaboration_score: 0.0,
         reputation_score: 0.0,
@@ -880,6 +882,9 @@ fn synthesize_validator(
         min_stake_required: stake_amount.max(1),
         cluster_id: None,
         cluster_address: None,
+        cluster_assignment_epoch: None,
+        cluster_assignment_seed: None,
+        cluster_assignment_effective_height: None,
         status: ValidatorStatus::Inactive,
         version: env!("CARGO_PKG_VERSION").to_string(),
         activation_tx_hash: None,
@@ -1276,6 +1281,102 @@ fn validator_set_snapshot_json(
         .collect::<Vec<_>>();
     let active = crate::validator::consensus_membership_validators(active);
     let validator_set_hash = canonical_active_validator_set_hash(&active);
+    let cluster_plan = canonical_validator_cluster_plan_for_epoch(&active, registry.current_epoch);
+    let cluster_map_hash = canonical_validator_clusters_digest(&active, registry.current_epoch);
+    let assignment_epochs = active
+        .iter()
+        .filter_map(|validator| validator.cluster_assignment_epoch)
+        .collect::<HashSet<_>>();
+    let assignment_seeds = active
+        .iter()
+        .filter_map(|validator| validator.cluster_assignment_seed.as_deref())
+        .filter(|seed| !seed.trim().is_empty())
+        .collect::<HashSet<_>>();
+    let assignment_effective_heights = active
+        .iter()
+        .filter_map(|validator| validator.cluster_assignment_effective_height)
+        .collect::<HashSet<_>>();
+    let persisted_assignments_match_plan = cluster_plan.clusters.len() == registry.clusters.len()
+        && cluster_plan.clusters.iter().all(|(cluster_id, members)| {
+            let expected_address = canonical_validator_cluster_address(*cluster_id, members);
+            let expected_validators = members
+                .iter()
+                .map(|validator| validator.address.clone())
+                .collect::<Vec<_>>();
+            let registry_cluster_matches =
+                registry.clusters.get(cluster_id).is_some_and(|cluster| {
+                    cluster.id == *cluster_id
+                        && cluster.address == expected_address
+                        && cluster.validators == expected_validators
+                });
+            registry_cluster_matches
+                && members.iter().all(|validator| {
+                    validator.cluster_id == Some(*cluster_id)
+                        && validator.cluster_address.as_deref() == Some(expected_address.as_str())
+                        && validator.cluster_assignment_epoch == Some(registry.current_epoch)
+                        && validator
+                            .cluster_assignment_seed
+                            .as_deref()
+                            .is_some_and(|seed| !seed.trim().is_empty())
+                        && validator.cluster_assignment_effective_height.is_some()
+                })
+        });
+    let cluster_assignments_complete = !active.is_empty()
+        && active
+            .iter()
+            .all(|validator| validator.cluster_id.is_some())
+        && assignment_epochs == HashSet::from([registry.current_epoch])
+        && assignment_seeds.len() == 1
+        && assignment_effective_heights.len() == 1
+        && persisted_assignments_match_plan;
+    let cluster_assignment_epoch = cluster_assignments_complete.then_some(registry.current_epoch);
+    let cluster_randomness_source = cluster_assignments_complete.then(|| {
+        assignment_seeds
+            .iter()
+            .next()
+            .copied()
+            .unwrap_or_default()
+            .to_string()
+    });
+    let cluster_assignment_effective_height = cluster_assignments_complete.then(|| {
+        assignment_effective_heights
+            .iter()
+            .next()
+            .copied()
+            .unwrap_or_default()
+    });
+    let cluster_assignments = cluster_plan
+        .clusters
+        .iter()
+        .map(|(cluster_id, members)| {
+            json!({
+                "cluster_id": cluster_id,
+                "cluster_address": canonical_validator_cluster_address(*cluster_id, members),
+                "validator_ids": members.iter().map(|validator| validator.address.clone()).collect::<Vec<_>>(),
+                "quorum_threshold": quorum_threshold(members.len()),
+                "fault_tolerance_f": fault_tolerance_f(members.len()),
+                "assignment_epoch": cluster_assignment_epoch,
+                "assignment_effective_height": cluster_assignment_effective_height,
+                "validators": members.iter().map(|validator| json!({
+                    "address": validator.address,
+                    "public_key": validator.public_key,
+                    "stake_amount": validator.stake_amount,
+                    "cluster_id": validator.cluster_id,
+                    "activation_tx_hash": validator.activation_tx_hash,
+                    "finalized_synergy_score_bps": validator.finalized_synergy_score_bps,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let membership_bundle_hash = validator_membership_bundle_hash(
+        &active,
+        registry.current_epoch,
+        registry.validator_set_version,
+        &validator_set_hash,
+        &cluster_map_hash,
+        cluster_randomness_source.as_deref(),
+        cluster_assignment_effective_height,
+    );
     let addresses_for_status = |status: ValidatorStatus| {
         let mut addresses = registry
             .validators
@@ -1311,9 +1412,65 @@ fn validator_set_snapshot_json(
         "validator_set_hash": validator_set_hash,
         "local_validator_set_hash": validator_set_hash,
         "network_validator_set_hash": validator_set_hash,
+        "cluster_count": cluster_plan.cluster_count,
+        "cluster_assignments_complete": cluster_assignments_complete,
+        "cluster_assignment_epoch": cluster_assignment_epoch,
+        "cluster_assignment_effective_height": cluster_assignment_effective_height,
+        "cluster_randomness_source": cluster_randomness_source,
+        "cluster_map_hash": cluster_map_hash,
+        "cluster_assignments": cluster_assignments,
+        "membership_bundle_hash": membership_bundle_hash,
         "is_latest": true,
         "generated_at_utc": current_timestamp(),
     })
+}
+
+fn validator_membership_bundle_hash(
+    active_validators: &[Validator],
+    epoch: u64,
+    validator_set_version: u64,
+    validator_set_hash: &str,
+    cluster_map_hash: &str,
+    cluster_randomness_source: Option<&str>,
+    cluster_assignment_effective_height: Option<u64>,
+) -> String {
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"synergy-validator-membership-bundle-v1");
+    hasher.update(1264_u64.to_be_bytes());
+    hasher.update(epoch.to_be_bytes());
+    hasher.update(validator_set_version.to_be_bytes());
+    hasher.update(
+        cluster_assignment_effective_height
+            .unwrap_or_default()
+            .to_be_bytes(),
+    );
+    for value in [
+        current_network_id(),
+        current_protocol_version(),
+        env!("CARGO_PKG_VERSION").to_string(),
+        validator_set_hash.to_string(),
+        cluster_map_hash.to_string(),
+        cluster_randomness_source.unwrap_or_default().to_string(),
+    ] {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+    let mut validators = active_validators.iter().collect::<Vec<_>>();
+    validators.sort_by(|left, right| left.address.cmp(&right.address));
+    for validator in validators {
+        for value in [
+            validator.address.as_str(),
+            validator.public_key.as_str(),
+            validator.activation_tx_hash.as_deref().unwrap_or_default(),
+        ] {
+            hasher.update((value.len() as u64).to_be_bytes());
+            hasher.update(value.as_bytes());
+        }
+        hasher.update(validator.stake_amount.to_be_bytes());
+        hasher.update(validator.cluster_id.unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(validator.finalized_synergy_score_bps.to_be_bytes());
+    }
+    hex::encode(hasher.finalize())
 }
 
 fn network_cluster_summary(validators: &[Validator]) -> Value {
@@ -10632,7 +10789,7 @@ mod tests {
         assert_eq!(status["cluster_address"], json!(cluster_address));
         assert_eq!(status["current_epoch"], json!(12));
         assert_eq!(status["current_validator_ids"].as_array().unwrap().len(), 5);
-        assert_eq!(status["current_quorum_threshold"], json!(4));
+        assert_eq!(status["current_quorum_threshold"], json!(3));
         assert_eq!(status["status"], json!("Degraded"));
         assert_eq!(status["total_rewards_earned_nwei"], json!(1_234));
         assert_eq!(status["last_rotation_epoch"], json!(9));
@@ -10698,7 +10855,7 @@ mod tests {
         let validator_manager = Arc::new(ValidatorManager::new());
         {
             let mut registry = validator_manager.registry.lock().unwrap();
-            for index in 0..6 {
+            for index in 0..10 {
                 let mut validator = Validator::new(
                     format!("snapshot-validator-{index}"),
                     format!("snapshot-key-{index}"),
@@ -10727,6 +10884,7 @@ mod tests {
             }
             registry.current_epoch = 12;
             registry.validator_set_version = 7;
+            registry.reorganize_clusters_for_epoch_with_seed(12, "snapshot-qc-seed", 12_001);
         }
 
         let chain = Arc::new(Mutex::new(BlockChain::new()));
@@ -10746,12 +10904,44 @@ mod tests {
         assert_eq!(snapshot["snapshot_format_version"], json!(1));
         assert_eq!(snapshot["epoch_id"], json!(12));
         assert_eq!(snapshot["validator_set_version"], json!(7));
-        assert_eq!(snapshot["active_validators"].as_array().unwrap().len(), 6);
+        assert_eq!(snapshot["active_validators"].as_array().unwrap().len(), 10);
         assert_eq!(snapshot["pending_validators"], json!(["snapshot-pending"]));
         assert_eq!(snapshot["syncing_validators"], json!(["snapshot-shadow"]));
         assert_eq!(snapshot["jailed_validators"], json!(["snapshot-jailed"]));
         assert_eq!(snapshot["removed_validators"], json!(["snapshot-slashed"]));
-        assert_eq!(snapshot["quorum_threshold"], json!(4));
+        assert_eq!(snapshot["quorum_threshold"], json!(7));
+        assert_eq!(snapshot["cluster_count"], json!(2));
+        assert_eq!(snapshot["cluster_assignments_complete"], json!(true));
+        assert_eq!(snapshot["cluster_assignment_epoch"], json!(12));
+        assert_eq!(
+            snapshot["cluster_assignment_effective_height"],
+            json!(12_001)
+        );
+        assert_eq!(
+            snapshot["cluster_randomness_source"],
+            json!("snapshot-qc-seed")
+        );
+        let cluster_assignments = snapshot["cluster_assignments"].as_array().unwrap();
+        assert_eq!(cluster_assignments.len(), 2);
+        assert!(cluster_assignments.iter().all(|cluster| {
+            cluster["validator_ids"].as_array().unwrap().len() == 5
+                && cluster["quorum_threshold"] == json!(3)
+                && cluster["validators"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|validator| {
+                        validator["public_key"].as_str().is_some()
+                            && validator["stake_amount"].as_u64().is_some()
+                            && validator["cluster_id"].as_u64().is_some()
+                    })
+        }));
+        assert!(snapshot["cluster_map_hash"]
+            .as_str()
+            .is_some_and(|hash| !hash.is_empty()));
+        assert!(snapshot["membership_bundle_hash"]
+            .as_str()
+            .is_some_and(|hash| !hash.is_empty()));
         assert_eq!(
             snapshot["validator_set_hash"],
             snapshot["local_validator_set_hash"]
@@ -10761,6 +10951,28 @@ mod tests {
             snapshot["network_validator_set_hash"]
         );
         assert_eq!(snapshot["is_latest"], json!(true));
+
+        {
+            let mut registry = validator_manager.registry.lock().unwrap();
+            let validator = registry
+                .validators
+                .values_mut()
+                .find(|validator| validator.status == ValidatorStatus::Active)
+                .unwrap();
+            validator.cluster_address = Some("syngrp1corrupted-membership".to_string());
+        }
+        let corrupted_snapshot = handle_json_rpc(
+            "synergy_getValidatorSetSnapshot",
+            json!([]),
+            &TX_POOL,
+            &chain,
+            &validator_manager,
+        );
+        assert_eq!(
+            corrupted_snapshot["cluster_assignments_complete"],
+            json!(false),
+            "RPC membership evidence must fail closed when persisted validator assignments diverge"
+        );
     }
 
     #[test]
