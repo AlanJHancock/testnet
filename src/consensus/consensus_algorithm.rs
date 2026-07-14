@@ -55,11 +55,11 @@ const POST_COMMIT_PARENT_PROPAGATION_GRACE_MILLIS: u64 = 250;
 const SAFE_HEAD_CATCHUP_WITHOUT_MESH_RESET_BLOCKS: u64 = 1;
 const DEFAULT_MAX_CHAIN_SNAPSHOT_CLONE_HEIGHT: u64 = 50_000;
 const PROPOSAL_TRANSACTION_MAX_AGE_SECS: u64 = 3_600;
-// v19.0.15 finalized this boundary before the one-based epoch correction.
-// Accept and normalize only this immutable checkpoint; future off-by-one QCs fail closed.
-const ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HEIGHT: u64 = 1_046_000;
-const ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HASH: &str =
-    "0f3b823697f65f89ca27da60e7f5b5bd2792b3ba4f1d5061d206cfdf78d06b09";
+// v19.0.15 used height / 1000 in committed QC metadata at every exact epoch
+// boundary. The QC remains hash-bound and dual-quorum finalized; normalize only
+// that metadata through this frozen cutover window. Later off-by-one QCs fail closed.
+const CANONICAL_TESTNET_EPOCH_LENGTH: u64 = 1_000;
+const ONE_BASED_EPOCH_MIGRATION_CUTOFF_HEIGHT: u64 = 1_052_000;
 
 macro_rules! consensus_log {
     ($($arg:tt)*) => {
@@ -654,6 +654,7 @@ impl ProofOfSynergy {
                                 &chain_guard,
                                 next_epoch,
                                 epoch_length,
+                                &validator_manager,
                             ) {
                                 Ok(qc) => qc,
                                 Err(error) => {
@@ -1062,6 +1063,7 @@ impl ProofOfSynergy {
                             &chain_guard,
                             next_block_index,
                             epoch_length,
+                            &validator_manager,
                         ) {
                             Ok(randomness) => randomness,
                             Err(error) => {
@@ -2749,6 +2751,7 @@ impl ProofOfSynergy {
         chain: &BlockChain,
         current_epoch: u64,
         epoch_length: u64,
+        validator_manager: &Arc<ValidatorManager>,
     ) -> Result<QuorumCertificate, String> {
         let epoch_length = epoch_length.max(1);
         let boundary_height = current_epoch
@@ -2771,26 +2774,49 @@ impl ProofOfSynergy {
             )
         })?;
         let expected_epoch = epoch_for_block_height(block.block_index, epoch_length);
-        if qc.epoch_number != expected_epoch {
-            let is_checkpointed_legacy_boundary = block.block_index
-                == ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HEIGHT
-                && block.hash == ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HASH
-                && qc.epoch_number == expected_epoch.saturating_add(1);
-            if !is_checkpointed_legacy_boundary {
-                return Err(format!(
-                    "boundary QC epoch {} does not match block {} epoch {expected_epoch}",
-                    qc.epoch_number, block.block_index
-                ));
-            }
-            qc.epoch_number = expected_epoch;
-        }
-        if !qc.validation_quorum_met || !qc.cooperation_quorum_met {
+        let normalize_legacy_epoch = qc.epoch_number != expected_epoch;
+        if normalize_legacy_epoch
+            && !Self::is_migratable_legacy_boundary_epoch(
+                block.block_index,
+                epoch_length,
+                qc.epoch_number,
+            )
+        {
             return Err(format!(
-                "boundary QC for block {} is not a finalized dual-quorum certificate",
-                block.block_index
+                "boundary QC epoch {} does not match block {} epoch {expected_epoch}",
+                qc.epoch_number, block.block_index
             ));
         }
+
+        DualQuorumConsensus::verify_commit_certificate_for_block_static(
+            block,
+            &qc,
+            validator_manager,
+        )
+        .map_err(|error| {
+            format!(
+                "boundary QC for block {} failed Aegis dual-quorum verification: {error}",
+                block.block_index
+            )
+        })?;
+
+        if normalize_legacy_epoch {
+            qc.epoch_number = expected_epoch;
+        }
         Ok(qc)
+    }
+
+    fn is_migratable_legacy_boundary_epoch(
+        block_height: u64,
+        epoch_length: u64,
+        qc_epoch: u64,
+    ) -> bool {
+        let expected_epoch = epoch_for_block_height(block_height, epoch_length);
+        block_height > 0
+            && epoch_length == CANONICAL_TESTNET_EPOCH_LENGTH
+            && block_height <= ONE_BASED_EPOCH_MIGRATION_CUTOFF_HEIGHT
+            && block_height % CANONICAL_TESTNET_EPOCH_LENGTH == 0
+            && qc_epoch == expected_epoch.saturating_add(1)
     }
 
     fn finalized_synergy_scores_for_epoch(
@@ -2922,6 +2948,7 @@ impl ProofOfSynergy {
         chain: &BlockChain,
         block_height: u64,
         epoch_length: u64,
+        validator_manager: &Arc<ValidatorManager>,
     ) -> Result<Vec<u8>, String> {
         let epoch_length = epoch_length.max(1);
         let current_epoch = epoch_for_block_height(block_height, epoch_length);
@@ -2932,8 +2959,12 @@ impl ProofOfSynergy {
             hasher.update(genesis_hash.as_bytes());
             return Ok(hasher.finalize().to_vec());
         }
-        let previous_qc =
-            Self::get_previous_quorum_certificate(chain, current_epoch, epoch_length)?;
+        let previous_qc = Self::get_previous_quorum_certificate(
+            chain,
+            current_epoch,
+            epoch_length,
+            validator_manager,
+        )?;
         Ok(Self::deterministic_epoch_randomness_from_qc(&previous_qc))
     }
 
@@ -4619,6 +4650,58 @@ mod tests {
         manager
     }
 
+    fn signed_boundary_fixture(
+        block_height: u64,
+        qc_epoch: u64,
+    ) -> (Arc<ValidatorManager>, Block, QuorumCertificate) {
+        let validator_address = format!("validator-boundary-{block_height}-{qc_epoch}");
+        let manager = active_validator_manager(&validator_address);
+        let mut block = Block::new_with_timestamp(
+            block_height,
+            Vec::new(),
+            format!("parent-{block_height}"),
+            validator_address.clone(),
+            block_height,
+            1_784_000_000u64.saturating_add(block_height),
+        );
+        let (public_key, private_key) =
+            load_local_validator_keypair_for_height(block_height, &validator_address, &manager)
+                .expect("test proposer key should load");
+        let signature = PQCManager::new()
+            .sign(&private_key, block.hash.as_bytes())
+            .expect("test proposer signature should be created");
+        block.proposer_public_key = public_key.key_data;
+        block.block_signature = signature.signature_data;
+        block.block_signature_algorithm =
+            consensus_algorithm_label(&public_key.algorithm).to_string();
+
+        let vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            &validator_address,
+            &block,
+            qc_epoch,
+            1,
+            &manager,
+        )
+        .expect("test boundary vote should be created");
+        let qc = QuorumCertificate {
+            block_hash: block.hash.clone(),
+            cluster_id: None,
+            epoch_number: qc_epoch,
+            round_number: 1,
+            aggregate_signature: vec![1],
+            participant_bitmap: vec![1],
+            cumulative_weight: 1.0,
+            validation_quorum_met: true,
+            cooperation_quorum_met: true,
+            timestamp: block.timestamp,
+            votes: vec![vote],
+        };
+        DualQuorumConsensus::verify_commit_certificate_for_block_static(&block, &qc, &manager)
+            .expect("test boundary QC should pass full Aegis verification");
+
+        (manager, block, qc)
+    }
+
     #[test]
     fn next_block_pacing_anchor_preserves_normal_block_timestamp_cadence() {
         let current_time = UNIX_EPOCH + Duration::from_millis(1_000_500);
@@ -5018,33 +5101,10 @@ mod tests {
         let _guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
         let mut chain = BlockChain::new();
-        chain.add_block(Block {
-            block_index: 1000,
-            timestamp: 1000,
-            transactions: Vec::new(),
-            previous_hash: "999".to_string(),
-            validator_id: "validator-a".to_string(),
-            nonce: 1000,
-            hash: "boundary-1000".to_string(),
-            transactions_root: String::new(),
-            proposer_public_key: Vec::new(),
-            block_signature: vec![9, 9, 9],
-            block_signature_algorithm: "fndsa".to_string(),
-        });
-        DualQuorumConsensus::record_committed_qc_checked(QuorumCertificate {
-            block_hash: "boundary-1000".to_string(),
-            cluster_id: None,
-            epoch_number: 0,
-            round_number: 1,
-            aggregate_signature: vec![9, 9, 9],
-            participant_bitmap: Vec::new(),
-            cumulative_weight: 1.0,
-            validation_quorum_met: true,
-            cooperation_quorum_met: true,
-            timestamp: 1000,
-            votes: Vec::new(),
-        })
-        .unwrap();
+        let (manager, boundary_block, qc) = signed_boundary_fixture(1_000, 0);
+        let boundary_hash = boundary_block.hash.clone();
+        chain.add_block(boundary_block);
+        DualQuorumConsensus::record_committed_qc_checked(qc).unwrap();
         chain.add_block(Block {
             block_index: 1026,
             timestamp: 1026,
@@ -5059,79 +5119,83 @@ mod tests {
             block_signature_algorithm: "fndsa".to_string(),
         });
 
-        let previous_qc = ProofOfSynergy::get_previous_quorum_certificate(&chain, 1, 1000).unwrap();
+        let previous_qc =
+            ProofOfSynergy::get_previous_quorum_certificate(&chain, 1, 1000, &manager).unwrap();
 
-        assert_eq!(previous_qc.block_hash, "boundary-1000");
+        assert_eq!(previous_qc.block_hash, boundary_hash);
         assert_eq!(previous_qc.epoch_number, 0);
-        assert_eq!(previous_qc.aggregate_signature, vec![9, 9, 9]);
+        assert_eq!(previous_qc.aggregate_signature, vec![1]);
     }
 
     #[test]
-    fn previous_qc_normalizes_only_the_checkpointed_legacy_epoch_boundary() {
+    fn previous_qc_normalizes_historical_legacy_epoch_boundaries_through_cutoff() {
         let _guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
         let mut chain = BlockChain::new();
-        chain.add_block(Block {
-            block_index: ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HEIGHT,
-            timestamp: 1_784_029_631,
-            transactions: Vec::new(),
-            previous_hash: "0a9443910c6687883489ab61da94d27df1157f8f0288b8a351466a6c0735cfb6"
-                .to_string(),
-            validator_id: "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string(),
-            nonce: ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HEIGHT,
-            hash: ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HASH.to_string(),
-            transactions_root: String::new(),
-            proposer_public_key: Vec::new(),
-            block_signature: vec![9, 9, 9],
-            block_signature_algorithm: "fndsa".to_string(),
-        });
-        DualQuorumConsensus::record_committed_qc_checked(QuorumCertificate {
-            block_hash: ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HASH.to_string(),
-            cluster_id: None,
-            epoch_number: 1_046,
-            round_number: 1,
-            aggregate_signature: vec![9, 9, 9],
-            participant_bitmap: Vec::new(),
-            cumulative_weight: 4.0,
-            validation_quorum_met: true,
-            cooperation_quorum_met: true,
-            timestamp: 1_784_029_631,
-            votes: Vec::new(),
-        })
-        .unwrap();
+        let boundary_height = 1_048_000;
+        let (manager, boundary_block, qc) = signed_boundary_fixture(boundary_height, 1_048);
+        let boundary_hash = boundary_block.hash.clone();
+        chain.add_block(boundary_block);
+        DualQuorumConsensus::record_committed_qc_checked(qc).unwrap();
 
         let previous_qc =
-            ProofOfSynergy::get_previous_quorum_certificate(&chain, 1_046, 1_000).unwrap();
+            ProofOfSynergy::get_previous_quorum_certificate(&chain, 1_048, 1_000, &manager)
+                .unwrap();
 
-        assert_eq!(
-            previous_qc.block_hash,
-            ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HASH
-        );
-        assert_eq!(previous_qc.epoch_number, 1_045);
+        assert_eq!(previous_qc.block_hash, boundary_hash.as_str());
+        assert_eq!(previous_qc.epoch_number, 1_047);
+    }
+
+    #[test]
+    fn legacy_epoch_migration_accepts_only_positive_canonical_boundaries_through_cutoff() {
+        assert!(!ProofOfSynergy::is_migratable_legacy_boundary_epoch(
+            0, 1_000, 1
+        ));
+        assert!(!ProofOfSynergy::is_migratable_legacy_boundary_epoch(
+            999, 1_000, 1
+        ));
+        assert!(ProofOfSynergy::is_migratable_legacy_boundary_epoch(
+            1_000, 1_000, 1
+        ));
+        assert!(ProofOfSynergy::is_migratable_legacy_boundary_epoch(
+            ONE_BASED_EPOCH_MIGRATION_CUTOFF_HEIGHT,
+            1_000,
+            1_052,
+        ));
+        assert!(!ProofOfSynergy::is_migratable_legacy_boundary_epoch(
+            ONE_BASED_EPOCH_MIGRATION_CUTOFF_HEIGHT + 1_000,
+            1_000,
+            1_053,
+        ));
+        assert!(!ProofOfSynergy::is_migratable_legacy_boundary_epoch(
+            1_000, 500, 2
+        ));
     }
 
     #[test]
     fn previous_qc_rejects_future_legacy_epoch_boundary_labels() {
         let _guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
+        let manager = active_validator_manager("validator-future-boundary");
         let mut chain = BlockChain::new();
+        let future_boundary_height = ONE_BASED_EPOCH_MIGRATION_CUTOFF_HEIGHT + 1_000;
         chain.add_block(Block {
-            block_index: 1_047_000,
+            block_index: future_boundary_height,
             timestamp: 1_784_030_631,
             transactions: Vec::new(),
             previous_hash: "future-parent".to_string(),
             validator_id: "validator-a".to_string(),
-            nonce: 1_047_000,
-            hash: "future-boundary-1047000".to_string(),
+            nonce: future_boundary_height,
+            hash: "future-boundary-after-cutoff".to_string(),
             transactions_root: String::new(),
             proposer_public_key: Vec::new(),
             block_signature: vec![9, 9, 9],
             block_signature_algorithm: "fndsa".to_string(),
         });
         DualQuorumConsensus::record_committed_qc_checked(QuorumCertificate {
-            block_hash: "future-boundary-1047000".to_string(),
+            block_hash: "future-boundary-after-cutoff".to_string(),
             cluster_id: None,
-            epoch_number: 1_047,
+            epoch_number: 1_053,
             round_number: 1,
             aggregate_signature: vec![9, 9, 9],
             participant_bitmap: Vec::new(),
@@ -5143,11 +5207,11 @@ mod tests {
         })
         .unwrap();
 
-        let error = ProofOfSynergy::get_previous_quorum_certificate(&chain, 1_047, 1_000)
+        let error = ProofOfSynergy::get_previous_quorum_certificate(&chain, 1_053, 1_000, &manager)
             .expect_err("future off-by-one boundary QC must fail closed");
 
-        assert!(error.contains("boundary QC epoch 1047"));
-        assert!(error.contains("block 1047000 epoch 1046"));
+        assert!(error.contains("boundary QC epoch 1053"));
+        assert!(error.contains("block 1053000 epoch 1052"));
     }
 
     #[test]
@@ -5155,33 +5219,9 @@ mod tests {
         let _guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
         let mut chain = BlockChain::new();
-        chain.add_block(Block {
-            block_index: 1000,
-            timestamp: 1000,
-            transactions: Vec::new(),
-            previous_hash: "999".to_string(),
-            validator_id: "validator-a".to_string(),
-            nonce: 1000,
-            hash: "boundary-1000".to_string(),
-            transactions_root: String::new(),
-            proposer_public_key: Vec::new(),
-            block_signature: vec![9, 9, 9],
-            block_signature_algorithm: "fndsa".to_string(),
-        });
-        DualQuorumConsensus::record_committed_qc_checked(QuorumCertificate {
-            block_hash: "boundary-1000".to_string(),
-            cluster_id: None,
-            epoch_number: 0,
-            round_number: 1,
-            aggregate_signature: vec![9, 9, 9],
-            participant_bitmap: Vec::new(),
-            cumulative_weight: 1.0,
-            validation_quorum_met: true,
-            cooperation_quorum_met: true,
-            timestamp: 1000,
-            votes: Vec::new(),
-        })
-        .unwrap();
+        let (manager, boundary_block, qc) = signed_boundary_fixture(1_000, 0);
+        chain.add_block(boundary_block);
+        DualQuorumConsensus::record_committed_qc_checked(qc).unwrap();
         chain.add_block(Block {
             block_index: 1026,
             timestamp: 1026,
@@ -5196,11 +5236,30 @@ mod tests {
             block_signature_algorithm: "fndsa".to_string(),
         });
 
-        let direct_qc = ProofOfSynergy::get_previous_quorum_certificate(&chain, 1, 1000).unwrap();
+        let direct_qc =
+            ProofOfSynergy::get_previous_quorum_certificate(&chain, 1, 1000, &manager).unwrap();
         let expected = ProofOfSynergy::deterministic_epoch_randomness_from_qc(&direct_qc);
-        let actual = ProofOfSynergy::deterministic_epoch_randomness(&chain, 1_026, 1_000).unwrap();
+        let actual =
+            ProofOfSynergy::deterministic_epoch_randomness(&chain, 1_026, 1_000, &manager).unwrap();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn previous_qc_revalidates_persisted_aegis_vote_evidence() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let (manager, boundary_block, mut qc) = signed_boundary_fixture(2_000, 1);
+        qc.votes.clear();
+        let mut chain = BlockChain::new();
+        chain.add_block(boundary_block);
+        DualQuorumConsensus::record_committed_qc_checked(qc).unwrap();
+
+        let error = ProofOfSynergy::get_previous_quorum_certificate(&chain, 2, 1_000, &manager)
+            .expect_err("persisted QC without Aegis vote evidence must fail closed");
+
+        assert!(error.contains("failed Aegis dual-quorum verification"));
+        assert!(error.contains("individually verifiable Aegis PQC votes"));
     }
 
     #[test]
