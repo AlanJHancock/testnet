@@ -261,12 +261,13 @@ fn test_uint256_simple_assign() {
 }
 
 #[test]
-#[ignore = "depends on Value::U128 and LoadImm128 opcode implementation"]
 fn test_uint256_large_value() {
+    // 3_000_000_000 > i32::MAX (2_147_483_647) — codegen must emit LoadImm128
+    // (opcode 0x43) rather than Push/i32, and the VM must store it as Value::U128.
     let source = r#"
         contract LargeVal {
             n: UInt256;
-            fn get() -> UInt256 {
+            function get() -> UInt256 {
                 n = 3000000000;
                 return n;
             }
@@ -274,10 +275,16 @@ fn test_uint256_large_value() {
     "#;
     let bytecode = compile(source);
     assert!(!bytecode.is_empty());
-    // LoadImm128 opcode is expected to be 0x0F as specified or similar, we search for it.
-    // Since we ignore this test until integration is fully complete, we can assert success.
-    let has_opcode_128 = bytecode.iter().any(|&b| b == 0x0F || b == 0x43); // 0x43 is after LoadImm 0x42
-    assert!(has_opcode_128, "Bytecode should contain the LoadImm128 opcode");
+    // Bytecode must contain the LoadImm128 opcode (0x43)
+    assert!(
+        bytecode.iter().any(|&b| b == 0x43),
+        "Expected LoadImm128 opcode (0x43) in bytecode for large UInt256 literal"
+    );
+    // Execute and verify the value survives the round-trip
+    let mut vm = QuantumVM::new();
+    vm.load_bytecode(&bytecode).unwrap();
+    let result = vm.call_function("get", &[]).unwrap().unwrap();
+    assert_eq!(result.as_u128().unwrap(), 3_000_000_000u128);
 }
 
 #[test]
@@ -296,11 +303,31 @@ fn test_uint256_arithmetic() {
 }
 
 #[test]
-#[ignore = "depends on VM runtime overflow detection error message"]
 fn test_uint256_overflow_detection() {
-    // VM-level overflow test: once Value::U128 and LoadImm128 are in the vm crate,
-    // move this to vm/tests/integration_test.rs (test_u128_overflow covers it there).
-    // Placeholder — nothing to assert here yet.
+    // Compile a SynQ contract that loads u128::MAX into a UInt256 state variable
+    // and adds 1 to it. The VM must return a RuntimeError containing "overflow"
+    // rather than wrapping silently (the original i32 bug).
+    // u128::MAX = 340282366920938463463374607431768211455
+    let source = r#"
+        contract OverflowTest {
+            n: UInt256;
+            function run() {
+                n = 340282366920938463463374607431768211455;
+                n = n + 1;
+                return n;
+            }
+        }
+    "#;
+    let bytecode = compile(source);
+    assert!(!bytecode.is_empty());
+
+    let mut vm = QuantumVM::new();
+    vm.load_bytecode(&bytecode).unwrap();
+    let err = vm.call_function("run", &[]).unwrap_err();
+    assert!(
+        format!("{}", err).contains("overflow"),
+        "Expected overflow RuntimeError, got: {}", err
+    );
 }
 
 #[test]
