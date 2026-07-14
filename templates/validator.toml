@@ -19,8 +19,9 @@ max_peers = 100
 bootnodes = []
 seed_servers = []
 bootstrap_dns_records = []
-additional_dial_targets = ["10.69.0.1:5622", "10.69.0.2:5622", "10.69.0.3:5622", "10.69.0.4:5622", "10.69.0.5:5622", "10.69.0.6:5622"]
-persistent_peers = ["10.69.0.1:5622", "10.69.0.2:5622", "10.69.0.3:5622", "10.69.0.4:5622", "10.69.0.5:5622", "10.69.0.6:5622"]
+additional_dial_targets = []
+persistent_peers = []
+validator_vpn_transports = []
 
 [blockchain]
 block_time = 2
@@ -80,12 +81,13 @@ cors_origins = []
 
 [p2p]
 listen_address = "0.0.0.0:5622"
-public_address = "replace-with-public-host:5622"
+public_address = ""
 node_name = "validator-node-01"
 enable_discovery = false
+enable_peer_exchange = false
 discovery_port = 5680
 discovery_listen_address = "0.0.0.0:5680"
-discovery_public_address = "replace-with-public-host:5680"
+discovery_public_address = ""
 heartbeat_interval = 10
 bootstrap_refresh_secs = 3600
 

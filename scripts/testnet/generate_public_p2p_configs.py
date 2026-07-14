@@ -193,6 +193,8 @@ def validate_topology(topology: dict[str, Any]) -> None:
         raise TopologyError("public RPC endpoint must remain testnet-core-rpc.synergy-network.io")
 
     common = topology["common"]
+    if topology["policies"].get("validator_endpoint_policy") != "coordinator_private_runtime_only":
+        raise TopologyError("validator endpoint policy must be coordinator_private_runtime_only")
     assert_public_endpoints("common bootnodes", list(common["bootnodes"]))
     assert_public_endpoints("common seed servers", list(common["seed_servers"]))
     assert_public_endpoints("common relayer peers", list(common["relayer_peers"]))
@@ -217,12 +219,16 @@ def validate_topology(topology: dict[str, Any]) -> None:
     if validator_addresses != allowlist:
         raise TopologyError("validator allowlist must match active validator manifest order")
     for validator in validators:
-        endpoint = validator["public_endpoint"]
-        if not endpoint_host_is_public_ip(endpoint):
-            raise TopologyError(f"{validator['name']} must use public IP endpoint")
-        if split_endpoint(endpoint)[1] != 5622:
+        if "public_endpoint" in validator:
+            raise TopologyError(f"{validator['name']} must not define a public endpoint")
+        if validator.get("port") != 5622:
             raise TopologyError(f"{validator['name']} must use port 5622")
-        assert_public_endpoints(validator["name"], [endpoint])
+        if not str(validator.get("validator_address", "")).startswith("synv1"):
+            raise TopologyError(f"{validator['name']} must use a synv1 identity")
+
+    relayer_endpoints = [relayer["public_endpoint"] for relayer in topology["relayers"]]
+    if len(relayer_endpoints) != 3 or len(set(relayer_endpoints)) != 3 or list(common["relayer_peers"]) != relayer_endpoints:
+        raise TopologyError("public consensus boundary must contain exactly the three canonical relayers")
 
     archive = topology["archive_validators"][0]
     if archive["public_endpoint"] != "archive.synergynode.xyz:5615":
@@ -239,6 +245,8 @@ def validate_topology(topology: dict[str, Any]) -> None:
 
     for relayer in topology["relayers"]:
         assert_public_endpoints(relayer["name"], list(relayer["peers"]))
+        if any(peer in {str(validator.get("public_endpoint")) for validator in validators} for peer in relayer["peers"]):
+            raise TopologyError(f"{relayer['name']} must not dial public validator endpoints")
     for rpc_gateway in topology["rpc_gateways"]:
         assert_public_endpoints(rpc_gateway["name"], list(rpc_gateway["peers"]))
     for archive_validator in topology["archive_validators"]:
@@ -293,13 +301,13 @@ def seed_registry_peer_view(
     return visible
 
 
-def validator_peer_endpoints(topology: dict[str, Any], self_endpoint: str) -> list[str]:
-    validator_endpoints = [
-        validator["public_endpoint"]
+def validator_peer_identities(topology: dict[str, Any], self_address: str) -> list[str]:
+    validator_identities = [
+        validator["validator_address"]
         for validator in topology["validators"]
-        if validator["public_endpoint"] != self_endpoint
+        if validator["validator_address"] != self_address
     ]
-    return [*validator_endpoints, *topology["common"]["relayer_peers"]]
+    return [*validator_identities, *topology["common"]["relayer_peers"]]
 
 
 def base_config(
@@ -312,9 +320,28 @@ def base_config(
     network = topology["network"]
     common = topology["common"]
     allowlist = topology["consensus"]["strict_validator_allowlist"]
-    endpoint = node["public_endpoint"]
-    _host, port = split_endpoint(endpoint)
-    return {
+    endpoint = node.get("public_endpoint")
+    port = int(node["port"]) if endpoint is None else split_endpoint(endpoint)[1]
+    if port is None:
+        raise TopologyError(f"{node['name']} must define a P2P port")
+    is_validator = role == "validator"
+    network_config: dict[str, Any] = {
+        "id": network["network_id"],
+        "name": network["network_name"],
+        "chain_id": network["chain_id"],
+        "p2p_port": port,
+        "bootnodes": [] if is_validator else list(common["bootnodes"]),
+        "seed_servers": [] if is_validator else list(common["seed_servers"]),
+        "bootstrap_dns_records": [] if is_validator else list(common["bootstrap_dns_records"]),
+        "additional_dial_targets": list(peers),
+        "persistent_peers": list(peers),
+    }
+    if endpoint is not None:
+        network_config["public_p2p_address"] = endpoint
+    network_config["public_rpc_endpoint"] = network["public_rpc_endpoint"]
+    if is_validator:
+        network_config["validator_vpn_transports"] = []
+    config: dict[str, dict[str, Any]] = {
         "identity": {
             "node_id": node["node_id"],
             "role": role,
@@ -322,25 +349,13 @@ def base_config(
             "address": node.get("validator_address", ""),
             "label": node["name"],
         },
-        "network": {
-            "id": network["network_id"],
-            "name": network["network_name"],
-            "chain_id": network["chain_id"],
-            "p2p_port": port,
-            "bootnodes": list(common["bootnodes"]),
-            "seed_servers": list(common["seed_servers"]),
-            "bootstrap_dns_records": list(common["bootstrap_dns_records"]),
-            "additional_dial_targets": list(peers),
-            "persistent_peers": list(peers),
-            "public_p2p_address": endpoint,
-            "public_rpc_endpoint": network["public_rpc_endpoint"],
-        },
+        "network": network_config,
         "p2p": {
             "listen_address": f"0.0.0.0:{port}",
-            "public_address": endpoint,
+            "public_address": endpoint or "",
             "node_name": node["node_id"],
-            "enable_discovery": True,
-            "enable_peer_exchange": True,
+            "enable_discovery": not is_validator,
+            "enable_peer_exchange": not is_validator,
             "reject_private_advertise_addrs": True,
         },
         "node": {
@@ -350,12 +365,13 @@ def base_config(
             "active_consensus_validator": bool(node.get("active_consensus", False)),
         },
         "seed_registration": {
-            "enabled": True,
-            "register_endpoints": list(common["seed_servers"]),
-            "heartbeat_endpoints": list(common["seed_servers"]),
+            "enabled": not is_validator,
+            "register_endpoints": [] if is_validator else list(common["seed_servers"]),
+            "heartbeat_endpoints": [] if is_validator else list(common["seed_servers"]),
             "dialback_required": bool(topology["seed_registry"]["dialback_required"]),
         },
     }
+    return config
 
 
 def generate_configs(topology: dict[str, Any]) -> dict[PurePosixPath, dict[str, dict[str, Any]]]:
@@ -363,7 +379,7 @@ def generate_configs(topology: dict[str, Any]) -> dict[PurePosixPath, dict[str, 
     public_support_peers = list(topology["common"]["relayer_peers"])
 
     for validator in topology["validators"]:
-        peers = validator_peer_endpoints(topology, validator["public_endpoint"])
+        peers = validator_peer_identities(topology, validator["validator_address"])
         configs[PurePosixPath("validators") / f"{validator['name'].lower()}.toml"] = base_config(
             topology,
             validator,
