@@ -2075,7 +2075,7 @@ impl DualQuorumConsensus {
         votes: &[Vote],
     ) -> Result<QuorumCertificate, String> {
         let cluster_context = self.cluster_context_for_proposal(proposed_block, epoch_number)?;
-        let (validator_count, cumulative_weight) = self
+        let (validator_count, _) = self
             .cluster_vote_summary(&cluster_context.validators, votes)
             .map_err(|error| format!("invalid cluster vote set: {error}"))?;
 
@@ -2098,23 +2098,9 @@ impl DualQuorumConsensus {
             ));
         }
 
-        // Cluster quorum is an exact member count (3-of-5, 5-of-7, and
-        // ceil(2n/3) for other sizes); Synergy score affects rotation, not vote power.
-        let total_live_weight = if cluster_context.cluster_id.is_some() {
-            cluster_context.validators.len() as f64
-        } else {
-            self.total_validator_weight(&cluster_context.validators)
-        };
-        let validation_ratio = if total_live_weight > 0.0 {
-            cumulative_weight / total_live_weight
-        } else {
-            0.0
-        };
-        let required_validation_ratio =
-            Self::required_validation_ratio_for_cluster_context(&cluster_context);
-        let validation_quorum_met = validation_ratio + 0.000_001 >= required_validation_ratio;
-
-        // Check cooperation quorum using the same dynamic integer threshold.
+        // Consensus vote power is one active validator, one vote. Synergy Score
+        // affects rewards and rotation policy, never finality.
+        let validation_quorum_met = validator_count >= required_validator_votes;
         let cooperation_quorum_met = validator_count >= required_validator_votes;
 
         if validation_quorum_met && cooperation_quorum_met {
@@ -2133,30 +2119,6 @@ impl DualQuorumConsensus {
         }
     }
 
-    #[cfg(test)]
-    fn calculate_cumulative_vote_weight(&self, votes: &[Vote]) -> f64 {
-        let mut total_weight = 0.0;
-
-        for vote in votes {
-            if let Some(validator) = self
-                .validator_manager
-                .get_validator(&vote.validator_address)
-            {
-                // Use normalized synergy score as vote weight
-                total_weight += validator.synergy_score / 100.0;
-            }
-        }
-
-        total_weight
-    }
-
-    fn total_validator_weight(&self, validators: &[Validator]) -> f64 {
-        validators
-            .iter()
-            .map(|validator| (validator.synergy_score / 100.0).max(0.0))
-            .sum()
-    }
-
     fn required_validator_votes(&self, total_validators: usize) -> usize {
         required_validator_quorum(total_validators).max(1)
     }
@@ -2172,35 +2134,17 @@ impl DualQuorumConsensus {
         }
     }
 
-    fn required_validation_ratio_for_cluster_context(
-        cluster_context: &ConsensusClusterContext,
-    ) -> f64 {
-        if cluster_context.cluster_id.is_some() {
-            required_quorum_weight_ratio(cluster_context.validators.len())
-        } else {
-            VALIDATOR_QUORUM_RATIO
-        }
-    }
-
     #[cfg(test)]
     fn has_commit_quorum(&self, live_validators: &[Validator], votes: &[Vote]) -> bool {
         if live_validators.is_empty() {
             return false;
         }
 
+        let Ok((validator_count, _)) = self.cluster_vote_summary(live_validators, votes) else {
+            return false;
+        };
         let required_validator_votes = self.required_validator_votes(live_validators.len());
-        if votes.len() < required_validator_votes {
-            return false;
-        }
-
-        let total_live_weight = self.total_validator_weight(live_validators);
-        if total_live_weight <= 0.0 {
-            return false;
-        }
-
-        let cumulative_weight = self.calculate_cumulative_vote_weight(votes);
-        let required_validation_ratio = VALIDATOR_QUORUM_RATIO;
-        cumulative_weight + 0.000_001 >= total_live_weight * required_validation_ratio
+        validator_count >= required_validator_votes
     }
 
     fn cluster_vote_summary(
@@ -2243,29 +2187,14 @@ impl DualQuorumConsensus {
             return false;
         }
 
-        let Ok((validator_count, cumulative_weight)) =
+        let Ok((validator_count, _)) =
             self.cluster_vote_summary(&cluster_context.validators, votes)
         else {
             return false;
         };
         let required_validator_votes =
             self.required_validator_votes_for_cluster_context(cluster_context);
-        if validator_count < required_validator_votes {
-            return false;
-        }
-
-        let total_live_weight = if cluster_context.cluster_id.is_some() {
-            cluster_context.validators.len() as f64
-        } else {
-            self.total_validator_weight(&cluster_context.validators)
-        };
-        if total_live_weight <= 0.0 {
-            return false;
-        }
-
-        let required_validation_ratio =
-            Self::required_validation_ratio_for_cluster_context(cluster_context);
-        cumulative_weight + 0.000_001 >= total_live_weight * required_validation_ratio
+        validator_count >= required_validator_votes
     }
 
     fn record_missed_vote_timeouts(&self, live_validators: &[Validator], votes: &[Vote]) {
@@ -2764,7 +2693,6 @@ impl DualQuorumConsensus {
             .collect::<HashMap<_, _>>();
 
         let mut seen = BTreeSet::new();
-        let mut signed_weight = 0.0;
         for vote in &qc.votes {
             if vote.block_hash != block.hash {
                 return Err("QC vote signs a different block hash".to_string());
@@ -2778,7 +2706,7 @@ impl DualQuorumConsensus {
             if !seen.insert(vote.validator_address.clone()) {
                 return Err("QC contains duplicate signer".to_string());
             }
-            let Some(validator) = active_by_address.get(&vote.validator_address) else {
+            let Some(_validator) = active_by_address.get(&vote.validator_address) else {
                 return Err(if cluster_context.cluster_id.is_some() {
                     "QC contains signer outside the canonical proposal cluster".to_string()
                 } else {
@@ -2786,11 +2714,6 @@ impl DualQuorumConsensus {
                 });
             };
             Self::verify_vote_signature_uncached(vote, validator_manager)?;
-            signed_weight += if cluster_context.cluster_id.is_some() {
-                1.0
-            } else {
-                (validator.synergy_score / 100.0).max(0.0)
-            };
         }
 
         if cluster_context.cluster_id.is_some() {
@@ -2817,25 +2740,12 @@ impl DualQuorumConsensus {
             ));
         }
 
-        let total_weight = if cluster_context.cluster_id.is_some() {
-            cluster_context.validators.len() as f64
-        } else {
-            cluster_context
-                .validators
-                .iter()
-                .map(|validator| (validator.synergy_score / 100.0).max(0.0))
-                .sum::<f64>()
-        };
-        if total_weight <= 0.0 {
-            return Err("active validator set has zero voting weight".to_string());
-        }
-        let required_weight_ratio = if cluster_context.cluster_id.is_some() {
-            required_quorum_weight_ratio(cluster_context.validators.len())
-        } else {
-            VALIDATOR_QUORUM_RATIO
-        };
-        if signed_weight + 0.000_001 < total_weight * required_weight_ratio {
-            return Err("QC signed weight is below validator quorum threshold".to_string());
+        let signer_count = seen.len() as f64;
+        if qc.cumulative_weight > 0.0 && (qc.cumulative_weight - signer_count).abs() > 0.000_001 {
+            return Err(format!(
+                "QC cumulative_weight mismatch: computed {signer_count}, declared {}",
+                qc.cumulative_weight
+            ));
         }
 
         Ok(())
@@ -4039,14 +3949,6 @@ pub fn required_cluster_quorum(cluster_size: usize) -> usize {
         3
     } else {
         required_validator_quorum(cluster_size)
-    }
-}
-
-fn required_quorum_weight_ratio(cluster_size: usize) -> f64 {
-    if cluster_size == 0 {
-        0.0
-    } else {
-        required_cluster_quorum(cluster_size) as f64 / cluster_size as f64
     }
 }
 
@@ -6427,6 +6329,88 @@ mod tests {
             consensus.has_commit_quorum(&active_validators, &four_votes),
             "4 of 6 equal-weight votes should satisfy exact two-thirds quorum"
         );
+    }
+
+    #[test]
+    fn synergy_score_does_not_change_single_cluster_vote_power() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        let validator_manager = approved_validator_manager(&[
+            "validator1",
+            "validator2",
+            "validator3",
+            "validator4",
+            "validator5",
+            "validator6",
+        ]);
+        {
+            let mut registry = validator_manager
+                .registry
+                .lock()
+                .expect("score-divergence registry should lock");
+            for (address, score) in [
+                ("validator1", 100.0),
+                ("validator2", 100.0),
+                ("validator3", 1.0),
+                ("validator4", 1.0),
+                ("validator5", 1.0),
+                ("validator6", 1.0),
+            ] {
+                registry
+                    .validators
+                    .get_mut(address)
+                    .expect("validator should be registered")
+                    .synergy_score = score;
+            }
+        }
+
+        let pqc_manager = Arc::new(Mutex::new(PQCManager::new()));
+        let mut consensus = DualQuorumConsensus::new(
+            Arc::clone(&validator_manager),
+            Arc::clone(&pqc_manager),
+            false,
+            3,
+            4,
+            2,
+            6,
+        );
+        let block = signed_block_for_manager(42, 1, "validator1", &validator_manager);
+        let votes = ["validator3", "validator4", "validator5", "validator6"]
+            .into_iter()
+            .map(|address| {
+                DualQuorumConsensus::create_vote_for_validator_with_manager(
+                    address,
+                    &block,
+                    1,
+                    1,
+                    &validator_manager,
+                )
+                .expect("active validator should sign a vote")
+            })
+            .collect::<Vec<_>>();
+        let active_validators =
+            consensus_membership_validators(validator_manager.get_active_validators());
+
+        assert_eq!(
+            consensus.required_validator_votes(active_validators.len()),
+            4
+        );
+        assert!(
+            consensus.has_commit_quorum(&active_validators, &votes),
+            "four valid signers must satisfy 4-of-6 quorum regardless of Synergy Score"
+        );
+
+        let qc = consensus
+            .check_quorums_and_commit(&block, 1, 1, &votes)
+            .expect("four valid signers must produce a single-cluster QC");
+        assert_eq!(qc.cumulative_weight, 4.0);
+        DualQuorumConsensus::verify_commit_certificate_for_block_static(
+            &block,
+            &qc,
+            &validator_manager,
+        )
+        .expect("QC verification must use signer count rather than Synergy Score");
     }
 
     #[test]

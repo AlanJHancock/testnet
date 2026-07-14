@@ -3,7 +3,7 @@ use crate::consensus::consensus_fork::{
     self, normalize_consensus_key_algorithm, parse_consensus_public_key_material,
 };
 use crate::consensus::dual_quorum::{
-    required_validator_quorum, DualQuorumConsensus, QuorumCertificate, VALIDATOR_QUORUM_RATIO,
+    required_validator_quorum, DualQuorumConsensus, QuorumCertificate,
 };
 use crate::consensus::validator_keys::{
     parse_validator_public_key, parse_validator_public_key_with_declared_algorithm,
@@ -260,7 +260,6 @@ struct LegacyVote {
 #[derive(Debug, Clone)]
 struct LegacyValidator {
     public_key: PQCPublicKey,
-    synergy_score: f64,
 }
 
 pub const MISSING_QC_OFFLINE_MARKER: &str = "STATE_SYNC_OFFLINE_WORKSPACE";
@@ -2229,7 +2228,6 @@ fn verify_legacy_qc(
     }
 
     let mut seen = BTreeSet::new();
-    let mut signed_weight = 0.0f64;
     let manager = PQCManager::new();
     for vote in &qc.votes {
         if vote.block_hash != qc.block_hash {
@@ -2272,7 +2270,6 @@ fn verify_legacy_qc(
                 vote.validator_address
             ));
         }
-        signed_weight += validator.synergy_score.max(0.0) / 100.0;
     }
 
     if seen.len() < required_quorum {
@@ -2281,19 +2278,10 @@ fn verify_legacy_qc(
             seen.len(),
         ));
     }
-    let total_weight = validators
-        .values()
-        .map(|validator| validator.synergy_score.max(0.0) / 100.0)
-        .sum::<f64>();
-    if total_weight <= 0.0 {
-        return Err("active canonical validator set has zero voting weight".to_string());
-    }
-    if signed_weight + 0.000_001 < (total_weight * VALIDATOR_QUORUM_RATIO) {
-        return Err("committed QC signed weight is below validator quorum threshold".to_string());
-    }
-    if qc.cumulative_weight > 0.0 && (qc.cumulative_weight - signed_weight).abs() > 0.000_001 {
+    let signer_count = seen.len() as f64;
+    if qc.cumulative_weight > 0.0 && (qc.cumulative_weight - signer_count).abs() > 0.000_001 {
         return Err(format!(
-            "committed QC cumulative_weight mismatch: computed {signed_weight}, declared {}",
+            "committed QC cumulative_weight mismatch: computed {signer_count}, declared {}",
             qc.cumulative_weight
         ));
     }
@@ -2433,16 +2421,10 @@ fn load_legacy_active_baseline_validators(
                     }
                     public_key
                 };
-                let synergy_score = validators
-                    .get(address)
-                    .and_then(|record| record.get("synergy_score"))
-                    .and_then(Value::as_f64)
-                    .unwrap_or(100.0);
                 active.insert(
                     address.clone(),
                     LegacyValidator {
                         public_key: public_key.clone(),
-                        synergy_score,
                     },
                 );
             }
@@ -2499,17 +2481,7 @@ fn load_legacy_active_baseline_validators(
             ));
         }
         seen_canonical_keys.insert(public_key.key_data.clone());
-        let synergy_score = record
-            .get("synergy_score")
-            .and_then(Value::as_f64)
-            .unwrap_or(100.0);
-        active.insert(
-            address.clone(),
-            LegacyValidator {
-                public_key,
-                synergy_score,
-            },
-        );
+        active.insert(address.clone(), LegacyValidator { public_key });
     }
     if active.len() != BASELINE_VALIDATOR_COUNT {
         return Err(format!(
@@ -3903,7 +3875,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_qc_verification_accepts_unprefixed_active_validator_public_keys_as_fndsa() {
+    fn legacy_qc_verification_accepts_unprefixed_fndsa_keys_and_ignores_synergy_score() {
         let root = temp_root("legacy-unprefixed-validator-keys");
         let mut manager = PQCManager::new();
         let mut validators = serde_json::Map::new();
@@ -3921,7 +3893,7 @@ mod tests {
                     "address": address,
                     "status": "Active",
                     "public_key": general_purpose::STANDARD.encode(&public_key.key_data),
-                    "synergy_score": 100.0,
+                    "synergy_score": if index < signer_count { 1.0 } else { 100.0 },
                     "cluster_id": 0,
                 }),
             );
