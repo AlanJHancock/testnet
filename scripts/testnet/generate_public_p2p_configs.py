@@ -20,6 +20,11 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST = ROOT_DIR / "config" / "testnet" / "network-topology.toml"
 DEFAULT_OUTPUT_DIR = ROOT_DIR / "config" / "testnet" / "generated"
 STABLE_INFRA_SUFFIX = ".synergynode.xyz"
+VALIDATOR_VPN_CIDR = ipaddress.ip_network("10.70.10.0/24")
+RELAYER_VPN_CIDR = ipaddress.ip_network("10.70.20.0/24")
+RETIRED_VALIDATOR_VPN_CIDR = ipaddress.ip_network("10.69.0.0/16")
+VALIDATOR_LOOPBACK_HOST = "127.0.0.1"
+VALIDATOR_DISCOVERY_PORT = 5680
 
 
 class TopologyError(ValueError):
@@ -301,13 +306,11 @@ def seed_registry_peer_view(
     return visible
 
 
-def validator_peer_identities(topology: dict[str, Any], self_address: str) -> list[str]:
-    validator_identities = [
-        validator["validator_address"]
-        for validator in topology["validators"]
-        if validator["validator_address"] != self_address
-    ]
-    return [*validator_identities, *topology["common"]["relayer_peers"]]
+def validator_peer_identities(topology: dict[str, Any], _self_address: str) -> list[str]:
+    # Pre-enrollment configs have no VPN transport map. Bare synv1 identities
+    # are policy identifiers, not routable dial targets until the coordinator
+    # injects their post-enrollment transports.
+    return list(topology["common"]["relayer_peers"])
 
 
 def base_config(
@@ -351,18 +354,32 @@ def base_config(
         },
         "network": network_config,
         "p2p": {
-            "listen_address": f"0.0.0.0:{port}",
+            "listen_address": (
+                f"{VALIDATOR_LOOPBACK_HOST}:{port}"
+                if is_validator
+                else f"0.0.0.0:{port}"
+            ),
             "public_address": endpoint or "",
             "node_name": node["node_id"],
             "enable_discovery": not is_validator,
             "enable_peer_exchange": not is_validator,
+            "discovery_port": VALIDATOR_DISCOVERY_PORT,
+            "discovery_listen_address": (
+                f"{VALIDATOR_LOOPBACK_HOST}:{VALIDATOR_DISCOVERY_PORT}"
+                if is_validator
+                else f"0.0.0.0:{VALIDATOR_DISCOVERY_PORT}"
+            ),
+            "discovery_public_address": "" if is_validator else (endpoint or ""),
             "reject_private_advertise_addrs": True,
         },
         "node": {
             "strict_validator_allowlist": strict_validator_allowlist,
             "allowed_validator_addresses": list(allowlist),
             "validator_address": node.get("validator_address", ""),
-            "active_consensus_validator": bool(node.get("active_consensus", False)),
+            # The topology manifest describes the eventual validator set. A
+            # generated validator is pre-enrollment and cannot activate
+            # consensus until the coordinator installs its private transport.
+            "active_consensus_validator": False if is_validator else bool(node.get("active_consensus", False)),
         },
         "seed_registration": {
             "enabled": not is_validator,

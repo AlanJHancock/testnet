@@ -29,14 +29,17 @@ class PublicP2PTopologyGenerationTests(unittest.TestCase):
         self.assertEqual(self.topology["seed_registry"]["register_endpoint"], "/register")
         self.assertEqual(self.topology["seed_registry"]["heartbeat_endpoint"], "/heartbeat")
 
-    def test_validator_peer_generation_omits_self(self) -> None:
+    def test_validator_peer_generation_uses_relayer_support_only(self) -> None:
         all_validator_identities = {validator["validator_address"] for validator in self.topology["validators"]}
         relayer_peers = set(self.topology["common"]["relayer_peers"])
+        relayer_peer_order = list(self.topology["common"]["relayer_peers"])
         for validator in self.topology["validators"]:
             config = self.configs[Path("validators") / f"{validator['name'].lower()}.toml"]
             peers = set(config["network"]["persistent_peers"])
             self.assertNotIn(validator["validator_address"], peers)
-            self.assertEqual(peers, (all_validator_identities - {validator["validator_address"]}) | relayer_peers)
+            self.assertTrue(all_validator_identities.isdisjoint(peers))
+            self.assertEqual(peers, relayer_peers)
+            self.assertEqual(config["network"]["additional_dial_targets"], relayer_peer_order)
 
     def test_validators_do_not_publish_or_require_public_endpoints(self) -> None:
         for validator in self.topology["validators"]:
@@ -45,10 +48,20 @@ class PublicP2PTopologyGenerationTests(unittest.TestCase):
                 self.assertNotIn("public_endpoint", validator)
                 self.assertNotIn("public_p2p_address", config["network"])
                 self.assertEqual(config["p2p"]["public_address"], "")
+                self.assertEqual(config["p2p"]["listen_address"], "127.0.0.1:5622")
                 self.assertFalse(config["p2p"]["enable_discovery"])
                 self.assertFalse(config["p2p"]["enable_peer_exchange"])
+                self.assertEqual(config["p2p"]["discovery_listen_address"], "127.0.0.1:5680")
+                self.assertEqual(config["p2p"]["discovery_public_address"], "")
                 self.assertFalse(config["seed_registration"]["enabled"])
                 self.assertEqual(config["network"]["validator_vpn_transports"], [])
+                self.assertFalse(config["node"]["active_consensus_validator"])
+
+    def test_validator_vpn_ranges_are_reserved_for_post_enrollment(self) -> None:
+        self.assertEqual(str(gen.VALIDATOR_VPN_CIDR), "10.70.10.0/24")
+        self.assertEqual(str(gen.RELAYER_VPN_CIDR), "10.70.20.0/24")
+        self.assertFalse(gen.RETIRED_VALIDATOR_VPN_CIDR.overlaps(gen.VALIDATOR_VPN_CIDR))
+        self.assertFalse(gen.RETIRED_VALIDATOR_VPN_CIDR.overlaps(gen.RELAYER_VPN_CIDR))
 
     def test_generated_public_fields_do_not_contain_private_endpoints(self) -> None:
         public_field_names = {
@@ -189,9 +202,17 @@ class PublicP2PTopologyGenerationTests(unittest.TestCase):
             with self.subTest(path=str(path)):
                 self.assertNotIn("10.69.", gen.render_toml(config))
 
+        generated_dir = SCRIPT_PATH.parents[2] / "config" / "testnet" / "generated" / "validators"
+        for path in sorted(generated_dir.glob("*.toml")):
+            with self.subTest(path=str(path)):
+                self.assertNotIn("10.69.", path.read_text(encoding="utf-8"))
+
         template = (SCRIPT_PATH.parents[2] / "templates" / "validator.toml").read_text(encoding="utf-8")
         self.assertNotIn("10.69.", template)
         self.assertIn("validator_vpn_transports = []", template)
+        self.assertIn('listen_address = "127.0.0.1:5622"', template)
+        self.assertIn('discovery_listen_address = "127.0.0.1:5680"', template)
+        self.assertIn("active_consensus_validator = false", template)
 
     def test_seed_registry_rejects_private_endpoints(self) -> None:
         bad_endpoints = [
@@ -269,7 +290,7 @@ class PublicP2PTopologyGenerationTests(unittest.TestCase):
                     self.assertIn(relayer_peer, config["network"]["persistent_peers"])
                 self.assertTrue(config["node"]["strict_validator_allowlist"])
                 self.assertEqual(config["node"]["allowed_validator_addresses"], allowlist)
-                self.assertTrue(config["node"]["active_consensus_validator"])
+                self.assertFalse(config["node"]["active_consensus_validator"])
                 self.assertFalse(config["seed_registration"]["enabled"])
                 rendered_allowlists.add(tuple(config["node"]["allowed_validator_addresses"]))
         self.assertEqual(rendered_allowlists, {tuple(allowlist)})
