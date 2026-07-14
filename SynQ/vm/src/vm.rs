@@ -360,6 +360,8 @@ impl QuantumVM {
                 let a = self.pop()?;
                 let result = match (&a, &b) {
                     (Value::U128(av), Value::U128(bv)) => av < bv,
+                    (Value::U128(av), Value::I32(bv))  => if *bv < 0 { false } else { *av < (*bv as u128) },
+                    (Value::I32(av),  Value::U128(bv))  => if *av < 0 { true  } else { (*av as u128) < *bv },
                     _ => a.as_i32()? < b.as_i32()?,
                 };
                 self.push(Value::Bool(result))?;
@@ -369,6 +371,8 @@ impl QuantumVM {
                 let a = self.pop()?;
                 let result = match (&a, &b) {
                     (Value::U128(av), Value::U128(bv)) => av <= bv,
+                    (Value::U128(av), Value::I32(bv))  => if *bv < 0 { false } else { *av <= (*bv as u128) },
+                    (Value::I32(av),  Value::U128(bv))  => if *av < 0 { true  } else { (*av as u128) <= *bv },
                     _ => a.as_i32()? <= b.as_i32()?,
                 };
                 self.push(Value::Bool(result))?;
@@ -378,6 +382,8 @@ impl QuantumVM {
                 let a = self.pop()?;
                 let result = match (&a, &b) {
                     (Value::U128(av), Value::U128(bv)) => av > bv,
+                    (Value::U128(av), Value::I32(bv))  => if *bv < 0 { true  } else { *av > (*bv as u128) },
+                    (Value::I32(av),  Value::U128(bv))  => if *av < 0 { false } else { (*av as u128) > *bv },
                     _ => a.as_i32()? > b.as_i32()?,
                 };
                 self.push(Value::Bool(result))?;
@@ -387,6 +393,8 @@ impl QuantumVM {
                 let a = self.pop()?;
                 let result = match (&a, &b) {
                     (Value::U128(av), Value::U128(bv)) => av >= bv,
+                    (Value::U128(av), Value::I32(bv))  => if *bv < 0 { true  } else { *av >= (*bv as u128) },
+                    (Value::I32(av),  Value::U128(bv))  => if *av < 0 { false } else { (*av as u128) >= *bv },
                     _ => a.as_i32()? >= b.as_i32()?,
                 };
                 self.push(Value::Bool(result))?;

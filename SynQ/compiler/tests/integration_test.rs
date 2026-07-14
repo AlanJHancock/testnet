@@ -351,3 +351,74 @@ fn test_i32_still_works() {
     assert_eq!(count.as_i32().unwrap(), 5);
 }
 
+
+#[test]
+fn test_mixed_type_comparison_u128_gt_i32() {
+    // Regression: burn() does require(total > amount) where total may be U128
+    // (set by a large literal or prior U128 arithmetic) and amount is I32
+    // (passed as a small argument). Before the fix, Gt fell through to
+    // as_i32() on a U128 value, producing "Expected i32".
+    let source = r#"
+        contract Token {
+            total: UInt256;
+            function init(supply: UInt256) {
+                total = supply;
+                return total;
+            }
+            function burn(amount: UInt256) {
+                require(total > amount, "insufficient supply");
+                total = total - amount;
+                return total;
+            }
+        }
+    "#;
+    let bytecode = compile(source);
+    let mut vm = QuantumVM::new();
+    vm.load_bytecode(&bytecode).unwrap();
+
+    // Set total to a large U128 value
+    vm.call_function("init", &[Value::U128(1_000_000_000_000u128)]).unwrap();
+
+    // burn with a small I32 argument — mixed-type Gt comparison must work
+    let result = vm.call_function("burn", &[Value::I32(500)]).unwrap().unwrap();
+    assert_eq!(result.as_u128().unwrap(), 999_999_999_500u128);
+}
+
+#[test]
+fn test_mixed_type_comparison_i32_gt_u128() {
+    // Reverse: left is I32, right is U128 — should also work without panic
+    let source = r#"
+        contract Cmp {
+            function check(a: UInt256, b: UInt256) {
+                require(a > b, "a must be greater");
+                return a;
+            }
+        }
+    "#;
+    let bytecode = compile(source);
+    let mut vm = QuantumVM::new();
+    vm.load_bytecode(&bytecode).unwrap();
+
+    // I32 > U128 — 100 > 50
+    let r = vm.call_function("check", &[Value::I32(100), Value::U128(50)]).unwrap().unwrap();
+    assert_eq!(r.as_i32().unwrap(), 100);
+}
+
+#[test]
+fn test_u128_sub_with_i32_arg() {
+    // total is U128 (from large init), amount is I32 — Sub must promote correctly
+    let source = r#"
+        contract Sub {
+            n: UInt256;
+            function set(v: UInt256) { n = v; }
+            function sub(amount: UInt256) { n = n - amount; return n; }
+        }
+    "#;
+    let bytecode = compile(source);
+    let mut vm = QuantumVM::new();
+    vm.load_bytecode(&bytecode).unwrap();
+
+    vm.call_function("set", &[Value::U128(5_000_000_000u128)]).unwrap();
+    let result = vm.call_function("sub", &[Value::I32(1)]).unwrap().unwrap();
+    assert_eq!(result.as_u128().unwrap(), 4_999_999_999u128);
+}
