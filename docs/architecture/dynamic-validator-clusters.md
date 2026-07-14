@@ -21,6 +21,12 @@ An epoch starts at `epoch * 1,000 + 1` and ends at
 `(epoch + 1) * 1,000`. Activation, assignment, shadow-observation, and rotation
 evidence must use those boundaries exactly.
 
+The one-based epoch correction has one immutable migration checkpoint. Block
+`1,046,000` was finalized by `v19.0.15` with legacy QC epoch label `1046`; its
+canonical epoch is `1045`. Runtime `v19.0.21` accepts that exact block height
+and hash only, normalizes the label for epoch-randomness derivation, and rejects
+the same off-by-one label on every other boundary.
+
 ## Canonical Cluster Topology
 
 - `1-9` active validators use one cluster.

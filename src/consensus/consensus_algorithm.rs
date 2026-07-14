@@ -55,6 +55,11 @@ const POST_COMMIT_PARENT_PROPAGATION_GRACE_MILLIS: u64 = 250;
 const SAFE_HEAD_CATCHUP_WITHOUT_MESH_RESET_BLOCKS: u64 = 1;
 const DEFAULT_MAX_CHAIN_SNAPSHOT_CLONE_HEIGHT: u64 = 50_000;
 const PROPOSAL_TRANSACTION_MAX_AGE_SECS: u64 = 3_600;
+// v19.0.15 finalized this boundary before the one-based epoch correction.
+// Accept and normalize only this immutable checkpoint; future off-by-one QCs fail closed.
+const ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HEIGHT: u64 = 1_046_000;
+const ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HASH: &str =
+    "0f3b823697f65f89ca27da60e7f5b5bd2792b3ba4f1d5061d206cfdf78d06b09";
 
 macro_rules! consensus_log {
     ($($arg:tt)*) => {
@@ -2759,7 +2764,7 @@ impl ProofOfSynergy {
             .ok_or_else(|| {
                 format!("epoch {current_epoch} boundary block {boundary_height} is unavailable")
             })?;
-        let qc = DualQuorumConsensus::committed_qc_for_block_hash(&block.hash).ok_or_else(|| {
+        let mut qc = DualQuorumConsensus::committed_qc_for_block_hash(&block.hash).ok_or_else(|| {
             format!(
                 "finalized QC for epoch {current_epoch} boundary block {boundary_height} ({}) is unavailable",
                 block.hash
@@ -2767,10 +2772,17 @@ impl ProofOfSynergy {
         })?;
         let expected_epoch = epoch_for_block_height(block.block_index, epoch_length);
         if qc.epoch_number != expected_epoch {
-            return Err(format!(
-                "boundary QC epoch {} does not match block {} epoch {expected_epoch}",
-                qc.epoch_number, block.block_index
-            ));
+            let is_checkpointed_legacy_boundary = block.block_index
+                == ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HEIGHT
+                && block.hash == ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HASH
+                && qc.epoch_number == expected_epoch.saturating_add(1);
+            if !is_checkpointed_legacy_boundary {
+                return Err(format!(
+                    "boundary QC epoch {} does not match block {} epoch {expected_epoch}",
+                    qc.epoch_number, block.block_index
+                ));
+            }
+            qc.epoch_number = expected_epoch;
         }
         if !qc.validation_quorum_met || !qc.cooperation_quorum_met {
             return Err(format!(
@@ -5052,6 +5064,90 @@ mod tests {
         assert_eq!(previous_qc.block_hash, "boundary-1000");
         assert_eq!(previous_qc.epoch_number, 0);
         assert_eq!(previous_qc.aggregate_signature, vec![9, 9, 9]);
+    }
+
+    #[test]
+    fn previous_qc_normalizes_only_the_checkpointed_legacy_epoch_boundary() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let mut chain = BlockChain::new();
+        chain.add_block(Block {
+            block_index: ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HEIGHT,
+            timestamp: 1_784_029_631,
+            transactions: Vec::new(),
+            previous_hash: "0a9443910c6687883489ab61da94d27df1157f8f0288b8a351466a6c0735cfb6"
+                .to_string(),
+            validator_id: "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re".to_string(),
+            nonce: ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HEIGHT,
+            hash: ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HASH.to_string(),
+            transactions_root: String::new(),
+            proposer_public_key: Vec::new(),
+            block_signature: vec![9, 9, 9],
+            block_signature_algorithm: "fndsa".to_string(),
+        });
+        DualQuorumConsensus::record_committed_qc_checked(QuorumCertificate {
+            block_hash: ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HASH.to_string(),
+            cluster_id: None,
+            epoch_number: 1_046,
+            round_number: 1,
+            aggregate_signature: vec![9, 9, 9],
+            participant_bitmap: Vec::new(),
+            cumulative_weight: 4.0,
+            validation_quorum_met: true,
+            cooperation_quorum_met: true,
+            timestamp: 1_784_029_631,
+            votes: Vec::new(),
+        })
+        .unwrap();
+
+        let previous_qc =
+            ProofOfSynergy::get_previous_quorum_certificate(&chain, 1_046, 1_000).unwrap();
+
+        assert_eq!(
+            previous_qc.block_hash,
+            ONE_BASED_EPOCH_MIGRATION_BOUNDARY_HASH
+        );
+        assert_eq!(previous_qc.epoch_number, 1_045);
+    }
+
+    #[test]
+    fn previous_qc_rejects_future_legacy_epoch_boundary_labels() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let mut chain = BlockChain::new();
+        chain.add_block(Block {
+            block_index: 1_047_000,
+            timestamp: 1_784_030_631,
+            transactions: Vec::new(),
+            previous_hash: "future-parent".to_string(),
+            validator_id: "validator-a".to_string(),
+            nonce: 1_047_000,
+            hash: "future-boundary-1047000".to_string(),
+            transactions_root: String::new(),
+            proposer_public_key: Vec::new(),
+            block_signature: vec![9, 9, 9],
+            block_signature_algorithm: "fndsa".to_string(),
+        });
+        DualQuorumConsensus::record_committed_qc_checked(QuorumCertificate {
+            block_hash: "future-boundary-1047000".to_string(),
+            cluster_id: None,
+            epoch_number: 1_047,
+            round_number: 1,
+            aggregate_signature: vec![9, 9, 9],
+            participant_bitmap: Vec::new(),
+            cumulative_weight: 4.0,
+            validation_quorum_met: true,
+            cooperation_quorum_met: true,
+            timestamp: 1_784_030_631,
+            votes: Vec::new(),
+        })
+        .unwrap();
+
+        let error = ProofOfSynergy::get_previous_quorum_certificate(&chain, 1_047, 1_000)
+            .expect_err("future off-by-one boundary QC must fail closed");
+
+        assert!(error.contains("boundary QC epoch 1047"));
+        assert!(error.contains("block 1047000 epoch 1046"));
     }
 
     #[test]
