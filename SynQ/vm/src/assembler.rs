@@ -29,6 +29,11 @@ impl Assembler {
         self.code.extend_from_slice(&value.to_le_bytes());
     }
 
+    /// Emit a 16-byte big-endian u128 literal (for LoadImm128 / UInt256 values).
+    pub fn emit_u128(&mut self, v: u128) {
+        self.code.extend_from_slice(&v.to_be_bytes());
+    }
+
     pub fn emit_bytes(&mut self, bytes: &[u8]) {
         self.emit_u32(bytes.len() as u32);
         self.code.extend_from_slice(bytes);

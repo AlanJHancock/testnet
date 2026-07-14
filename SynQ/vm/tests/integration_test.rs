@@ -112,3 +112,79 @@ fn test_kyber_decaps_shim() {
     let shared_secret = vm.stack.pop().unwrap().as_bytes().unwrap().to_vec();
     assert_eq!(shared_secret, expected_shared_secret);
 }
+
+
+// --- VM Value::U128 & LoadImm128 Tests ---
+
+#[test]
+fn test_u128_push_and_return() {
+    // Verify LoadImm128 pushes the correct Value::U128 onto the stack.
+    let expected: u128 = 1_000_000_000_000_000_000_000u128; // 10^21 — well above i32::MAX
+    let mut assembler = Assembler::new();
+    assembler.emit_op(OpCode::LoadImm128);
+    assembler.emit_u128(expected);
+    assembler.emit_op(OpCode::Halt);
+    let bytecode = assembler.build();
+    let mut vm = QuantumVM::new();
+    vm.load_bytecode(&bytecode).unwrap();
+    vm.execute().unwrap();
+    let result = vm.stack.pop().unwrap();
+    assert_eq!(result.as_u128().unwrap(), expected);
+}
+
+#[test]
+fn test_u128_add() {
+    // 1T + 2T = 3T — values that would silently truncate under i32.
+    let a: u128 = 1_000_000_000_000u128;
+    let b: u128 = 2_000_000_000_000u128;
+    let mut assembler = Assembler::new();
+    assembler.emit_op(OpCode::LoadImm128);
+    assembler.emit_u128(a);
+    assembler.emit_op(OpCode::LoadImm128);
+    assembler.emit_u128(b);
+    assembler.emit_op(OpCode::Add);
+    assembler.emit_op(OpCode::Halt);
+    let bytecode = assembler.build();
+    let mut vm = QuantumVM::new();
+    vm.load_bytecode(&bytecode).unwrap();
+    vm.execute().unwrap();
+    let result = vm.stack.pop().unwrap();
+    assert_eq!(result.as_u128().unwrap(), 3_000_000_000_000u128);
+}
+
+#[test]
+fn test_u128_overflow() {
+    // u128::MAX + 1 must return a RuntimeError containing "overflow", not wrap silently.
+    let mut assembler = Assembler::new();
+    assembler.emit_op(OpCode::LoadImm128);
+    assembler.emit_u128(u128::MAX);
+    assembler.emit_op(OpCode::LoadImm128);
+    assembler.emit_u128(1u128);
+    assembler.emit_op(OpCode::Add);
+    assembler.emit_op(OpCode::Halt);
+    let bytecode = assembler.build();
+    let mut vm = QuantumVM::new();
+    vm.load_bytecode(&bytecode).unwrap();
+    let err = vm.execute().unwrap_err();
+    assert!(format!("{}", err).contains("overflow"),
+        "Expected overflow error, got: {}", err);
+}
+
+#[test]
+fn test_u128_i32_mixed_add() {
+    // Push an i32(5) then a U128(10) — Add should promote and return U128(15).
+    let mut assembler = Assembler::new();
+    assembler.emit_op(OpCode::Push);
+    assembler.emit_i32(5);
+    assembler.emit_op(OpCode::LoadImm128);
+    assembler.emit_u128(10u128);
+    assembler.emit_op(OpCode::Add);
+    assembler.emit_op(OpCode::Halt);
+    let bytecode = assembler.build();
+    let mut vm = QuantumVM::new();
+    vm.load_bytecode(&bytecode).unwrap();
+    vm.execute().unwrap();
+    let result = vm.stack.pop().unwrap();
+    assert_eq!(result.as_u128().unwrap(), 15u128);
+}
+

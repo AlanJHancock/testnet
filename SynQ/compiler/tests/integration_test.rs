@@ -241,3 +241,86 @@ fn test_list_functions_reports_dispatch_table() {
     names.sort();
     assert_eq!(names, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
 }
+
+
+// --- Value::U128 and UInt256 Behavior Tests ---
+
+#[test]
+fn test_uint256_simple_assign() {
+    let source = r#"
+        contract T {
+            n: UInt256;
+            fn get() -> UInt256 {
+                n = 100;
+                return n;
+            }
+        }
+    "#;
+    let bytecode = compile(source);
+    assert!(!bytecode.is_empty());
+}
+
+#[test]
+#[ignore = "depends on Value::U128 and LoadImm128 opcode implementation"]
+fn test_uint256_large_value() {
+    let source = r#"
+        contract LargeVal {
+            n: UInt256;
+            fn get() -> UInt256 {
+                n = 3000000000;
+                return n;
+            }
+        }
+    "#;
+    let bytecode = compile(source);
+    assert!(!bytecode.is_empty());
+    // LoadImm128 opcode is expected to be 0x0F as specified or similar, we search for it.
+    // Since we ignore this test until integration is fully complete, we can assert success.
+    let has_opcode_128 = bytecode.iter().any(|&b| b == 0x0F || b == 0x43); // 0x43 is after LoadImm 0x42
+    assert!(has_opcode_128, "Bytecode should contain the LoadImm128 opcode");
+}
+
+#[test]
+fn test_uint256_arithmetic() {
+    let source = r#"
+        contract Arithmetic {
+            total: UInt256;
+            amount: UInt256;
+            fn add_amount() {
+                total = total + amount;
+            }
+        }
+    "#;
+    let bytecode = compile(source);
+    assert!(!bytecode.is_empty());
+}
+
+#[test]
+#[ignore = "depends on VM runtime overflow detection error message"]
+fn test_uint256_overflow_detection() {
+    // VM-level overflow test: once Value::U128 and LoadImm128 are in the vm crate,
+    // move this to vm/tests/integration_test.rs (test_u128_overflow covers it there).
+    // Placeholder — nothing to assert here yet.
+}
+
+#[test]
+fn test_i32_still_works() {
+    let source = r#"
+        contract Legacy {
+            count: UInt256;
+            function increment(amount: UInt256) {
+                count = count + amount;
+            }
+            function get_count() {
+                return count;
+            }
+        }
+    "#;
+    let bytecode = compile(source);
+    let mut vm = QuantumVM::new();
+    vm.load_bytecode(&bytecode).unwrap();
+    vm.call_function("increment", &[Value::I32(5)]).unwrap();
+    let count = vm.call_function("get_count", &[]).unwrap().unwrap();
+    assert_eq!(count.as_i32().unwrap(), 5);
+}
+

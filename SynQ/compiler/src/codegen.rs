@@ -242,8 +242,17 @@ impl CodeGenerator {
     fn gen_expression(&mut self, expr: &Expression, scope: &mut FunctionScope) -> Result<(), String> {
         match expr {
             Expression::Literal(Literal::Number(n)) => {
-                self.assembler.emit_op(OpCode::Push);
-                self.assembler.emit_i32(*n as i32);
+                // If the literal exceeds i32::MAX, emit as a 16-byte u128
+                // via LoadImm128 so UInt256 state variables are not silently
+                // truncated. Small values stay as Push/i32 for backward compat.
+                // TODO: promote to LoadImm256 when primitive-types crate is added.
+                if *n > i32::MAX as u64 {
+                    self.assembler.emit_op(OpCode::LoadImm128);
+                    self.assembler.emit_u128(*n as u128);
+                } else {
+                    self.assembler.emit_op(OpCode::Push);
+                    self.assembler.emit_i32(*n as i32);
+                }
                 Ok(())
             }
             Expression::Literal(Literal::Bool(b)) => {

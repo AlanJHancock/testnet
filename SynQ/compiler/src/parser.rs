@@ -15,9 +15,9 @@ pub fn parse(source: &str) -> Result<Vec<SourceUnit>, String> {
             Rule::top_level_item => {
                 let inner = pair.into_inner().next().unwrap();
                 match inner.as_rule() {
-                    Rule::pragma_directive => ast.push(SourceUnit::Pragma(parse_pragma(inner))),
-                    Rule::synq_pragma => {} // `pragma synq ^x.y;` -- consumed silently
-                    Rule::struct_definition => ast.push(SourceUnit::Struct(parse_struct(inner))),
+                    Rule::pragma_directive => {} // standard pragma -- consumed silently
+                    Rule::synq_pragma      => {} // `pragma synq ^x.y;` -- consumed silently
+                    Rule::struct_definition   => ast.push(SourceUnit::Struct(parse_struct(inner))),
                     Rule::contract_definition => ast.push(SourceUnit::Contract(parse_contract(inner))),
                     _ => {}
                 }
@@ -29,13 +29,6 @@ pub fn parse(source: &str) -> Result<Vec<SourceUnit>, String> {
     Ok(ast)
 }
 
-fn parse_pragma(pair: Pair<Rule>) -> PragmaDirective {
-    let mut inner = pair.into_inner();
-    let key = inner.next().unwrap().as_str().to_string();
-    let value = inner.next().unwrap().as_str().trim_matches('"').to_string();
-    PragmaDirective { key, value }
-}
-
 fn parse_struct(pair: Pair<Rule>) -> StructDefinition {
     let mut inner = pair.into_inner();
     let name = inner.next().unwrap().as_str().to_string();
@@ -43,7 +36,7 @@ fn parse_struct(pair: Pair<Rule>) -> StructDefinition {
         let mut fi = p.into_inner();
         let n = fi.next().unwrap().as_str().to_string();
         let t = parse_type(fi.next().unwrap());
-        Parameter { name: n, ty: t }
+        Parameter { name: n, ty: t, is_indexed: false }
     }).collect();
     StructDefinition { name, fields }
 }
@@ -61,7 +54,9 @@ fn parse_contract(pair: Pair<Rule>) -> ContractDefinition {
                         let mut si = inner2.into_inner();
                         let n = si.next().unwrap().as_str().to_string();
                         let t = parse_type(si.next().unwrap());
-                        parts.push(ContractPart::StateVariable(StateVariable { name: n, ty: t }));
+                        parts.push(ContractPart::StateVariable(StateVariableDeclaration {
+                            name: n, ty: t, is_public: false
+                        }));
                     }
                     Rule::function_definition => {
                         parts.push(ContractPart::Function(parse_function(inner2)));
@@ -79,8 +74,8 @@ fn parse_function(pair: Pair<Rule>) -> FunctionDefinition {
     let mut inner = pair.into_inner();
     let name = inner.next().unwrap().as_str().to_string();
     let mut params = vec![];
-    let mut return_type = None;
-    let mut body = vec![];
+    let mut returns: Option<Type> = None;
+    let mut body_stmts = vec![];
 
     for p in inner {
         match p.as_rule() {
@@ -90,24 +85,31 @@ fn parse_function(pair: Pair<Rule>) -> FunctionDefinition {
                         let mut pi = param.into_inner();
                         let pn = pi.next().unwrap().as_str().to_string();
                         let pt = parse_type(pi.next().unwrap());
-                        params.push(Parameter { name: pn, ty: pt });
+                        params.push(Parameter { name: pn, ty: pt, is_indexed: false });
                     }
                 }
             }
-            Rule::type_decl => {
-                return_type = Some(parse_type(p));
+            Rule::type_decl | Rule::return_type => {
+                returns = Some(parse_type(p));
             }
             Rule::block => {
                 for stmt_pair in p.into_inner() {
                     if stmt_pair.as_rule() == Rule::statement {
-                        body.push(parse_statement(stmt_pair.into_inner().next().unwrap()));
+                        body_stmts.push(parse_statement(stmt_pair.into_inner().next().unwrap()));
                     }
                 }
             }
             _ => {}
         }
     }
-    FunctionDefinition { name, params, return_type, body }
+
+    FunctionDefinition {
+        name,
+        params,
+        returns,
+        body: Block { statements: body_stmts },
+        is_public: false,
+    }
 }
 
 fn parse_statement(pair: Pair<Rule>) -> Statement {
@@ -119,7 +121,9 @@ fn parse_statement(pair: Pair<Rule>) -> Statement {
         Rule::require_statement => {
             let mut inner = pair.into_inner();
             let cond = parse_expression(inner.next().unwrap());
-            let msg = inner.next().unwrap().as_str().trim_matches('"').to_string();
+            let msg = inner.next()
+                .map(|p| p.as_str().trim_matches('"').to_string())
+                .unwrap_or_default();
             Statement::Require(cond, msg)
         }
         Rule::assignment_statement => {
@@ -131,7 +135,7 @@ fn parse_statement(pair: Pair<Rule>) -> Statement {
         Rule::expr_statement => {
             Statement::Expression(parse_expression(pair.into_inner().next().unwrap()))
         }
-        _ => Statement::Expression(Expression::Number(0)),
+        _ => Statement::Expression(Expression::Literal(Literal::Number(0))),
     }
 }
 
@@ -154,7 +158,7 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
             if first.as_str() == "-" {
                 let operand = parse_expression(inner.next().unwrap());
                 Expression::BinaryOp(
-                    Box::new(Expression::Number(0)),
+                    Box::new(Expression::Literal(Literal::Number(0))),
                     BinaryOperator::Sub,
                     Box::new(operand),
                 )
@@ -162,7 +166,7 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
                 parse_expression(first)
             }
         }
-        Rule::primary => parse_expression(pair.into_inner().next().unwrap()),
+        Rule::primary  => parse_expression(pair.into_inner().next().unwrap()),
         Rule::call_expr => {
             let mut inner = pair.into_inner();
             let name = inner.next().unwrap().as_str().to_string();
@@ -173,42 +177,56 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
             };
             Expression::Call(name, args)
         }
-        Rule::literal => parse_expression(pair.into_inner().next().unwrap()),
-        Rule::number_literal => Expression::Number(pair.as_str().parse().unwrap_or(0)),
-        Rule::string_literal => Expression::StringLit(pair.as_str().trim_matches('"').to_string()),
-        Rule::bool_literal => Expression::Bool(pair.as_str() == "true"),
-        Rule::IDENT => Expression::Identifier(pair.as_str().to_string()),
-        _ => Expression::Number(0),
+        Rule::literal         => parse_expression(pair.into_inner().next().unwrap()),
+        Rule::number_literal  => Expression::Literal(Literal::Number(
+            pair.as_str().parse().unwrap_or(0)
+        )),
+        Rule::string_literal  => Expression::Literal(Literal::String(
+            pair.as_str().trim_matches('"').to_string()
+        )),
+        Rule::bool_literal    => Expression::Literal(Literal::Bool(pair.as_str() == "true")),
+        Rule::IDENT           => Expression::Identifier(pair.as_str().to_string()),
+        _ => Expression::Literal(Literal::Number(0)),
     }
 }
 
 fn parse_binop(pair: &Pair<Rule>) -> BinaryOperator {
     match pair.as_str() {
-        "+" => BinaryOperator::Add,
-        "-" => BinaryOperator::Sub,
-        "*" => BinaryOperator::Mul,
-        "/" => BinaryOperator::Div,
-        "%" => BinaryOperator::Mod,
+        "+"  => BinaryOperator::Add,
+        "-"  => BinaryOperator::Sub,
+        "*"  => BinaryOperator::Mul,
+        "/"  => BinaryOperator::Div,
         "==" => BinaryOperator::Eq,
         "!=" => BinaryOperator::Ne,
-        "<" => BinaryOperator::Lt,
+        "<"  => BinaryOperator::Lt,
         "<=" => BinaryOperator::Le,
-        ">" => BinaryOperator::Gt,
+        ">"  => BinaryOperator::Gt,
         ">=" => BinaryOperator::Ge,
-        _ => BinaryOperator::Add,
+        _    => BinaryOperator::Add,
     }
 }
 
-fn parse_type(pair: Pair<Rule>) -> TypeDecl {
+fn parse_type(pair: Pair<Rule>) -> Type {
     match pair.as_rule() {
-        Rule::type_decl => parse_type(pair.into_inner().next().unwrap()),
+        Rule::type_decl | Rule::return_type => parse_type(pair.into_inner().next().unwrap()),
         Rule::mapping_type => {
             let mut inner = pair.into_inner();
             let k = parse_type(inner.next().unwrap());
             let v = parse_type(inner.next().unwrap());
-            TypeDecl::Mapping(Box::new(k), Box::new(v))
+            Type::Mapping(Box::new(k), Box::new(v))
         }
-        Rule::IDENT => TypeDecl::Simple(pair.as_str().to_string()),
-        _ => TypeDecl::Simple("Unknown".to_string()),
+        Rule::IDENT => match pair.as_str() {
+            "address" | "Address"                  => Type::Address,
+            "UInt256" | "uint256" | "uint" | "u256"=> Type::UInt256,
+            "bool" | "Bool"                        => Type::Bool,
+            "bytes" | "Bytes"                      => Type::Bytes,
+            "DilithiumPublicKey"                   => Type::DilithiumPublicKey,
+            "FalconPublicKey"                      => Type::FalconPublicKey,
+            "KyberPublicKey"                       => Type::KyberPublicKey,
+            "DilithiumSignature"                   => Type::DilithiumSignature,
+            "FalconSignature"                      => Type::FalconSignature,
+            _                                      => Type::UInt256, // default unknown to UInt256
+        },
+        _ => Type::UInt256,
     }
 }

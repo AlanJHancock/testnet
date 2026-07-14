@@ -16,12 +16,12 @@ impl fmt::Display for VMError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             VMError::InvalidBytecode(msg) => write!(f, "Invalid bytecode: {}", msg),
-            VMError::StackUnderflow => write!(f, "Stack underflow"),
-            VMError::StackOverflow => write!(f, "Stack overflow"),
+            VMError::StackUnderflow      => write!(f, "Stack underflow"),
+            VMError::StackOverflow       => write!(f, "Stack overflow"),
             VMError::InvalidInstruction(op) => write!(f, "Invalid instruction: 0x{:02x}", op),
-            VMError::InvalidAddress(addr) => write!(f, "Invalid address: {}", addr),
-            VMError::CryptoError(msg) => write!(f, "Crypto error: {}", msg),
-            VMError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
+            VMError::InvalidAddress(addr)   => write!(f, "Invalid address: {}", addr),
+            VMError::CryptoError(msg)    => write!(f, "Crypto error: {}", msg),
+            VMError::RuntimeError(msg)   => write!(f, "Runtime error: {}", msg),
         }
     }
 }
@@ -33,10 +33,10 @@ impl std::error::Error for VMError {}
 #[repr(u8)]
 pub enum OpCode {
     // Stack operations
-    Push = 0x01,
-    Pop = 0x02,
-    Dup = 0x03,
-    Swap = 0x04,
+    Push   = 0x01,
+    Pop    = 0x02,
+    Dup    = 0x03,
+    Swap   = 0x04,
 
     // Arithmetic operations
     Add = 0x10,
@@ -53,25 +53,27 @@ pub enum OpCode {
     Ge = 0x25,
 
     // Control flow
-    Jump = 0x30,
+    Jump   = 0x30,
     JumpIf = 0x31,
-    Call = 0x32,
+    Call   = 0x32,
     Return = 0x33,
 
     // Memory operations
-    Load = 0x40,
-    Store = 0x41,
-    LoadImm = 0x42,
+    Load      = 0x40,
+    Store     = 0x41,
+    LoadImm   = 0x42,  // push raw bytes (strings / PQC keys)
+    LoadImm128 = 0x43, // push a 16-byte big-endian u128 (UInt256 values)
+                       // TODO: promote to LoadImm256([u8;32]) when primitive-types crate is added
 
     // PQC operations
-    DilithiumVerify = 0x80,
+    DilithiumVerify  = 0x80,
     KyberKeyExchange = 0x81,
-    FalconVerify = 0x82,
-    SphincsVerify = 0x83,
+    FalconVerify     = 0x82,
+    SphincsVerify    = 0x83,
 
     // Utility
     Print = 0xF0,
-    Halt = 0xFF,
+    Halt  = 0xFF,
 }
 
 impl TryFrom<u8> for OpCode {
@@ -100,13 +102,14 @@ impl TryFrom<u8> for OpCode {
             0x40 => Ok(OpCode::Load),
             0x41 => Ok(OpCode::Store),
             0x42 => Ok(OpCode::LoadImm),
+            0x43 => Ok(OpCode::LoadImm128),
             0x80 => Ok(OpCode::DilithiumVerify),
             0x81 => Ok(OpCode::KyberKeyExchange),
             0x82 => Ok(OpCode::FalconVerify),
             0x83 => Ok(OpCode::SphincsVerify),
             0xF0 => Ok(OpCode::Print),
             0xFF => Ok(OpCode::Halt),
-            _ => Err(VMError::InvalidInstruction(value)),
+            _    => Err(VMError::InvalidInstruction(value)),
         }
     }
 }
