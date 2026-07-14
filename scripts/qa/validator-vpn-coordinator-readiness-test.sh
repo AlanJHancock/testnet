@@ -32,7 +32,7 @@ chmod +x "$readiness" "$deploy_dir/validator-vpn-coordinator-add-peer.sh"
 
 stub_bin="$tmp_dir/bin"
 mkdir -p "$stub_bin" "$tmp_dir/etc/innernet-server" "$tmp_dir/var/lib/innernet-server" "$tmp_dir/unit"
-printf 'private-key = "test"\nlisten-port = 51820\naddress = "10.69.10.1"\nnetwork-cidr-prefix = 24\n' > "$tmp_dir/etc/innernet-server/sy-validator0.conf"
+printf 'private-key = "test"\nlisten-port = 51820\naddress = "10.70.10.1"\nnetwork-cidr-prefix = 24\n' > "$tmp_dir/etc/innernet-server/sy-validator0.conf"
 printf 'sqlite-placeholder\n' > "$tmp_dir/var/lib/innernet-server/sy-validator0.db"
 printf '[Service]\nUser=root\n' > "$tmp_dir/unit/innernet-server@.service"
 

@@ -31,8 +31,9 @@ VALIDATOR_P2P_PORT = 5622
 DEFAULT_VALIDATOR_VPN_IFACE = "sy-validator0"
 OLD_WIREGUARD_IFACE = "wg0"
 
-VALIDATOR_TRANSPORT_RE = re.compile(r"^10\.69\.(?:1[0-9]|[2-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-4])\.[0-9]+$")
-RELAYER_TRANSPORT_RE = re.compile(r"^10\.69\.0\.[0-9]+$")
+VALIDATOR_TRANSPORT_RE = re.compile(r"^10\.70\.10\.(?:[1-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-4])$")
+RELAYER_TRANSPORT_RE = re.compile(r"^10\.70\.20\.(?:[1-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-4])$")
+RETIRED_TRANSPORT_RE = re.compile(r"^10\.69\.")
 
 
 @dataclass
@@ -107,6 +108,10 @@ def is_validator_vpn_host(host: str) -> bool:
 
 def is_relayer_vpn_host(host: str) -> bool:
     return bool(RELAYER_TRANSPORT_RE.match(host.strip()))
+
+
+def is_retired_vpn_host(host: str) -> bool:
+    return bool(RETIRED_TRANSPORT_RE.match(host.strip()))
 
 
 def is_private_host(host: str) -> bool:
@@ -222,7 +227,9 @@ def check_config(
     validator_identity_targets = {target for target in peer_targets if is_synv_address(target)}
     for target in peer_targets:
         host, port = host_port(target)
-        if is_validator_vpn_host(host):
+        if is_retired_vpn_host(host):
+            findings.append(finding("FAIL", "retired validator VPN route", f"{target} is a retired 10.69.* VPN route; current Innernet evidence must use 10.70.10.1-254 or 10.70.20.1-254", node_path))
+        elif is_validator_vpn_host(host):
             findings.append(finding("FAIL", "validator peer identity", f"validator peer list contains raw validator VPN route {target}", node_path))
         elif is_relayer_vpn_host(host):
             findings.append(finding("PASS", "relayer support route", f"{target} is a relayer/support VPN route", node_path))
@@ -251,7 +258,7 @@ def check_config(
         if is_validator_vpn_host(host) and port == VALIDATOR_P2P_PORT:
             findings.append(finding("PASS", "validator VPN transport route", f"{validator_address} resolves to {dial_address}", node_path))
         else:
-            findings.append(finding("FAIL", "validator VPN transport route", f"{dial_address} is not a 10.69.10.x:{VALIDATOR_P2P_PORT} route", node_path))
+            findings.append(finding("FAIL", "validator VPN transport route", f"{dial_address} is not a 10.70.10.1-254:{VALIDATOR_P2P_PORT} route", node_path))
 
     return findings, node_config
 
