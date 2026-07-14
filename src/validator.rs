@@ -3095,9 +3095,37 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
 
     #[test]
     fn tenth_validator_activation_at_h_plus_1001_produces_exact_two_five_validator_clusters() {
+        let _env_lock = validator_test_env_lock();
         let activation_height = 50_000;
         let effective_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS + 1;
+        let temp_dir = unique_test_dir("activation-cluster-boundary");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([
+                {
+                    "epoch_id": 12,
+                    "validator_set_version": 1,
+                    "effective_from_height": 0,
+                    "effective_to_height": effective_height - 1,
+                    "active_validators": validator_addresses(0, 8),
+                    "validator_set_hash": "nine-validator-set"
+                },
+                {
+                    "epoch_id": 13,
+                    "validator_set_version": 2,
+                    "effective_from_height": effective_height,
+                    "active_validators": validator_addresses(0, 9),
+                    "previous_set_hash": "nine-validator-set",
+                    "validator_set_hash": "ten-validator-set"
+                }
+            ]),
+        );
+        let _snapshot_env =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
         let mut registry = active_registry(9);
+        registry.reorganize_clusters_for_epoch(12);
         let registration = pending_registration(9);
         let tenth_address = registration.address.clone();
         registry
@@ -3110,6 +3138,18 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
         assert!(registry
             .apply_pending_shadow_activations(effective_height - 1)
             .is_empty());
+        assert_eq!(registry.current_epoch, 12);
+
+        // Epoch advancement is external to shadow promotion. Advance the
+        // registry epoch before promoting so the boundary rebuild uses epoch 13.
+        registry.reorganize_clusters_for_epoch(13);
+        assert_eq!(registry.current_epoch, 13);
+        assert_eq!(
+            epoch_validator_set_hash_for_height(effective_height)
+                .expect("boundary set hash should resolve")
+                .as_deref(),
+            Some("ten-validator-set")
+        );
         assert_eq!(
             registry.apply_pending_shadow_activations(effective_height),
             vec![tenth_address.clone()]
@@ -3133,18 +3173,23 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
             .into_iter()
             .cloned()
             .collect::<Vec<_>>();
-        let expected = canonical_validator_clusters_for_epoch(&active, registry.current_epoch)
-            .into_iter()
-            .map(|(cluster_id, members)| {
-                (
-                    cluster_id,
-                    members
-                        .into_iter()
-                        .map(|validator| validator.address)
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
+        let expected = canonical_validator_clusters_for_height(
+            active.clone(),
+            registry.current_epoch,
+            effective_height,
+        )
+        .expect("boundary set should be the ten-validator set")
+        .into_iter()
+        .map(|(cluster_id, members)| {
+            (
+                cluster_id,
+                members
+                    .into_iter()
+                    .map(|validator| validator.address)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
         let mut expected = expected;
         for members in expected.values_mut() {
             members.sort();
@@ -3168,6 +3213,8 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
                 .len(),
             10
         );
+
+        std::fs::remove_dir_all(temp_dir).ok();
     }
 
     #[test]
