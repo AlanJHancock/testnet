@@ -34,7 +34,7 @@ bootstrap_dns_records = [
 
 [policies]
 stable_infrastructure_endpoint_policy = "dns_only"
-validator_endpoint_policy = "public_ip_only"
+validator_endpoint_policy = "coordinator_private_runtime_only"
 vpn_admin_only = true
 reject_private_public_p2p = true
 validator_configs_uniform_minus_self = true
@@ -124,7 +124,7 @@ validator_required_fields = [
   "validator_address",
 ]
 output_stable_infrastructure = "dns"
-output_validators = "public_ip"
+output_validators = "runtime_enrolled_private_transport"
 output_rpc_gateway = "rpc.synergynode.xyz:5623"
 output_archive_validator = "archive.synergynode.xyz:5615"
 output_observer = "209.145.50.9:5622"
@@ -194,12 +194,6 @@ peers = [
   "rpc.synergynode.xyz:5623",
   "archive.synergynode.xyz:5615",
   "209.145.50.9:5622",
-  "62.146.182.207:5622",
-  "62.146.182.208:5622",
-  "62.146.182.209:5622",
-  "73.79.66.255:5622",
-  "194.163.183.166:5622",
-  "157.173.192.45:5622",
 ]
 
 [[relayers]]
@@ -215,12 +209,6 @@ peers = [
   "rpc.synergynode.xyz:5623",
   "archive.synergynode.xyz:5615",
   "209.145.50.9:5622",
-  "62.146.182.207:5622",
-  "62.146.182.208:5622",
-  "62.146.182.209:5622",
-  "73.79.66.255:5622",
-  "194.163.183.166:5622",
-  "157.173.192.45:5622",
 ]
 
 [[relayers]]
@@ -236,66 +224,48 @@ peers = [
   "rpc.synergynode.xyz:5623",
   "archive.synergynode.xyz:5615",
   "209.145.50.9:5622",
-  "62.146.182.207:5622",
-  "62.146.182.208:5622",
-  "62.146.182.209:5622",
-  "73.79.66.255:5622",
-  "194.163.183.166:5622",
-  "157.173.192.45:5622",
 ]
 
 [[validators]]
 name = "Val1"
 node_id = "validator-node-01"
 validator_address = "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs"
-ip_address = "62.146.182.207"
 port = 5622
-public_endpoint = "62.146.182.207:5622"
 active_consensus = true
 
 [[validators]]
 name = "Val2"
 node_id = "validator-node-02"
 validator_address = "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt"
-ip_address = "62.146.182.208"
 port = 5622
-public_endpoint = "62.146.182.208:5622"
 active_consensus = true
 
 [[validators]]
 name = "Val3"
 node_id = "validator-node-03"
 validator_address = "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re"
-ip_address = "62.146.182.209"
 port = 5622
-public_endpoint = "62.146.182.209:5622"
 active_consensus = true
 
 [[validators]]
 name = "Val4"
 node_id = "validator-node-04"
 validator_address = "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
-ip_address = "73.79.66.255"
 port = 5622
-public_endpoint = "73.79.66.255:5622"
 active_consensus = true
 
 [[validators]]
 name = "Val5"
 node_id = "validator-node-05"
 validator_address = "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f"
-ip_address = "194.163.183.166"
 port = 5622
-public_endpoint = "194.163.183.166:5622"
 active_consensus = true
 
 [[validators]]
 name = "Val6"
 node_id = "validator-node-06"
 validator_address = "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx"
-ip_address = "157.173.192.45"
 port = 5622
-public_endpoint = "157.173.192.45:5622"
 active_consensus = true
 
 [[rpc_gateways]]

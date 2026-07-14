@@ -21,8 +21,8 @@ use crate::token::TOKEN_MANAGER;
 use crate::validator::{
     apply_validator_activation_transaction, consensus_membership_validators,
     consensus_membership_validators_for_height, is_validator_activation_transaction,
-    replay_validator_activation_transactions, Validator, ValidatorManager,
-    TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
+    replay_validator_activation_transactions, validate_validator_activation_transaction, Validator,
+    ValidatorManager, TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
 };
 use crate::wallet::WALLET_MANAGER;
 use crate::{debug, info, warn};
@@ -703,10 +703,9 @@ impl ProofOfSynergy {
                         // Get active validators, then reduce them to the authoritative
                         // height-specific consensus membership before leader or quorum
                         // math uses the set.
-                        let registry_active_validators = validator_manager.get_active_validators();
-                        let registry_active_count = registry_active_validators.len();
+                        let registry_active_count = validator_manager.get_active_validators().len();
                         let active_validators = match Self::consensus_membership_for_next_block(
-                            registry_active_validators,
+                            validator_manager.get_all_validators(),
                             latest_block.block_index,
                         ) {
                             Ok(validators) => validators,
@@ -1451,6 +1450,35 @@ impl ProofOfSynergy {
                                     );
                                     continue;
                                 }
+                                if let Err(error) =
+                                    Self::validate_finalized_validator_activations(
+                                        &new_block,
+                                        TOKEN_MANAGER.as_ref(),
+                                        &validator_manager,
+                                    )
+                                {
+                                    timing_trace::emit(
+                                        "rejected_proposal",
+                                        serde_json::json!({
+                                            "height": new_block.block_index,
+                                            "block_hash": new_block.hash.clone(),
+                                            "previous_hash": new_block.previous_hash.clone(),
+                                            "chosen_proposer": selected_validator.address.clone(),
+                                            "local_validator": local_validator_address.clone(),
+                                            "local_view_round": view_offset,
+                                            "reason": error.clone(),
+                                            "validator_activation_preflight": true
+                                        }),
+                                    );
+                                    warn!(
+                                        "consensus",
+                                        "Rejecting committed block before durable finalization because validator activation preflight failed",
+                                        "height" => new_block.block_index,
+                                        "hash" => new_block.hash.clone(),
+                                        "error" => error
+                                    );
+                                    continue;
+                                }
 
                                 // Block committed - update chain.
                                 // Reset view-change state: the chain has advanced, so the next
@@ -1588,7 +1616,6 @@ impl ProofOfSynergy {
                                 let token_manager = TOKEN_MANAGER.clone();
                                 let mut applied_txs = 0u64;
                                 let mut failed_txs = 0u64;
-                                let mut applied_validator_activations = 0u64;
                                 for tx in &new_block.transactions {
                                     match token_manager
                                         .process_transaction_in_finalized_block(
@@ -1608,31 +1635,60 @@ impl ProofOfSynergy {
                                             );
                                         }
                                     }
-                                    if is_validator_activation_transaction(tx) {
-                                        match apply_validator_activation_transaction(
-                                            tx,
-                                            &token_manager,
-                                            &validator_manager,
-                                            new_block.block_index,
-                                        ) {
-                                            Ok(message) => {
-                                                applied_validator_activations += 1;
+                                }
+
+                                let applied_validator_activations =
+                                    match Self::apply_finalized_validator_activations(
+                                        &new_block,
+                                        &token_manager,
+                                        &validator_manager,
+                                    ) {
+                                        Ok(activations) => {
+                                            for (tx_hash, message) in &activations {
                                                 info!(
                                                     "consensus",
                                                     "Applied validator activation",
-                                                    "tx_hash" => tx.hash(),
-                                                    "message" => message
+                                                    "tx_hash" => tx_hash.clone(),
+                                                    "message" => message.clone()
                                                 );
                                             }
-                                            Err(error) => warn!(
-                                                "consensus",
-                                                "Failed to apply validator activation",
-                                                "tx_hash" => tx.hash(),
-                                                "error" => error
-                                            ),
+                                            activations.len() as u64
                                         }
-                                    }
-                                }
+                                        Err(error) => {
+                                            let quarantine_reason = format!(
+                                                "fail-closed validator activation application: {error}"
+                                            );
+                                            match crate::consensus::anti_divergence::
+                                                record_self_quarantine_for_canonical_lock_conflict(
+                                                    new_block.block_index,
+                                                    Some(new_block.hash.clone()),
+                                                    &new_block.hash,
+                                                    &quarantine_reason,
+                                                ) {
+                                                Ok(record) => {
+                                                    warn!(
+                                                        "consensus",
+                                                        "Validator activation application failed after finalization; self-quarantined and terminating",
+                                                        "height" => new_block.block_index,
+                                                        "tx_hash" => new_block.hash.clone(),
+                                                        "quarantine_height" => record.divergence_height.0,
+                                                        "error" => error
+                                                    );
+                                                    process::exit(1);
+                                                }
+                                                Err(quarantine_error) => {
+                                                    warn!(
+                                                        "consensus",
+                                                        "Validator activation failure could not be persisted as quarantine; terminating",
+                                                        "height" => new_block.block_index,
+                                                        "error" => error,
+                                                        "quarantine_error" => quarantine_error
+                                                    );
+                                                    process::exit(1);
+                                                }
+                                            }
+                                        }
+                                    };
 
                                 if let Err(e) = crate::sts::note_finalized_sts_block(
                                     new_block.block_index,
@@ -1653,11 +1709,41 @@ impl ProofOfSynergy {
                                     if let Err(e) =
                                         validator_manager.save_registry(VALIDATOR_REGISTRY_PATH)
                                     {
-                                        warn!(
-                                            "consensus",
-                                            "Failed to persist validator registry after activation",
-                                            "error" => e.to_string()
+                                        let error = format!(
+                                            "validator registry persistence failed after finalized activation at height {}: {}",
+                                            new_block.block_index,
+                                            e
                                         );
+                                        let quarantine_reason =
+                                            format!("fail-closed validator state persistence: {error}");
+                                        match crate::consensus::anti_divergence::
+                                            record_self_quarantine_for_canonical_lock_conflict(
+                                                new_block.block_index,
+                                                Some(new_block.hash.clone()),
+                                                &new_block.hash,
+                                                &quarantine_reason,
+                                            ) {
+                                            Ok(record) => {
+                                                warn!(
+                                                    "consensus",
+                                                    "Validator registry persistence failed after finalization; self-quarantined and terminating",
+                                                    "height" => new_block.block_index,
+                                                    "quarantine_height" => record.divergence_height.0,
+                                                    "error" => error
+                                                );
+                                                process::exit(1);
+                                            }
+                                            Err(quarantine_error) => {
+                                                warn!(
+                                                    "consensus",
+                                                    "Validator registry persistence failure could not be quarantined; terminating",
+                                                    "height" => new_block.block_index,
+                                                    "error" => error,
+                                                    "quarantine_error" => quarantine_error
+                                                );
+                                                process::exit(1);
+                                            }
+                                        }
                                     }
                                     if !activated_validators.is_empty() {
                                         info!(
@@ -2604,6 +2690,7 @@ impl ProofOfSynergy {
         {
             QuorumCertificate {
                 block_hash: block.hash.clone(),
+                cluster_id: None,
                 epoch_number: block.block_index / epoch_length,
                 round_number: 1,
                 aggregate_signature: block.block_signature.clone(),
@@ -2617,6 +2704,7 @@ impl ProofOfSynergy {
         } else {
             QuorumCertificate {
                 block_hash: "genesis_block".to_string(),
+                cluster_id: None,
                 epoch_number: 0,
                 round_number: 0,
                 aggregate_signature: Vec::new(),
@@ -3397,6 +3485,56 @@ impl ProofOfSynergy {
             .expect("test proposal cache lock should succeed") = path;
     }
 
+    fn validate_finalized_validator_activations(
+        block: &Block,
+        token_manager: &crate::token::TokenManager,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<(), String> {
+        for tx in &block.transactions {
+            if !is_validator_activation_transaction(tx) {
+                continue;
+            }
+            validate_validator_activation_transaction(tx, token_manager, validator_manager)
+                .map_err(|error| {
+                    format!(
+                        "validator activation preflight failed at height {} for transaction {}: {error}",
+                        block.block_index,
+                        tx.hash()
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    fn apply_finalized_validator_activations(
+        block: &Block,
+        token_manager: &crate::token::TokenManager,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let mut applied = Vec::new();
+        for tx in &block.transactions {
+            if !is_validator_activation_transaction(tx) {
+                continue;
+            }
+
+            let message = apply_validator_activation_transaction(
+                tx,
+                token_manager,
+                validator_manager,
+                block.block_index,
+            )
+            .map_err(|error| {
+                format!(
+                    "validator activation application failed at finalized height {} for transaction {}: {error}",
+                    block.block_index,
+                    tx.hash()
+                )
+            })?;
+            applied.push((tx.hash(), message));
+        }
+        Ok(applied)
+    }
+
     fn execute_dual_quorum_consensus(
         block: &Block,
         _validator_manager: &Arc<ValidatorManager>,
@@ -3915,7 +4053,7 @@ mod tests {
     }
 
     #[test]
-    fn next_block_membership_uses_epoch_validator_set_effective_height() {
+    fn next_block_membership_uses_replayed_registry_over_stale_manifest() {
         let _env_lock = epoch_set_env_test_lock()
             .lock()
             .expect("epoch set env test lock should succeed");
@@ -3965,16 +4103,100 @@ mod tests {
         std::fs::remove_dir_all(temp_dir).ok();
         assert_eq!(
             validator_membership_addresses(&before_boundary),
-            test_validator_addresses(1, 6),
-            "pending validator must not enter proposer/quorum membership before effective height"
+            test_validator_addresses(1, 7),
+            "replayed active registry membership must not be reduced by stale manifest evidence"
         );
         assert_eq!(
             validator_membership_addresses(&at_boundary),
             test_validator_addresses(1, 7),
-            "new validator enters proposer/quorum membership exactly at effective height"
+            "replayed active registry membership must remain authoritative at the boundary"
         );
-        assert_eq!(required_validator_quorum(before_boundary.len()), 4);
+        assert_eq!(required_validator_quorum(before_boundary.len()), 5);
         assert_eq!(required_validator_quorum(at_boundary.len()), 5);
+    }
+
+    #[test]
+    fn finalized_activation_application_fails_closed_without_fabricating_success() {
+        let validator_manager = Arc::new(ValidatorManager::new());
+        let token_manager = crate::token::TokenManager::new();
+        let tx = Transaction::new(
+            "validator-activation-failure".to_string(),
+            "validator-activation-failure".to_string(),
+            0,
+            0,
+            Vec::new(),
+            1,
+            21_000,
+            Some(
+                "validator_activation:{\"validator\":\"validator-activation-failure\"}".to_string(),
+            ),
+            "fndsa".to_string(),
+        );
+        let tx_hash = tx.hash();
+        let block = Block::new(
+            42,
+            vec![tx],
+            "parent-hash".to_string(),
+            "validator-1".to_string(),
+            1,
+        );
+
+        let error = ProofOfSynergy::apply_finalized_validator_activations(
+            &block,
+            &token_manager,
+            &validator_manager,
+        )
+        .expect_err("malformed activation must fail closed");
+
+        assert_eq!(
+            error,
+            format!(
+                "validator activation application failed at finalized height 42 for transaction {tx_hash}: Validator activation is missing public key."
+            )
+        );
+        assert!(
+            validator_manager
+                .get_validator("validator-activation-failure")
+                .is_none(),
+            "failed activation must not fabricate a registry entry"
+        );
+    }
+
+    #[test]
+    fn proposer_membership_fails_closed_for_incompatible_height_manifest() {
+        let _env_lock = epoch_set_env_test_lock()
+            .lock()
+            .expect("epoch validator set env test lock should succeed");
+        let temp_dir = unique_proposal_cache_dir("incompatible-proposer-membership");
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        std::fs::write(
+            &snapshot_path,
+            serde_json::json!({
+                "epoch_validator_sets": [{
+                    "chain_id": 1264,
+                    "epoch_id": 9,
+                    "validator_set_version": 1,
+                    "effective_from_height": 100,
+                    "active_validators": ["validator-1"],
+                    "quorum_threshold": 1,
+                    "validator_set_hash": "incompatible-proposer-set",
+                    "required_binary_version": "0.0.0-incompatible"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("incompatible epoch validator set should be written");
+        let _snapshot_guard =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let error = ProofOfSynergy::consensus_membership_for_next_block(test_validators(1, 1), 99)
+            .expect_err("incompatible height manifest must block proposer membership");
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        assert!(
+            error.contains("requires binary version 0.0.0-incompatible"),
+            "unexpected error: {error}"
+        );
     }
 
     fn catchup_decision(

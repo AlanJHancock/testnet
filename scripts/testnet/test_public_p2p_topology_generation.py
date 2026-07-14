@@ -29,14 +29,39 @@ class PublicP2PTopologyGenerationTests(unittest.TestCase):
         self.assertEqual(self.topology["seed_registry"]["register_endpoint"], "/register")
         self.assertEqual(self.topology["seed_registry"]["heartbeat_endpoint"], "/heartbeat")
 
-    def test_validator_peer_generation_omits_self(self) -> None:
-        all_validator_endpoints = {validator["public_endpoint"] for validator in self.topology["validators"]}
+    def test_validator_peer_generation_uses_relayer_support_only(self) -> None:
+        all_validator_identities = {validator["validator_address"] for validator in self.topology["validators"]}
         relayer_peers = set(self.topology["common"]["relayer_peers"])
+        relayer_peer_order = list(self.topology["common"]["relayer_peers"])
         for validator in self.topology["validators"]:
             config = self.configs[Path("validators") / f"{validator['name'].lower()}.toml"]
             peers = set(config["network"]["persistent_peers"])
-            self.assertNotIn(validator["public_endpoint"], peers)
-            self.assertEqual(peers, (all_validator_endpoints - {validator["public_endpoint"]}) | relayer_peers)
+            self.assertNotIn(validator["validator_address"], peers)
+            self.assertTrue(all_validator_identities.isdisjoint(peers))
+            self.assertEqual(peers, relayer_peers)
+            self.assertEqual(config["network"]["additional_dial_targets"], relayer_peer_order)
+
+    def test_validators_do_not_publish_or_require_public_endpoints(self) -> None:
+        for validator in self.topology["validators"]:
+            config = self.configs[Path("validators") / f"{validator['name'].lower()}.toml"]
+            with self.subTest(validator=validator["name"]):
+                self.assertNotIn("public_endpoint", validator)
+                self.assertNotIn("public_p2p_address", config["network"])
+                self.assertEqual(config["p2p"]["public_address"], "")
+                self.assertEqual(config["p2p"]["listen_address"], "127.0.0.1:5622")
+                self.assertFalse(config["p2p"]["enable_discovery"])
+                self.assertFalse(config["p2p"]["enable_peer_exchange"])
+                self.assertEqual(config["p2p"]["discovery_listen_address"], "127.0.0.1:5680")
+                self.assertEqual(config["p2p"]["discovery_public_address"], "")
+                self.assertFalse(config["seed_registration"]["enabled"])
+                self.assertEqual(config["network"]["validator_vpn_transports"], [])
+                self.assertFalse(config["node"]["active_consensus_validator"])
+
+    def test_validator_vpn_ranges_are_reserved_for_post_enrollment(self) -> None:
+        self.assertEqual(str(gen.VALIDATOR_VPN_CIDR), "10.70.10.0/24")
+        self.assertEqual(str(gen.RELAYER_VPN_CIDR), "10.70.20.0/24")
+        self.assertFalse(gen.RETIRED_VALIDATOR_VPN_CIDR.overlaps(gen.VALIDATOR_VPN_CIDR))
+        self.assertFalse(gen.RETIRED_VALIDATOR_VPN_CIDR.overlaps(gen.RELAYER_VPN_CIDR))
 
     def test_generated_public_fields_do_not_contain_private_endpoints(self) -> None:
         public_field_names = {
@@ -58,6 +83,14 @@ class PublicP2PTopologyGenerationTests(unittest.TestCase):
                         continue
                     values = value if isinstance(value, list) else [value]
                     for endpoint in values:
+                        if not endpoint:
+                            continue
+                        if (
+                            config["identity"]["role"] == "validator"
+                            and key in {"additional_dial_targets", "persistent_peers"}
+                            and str(endpoint).startswith("synv1")
+                        ):
+                            continue
                         with self.subTest(path=str(path), endpoint=endpoint):
                             self.assertTrue(gen.endpoint_is_public_advertisement(endpoint))
                             self.assertNotIn("10.69.", endpoint)
@@ -75,11 +108,10 @@ class PublicP2PTopologyGenerationTests(unittest.TestCase):
             self.assertTrue(gen.endpoint_host_is_dns(endpoint))
             self.assertIn(".synergynode.xyz", endpoint)
 
-    def test_validators_use_public_ips(self) -> None:
+    def test_validators_have_no_public_ip_endpoints(self) -> None:
         for validator in self.topology["validators"]:
             with self.subTest(validator=validator["name"]):
-                self.assertTrue(gen.endpoint_host_is_public_ip(validator["public_endpoint"]))
-                self.assertTrue(validator["public_endpoint"].endswith(":5622"))
+                self.assertNotIn("public_endpoint", validator)
 
     def test_rpc_gateway_p2p_is_distinct_from_public_rpc(self) -> None:
         network = self.topology["network"]
@@ -126,13 +158,19 @@ class PublicP2PTopologyGenerationTests(unittest.TestCase):
     def test_public_support_nodes_are_relayer_only(self) -> None:
         expected = self.topology["common"]["relayer_peers"]
         paths = [
+            Path("bootnodes") / "bootnode1.toml",
+            Path("bootnodes") / "bootnode2.toml",
+            Path("bootnodes") / "bootnode3.toml",
+            Path("seed-servers") / "seed1.toml",
+            Path("seed-servers") / "seed2.toml",
+            Path("seed-servers") / "seed3.toml",
             Path("rpc-gateway") / "rpc-gateway.toml",
             Path("observer") / "observer.toml",
             Path("explorer-indexer") / "explorer-indexer.toml",
             Path("archive-validator") / "archive-validator.toml",
         ]
         validator_endpoints = {
-            validator["public_endpoint"] for validator in self.topology["validators"]
+            validator.get("public_endpoint") for validator in self.topology["validators"]
         }
 
         self.assertEqual(
@@ -148,6 +186,33 @@ class PublicP2PTopologyGenerationTests(unittest.TestCase):
                 peers = self.configs[path]["network"]["persistent_peers"]
                 self.assertEqual(peers, expected)
                 self.assertTrue(validator_endpoints.isdisjoint(peers))
+
+    def test_relayers_do_not_dial_public_validator_endpoints(self) -> None:
+        validator_endpoints = {
+            validator.get("public_endpoint") for validator in self.topology["validators"]
+        }
+        for relayer in self.topology["relayers"]:
+            config = self.configs[Path("relayers") / f"{relayer['name']}.toml"]
+            with self.subTest(relayer=relayer["name"]):
+                self.assertTrue(validator_endpoints.isdisjoint(config["network"]["persistent_peers"]))
+                self.assertFalse(any(str(peer).startswith("synv1") for peer in config["network"]["persistent_peers"]))
+
+    def test_generated_configs_never_emit_retired_validator_vpn_range(self) -> None:
+        for path, config in self.configs.items():
+            with self.subTest(path=str(path)):
+                self.assertNotIn("10.69.", gen.render_toml(config))
+
+        generated_dir = SCRIPT_PATH.parents[2] / "config" / "testnet" / "generated" / "validators"
+        for path in sorted(generated_dir.glob("*.toml")):
+            with self.subTest(path=str(path)):
+                self.assertNotIn("10.69.", path.read_text(encoding="utf-8"))
+
+        template = (SCRIPT_PATH.parents[2] / "templates" / "validator.toml").read_text(encoding="utf-8")
+        self.assertNotIn("10.69.", template)
+        self.assertIn("validator_vpn_transports = []", template)
+        self.assertIn('listen_address = "127.0.0.1:5622"', template)
+        self.assertIn('discovery_listen_address = "127.0.0.1:5680"', template)
+        self.assertIn("active_consensus_validator = false", template)
 
     def test_seed_registry_rejects_private_endpoints(self) -> None:
         bad_endpoints = [
@@ -213,21 +278,20 @@ class PublicP2PTopologyGenerationTests(unittest.TestCase):
 
     def test_validator_config_uniformity_and_allowlist(self) -> None:
         allowlist = self.topology["consensus"]["strict_validator_allowlist"]
-        common_bootnodes = self.topology["common"]["bootnodes"]
-        common_seed_servers = self.topology["common"]["seed_servers"]
         relayer_peers = self.topology["common"]["relayer_peers"]
         rendered_allowlists = set()
         for validator in self.topology["validators"]:
             config = self.configs[Path("validators") / f"{validator['name'].lower()}.toml"]
             with self.subTest(validator=validator["name"]):
-                self.assertEqual(config["network"]["bootnodes"], common_bootnodes)
-                self.assertEqual(config["network"]["seed_servers"], common_seed_servers)
+                self.assertEqual(config["network"]["bootnodes"], [])
+                self.assertEqual(config["network"]["seed_servers"], [])
                 self.assertEqual(config["network"]["persistent_peers"], config["network"]["additional_dial_targets"])
                 for relayer_peer in relayer_peers:
                     self.assertIn(relayer_peer, config["network"]["persistent_peers"])
                 self.assertTrue(config["node"]["strict_validator_allowlist"])
                 self.assertEqual(config["node"]["allowed_validator_addresses"], allowlist)
-                self.assertTrue(config["node"]["active_consensus_validator"])
+                self.assertFalse(config["node"]["active_consensus_validator"])
+                self.assertFalse(config["seed_registration"]["enabled"])
                 rendered_allowlists.add(tuple(config["node"]["allowed_validator_addresses"]))
         self.assertEqual(rendered_allowlists, {tuple(allowlist)})
 

@@ -8,9 +8,8 @@ use std::sync::{Arc, Mutex, TryLockError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::address::generate_cluster_address;
 use crate::block::{Block, BlockChain, HOT_CHAIN_RETENTION_BLOCKS_ENV};
-use crate::cluster::{fault_tolerance_f, quorum_threshold};
+use crate::cluster::{fault_tolerance_f, quorum_threshold, EpochClusterAssignmentSnapshot};
 use crate::consensus::chain_durability::recover_chain_and_validate_canonical;
 use crate::consensus::consensus_algorithm::ProofOfSynergy;
 use crate::consensus::consensus_fork;
@@ -35,8 +34,13 @@ use crate::synq_receipts::{
 use crate::token::TOKEN_MANAGER;
 use crate::transaction::Transaction;
 use crate::validator::{
-    balanced_validator_cluster_id, Validator, ValidatorManager, ValidatorStatus,
-    INITIAL_VALIDATOR_SYNERGY_SCORE, TESTNET_MIN_VALIDATOR_STAKE_NWEI, VALIDATOR_MANAGER,
+    balanced_validator_cluster_id, canonical_active_validator_set_hash,
+    canonical_validator_cluster_address, canonical_validator_clusters_digest,
+    canonical_validator_clusters_for_epoch, canonical_validator_clusters_for_height,
+    consensus_membership_validators_for_height, effective_cluster_epoch_for_height,
+    target_validator_cluster_count, Validator, ValidatorManager, ValidatorRegistry,
+    ValidatorStatus, INITIAL_VALIDATOR_SYNERGY_SCORE, TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+    VALIDATOR_MANAGER,
 };
 use crate::wallet::WALLET_MANAGER;
 use crate::{info, warn};
@@ -885,46 +889,138 @@ fn synthesize_validator(
     }
 }
 
-fn assign_cluster_addresses(validators: &mut [Validator]) {
-    let mut members_by_cluster = BTreeMap::<u64, Vec<String>>::new();
-    let mut existing_by_cluster = HashMap::<u64, String>::new();
-    for validator in validators.iter() {
-        if let Some(cluster_id) = validator.cluster_id {
-            members_by_cluster
-                .entry(cluster_id)
-                .or_default()
-                .push(validator.address.clone());
-            if let Some(cluster_address) = validator.cluster_address.as_deref() {
-                if cluster_address.starts_with("syngrp") {
-                    existing_by_cluster
-                        .entry(cluster_id)
-                        .or_insert_with(|| cluster_address.to_string());
-                }
-            }
+fn assign_canonical_cluster_memberships(
+    validators: &mut [Validator],
+    epoch: u64,
+    height: u64,
+) -> Result<(), String> {
+    let active_validators = validators
+        .iter()
+        .filter(|validator| validator.status == ValidatorStatus::Active)
+        .cloned()
+        .collect::<Vec<_>>();
+    let cluster_members =
+        canonical_validator_clusters_for_height(active_validators, epoch, height)?;
+    let mut assignments = HashMap::new();
+    for (cluster_id, members) in cluster_members {
+        let cluster_address = canonical_validator_cluster_address(cluster_id, &members);
+        for member in members {
+            assignments.insert(member.address, (cluster_id, cluster_address.clone()));
         }
     }
 
-    let cluster_addresses = members_by_cluster
-        .into_iter()
-        .map(|(cluster_id, mut members)| {
-            let cluster_address = existing_by_cluster
-                .get(&cluster_id)
-                .cloned()
-                .unwrap_or_else(|| {
-                    members.sort();
-                    let group = ((cluster_id % 5) + 1) as u8;
-                    let seed = format!("cluster-{}-{}", cluster_id, members.join("-"));
-                    generate_cluster_address(&seed, group)
-                });
-            (cluster_id, cluster_address)
-        })
-        .collect::<HashMap<_, _>>();
-
-    for validator in validators.iter_mut() {
-        validator.cluster_address = validator
-            .cluster_id
-            .and_then(|cluster_id| cluster_addresses.get(&cluster_id).cloned());
+    for validator in validators {
+        if let Some((cluster_id, cluster_address)) = assignments.get(&validator.address) {
+            validator.cluster_id = Some(*cluster_id);
+            validator.cluster_address = Some(cluster_address.clone());
+        } else {
+            validator.cluster_id = None;
+            validator.cluster_address = None;
+        }
     }
+    Ok(())
+}
+
+fn canonical_epoch_cluster_assignments(
+    registry: &ValidatorRegistry,
+    epoch: u64,
+    height: u64,
+) -> Result<Vec<EpochClusterAssignmentSnapshot>, String> {
+    let validator_candidates = registry.validators.values().cloned().collect::<Vec<_>>();
+    let effective_epoch = effective_cluster_epoch_for_height(epoch, height)?;
+    let height_scoped_membership =
+        consensus_membership_validators_for_height(validator_candidates, height)?;
+    let assignment_hash =
+        canonical_validator_clusters_digest(&height_scoped_membership, effective_epoch);
+    Ok(
+        canonical_validator_clusters_for_epoch(&height_scoped_membership, effective_epoch)
+            .into_iter()
+            .map(|(cluster_id, members)| EpochClusterAssignmentSnapshot {
+                epoch_id: effective_epoch,
+                cluster_address: canonical_validator_cluster_address(cluster_id, &members),
+                validator_ids: members
+                    .iter()
+                    .map(|validator| validator.address.clone())
+                    .collect(),
+                quorum_threshold: quorum_threshold(members.len()),
+                fault_tolerance_f: fault_tolerance_f(members.len()),
+                assignment_hash: assignment_hash.clone(),
+                rotation_mode: crate::cluster::RotationMode::RoutineRotation,
+                created_block_height: height,
+            })
+            .collect(),
+    )
+}
+
+fn epoch_cluster_assignments_for_rpc(
+    registry: &ValidatorRegistry,
+    ledger: &crate::cluster::ClusterLedger,
+    epoch: u64,
+    height: u64,
+) -> Result<Vec<EpochClusterAssignmentSnapshot>, String> {
+    let effective_epoch = effective_cluster_epoch_for_height(registry.current_epoch, height)?;
+    if epoch == effective_epoch {
+        canonical_epoch_cluster_assignments(registry, effective_epoch, height)
+    } else {
+        Ok(ledger.get_epoch_cluster_assignments(epoch))
+    }
+}
+
+fn canonical_cluster_status(
+    registry: &ValidatorRegistry,
+    cluster_address: &str,
+    ledger_status: Option<&crate::cluster::ClusterStatusResponse>,
+) -> Value {
+    let Some(cluster) = registry
+        .clusters
+        .values()
+        .find(|cluster| cluster.address == cluster_address)
+    else {
+        return Value::Null;
+    };
+    let ledger_status =
+        ledger_status
+            .cloned()
+            .unwrap_or_else(|| crate::cluster::ClusterStatusResponse {
+                cluster_address: cluster.address.clone(),
+                status: crate::cluster::ClusterStatus::Active,
+                current_epoch: registry.current_epoch,
+                current_validator_ids: Vec::new(),
+                previous_validator_ids: Vec::new(),
+                current_quorum_threshold: 0,
+                current_fault_tolerance_f: 0,
+                current_rotation_mode: crate::cluster::RotationMode::RoutineRotation,
+                last_rotation_epoch: None,
+                last_full_rotation_epoch: None,
+                total_rewards_earned_nwei: 0,
+                total_rewards_settled_nwei: 0,
+                recent_performance_score_bps: 0,
+                recent_finality_success_rate_bps: 0,
+                recent_missed_rounds: 0,
+                recent_slashing_events: 0,
+                cartel_risk_score_bps: None,
+                co_cluster_repetition_summary: None,
+            });
+    json!(crate::cluster::ClusterStatusResponse {
+        cluster_address: cluster.address.clone(),
+        status: ledger_status.status,
+        current_epoch: registry.current_epoch,
+        current_validator_ids: cluster.validators.clone(),
+        previous_validator_ids: ledger_status.previous_validator_ids,
+        current_quorum_threshold: quorum_threshold(cluster.validators.len()),
+        current_fault_tolerance_f: fault_tolerance_f(cluster.validators.len()),
+        current_rotation_mode: ledger_status.current_rotation_mode,
+        last_rotation_epoch: ledger_status.last_rotation_epoch,
+        last_full_rotation_epoch: ledger_status.last_full_rotation_epoch,
+        total_rewards_earned_nwei: ledger_status.total_rewards_earned_nwei,
+        total_rewards_settled_nwei: ledger_status.total_rewards_settled_nwei,
+        recent_performance_score_bps: ledger_status.recent_performance_score_bps,
+        recent_finality_success_rate_bps: ledger_status.recent_finality_success_rate_bps,
+        recent_missed_rounds: ledger_status.recent_missed_rounds,
+        recent_slashing_events: ledger_status.recent_slashing_events,
+        cartel_risk_score_bps: ledger_status.cartel_risk_score_bps,
+        co_cluster_repetition_summary: ledger_status.co_cluster_repetition_summary,
+    })
 }
 
 fn recent_active_validator_addresses(
@@ -1092,7 +1188,19 @@ fn network_validator_snapshot(
             validator.reputation_score = 100.0;
         }
     }
-    assign_cluster_addresses(&mut ordered);
+    let current_height = chain.last().map(|block| block.block_index).unwrap_or(0);
+    if assign_canonical_cluster_memberships(
+        &mut ordered,
+        validator_manager.get_current_epoch(),
+        current_height,
+    )
+    .is_err()
+    {
+        for validator in &mut ordered {
+            validator.cluster_id = None;
+            validator.cluster_address = None;
+        }
+    }
 
     ordered
 }
@@ -1146,13 +1254,74 @@ fn validator_to_rpc_json(
     value
 }
 
+fn validator_set_snapshot_json(
+    chain: &Arc<Mutex<BlockChain>>,
+    validator_manager: &Arc<ValidatorManager>,
+) -> Value {
+    // Capture the chain height before taking the registry lock so this read-only
+    // endpoint never establishes a chain-lock -> registry-lock dependency.
+    let finalized_height = chain_tip_snapshot_for_status(chain).height.unwrap_or(0);
+    let Ok(registry) = validator_manager.registry.lock() else {
+        return json!({
+            "error": "validator registry is temporarily unavailable",
+            "chain_id": 1264,
+            "is_latest": false,
+        });
+    };
+
+    let active = registry
+        .get_active_validators()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let active = crate::validator::consensus_membership_validators(active);
+    let validator_set_hash = canonical_active_validator_set_hash(&active);
+    let addresses_for_status = |status: ValidatorStatus| {
+        let mut addresses = registry
+            .validators
+            .values()
+            .filter(|validator| validator.status == status)
+            .map(|validator| validator.address.clone())
+            .collect::<Vec<_>>();
+        addresses.sort();
+        addresses
+    };
+    let active_addresses = active
+        .iter()
+        .map(|validator| validator.address.clone())
+        .collect::<Vec<_>>();
+
+    json!({
+        "chain_id": 1264,
+        "network_id": current_network_id(),
+        "snapshot_format_version": 1,
+        "protocol_version": current_protocol_version(),
+        "binary_version": env!("CARGO_PKG_VERSION"),
+        "epoch_id": registry.current_epoch,
+        "validator_set_version": registry.validator_set_version,
+        "effective_from_height": finalized_height,
+        "current_finalized_height": finalized_height,
+        "active_validators": active_addresses.clone(),
+        "pending_validators": addresses_for_status(ValidatorStatus::Pending),
+        "syncing_validators": addresses_for_status(ValidatorStatus::Shadow),
+        "eligible_validators": active_addresses,
+        "jailed_validators": addresses_for_status(ValidatorStatus::Jailed),
+        "removed_validators": addresses_for_status(ValidatorStatus::Slashed),
+        "quorum_threshold": required_validator_quorum(active.len()),
+        "validator_set_hash": validator_set_hash,
+        "local_validator_set_hash": validator_set_hash,
+        "network_validator_set_hash": validator_set_hash,
+        "is_latest": true,
+        "generated_at_utc": current_timestamp(),
+    })
+}
+
 fn network_cluster_summary(validators: &[Validator]) -> Value {
     let mut validators_by_cluster = BTreeMap::<u64, Vec<&Validator>>::new();
-    for (index, validator) in validators.iter().enumerate() {
-        let cluster_id = validator
-            .cluster_id
-            .or_else(|| default_cluster_id(index, validators.len()))
-            .unwrap_or(0);
+    for validator in validators {
+        let Some(cluster_id) = validator.cluster_id else {
+            continue;
+        };
         validators_by_cluster
             .entry(cluster_id)
             .or_default()
@@ -2826,6 +2995,8 @@ fn handle_json_rpc(
             json!(validators.into_iter().take(count).collect::<Vec<_>>())
         }
 
+        "synergy_getValidatorSetSnapshot" => validator_set_snapshot_json(chain, validator_manager),
+
         "synergy_slashValidator" => {
             if let (Some(address), Some(reason)) = (
                 params.get(0).and_then(|v| v.as_str()),
@@ -4367,9 +4538,15 @@ fn handle_json_rpc(
         // synergy_getClusterStatus
         "synergy_getClusterStatus" => {
             if let Some(cluster_address) = params.get(0).and_then(|v| v.as_str()) {
-                match crate::cluster::CLUSTER_LEDGER.lock() {
-                    Ok(ledger) => json!(ledger.get_cluster_status(cluster_address)),
-                    Err(_) => json!({"error": "Failed to access cluster ledger"}),
+                let ledger = crate::cluster::CLUSTER_LEDGER.lock();
+                let registry = validator_manager.registry.lock();
+                match (ledger, registry) {
+                    (Ok(ledger), Ok(registry)) => canonical_cluster_status(
+                        &registry,
+                        cluster_address,
+                        ledger.get_cluster_status(cluster_address).as_ref(),
+                    ),
+                    _ => json!({"error": "Failed to access cluster or validator ledger"}),
                 }
             } else {
                 json!({"error": "Missing cluster address parameter"})
@@ -4380,9 +4557,10 @@ fn handle_json_rpc(
         "synergy_getValidatorClusterHistory" => {
             if let Some(validator_id) = params.get(0).and_then(|v| v.as_str()) {
                 let cluster_ledger = crate::cluster::CLUSTER_LEDGER.lock();
+                let registry = validator_manager.registry.lock();
                 let reward_ledger = crate::rewards::REWARD_LEDGER.lock();
-                match (cluster_ledger, reward_ledger) {
-                    (Ok(cluster_ledger), Ok(reward_ledger)) => {
+                match (cluster_ledger, registry, reward_ledger) {
+                    (Ok(cluster_ledger), Ok(registry), Ok(reward_ledger)) => {
                         let mut prior_assignments = Vec::new();
                         let mut epochs_by_cluster: BTreeMap<String, Vec<u64>> = BTreeMap::new();
                         for snapshots in cluster_ledger.assignment_snapshots.values() {
@@ -4397,15 +4575,15 @@ fn handle_json_rpc(
                             }
                         }
                         prior_assignments.sort_by_key(|snapshot| snapshot.epoch_id);
-                        let current_cluster_address = prior_assignments
-                            .last()
-                            .map(|snapshot| snapshot.cluster_address.clone());
-                        let participation_segments: Vec<_> = cluster_ledger
+                        let participation_segments = cluster_ledger
                             .participation_segments
                             .iter()
                             .filter(|segment| segment.validator_id == validator_id)
                             .cloned()
-                            .collect();
+                            .collect::<Vec<_>>();
+                        let current_cluster_address = registry
+                            .get_validator_cluster(validator_id)
+                            .map(|cluster| cluster.address.clone());
                         let mut pending_rewards_by_original_cluster: BTreeMap<String, u128> =
                             BTreeMap::new();
                         for reward in reward_ledger.get_validator_pending_rewards(validator_id) {
@@ -4445,9 +4623,25 @@ fn handle_json_rpc(
         // synergy_getEpochClusterAssignments
         "synergy_getEpochClusterAssignments" => {
             if let Some(epoch_id) = params.get(0).and_then(|v| v.as_u64()) {
-                match crate::cluster::CLUSTER_LEDGER.lock() {
-                    Ok(ledger) => json!(ledger.get_epoch_cluster_assignments(epoch_id)),
-                    Err(_) => json!({"error": "Failed to access cluster ledger"}),
+                let current_height = match chain.lock() {
+                    Ok(chain) => chain.last().map(|block| block.block_index).unwrap_or(0),
+                    Err(_) => return json!({"error": "Failed to access blockchain"}),
+                };
+                let ledger = crate::cluster::CLUSTER_LEDGER.lock();
+                let registry = validator_manager.registry.lock();
+                match (ledger, registry) {
+                    (Ok(ledger), Ok(registry)) => {
+                        match epoch_cluster_assignments_for_rpc(
+                            &registry,
+                            &ledger,
+                            epoch_id,
+                            current_height,
+                        ) {
+                            Ok(assignments) => json!(assignments),
+                            Err(error) => json!({"error": error, "fail_closed": true}),
+                        }
+                    }
+                    _ => json!({"error": "Failed to access cluster or validator ledger"}),
                 }
             } else {
                 json!({"error": "Missing epoch ID parameter"})
@@ -4959,6 +5153,7 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_getShadowStatus"
         | "synergy_getRejoinEligibility"
         | "synergy_getValidatorSet"
+        | "synergy_getValidatorSetSnapshot"
         | "synergy_getProtocolConfig"
         | "synergy_getAegisStatus"
         | "synergy_getAegisCapabilities"
@@ -5378,8 +5573,15 @@ fn chain_identity_json() -> Value {
 }
 
 fn protocol_config_json() -> Value {
-    let validator_count = configured_validator_addresses().len().max(1);
+    let configured_count = configured_validator_addresses().len();
+    let active_count = VALIDATOR_MANAGER.get_active_validators().len();
+    let validator_count = if active_count > 0 {
+        active_count
+    } else {
+        configured_count.max(1)
+    };
     let required_quorum = required_validator_quorum(validator_count).max(1);
+    let cluster_count = target_validator_cluster_count(validator_count).max(1);
     json!({
         "chain": chain_identity_json(),
         "protocol_version": current_protocol_version(),
@@ -5390,8 +5592,8 @@ fn protocol_config_json() -> Value {
             "total": validator_count,
         },
         "target_block_cadence_seconds": 2,
-        "cluster_count": 1,
-        "cluster_id": 0,
+        "cluster_count": cluster_count,
+        "cluster_id": if cluster_count == 1 { Some(0u64) } else { None },
     })
 }
 
@@ -8778,6 +8980,31 @@ mod tests {
     const STS_TEST_CREATOR: &str = "synw1creator000000000000000000000000000";
     const STS_TEST_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
+    static RPC_VALIDATOR_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct RpcEnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl RpcEnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for RpcEnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
     fn sts_test_create_params() -> CreateFungibleParams {
         CreateFungibleParams {
             class: TokenClass::B1BasicFungible,
@@ -10089,6 +10316,347 @@ mod tests {
     }
 
     #[test]
+    fn epoch_cluster_rpc_reads_the_validator_registry_canonical_map() {
+        let validator_manager = Arc::new(ValidatorManager::new());
+        {
+            let mut registry = validator_manager
+                .registry
+                .lock()
+                .expect("validator registry should lock");
+            for index in 0..10 {
+                let validator =
+                    rpc_test_validator(&format!("validator-{index}"), 0, ValidatorStatus::Active);
+                registry
+                    .validators
+                    .insert(validator.address.clone(), validator);
+            }
+            registry.reorganize_clusters_for_epoch(12);
+        }
+
+        let chain = Arc::new(Mutex::new(BlockChain::new()));
+        let response = handle_json_rpc(
+            "synergy_getEpochClusterAssignments",
+            json!([12]),
+            &TX_POOL,
+            &chain,
+            &validator_manager,
+        );
+        let assignments = response
+            .as_array()
+            .expect("epoch cluster RPC should return an array");
+        let mut members = assignments
+            .iter()
+            .map(|assignment| {
+                (
+                    assignment["cluster_address"]
+                        .as_str()
+                        .expect("cluster address")
+                        .to_string(),
+                    assignment["validator_ids"]
+                        .as_array()
+                        .expect("validator IDs")
+                        .iter()
+                        .map(|validator| validator.as_str().unwrap().to_string())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for cluster_members in members.values_mut() {
+            cluster_members.sort();
+        }
+
+        assert_eq!(members.len(), 2);
+        assert_eq!(
+            members.values().map(Vec::len).collect::<Vec<_>>(),
+            vec![5, 5]
+        );
+        assert_eq!(
+            assignments
+                .iter()
+                .map(|assignment| assignment["assignment_hash"].as_str().unwrap())
+                .collect::<HashSet<_>>()
+                .len(),
+            1,
+            "all RPC assignments must carry one canonical map digest"
+        );
+    }
+
+    #[test]
+    fn epoch_cluster_rpc_uses_effective_manifest_epoch_at_current_height() {
+        let _env_lock = RPC_VALIDATOR_ENV_LOCK
+            .lock()
+            .expect("RPC validator environment mutex should lock");
+        let temp_dir = std::env::temp_dir().join(format!(
+            "synergy-rpc-cluster-epoch-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock should be after UNIX epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).expect("RPC epoch snapshot directory should be created");
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        let old_addresses = (0..=8)
+            .map(|index| format!("validator-{index}"))
+            .collect::<Vec<_>>();
+        let all_addresses = (0..=9)
+            .map(|index| format!("validator-{index}"))
+            .collect::<Vec<_>>();
+        fs::write(
+            &snapshot_path,
+            json!({
+                "epoch_validator_sets": [
+                    {
+                        "epoch_id": 12,
+                        "validator_set_version": 1,
+                        "effective_from_height": 0,
+                        "effective_to_height": 1000,
+                        "active_validators": old_addresses,
+                        "validator_set_hash": "nine-validator-set"
+                    },
+                    {
+                        "epoch_id": 13,
+                        "validator_set_version": 2,
+                        "effective_from_height": 1001,
+                        "active_validators": all_addresses,
+                        "previous_set_hash": "nine-validator-set",
+                        "validator_set_hash": "ten-validator-set"
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("RPC epoch snapshot should be written");
+        let _snapshot_env = RpcEnvVarGuard::set(
+            crate::validator::EPOCH_VALIDATOR_SETS_ENV,
+            &snapshot_path.to_string_lossy(),
+        );
+
+        let validator_manager = Arc::new(ValidatorManager::new());
+        let expected_assignment_hash;
+        {
+            let mut registry = validator_manager
+                .registry
+                .lock()
+                .expect("validator registry should lock");
+            for index in 0..10 {
+                let validator =
+                    rpc_test_validator(&format!("validator-{index}"), 0, ValidatorStatus::Active);
+                registry
+                    .validators
+                    .insert(validator.address.clone(), validator);
+            }
+            registry.reorganize_clusters_for_epoch(12);
+            let active_validators = registry
+                .get_active_validators()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            expected_assignment_hash = canonical_validator_clusters_digest(&active_validators, 13);
+        }
+
+        let chain = Arc::new(Mutex::new(BlockChain::new()));
+        chain.lock().unwrap().add_block(Block::new_with_timestamp(
+            1001,
+            Vec::new(),
+            "parent".to_string(),
+            "validator-0".to_string(),
+            0,
+            1,
+        ));
+        let expected_historical_epoch12 = crate::cluster::CLUSTER_LEDGER
+            .lock()
+            .expect("cluster ledger should lock")
+            .get_epoch_cluster_assignments(12);
+        let response = handle_json_rpc(
+            "synergy_getEpochClusterAssignments",
+            json!([13]),
+            &TX_POOL,
+            &chain,
+            &validator_manager,
+        );
+        let assignments = response
+            .as_array()
+            .expect("current epoch RPC should return canonical assignments");
+
+        assert_eq!(assignments.len(), 2);
+        assert!(assignments
+            .iter()
+            .all(|assignment| assignment["epoch_id"] == json!(13)));
+        assert!(assignments
+            .iter()
+            .all(|assignment| assignment["assignment_hash"] == json!(expected_assignment_hash)));
+        assert!(assignments
+            .iter()
+            .all(|assignment| assignment["created_block_height"] == json!(1001)));
+        assert_eq!(
+            assignments
+                .iter()
+                .map(|assignment| assignment["validator_ids"].as_array().unwrap().len())
+                .collect::<Vec<_>>(),
+            vec![5, 5]
+        );
+        assert_eq!(
+            assignments
+                .iter()
+                .flat_map(|assignment| assignment["validator_ids"].as_array().unwrap())
+                .collect::<HashSet<_>>()
+                .len(),
+            10
+        );
+
+        let historical_epoch12 = handle_json_rpc(
+            "synergy_getEpochClusterAssignments",
+            json!([12]),
+            &TX_POOL,
+            &chain,
+            &validator_manager,
+        );
+        assert_eq!(
+            historical_epoch12,
+            json!(expected_historical_epoch12),
+            "non-effective epochs must remain ledger-backed history"
+        );
+
+        fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn historical_epoch_cluster_rpc_preserves_ledger_snapshots() {
+        let validator_manager = Arc::new(ValidatorManager::new());
+        let cluster_address;
+        {
+            let mut registry = validator_manager
+                .registry
+                .lock()
+                .expect("validator registry should lock");
+            for index in 0..10 {
+                let validator =
+                    rpc_test_validator(&format!("validator-{index}"), 0, ValidatorStatus::Active);
+                registry
+                    .validators
+                    .insert(validator.address.clone(), validator);
+            }
+            registry.reorganize_clusters_for_epoch(12);
+            cluster_address = registry
+                .get_validator_cluster("validator-0")
+                .expect("validator-0 canonical cluster should exist")
+                .address
+                .clone();
+        }
+
+        let historical = crate::cluster::EpochClusterAssignmentSnapshot {
+            epoch_id: 11,
+            cluster_address: "historical-cluster".to_string(),
+            validator_ids: vec!["validator-0".to_string()],
+            quorum_threshold: 1,
+            fault_tolerance_f: 0,
+            assignment_hash: "historical-hash".to_string(),
+            rotation_mode: crate::cluster::RotationMode::RoutineRotation,
+            created_block_height: 110,
+        };
+        let historical_segment = crate::cluster::EpochParticipationSegment {
+            epoch_id: 11,
+            segment_id: "segment-11".to_string(),
+            cluster_address: "historical-cluster".to_string(),
+            validator_id: "validator-0".to_string(),
+            start_block_height: 100,
+            end_block_height: 110,
+            participation_score_bps: 9_000,
+            cluster_performance_score_bps: 8_500,
+            segment_reward_nwei: 123,
+            segment_reason: "historical-test".to_string(),
+        };
+        let previous_ledger = {
+            let mut ledger = crate::cluster::CLUSTER_LEDGER
+                .lock()
+                .expect("cluster ledger should lock");
+            let previous = ledger.clone();
+            ledger.assignment_snapshots.clear();
+            ledger
+                .assignment_snapshots
+                .insert(11, vec![historical.clone()]);
+            ledger.participation_segments = vec![historical_segment.clone()];
+            let mut ledger_cluster = crate::cluster::Cluster::new(
+                "network",
+                "genesis",
+                0,
+                11,
+                110,
+                &crate::cluster::ClusterConfig::default(),
+            );
+            ledger_cluster.cluster_address = cluster_address.clone();
+            ledger_cluster.status = crate::cluster::ClusterStatus::Degraded;
+            ledger_cluster.current_validator_ids = vec!["ledger-old-membership".to_string()];
+            ledger_cluster.current_quorum_threshold = 1;
+            ledger_cluster.current_fault_tolerance_f = 0;
+            ledger_cluster.total_rewards_earned_nwei = 1_234;
+            ledger_cluster.last_rotation_epoch = Some(9);
+            ledger.clusters.clear();
+            ledger
+                .clusters
+                .insert(cluster_address.clone(), ledger_cluster);
+            previous
+        };
+
+        let chain = Arc::new(Mutex::new(BlockChain::new()));
+        let status = handle_json_rpc(
+            "synergy_getClusterStatus",
+            json!([cluster_address.clone()]),
+            &TX_POOL,
+            &chain,
+            &validator_manager,
+        );
+        let history = handle_json_rpc(
+            "synergy_getValidatorClusterHistory",
+            json!(["validator-0"]),
+            &TX_POOL,
+            &chain,
+            &validator_manager,
+        );
+        let historical_assignments = handle_json_rpc(
+            "synergy_getEpochClusterAssignments",
+            json!([11]),
+            &TX_POOL,
+            &chain,
+            &validator_manager,
+        );
+
+        {
+            let mut ledger = crate::cluster::CLUSTER_LEDGER
+                .lock()
+                .expect("cluster ledger should lock for restore");
+            *ledger = previous_ledger;
+        }
+
+        assert_eq!(status["cluster_address"], json!(cluster_address));
+        assert_eq!(status["current_epoch"], json!(12));
+        assert_eq!(status["current_validator_ids"].as_array().unwrap().len(), 5);
+        assert_eq!(status["current_quorum_threshold"], json!(4));
+        assert_eq!(status["status"], json!("Degraded"));
+        assert_eq!(status["total_rewards_earned_nwei"], json!(1_234));
+        assert_eq!(status["last_rotation_epoch"], json!(9));
+
+        assert_eq!(history["current_cluster_address"], json!(cluster_address));
+        assert_eq!(
+            history["prior_cluster_assignments"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            history["epochs_by_cluster"]["historical-cluster"],
+            json!([11])
+        );
+        assert_eq!(
+            history["participation_segments"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(historical_assignments, json!([historical]));
+    }
+
+    #[test]
     fn network_validator_snapshot_uses_configured_validators_for_read_only_nodes() {
         let genesis_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../config/genesis.json")
@@ -10123,6 +10691,76 @@ mod tests {
         assert_eq!(matched.stake_amount, first_validator.stake_nwei);
         assert_eq!(matched.status, ValidatorStatus::Active);
         assert_eq!(matched.total_blocks_produced, 1);
+    }
+
+    #[test]
+    fn validator_set_snapshot_reports_live_membership_and_hashes() {
+        let validator_manager = Arc::new(ValidatorManager::new());
+        {
+            let mut registry = validator_manager.registry.lock().unwrap();
+            for index in 0..6 {
+                let mut validator = Validator::new(
+                    format!("snapshot-validator-{index}"),
+                    format!("snapshot-key-{index}"),
+                    format!("Snapshot Validator {index}"),
+                    TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+                );
+                validator.status = ValidatorStatus::Active;
+                registry
+                    .validators
+                    .insert(validator.address.clone(), validator);
+            }
+            for (address, status) in [
+                ("snapshot-pending", ValidatorStatus::Pending),
+                ("snapshot-shadow", ValidatorStatus::Shadow),
+                ("snapshot-jailed", ValidatorStatus::Jailed),
+                ("snapshot-slashed", ValidatorStatus::Slashed),
+            ] {
+                let mut validator = Validator::new(
+                    address.to_string(),
+                    format!("{address}-key"),
+                    address.to_string(),
+                    TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+                );
+                validator.status = status;
+                registry.validators.insert(address.to_string(), validator);
+            }
+            registry.current_epoch = 12;
+            registry.validator_set_version = 7;
+        }
+
+        let chain = Arc::new(Mutex::new(BlockChain::new()));
+        let snapshot = handle_json_rpc(
+            "synergy_getValidatorSetSnapshot",
+            json!([]),
+            &TX_POOL,
+            &chain,
+            &validator_manager,
+        );
+
+        assert_eq!(
+            rpc_method_exposure("synergy_getValidatorSetSnapshot"),
+            Some(RpcMethodExposure::PublicRead)
+        );
+        assert_eq!(snapshot["chain_id"], json!(1264));
+        assert_eq!(snapshot["snapshot_format_version"], json!(1));
+        assert_eq!(snapshot["epoch_id"], json!(12));
+        assert_eq!(snapshot["validator_set_version"], json!(7));
+        assert_eq!(snapshot["active_validators"].as_array().unwrap().len(), 6);
+        assert_eq!(snapshot["pending_validators"], json!(["snapshot-pending"]));
+        assert_eq!(snapshot["syncing_validators"], json!(["snapshot-shadow"]));
+        assert_eq!(snapshot["jailed_validators"], json!(["snapshot-jailed"]));
+        assert_eq!(snapshot["removed_validators"], json!(["snapshot-slashed"]));
+        assert_eq!(snapshot["quorum_threshold"], json!(4));
+        assert_eq!(
+            snapshot["validator_set_hash"],
+            snapshot["local_validator_set_hash"]
+        );
+        assert_eq!(
+            snapshot["validator_set_hash"],
+            snapshot["network_validator_set_hash"]
+        );
+        assert_eq!(snapshot["is_latest"], json!(true));
     }
 
     #[test]

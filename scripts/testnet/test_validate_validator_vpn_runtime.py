@@ -35,7 +35,7 @@ def write_workspace(
     config = workspace / "config"
     config.mkdir(parents=True)
     peers = persistent_peers if persistent_peers is not None else [PEER_VALIDATOR]
-    transport_rows = transports if transports is not None else [(PEER_VALIDATOR, "10.69.10.2:5622")]
+    transport_rows = transports if transports is not None else [(PEER_VALIDATOR, "10.70.10.2:5622")]
     lines = [
         "[node]",
         f'validator_address = "{validator_address}"',
@@ -95,7 +95,7 @@ class ValidatorVpnRuntimeValidationTests(unittest.TestCase):
     def test_valid_validator_workspace_separates_identity_and_transport(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            write_workspace(workspace, persistent_peers=[PEER_VALIDATOR, "10.69.0.1:5622"])
+            write_workspace(workspace, persistent_peers=[PEER_VALIDATOR, "10.70.20.1:5622"])
             write_epoch_snapshot(workspace)
 
             config_findings, _config = checker.check_config(workspace, "validator", LOCAL_VALIDATOR)
@@ -106,11 +106,38 @@ class ValidatorVpnRuntimeValidationTests(unittest.TestCase):
     def test_raw_validator_vpn_ip_in_peer_list_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            write_workspace(workspace, persistent_peers=["10.69.10.2:5622"])
+            write_workspace(workspace, persistent_peers=["10.70.10.2:5622"])
 
             findings, _config = checker.check_config(workspace, "validator", LOCAL_VALIDATOR)
 
             self.assertIn("validator peer identity", statuses(findings).get("FAIL", []))
+
+    def test_retired_vpn_route_fails_as_current_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            write_workspace(
+                workspace,
+                persistent_peers=["10.69.10.2:5622"],
+                transports=[(PEER_VALIDATOR, "10.69.10.2:5622")],
+            )
+
+            findings, _config = checker.check_config(workspace, "validator", LOCAL_VALIDATOR)
+            failed = statuses(findings).get("FAIL", [])
+
+            self.assertIn("retired validator VPN route", failed)
+            self.assertIn("validator VPN transport route", failed)
+
+    def test_canonical_vpn_ranges_are_bounded_to_innernet_hosts(self) -> None:
+        self.assertTrue(checker.is_validator_vpn_host("10.70.10.1"))
+        self.assertTrue(checker.is_validator_vpn_host("10.70.10.254"))
+        self.assertFalse(checker.is_validator_vpn_host("10.70.10.0"))
+        self.assertFalse(checker.is_validator_vpn_host("10.70.10.255"))
+        self.assertTrue(checker.is_relayer_vpn_host("10.70.20.1"))
+        self.assertTrue(checker.is_relayer_vpn_host("10.70.20.254"))
+        self.assertFalse(checker.is_relayer_vpn_host("10.70.20.0"))
+        self.assertFalse(checker.is_relayer_vpn_host("10.70.20.255"))
+        self.assertFalse(checker.is_validator_vpn_host("10.69.10.2"))
+        self.assertFalse(checker.is_relayer_vpn_host("10.69.0.1"))
 
     def test_strict_validator_allowlist_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

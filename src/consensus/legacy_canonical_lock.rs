@@ -295,6 +295,7 @@ mod tests {
     fn qc(block_hash: &str) -> QuorumCertificate {
         QuorumCertificate {
             block_hash: block_hash.to_string(),
+            cluster_id: None,
             epoch_number: 0,
             round_number: 1,
             aggregate_signature: vec![1],

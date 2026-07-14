@@ -204,6 +204,7 @@ fn test_entropy_beacon() {
     // Create dummy previous QC
     let previous_qc = QuorumCertificate {
         block_hash: "test_hash".to_string(),
+        cluster_id: None,
         epoch_number: 0,
         round_number: 1,
         aggregate_signature: vec![1, 2, 3, 4],
