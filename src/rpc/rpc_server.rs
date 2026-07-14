@@ -949,7 +949,7 @@ fn canonical_epoch_cluster_assignments(
                 fault_tolerance_f: fault_tolerance_f(members.len()),
                 assignment_hash: assignment_hash.clone(),
                 rotation_mode: crate::cluster::RotationMode::RoutineRotation,
-                created_block_height: 0,
+                created_block_height: height,
             })
             .collect(),
     )
@@ -961,8 +961,9 @@ fn epoch_cluster_assignments_for_rpc(
     epoch: u64,
     height: u64,
 ) -> Result<Vec<EpochClusterAssignmentSnapshot>, String> {
-    if epoch == registry.current_epoch {
-        canonical_epoch_cluster_assignments(registry, epoch, height)
+    let effective_epoch = effective_cluster_epoch_for_height(registry.current_epoch, height)?;
+    if epoch == effective_epoch {
+        canonical_epoch_cluster_assignments(registry, effective_epoch, height)
     } else {
         Ok(ledger.get_epoch_cluster_assignments(epoch))
     }
@@ -10401,9 +10402,13 @@ mod tests {
             0,
             1,
         ));
+        let expected_historical_epoch12 = crate::cluster::CLUSTER_LEDGER
+            .lock()
+            .expect("cluster ledger should lock")
+            .get_epoch_cluster_assignments(12);
         let response = handle_json_rpc(
             "synergy_getEpochClusterAssignments",
-            json!([12]),
+            json!([13]),
             &TX_POOL,
             &chain,
             &validator_manager,
@@ -10419,6 +10424,9 @@ mod tests {
         assert!(assignments
             .iter()
             .all(|assignment| assignment["assignment_hash"] == json!(expected_assignment_hash)));
+        assert!(assignments
+            .iter()
+            .all(|assignment| assignment["created_block_height"] == json!(1001)));
         assert_eq!(
             assignments
                 .iter()
@@ -10433,6 +10441,19 @@ mod tests {
                 .collect::<HashSet<_>>()
                 .len(),
             10
+        );
+
+        let historical_epoch12 = handle_json_rpc(
+            "synergy_getEpochClusterAssignments",
+            json!([12]),
+            &TX_POOL,
+            &chain,
+            &validator_manager,
+        );
+        assert_eq!(
+            historical_epoch12,
+            json!(expected_historical_epoch12),
+            "non-effective epochs must remain ledger-backed history"
         );
 
         fs::remove_dir_all(temp_dir).ok();
