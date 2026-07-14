@@ -61,7 +61,7 @@ impl CodeGenerator {
         }
     }
 
-    pub fn generate(mut self, ast: &[SourceUnit]) -> Result<Vec<u8>, String> {
+    pub fn generate(mut self, ast: &[SourceUnit]) -> Result<(Vec<u8>, Vec<(String, u32)>), String> {
         // Pre-registration pass: assign every state variable and every
         // function's parameter memory addresses before generating any
         // code, so forward references (function A calling function B
@@ -97,7 +97,11 @@ impl CodeGenerator {
             self.assembler.add_function_entry(&name, address, &params, has_return);
         }
 
-        Ok(self.assembler.build())
+        let bytecode = self.assembler.build();
+        // Return state var layout so callers can expose live state
+        let mut sv_layout: Vec<(String, u32)> = self.state_vars.into_iter().collect();
+        sv_layout.sort_by_key(|e| e.1); // order by address
+        Ok((bytecode, sv_layout))
     }
 
     fn register_contract_symbols(&mut self, c: &ContractDefinition) -> Result<(), String> {

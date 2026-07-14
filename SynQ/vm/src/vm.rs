@@ -154,7 +154,7 @@ fn parse_function_table(data: &[u8]) -> Result<HashMap<String, FunctionEntry>, V
 // The main VM struct
 pub struct QuantumVM {
     pub stack: Vec<Value>,
-    memory: HashMap<usize, Value>,
+    pub memory: HashMap<usize, Value>,
     code: Vec<u8>,
     data: Vec<u8>,
     pc: usize,

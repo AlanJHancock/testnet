@@ -34,6 +34,8 @@ const SESSION_TTL: Duration = Duration::from_secs(30 * 60); // 30 min
 struct Session {
     vm:         QuantumVM,
     last_used:  Instant,
+    /// State variable names in address order (name, address)
+    state_vars: Vec<(String, u32)>,
 }
 
 type SessionStore = Arc<Mutex<HashMap<String, Session>>>;
@@ -129,6 +131,7 @@ struct CompileResponse {
     success: bool,
     bytecode: Option<String>,
     signature_sidecar: Option<serde_json::Value>,
+    state_vars: Vec<(String, u32)>,
     errors: Vec<String>,
     warnings: Vec<String>,
 }
@@ -139,15 +142,15 @@ async fn compile_handler(
     let ast = match synq_compiler::parser::parse(&req.source) {
         Ok(a) => a,
         Err(e) => return (StatusCode::OK, RespJson(CompileResponse {
-            success: false, bytecode: None, signature_sidecar: None,
+            success: false, bytecode: None, signature_sidecar: None, state_vars: vec![],
             errors: vec![format!("Parse error: {}", e)], warnings: vec![],
         })),
     };
 
-    let bytecode = match synq_compiler::codegen::CodeGenerator::new().generate(&ast) {
+    let (bytecode, state_vars) = match synq_compiler::codegen::CodeGenerator::new().generate(&ast) {
         Ok(b) => b,
         Err(e) => return (StatusCode::OK, RespJson(CompileResponse {
-            success: false, bytecode: None, signature_sidecar: None,
+            success: false, bytecode: None, signature_sidecar: None, state_vars: vec![],
             errors: vec![format!("Codegen error: {}", e)], warnings: vec![],
         })),
     };
@@ -167,6 +170,7 @@ async fn compile_handler(
         success: true,
         bytecode: Some(format!("0x{}", hex::encode(&bytecode))),
         signature_sidecar: Some(sidecar),
+        state_vars,
         errors: vec![], warnings: vec![],
     }))
 }
@@ -234,7 +238,7 @@ async fn attest_handler(
 // Creates a persistent VM session, loads the bytecode, returns session_id.
 
 #[derive(Deserialize)]
-struct NewSessionRequest { bytecode: String }
+struct NewSessionRequest { bytecode: String, #[serde(default)] state_vars: Vec<(String, u32)> }
 
 #[derive(serde::Serialize)]
 struct NewSessionResponse {
@@ -265,7 +269,7 @@ async fn session_new_handler(
     {
         let mut map = store.lock().unwrap();
         evict_stale(&mut map);
-        map.insert(id.clone(), Session { vm, last_used: Instant::now() });
+        map.insert(id.clone(), Session { vm, last_used: Instant::now(), state_vars: req.state_vars.clone() });
     }
 
     (StatusCode::OK, RespJson(NewSessionResponse {
@@ -359,6 +363,34 @@ async fn health(
     RespJson(json!({"status": "ok", "service": "synq-compiler", "active_sessions": count}))
 }
 
+async fn session_state_handler(
+    State(store): State<SessionStore>,
+    Path(session_id): Path<String>,
+) -> (StatusCode, RespJson<serde_json::Value>) {
+    let map = store.lock().unwrap();
+    let session = match map.get(&session_id) {
+        Some(s) => s,
+        None => return (StatusCode::OK, RespJson(serde_json::json!({
+            "success": false, "error": "Session not found"
+        }))),
+    };
+    let mut state_map = serde_json::Map::new();
+    for (name, addr) in &session.state_vars {
+        let val = session.vm.memory.get(&(*addr as usize));
+        let json_val = match val {
+            Some(synq_vm::Value::I32(v))  => serde_json::json!(v),
+            Some(synq_vm::Value::U128(v)) => serde_json::json!(v.to_string()),
+            None => serde_json::json!(0),
+            _ => serde_json::json!(null),
+        };
+        state_map.insert(name.clone(), json_val);
+    }
+    (StatusCode::OK, RespJson(serde_json::json!({
+        "success": true,
+        "state": serde_json::Value::Object(state_map)
+    })))
+}
+
 // ─── main ────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -377,6 +409,7 @@ async fn main() {
         .route("/session/new",  post(session_new_handler))
         .route("/session/run",  post(session_run_handler))
         .route("/session/:id",  delete(session_delete_handler))
+        .route("/session/:id/state", get(session_state_handler))
         .with_state(store)
         .layer(cors);
 
