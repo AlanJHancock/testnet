@@ -35,8 +35,9 @@ use crate::synq_receipts::{
 use crate::token::TOKEN_MANAGER;
 use crate::transaction::Transaction;
 use crate::validator::{
-    balanced_validator_cluster_id, Validator, ValidatorManager, ValidatorStatus,
-    INITIAL_VALIDATOR_SYNERGY_SCORE, TESTNET_MIN_VALIDATOR_STAKE_NWEI, VALIDATOR_MANAGER,
+    balanced_validator_cluster_id, target_validator_cluster_count, Validator, ValidatorManager,
+    ValidatorStatus, INITIAL_VALIDATOR_SYNERGY_SCORE, TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+    VALIDATOR_MANAGER,
 };
 use crate::wallet::WALLET_MANAGER;
 use crate::{info, warn};
@@ -5378,8 +5379,15 @@ fn chain_identity_json() -> Value {
 }
 
 fn protocol_config_json() -> Value {
-    let validator_count = configured_validator_addresses().len().max(1);
+    let configured_count = configured_validator_addresses().len();
+    let active_count = VALIDATOR_MANAGER.get_active_validators().len();
+    let validator_count = if active_count > 0 {
+        active_count
+    } else {
+        configured_count.max(1)
+    };
     let required_quorum = required_validator_quorum(validator_count).max(1);
+    let cluster_count = target_validator_cluster_count(validator_count).max(1);
     json!({
         "chain": chain_identity_json(),
         "protocol_version": current_protocol_version(),
@@ -5390,8 +5398,8 @@ fn protocol_config_json() -> Value {
             "total": validator_count,
         },
         "target_block_cadence_seconds": 2,
-        "cluster_count": 1,
-        "cluster_id": 0,
+        "cluster_count": cluster_count,
+        "cluster_id": if cluster_count == 1 { Some(0u64) } else { None },
     })
 }
 

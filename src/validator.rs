@@ -49,6 +49,45 @@ pub fn target_validator_cluster_count(active_validator_count: usize) -> usize {
     }
 }
 
+pub fn canonical_validator_clusters_for_epoch(
+    active_validators: &[Validator],
+    epoch: u64,
+) -> Vec<(u64, Vec<Validator>)> {
+    if active_validators.is_empty() {
+        return Vec::new();
+    }
+
+    let mut ordered_validators = active_validators.to_vec();
+    ordered_validators.sort_by(|a, b| {
+        epoch_cluster_rank(epoch, &a.address)
+            .cmp(&epoch_cluster_rank(epoch, &b.address))
+            .then_with(|| a.address.cmp(&b.address))
+    });
+
+    let cluster_count = target_validator_cluster_count(ordered_validators.len());
+    let base_cluster_size = ordered_validators.len() / cluster_count;
+    let extra_members = ordered_validators.len() % cluster_count;
+    let target_sizes: Vec<usize> = (0..cluster_count)
+        .map(|index| base_cluster_size + usize::from(index < extra_members))
+        .collect();
+    let mut cluster_members: Vec<Vec<Validator>> = (0..cluster_count).map(|_| Vec::new()).collect();
+    let mut next_cluster_index = 0usize;
+
+    for validator in ordered_validators {
+        while cluster_members[next_cluster_index].len() >= target_sizes[next_cluster_index] {
+            next_cluster_index = (next_cluster_index + 1) % cluster_count;
+        }
+        cluster_members[next_cluster_index].push(validator);
+        next_cluster_index = (next_cluster_index + 1) % cluster_count;
+    }
+
+    cluster_members
+        .into_iter()
+        .enumerate()
+        .map(|(cluster_index, members)| (cluster_index as u64, members))
+        .collect()
+}
+
 pub fn balanced_validator_cluster_id(index: usize, active_validator_count: usize) -> Option<u64> {
     let cluster_count = target_validator_cluster_count(active_validator_count);
     if cluster_count == 0 || index >= active_validator_count {
@@ -778,7 +817,7 @@ impl ValidatorRegistry {
 
     pub fn reorganize_clusters_for_epoch(&mut self, epoch: u64) {
         self.current_epoch = epoch;
-        let mut active_validators: Vec<Validator> =
+        let active_validators: Vec<Validator> =
             self.get_active_validators().into_iter().cloned().collect();
 
         for validator in self.validators.values_mut() {
@@ -791,33 +830,10 @@ impl ValidatorRegistry {
             return;
         }
 
-        active_validators.sort_by(|a, b| {
-            epoch_cluster_rank(epoch, &a.address)
-                .cmp(&epoch_cluster_rank(epoch, &b.address))
-                .then_with(|| a.address.cmp(&b.address))
-        });
-
-        let cluster_count = target_validator_cluster_count(active_validators.len());
-        let base_cluster_size = active_validators.len() / cluster_count;
-        let extra_members = active_validators.len() % cluster_count;
-        let target_sizes: Vec<usize> = (0..cluster_count)
-            .map(|index| base_cluster_size + usize::from(index < extra_members))
-            .collect();
-        let mut cluster_members: Vec<Vec<Validator>> =
-            (0..cluster_count).map(|_| Vec::new()).collect();
-        let mut next_cluster_index = 0usize;
-
-        for validator in active_validators {
-            while cluster_members[next_cluster_index].len() >= target_sizes[next_cluster_index] {
-                next_cluster_index = (next_cluster_index + 1) % cluster_count;
-            }
-            cluster_members[next_cluster_index].push(validator);
-            next_cluster_index = (next_cluster_index + 1) % cluster_count;
-        }
+        let cluster_members = canonical_validator_clusters_for_epoch(&active_validators, epoch);
 
         let now = Validator::current_timestamp();
-        for (cluster_index, members) in cluster_members.into_iter().enumerate() {
-            let cluster_id = cluster_index as u64;
+        for (cluster_id, members) in cluster_members {
             let cluster_group = ((cluster_id % 5) + 1) as u8;
             let validator_addresses: Vec<String> = members
                 .iter()
@@ -1183,6 +1199,13 @@ impl ValidatorManager {
         } else {
             0
         }
+    }
+
+    pub fn get_current_epoch(&self) -> u64 {
+        self.registry
+            .lock()
+            .map(|registry| registry.current_epoch)
+            .unwrap_or(0)
     }
 
     pub fn reorganize_clusters_for_epoch(&self, epoch: u64) {
@@ -2484,6 +2507,20 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
     }
 
     #[test]
+    fn reorganize_clusters_keeps_nine_validators_in_one_cluster() {
+        let registry = active_registry(9);
+        let mut cluster_sizes: Vec<usize> = registry
+            .clusters
+            .values()
+            .map(|cluster| cluster.validators.len())
+            .collect();
+        cluster_sizes.sort_unstable();
+
+        assert_eq!(registry.clusters.len(), 1);
+        assert_eq!(cluster_sizes, vec![9]);
+    }
+
+    #[test]
     fn reorganize_clusters_stores_syngrp_address_on_validators() {
         let registry = active_registry(5);
         let validator = registry
@@ -2989,6 +3026,69 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
 
         assert_eq!(registry.clusters.len(), 2);
         assert_eq!(cluster_sizes, vec![5, 5]);
+    }
+
+    #[test]
+    fn cluster_assignments_survive_registry_save_load_and_epoch_replay() {
+        let registry = active_registry(10);
+        let assignments = registry
+            .validators
+            .iter()
+            .map(|(address, validator)| (address.clone(), validator.cluster_id))
+            .collect::<HashMap<_, _>>();
+        let clusters = registry
+            .clusters
+            .iter()
+            .map(|(cluster_id, cluster)| {
+                let mut members = cluster.validators.clone();
+                members.sort();
+                (*cluster_id, members)
+            })
+            .collect::<HashMap<_, _>>();
+        let path = std::env::temp_dir().join(format!(
+            "synergy-validator-registry-clusters-{}-{}.json",
+            std::process::id(),
+            Validator::current_timestamp()
+        ));
+
+        registry
+            .save_to_file(&path)
+            .expect("validator registry should save");
+        let mut restarted = ValidatorRegistry::load_from_file(&path)
+            .expect("validator registry should load after restart");
+        assert_eq!(
+            restarted
+                .validators
+                .iter()
+                .map(|(address, validator)| (address.clone(), validator.cluster_id))
+                .collect::<HashMap<_, _>>(),
+            assignments
+        );
+        assert_eq!(
+            restarted
+                .clusters
+                .iter()
+                .map(|(cluster_id, cluster)| {
+                    let mut members = cluster.validators.clone();
+                    members.sort();
+                    (*cluster_id, members)
+                })
+                .collect::<HashMap<_, _>>(),
+            clusters
+        );
+
+        restarted.reorganize_clusters_for_epoch(0);
+        assert_eq!(
+            restarted
+                .validators
+                .iter()
+                .map(|(address, validator)| (address.clone(), validator.cluster_id))
+                .collect::<HashMap<_, _>>(),
+            assignments,
+            "replaying the same epoch must preserve canonical cluster assignments"
+        );
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]

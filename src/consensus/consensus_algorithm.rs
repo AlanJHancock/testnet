@@ -2604,6 +2604,7 @@ impl ProofOfSynergy {
         {
             QuorumCertificate {
                 block_hash: block.hash.clone(),
+                cluster_id: None,
                 epoch_number: block.block_index / epoch_length,
                 round_number: 1,
                 aggregate_signature: block.block_signature.clone(),
@@ -2617,6 +2618,7 @@ impl ProofOfSynergy {
         } else {
             QuorumCertificate {
                 block_hash: "genesis_block".to_string(),
+                cluster_id: None,
                 epoch_number: 0,
                 round_number: 0,
                 aggregate_signature: Vec::new(),

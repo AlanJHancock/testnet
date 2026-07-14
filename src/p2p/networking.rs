@@ -8442,6 +8442,7 @@ fn verify_network_commit_certificate_with_manager(
     if block.block_index == 0 {
         return Ok(QuorumCertificate {
             block_hash: block.hash.clone(),
+            cluster_id: None,
             epoch_number: 0,
             round_number: 0,
             aggregate_signature: vec![0],
@@ -10324,6 +10325,7 @@ mod tests {
             .collect::<Vec<_>>();
         QuorumCertificate {
             block_hash: block.hash.clone(),
+            cluster_id: None,
             epoch_number: 0,
             round_number: 1,
             aggregate_signature: vec![42],
