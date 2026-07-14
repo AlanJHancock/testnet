@@ -186,25 +186,62 @@ async fn attest_handler(
 // POST /run
 // Body: { bytecode: "0x...", function: "mint", args: [1000] }
 //
-// Loads the bytecode into a fresh QVM instance, calls the named function
-// with the supplied integer arguments, and returns the result.
+// args can be JSON numbers OR quoted strings — this lets the browser send
+// values larger than i64::MAX (e.g. u128-range token supplies) without
+// hitting JSON number precision limits.
 //
-// Each call starts a fresh VM (stateless per request). State persistence
-// across calls is not yet supported server-side — use the CLI for that.
+// Each call starts a fresh VM (stateless per request).
 
 #[derive(Deserialize)]
 struct RunRequest {
-    bytecode: String,         // 0x-prefixed hex
-    function: String,         // function name from dispatch table
-    args: Option<Vec<i64>>,   // integer arguments (mapped to I32 or U128 by value)
+    bytecode: String,
+    function: String,
+    // Each arg is either a JSON number or a quoted decimal string
+    args: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(serde::Serialize)]
 struct RunResponse {
     success: bool,
-    result:  Option<serde_json::Value>,   // Value returned by the function
-    output:  String,                      // human-readable summary
+    result:  Option<serde_json::Value>,
+    output:  String,
     error:   Option<String>,
+}
+
+/// Parse a single JSON arg value (number or string) into a VM Value.
+/// Numbers that fit in i32 → I32; everything else → U128.
+fn parse_arg(v: &serde_json::Value) -> Result<Value, String> {
+    match v {
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
+                    return Ok(Value::I32(i as i32));
+                }
+                return Ok(Value::U128(i as u128));
+            }
+            if let Some(u) = n.as_u64() {
+                return Ok(Value::U128(u as u128));
+            }
+            Err(format!("Cannot represent {} as an integer", n))
+        }
+        serde_json::Value::String(s) => {
+            let s = s.trim();
+            match s.parse::<u128>() {
+                Ok(u) => {
+                    if u <= i32::MAX as u128 {
+                        Ok(Value::I32(u as i32))
+                    } else {
+                        Ok(Value::U128(u))
+                    }
+                }
+                Err(_) => match s.parse::<i64>() {
+                    Ok(i) => Ok(Value::I32(i as i32)),
+                    Err(_) => Err(format!("Cannot parse {:?} as an integer", s)),
+                }
+            }
+        }
+        other => Err(format!("Expected number or string, got {}", other)),
+    }
 }
 
 async fn run_handler(
@@ -227,15 +264,17 @@ async fn run_handler(
         }));
     }
 
-    // Map supplied integers to VM Values.
-    // Values that fit in i32 stay as I32 (most common); larger values promoted to U128.
-    let vm_args: Vec<Value> = req.args.unwrap_or_default().iter().map(|&n| {
-        if n >= i32::MIN as i64 && n <= i32::MAX as i64 {
-            Value::I32(n as i32)
-        } else {
-            Value::U128(n as u128)
+    // Parse args — return JSON error if any arg is unparseable
+    let mut vm_args: Vec<Value> = Vec::new();
+    for (i, raw_arg) in req.args.unwrap_or_default().iter().enumerate() {
+        match parse_arg(raw_arg) {
+            Ok(v)  => vm_args.push(v),
+            Err(e) => return (StatusCode::OK, RespJson(RunResponse {
+                success: false, result: None, output: String::new(),
+                error: Some(format!("arg[{}]: {}", i, e)),
+            })),
         }
-    }).collect();
+    }
 
     match vm.call_function(&req.function, &vm_args) {
         Ok(maybe_val) => {
@@ -250,7 +289,7 @@ async fn run_handler(
         Err(e) => {
             (StatusCode::OK, RespJson(RunResponse {
                 success: false, result: None, output: String::new(),
-                error: Some(format!("Runtime error: {}", e)),
+                error: Some(format!("{}", e)),
             }))
         }
     }
@@ -264,6 +303,24 @@ fn value_display(v: &Value) -> String {
         Value::Bool(b)  => b.to_string(),
         Value::Bytes(b) => format!("0x{}", hex_encode(b)),
     }
+}
+
+// ─── Custom JSON rejection handler ───────────────────────────────────────────
+// Axum's default Json extractor returns a plain-text 422 when the body
+// cannot be deserialised. We wrap the router with a custom error handler
+// so all errors — including body-parse failures — return valid JSON.
+
+use axum::extract::rejection::JsonRejection;
+use axum::response::IntoResponse;
+
+async fn handle_json_rejection(rejection: JsonRejection) -> impl IntoResponse {
+    let body = serde_json::json!({
+        "success": false,
+        "result":  null,
+        "output":  "",
+        "error":   format!("Bad request: {}", rejection.body_text())
+    });
+    (StatusCode::OK, axum::response::Json(body))
 }
 
 // ─── /health ─────────────────────────────────────────────────────────────────
