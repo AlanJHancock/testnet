@@ -234,7 +234,12 @@ impl QuantumVM {
         if entry.has_return {
             Ok(self.stack.pop())
         } else {
-            Ok(None)
+            // Even without an explicit `return expr;`, a function may leave
+            // a value on the stack (e.g. the result of the last assignment).
+            // Surface it so the CLI can display it rather than silently
+            // discarding it. Callers that expect None can still check
+            // Option::is_some() to tell the difference.
+            Ok(self.stack.pop())
         }
     }
 

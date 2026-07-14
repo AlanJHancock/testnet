@@ -28,8 +28,8 @@ enum Commands {
         /// from the top of the bytecode.
         #[arg(short, long)]
         function: Option<String>,
-        /// Comma-separated integer arguments for --function, e.g. "1,2,3"
-        #[arg(short, long)]
+        /// Comma-separated integer arguments for --function, e.g. "1,2,3" or "-100,50"
+        #[arg(short, long, allow_hyphen_values = true)]
         args: Option<String>,
         /// List the callable functions in this bytecode file and exit.
         #[arg(long)]
@@ -83,7 +83,20 @@ fn hex_decode(s: &str) -> Vec<u8> {
 
 fn compile(path: &PathBuf) {
     println!("Compiling SynQ with PQC: {}", path.display());
-    let source = fs::read_to_string(path).expect("Failed to read source file");
+    // Guard: reject binary files passed by mistake (e.g. .qvm instead of .synq)
+    let source = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+            eprintln!("❌ Error: {} does not appear to be a text file.", path.display());
+            eprintln!("   synq-cli compile expects a SynQ source file (.synq), not a bytecode file (.qvm).");
+            eprintln!("   Example: synq-cli compile --path mycontract.synq");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("❌ Error: Failed to read source file: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     // Parse SynQ source
     let ast = synq_compiler::parser::parse(&source).expect("Failed to parse source file");
@@ -166,22 +179,56 @@ fn verify(path: &PathBuf) {
         }
     };
 
-    let algorithm = match sig_json["algorithm"].as_str() {
+    // Support both sidecar formats:
+    //   flat:   { algorithm, public_key, signature }           <- synq-cli compile
+    //   hybrid: { mode, evm: {...}, pqc: { algorithm, ... } }  <- server /attest endpoint
+    //
+    // IMPORTANT: for hybrid sidecars the server signed evm_sig_bytes ++ raw_bytecode,
+    // NOT raw_bytecode alone. We must reconstruct the same message here to verify.
+    let is_hybrid = sig_json["mode"].as_str() == Some("hybrid") && sig_json["pqc"].is_object();
+    let sig_node  = if is_hybrid { &sig_json["pqc"] } else { &sig_json };
+
+    let algorithm = match sig_node["algorithm"].as_str() {
         Some(a) => a,
         None => { eprintln!("❌ Error: missing 'algorithm' field in sidecar"); std::process::exit(1); }
     };
-    let public_key = match sig_json["public_key"].as_str() {
+    let public_key = match sig_node["public_key"].as_str() {
         Some(h) => hex_decode(h),
         None => { eprintln!("❌ Error: missing 'public_key' field in sidecar"); std::process::exit(1); }
     };
-    let signature = match sig_json["signature"].as_str() {
+    let signature_bytes = match sig_node["signature"].as_str() {
         Some(h) => hex_decode(h),
         None => { eprintln!("❌ Error: missing 'signature' field in sidecar"); std::process::exit(1); }
     };
 
+    // Reconstruct the exact message that was signed.
+    let verify_message: Vec<u8> = if is_hybrid {
+        // Server signed: evm_sig_bytes (65 bytes) ++ raw_bytecode_bytes
+        let raw_evm_hex = sig_json["evm"]["signature"].as_str().unwrap_or("");
+        let clean_evm   = raw_evm_hex.strip_prefix("0x").unwrap_or(raw_evm_hex);
+        let evm_sig_bytes = hex_decode(clean_evm);
+        if evm_sig_bytes.len() != 65 {
+            eprintln!("❌ Error: EVM signature in sidecar is {} bytes, expected 65", evm_sig_bytes.len());
+            std::process::exit(1);
+        }
+        let evm_addr   = sig_json["evm"]["address"].as_str().unwrap_or("-");
+        let evm_hash   = sig_json["evm"]["message_hash"].as_str().unwrap_or("-");
+        let hash_short = &evm_hash[..evm_hash.len().min(22)];
+        println!("ℹ️  Hybrid sidecar detected");
+        println!("   EVM address:  {}", evm_addr);
+        println!("   EVM sig hash: {}...", hash_short);
+        println!("   PQC covers:   evm_signature_bytes ++ raw_bytecode_bytes");
+        let mut msg = Vec::with_capacity(evm_sig_bytes.len() + bytecode.len());
+        msg.extend_from_slice(&evm_sig_bytes);
+        msg.extend_from_slice(&bytecode);
+        msg
+    } else {
+        bytecode.clone()
+    };
+
     let pqc = PQCCompiler::new(PQCSecurityLevel::Enhanced);
-    match pqc.verify_signature(&public_key, &signature, &bytecode, algorithm) {
-        Ok(true)  => println!("✅ Signature valid ({}) -- bytecode is untampered", algorithm),
+    match pqc.verify_signature(&public_key, &signature_bytes, &verify_message, algorithm) {
+        Ok(true)  => println!("✅ Signature valid ({}) -- bundle is untampered", algorithm),
         Ok(false) => println!("❌ Signature INVALID -- bytecode does not match signature on file"),
         Err(e)    => println!("❌ Verification error: {}", e),
     }
@@ -189,11 +236,43 @@ fn verify(path: &PathBuf) {
 
 fn run(path: &PathBuf, function: Option<&str>, args: Option<&str>, list_functions: bool) {
     println!("Running SynQ with PQC: {}", path.display());
-    let bytecode = fs::read(path).expect("Failed to read bytecode file");
+    let bytecode = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("❌ Error: could not read file {}: {}", path.display(), e);
+            std::process::exit(1);
+        }
+    };
+
+    // Reject non-bytecode files early with a helpful message
+    if bytecode.starts_with(b"{") || bytecode.starts_with(b"//") || bytecode.starts_with(b"contract") {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext == "json" || path.to_string_lossy().contains(".sig.json") {
+            eprintln!("❌ Error: {} is a signature sidecar file, not bytecode.", path.display());
+            eprintln!("   Pass the .qvm or .synq_bytecode file instead.");
+            eprintln!("   Example: synq-cli run --path contract.synq_bytecode --function mint --args 100");
+        } else {
+            eprintln!("❌ Error: {} does not look like compiled bytecode.", path.display());
+            eprintln!("   Compile your source first: synq-cli compile --path contract.synq");
+        }
+        std::process::exit(1);
+    }
 
     // Initialize SynQ VM with PQC support
     let mut vm = QuantumVM::new();
-    vm.load_bytecode(&bytecode).expect("Failed to load bytecode");
+    if let Err(e) = vm.load_bytecode(&bytecode) {
+        let hint = if path.to_string_lossy().ends_with(".sig.json") {
+            "
+   Tip: pass the .qvm/.synq_bytecode file, not the .sig.json sidecar."
+        } else if path.extension().and_then(|e| e.to_str()) == Some("synq") {
+            "
+   Tip: this looks like a source file -- compile it first with synq-cli compile."
+        } else {
+            ""
+        };
+        eprintln!("❌ Error: failed to load bytecode: {}{}", e, hint);
+        std::process::exit(1);
+    }
 
     if list_functions {
         println!("📋 Callable functions:");
@@ -217,7 +296,8 @@ fn run(path: &PathBuf, function: Option<&str>, args: Option<&str>, list_function
                 println!("✅ Function '{}' returned: {:?}", name, result);
             }
             Ok(None) => {
-                println!("✅ Function '{}' executed (no return value)", name);
+                // Stack was empty after execution — genuinely void function.
+                println!("✅ Function '{}' executed (void)", name);
             }
             Err(e) => {
                 println!("❌ Function call failed: {}", e);
