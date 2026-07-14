@@ -1126,6 +1126,15 @@ impl ValidatorRegistry {
         epoch: u64,
         height: u64,
     ) -> Result<(), String> {
+        self.reconcile_clusters_for_height(epoch, height)
+            .map(|_| ())
+    }
+
+    pub fn reconcile_clusters_for_height(
+        &mut self,
+        epoch: u64,
+        height: u64,
+    ) -> Result<bool, String> {
         let effective_epoch =
             match effective_cluster_epoch_for_height(self.current_epoch.max(epoch), height) {
                 Ok(effective_epoch) => effective_epoch,
@@ -1148,6 +1157,14 @@ impl ValidatorRegistry {
                 return Err(error);
             }
         };
+        if self.cluster_memberships_are_canonical(
+            &cluster_members,
+            effective_epoch,
+            &randomness_source,
+            height,
+        ) {
+            return Ok(false);
+        }
         self.apply_cluster_memberships(
             cluster_members,
             effective_epoch,
@@ -1155,7 +1172,104 @@ impl ValidatorRegistry {
             height,
         );
         self.current_epoch = effective_epoch;
-        Ok(())
+        Ok(true)
+    }
+
+    fn cluster_memberships_are_canonical(
+        &self,
+        cluster_members: &[(u64, Vec<Validator>)],
+        assignment_epoch: u64,
+        assignment_seed: &str,
+        assignment_effective_height: u64,
+    ) -> bool {
+        if self.current_epoch != assignment_epoch || self.clusters.len() != cluster_members.len() {
+            return false;
+        }
+
+        let mut expected_assignments = HashMap::new();
+        for (cluster_id, members) in cluster_members {
+            let cluster_address = canonical_validator_cluster_address(*cluster_id, members);
+            let expected_addresses = members
+                .iter()
+                .map(|validator| validator.address.clone())
+                .collect::<Vec<_>>();
+            let expected_total_stake = members
+                .iter()
+                .map(|validator| validator.stake_amount)
+                .sum::<u64>();
+            let expected_average_synergy_score = if members.is_empty() {
+                0.0
+            } else {
+                members
+                    .iter()
+                    .map(|validator| validator.synergy_score)
+                    .sum::<f64>()
+                    / members.len() as f64
+            };
+            let expected_group = ((*cluster_id % 5) + 1) as u8;
+
+            let Some(cluster) = self.clusters.get(cluster_id) else {
+                return false;
+            };
+            if cluster.id != *cluster_id
+                || cluster.address != cluster_address
+                || cluster.validators != expected_addresses
+                || cluster.total_stake != expected_total_stake
+                || cluster.average_synergy_score != expected_average_synergy_score
+                || cluster.group != expected_group
+            {
+                return false;
+            }
+
+            for member in members {
+                if expected_assignments
+                    .insert(
+                        member.address.clone(),
+                        (*cluster_id, cluster_address.clone()),
+                    )
+                    .is_some()
+                {
+                    return false;
+                }
+            }
+        }
+
+        let mut assigned_effective_height = None;
+        for address in expected_assignments.keys() {
+            let Some(validator) = self.validators.get(address) else {
+                return false;
+            };
+            let Some(effective_height) = validator.cluster_assignment_effective_height else {
+                return false;
+            };
+            if effective_height > assignment_effective_height {
+                return false;
+            }
+            if assigned_effective_height
+                .replace(effective_height)
+                .is_some_and(|existing| existing != effective_height)
+            {
+                return false;
+            }
+        }
+
+        self.validators.values().all(|validator| {
+            if let Some((cluster_id, cluster_address)) =
+                expected_assignments.get(&validator.address)
+            {
+                validator.cluster_id == Some(*cluster_id)
+                    && validator.cluster_address.as_deref() == Some(cluster_address.as_str())
+                    && validator.cluster_assignment_epoch == Some(assignment_epoch)
+                    && validator.cluster_assignment_seed.as_deref() == Some(assignment_seed)
+                    && validator.cluster_assignment_effective_height == assigned_effective_height
+            } else {
+                validator.cluster_id.is_none()
+                    && validator.cluster_address.is_none()
+                    && validator.cluster_assignment_epoch.is_none()
+                    && validator.cluster_assignment_seed.is_none()
+                    && validator.cluster_assignment_effective_height.is_none()
+            }
+        })
     }
 
     fn clear_cluster_assignments(&mut self) {

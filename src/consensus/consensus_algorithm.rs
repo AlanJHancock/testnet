@@ -225,6 +225,18 @@ lazy_static::lazy_static! {
     static ref TEST_PROPOSAL_CACHE_DIR: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
 }
 
+pub(crate) fn reconcile_validator_registry_clusters_for_height(
+    validator_manager: &Arc<ValidatorManager>,
+    height: u64,
+) -> Result<bool, String> {
+    let mut registry = validator_manager
+        .registry
+        .lock()
+        .map_err(|_| "failed to lock validator registry for cluster reconciliation".to_string())?;
+    let epoch = epoch_for_block_height(height, registry.epoch_length.max(1));
+    registry.reconcile_clusters_for_height(epoch, height)
+}
+
 impl ProofOfSynergy {
     pub fn proposal_cache_discard_count() -> u64 {
         PROPOSAL_CACHE_DISCARD_COUNT.load(Ordering::Relaxed)
@@ -334,6 +346,32 @@ impl ProofOfSynergy {
                     "consensus",
                     "Failed to persist replayed validator activations",
                     "error" => error.to_string()
+                );
+            }
+        }
+
+        let chain_height = chain_snapshot
+            .last()
+            .map(|block| block.block_index)
+            .unwrap_or(0);
+        match reconcile_validator_registry_clusters_for_height(&validator_manager, chain_height) {
+            Ok(true) => {
+                if let Err(error) = validator_manager.save_registry(VALIDATOR_REGISTRY_PATH) {
+                    warn!(
+                        "consensus",
+                        "Failed to persist startup validator cluster reconciliation",
+                        "height" => chain_height,
+                        "error" => error.to_string()
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    "consensus",
+                    "Failed to reconcile validator clusters at startup",
+                    "height" => chain_height,
+                    "error" => error
                 );
             }
         }
@@ -4285,6 +4323,246 @@ mod tests {
             .iter()
             .map(|address| test_validator(address))
             .collect()
+    }
+
+    #[test]
+    fn startup_cluster_reconciliation_repairs_six_validator_registry_and_is_idempotent() {
+        let manager = Arc::new(ValidatorManager::new());
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            for mut validator in test_validators(0, 5) {
+                validator.cluster_id = Some(99);
+                validator.cluster_address = Some("stale-cluster-address".to_string());
+                validator.cluster_assignment_epoch = Some(99);
+                validator.cluster_assignment_seed = Some("stale-cluster-seed".to_string());
+                validator.cluster_assignment_effective_height = Some(1);
+                registry
+                    .validators
+                    .insert(validator.address.clone(), validator);
+            }
+            registry.clusters.clear();
+        }
+
+        assert!(
+            reconcile_validator_registry_clusters_for_height(&manager, 42)
+                .expect("startup cluster reconciliation should repair stale metadata")
+        );
+
+        {
+            let registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            let cluster = registry
+                .clusters
+                .get(&0)
+                .expect("six validators should have one canonical cluster");
+            assert_eq!(registry.clusters.len(), 1);
+            assert_eq!(cluster.validators.len(), 6);
+            assert!(registry.validators.values().all(|validator| {
+                validator.cluster_id == Some(0)
+                    && validator.cluster_address.as_deref() == Some(cluster.address.as_str())
+                    && validator.cluster_assignment_epoch == Some(0)
+                    && validator
+                        .cluster_assignment_seed
+                        .as_deref()
+                        .is_some_and(|seed| !seed.is_empty())
+                    && validator.cluster_assignment_effective_height == Some(42)
+            }));
+        }
+
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            let cluster = registry
+                .clusters
+                .get_mut(&0)
+                .expect("canonical cluster should exist");
+            cluster.created_at = 11;
+            cluster.last_rotation = 29;
+        }
+        let stable_before_reconcile = {
+            let registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            serde_json::to_string_pretty(&*registry).expect("timestamped registry should serialize")
+        };
+        assert!(
+            !reconcile_validator_registry_clusters_for_height(&manager, 99)
+                .expect("canonical startup reconciliation should succeed")
+        );
+        let stable_after_reconcile = {
+            let registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            serde_json::to_string_pretty(&*registry).expect("timestamped registry should serialize")
+        };
+        assert_eq!(stable_after_reconcile, stable_before_reconcile);
+
+        let state_dir = unique_proposal_cache_dir("startup-cluster-reconciliation");
+        let registry_path = state_dir.join("validator_registry.json");
+        manager
+            .registry
+            .lock()
+            .expect("validator registry lock should succeed")
+            .save_to_file(&registry_path)
+            .expect("repaired validator registry should persist");
+
+        let restarted = Arc::new(ValidatorManager::new());
+        restarted
+            .load_registry(
+                registry_path
+                    .to_str()
+                    .expect("registry path should be UTF-8"),
+            )
+            .expect("restarted validator registry should load");
+        assert!(
+            !reconcile_validator_registry_clusters_for_height(&restarted, 99)
+                .expect("restart reconciliation should succeed")
+        );
+        let after_restart = {
+            let registry = restarted
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            serde_json::to_value(&*registry).expect("restarted registry should serialize")
+        };
+
+        assert_eq!(
+            after_restart,
+            serde_json::from_str::<serde_json::Value>(&stable_before_reconcile)
+                .expect("timestamped registry snapshot should parse")
+        );
+        std::fs::remove_dir_all(state_dir).ok();
+    }
+
+    #[test]
+    fn startup_cluster_reconciliation_repairs_mixed_and_future_effective_heights() {
+        let manager = Arc::new(ValidatorManager::new());
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            for validator in test_validators(0, 5) {
+                registry
+                    .validators
+                    .insert(validator.address.clone(), validator);
+            }
+        }
+
+        assert!(
+            reconcile_validator_registry_clusters_for_height(&manager, 42)
+                .expect("initial cluster reconciliation should succeed")
+        );
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            registry
+                .validators
+                .get_mut("validator-0")
+                .expect("validator-0 should exist")
+                .cluster_assignment_effective_height = Some(43);
+        }
+        assert!(
+            reconcile_validator_registry_clusters_for_height(&manager, 99)
+                .expect("mixed effective heights should be repaired")
+        );
+        {
+            let registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            assert!(registry
+                .validators
+                .values()
+                .all(|validator| validator.cluster_assignment_effective_height == Some(99)));
+        }
+
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            registry
+                .validators
+                .get_mut("validator-1")
+                .expect("validator-1 should exist")
+                .cluster_assignment_effective_height = Some(100);
+        }
+        assert!(
+            reconcile_validator_registry_clusters_for_height(&manager, 99)
+                .expect("future effective height should be repaired")
+        );
+        let registry = manager
+            .registry
+            .lock()
+            .expect("validator registry lock should succeed");
+        assert!(registry
+            .validators
+            .values()
+            .all(|validator| validator.cluster_assignment_effective_height == Some(99)));
+    }
+
+    #[test]
+    fn startup_cluster_reconciliation_preserves_shadow_activation_boundary() {
+        let _env_lock = epoch_set_env_test_lock().lock().unwrap();
+        let manager = Arc::new(ValidatorManager::new());
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            for mut validator in test_validators(0, 5) {
+                if validator.address == "validator-5" {
+                    validator.status = ValidatorStatus::Shadow;
+                    validator.activation_recorded_height = Some(1_000);
+                    validator.activation_effective_height = Some(1_001);
+                }
+                registry
+                    .validators
+                    .insert(validator.address.clone(), validator);
+            }
+        }
+
+        assert!(
+            reconcile_validator_registry_clusters_for_height(&manager, 1_000)
+                .expect("pre-activation reconciliation should succeed"),
+            "pre-activation reconciliation should repair the height-scoped membership"
+        );
+        {
+            let registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            assert_eq!(registry.clusters.len(), 1);
+            assert_eq!(registry.clusters[&0].validators.len(), 5);
+            assert_eq!(registry.validators["validator-5"].cluster_id, None);
+        }
+
+        assert!(
+            reconcile_validator_registry_clusters_for_height(&manager, 1_001)
+                .expect("effective-height reconciliation should succeed")
+        );
+        let registry = manager
+            .registry
+            .lock()
+            .expect("validator registry lock should succeed");
+        assert_eq!(registry.clusters[&0].validators.len(), 6);
+        assert_eq!(registry.validators["validator-5"].cluster_id, Some(0));
+        assert_eq!(
+            registry.validators["validator-5"].status,
+            ValidatorStatus::Shadow
+        );
     }
 
     fn finalized_score_vote(address: &str, block_hash: &str, block_index: u64) -> Vote {

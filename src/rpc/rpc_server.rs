@@ -11,7 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::block::{Block, BlockChain, HOT_CHAIN_RETENTION_BLOCKS_ENV};
 use crate::cluster::{fault_tolerance_f, quorum_threshold, EpochClusterAssignmentSnapshot};
 use crate::consensus::chain_durability::recover_chain_and_validate_canonical;
-use crate::consensus::consensus_algorithm::ProofOfSynergy;
+use crate::consensus::consensus_algorithm::{
+    reconcile_validator_registry_clusters_for_height, ProofOfSynergy,
+};
 use crate::consensus::consensus_fork;
 use crate::consensus::dual_quorum::{required_validator_quorum, DualQuorumConsensus};
 use crate::consensus::legacy_canonical_lock::{
@@ -598,6 +600,26 @@ pub fn start_rpc_server(
             "✅ Loaded {} validators from registry at startup",
             validators.len()
         );
+        let chain_height = persisted_chain_tip()
+            .map(|block| block.block_index)
+            .unwrap_or(0);
+        match reconcile_validator_registry_clusters_for_height(&VALIDATOR_MANAGER, chain_height) {
+            Ok(true) => {
+                if let Err(error) = VALIDATOR_MANAGER.save_registry(validator_registry_path) {
+                    println!(
+                        "⚠️ Failed to persist startup validator cluster reconciliation at height {}: {}",
+                        chain_height, error
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                println!(
+                    "⚠️ Failed to reconcile validator clusters at startup height {}: {}",
+                    chain_height, error
+                );
+            }
+        }
     }
 
     if let Some(block) = persisted_chain_tip() {
