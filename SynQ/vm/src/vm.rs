@@ -274,31 +274,63 @@ impl QuantumVM {
             OpCode::Add => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                if a.is_u128_compat() && b.is_u128_compat() && (matches!(a, Value::U128(_)) || matches!(b, Value::U128(_))) {
-                    let av = a.as_u128()?;
-                    let bv = b.as_u128()?;
-                    let result = av.checked_add(bv)
-                        .ok_or_else(|| VMError::RuntimeError("UInt256 overflow on Add".to_string()))?;
-                    self.push(Value::U128(result))?;
+                let av = match &a {
+                    Value::U128(v) => *v,
+                    Value::I32(v)  => {
+                        if *v < 0 { return Err(VMError::RuntimeError(
+                            format!("UInt256 value {} is negative; UInt256 cannot be negative", v))); }
+                        *v as u128
+                    }
+                    _ => return Err(VMError::RuntimeError("Add: expected numeric value".to_string())),
+                };
+                let bv = match &b {
+                    Value::U128(v) => *v,
+                    Value::I32(v)  => {
+                        if *v < 0 { return Err(VMError::RuntimeError(
+                            format!("UInt256 value {} is negative; UInt256 cannot be negative", v))); }
+                        *v as u128
+                    }
+                    _ => return Err(VMError::RuntimeError("Add: expected numeric value".to_string())),
+                };
+                let result = av.checked_add(bv)
+                    .ok_or_else(|| VMError::RuntimeError("UInt256 overflow on Add".to_string()))?;
+                if result <= i32::MAX as u128 {
+                    self.push(Value::I32(result as i32))?;
                 } else {
-                    let av = a.as_i32()?;
-                    let bv = b.as_i32()?;
-                    self.push(Value::I32(av.wrapping_add(bv)))?;
+                    self.push(Value::U128(result))?;
                 }
             }
             OpCode::Sub => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                if a.is_u128_compat() && b.is_u128_compat() && (matches!(a, Value::U128(_)) || matches!(b, Value::U128(_))) {
-                    let av = a.as_u128()?;
-                    let bv = b.as_u128()?;
-                    let result = av.checked_sub(bv)
-                        .ok_or_else(|| VMError::RuntimeError("UInt256 underflow on Sub".to_string()))?;
-                    self.push(Value::U128(result))?;
+                // All numeric values in SynQ are UInt256 — treat I32 as unsigned.
+                // Promote both operands to u128, check for underflow, shrink result
+                // back to I32 if it fits (avoids unnecessary U128 inflation).
+                let av = match &a {
+                    Value::U128(v) => *v,
+                    Value::I32(v)  => {
+                        if *v < 0 { return Err(VMError::RuntimeError(
+                            format!("UInt256 underflow: left operand {} is negative", v))); }
+                        *v as u128
+                    }
+                    _ => return Err(VMError::RuntimeError("Sub: expected numeric value".to_string())),
+                };
+                let bv = match &b {
+                    Value::U128(v) => *v,
+                    Value::I32(v)  => {
+                        if *v < 0 { return Err(VMError::RuntimeError(
+                            format!("UInt256 underflow: right operand {} is negative", v))); }
+                        *v as u128
+                    }
+                    _ => return Err(VMError::RuntimeError("Sub: expected numeric value".to_string())),
+                };
+                let result = av.checked_sub(bv)
+                    .ok_or_else(|| VMError::RuntimeError(
+                        format!("UInt256 underflow on Sub: {} - {} would be negative", av, bv)))?;
+                if result <= i32::MAX as u128 {
+                    self.push(Value::I32(result as i32))?;
                 } else {
-                    let av = a.as_i32()?;
-                    let bv = b.as_i32()?;
-                    self.push(Value::I32(av.wrapping_sub(bv)))?;
+                    self.push(Value::U128(result))?;
                 }
             }
             OpCode::Mul => {
@@ -493,6 +525,13 @@ impl QuantumVM {
             }
             OpCode::Halt => {
                 self.halted = true;
+            }
+            OpCode::Revert => {
+                // Followed by: 4-byte LE message length + message bytes
+                let msg_len = self.read_u32()? as usize;
+                let msg_bytes = self.read_bytes(msg_len)?;
+                let msg = String::from_utf8_lossy(&msg_bytes).into_owned();
+                return Err(VMError::Reverted(msg));
             }
         }
 

@@ -10,18 +10,20 @@ pub enum VMError {
     InvalidAddress(usize),
     CryptoError(String),
     RuntimeError(String),
+    Reverted(String),   // require() failure — carries the require message
 }
 
 impl fmt::Display for VMError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            VMError::InvalidBytecode(msg) => write!(f, "Invalid bytecode: {}", msg),
-            VMError::StackUnderflow      => write!(f, "Stack underflow"),
-            VMError::StackOverflow       => write!(f, "Stack overflow"),
+            VMError::InvalidBytecode(msg)   => write!(f, "Invalid bytecode: {}", msg),
+            VMError::StackUnderflow         => write!(f, "Stack underflow"),
+            VMError::StackOverflow          => write!(f, "Stack overflow"),
             VMError::InvalidInstruction(op) => write!(f, "Invalid instruction: 0x{:02x}", op),
             VMError::InvalidAddress(addr)   => write!(f, "Invalid address: {}", addr),
-            VMError::CryptoError(msg)    => write!(f, "Crypto error: {}", msg),
-            VMError::RuntimeError(msg)   => write!(f, "Runtime error: {}", msg),
+            VMError::CryptoError(msg)       => write!(f, "Crypto error: {}", msg),
+            VMError::RuntimeError(msg)      => write!(f, "Runtime error: {}", msg),
+            VMError::Reverted(msg)          => write!(f, "require failed: {}", msg),
         }
     }
 }
@@ -57,13 +59,13 @@ pub enum OpCode {
     JumpIf = 0x31,
     Call   = 0x32,
     Return = 0x33,
+    Revert = 0x34,  // require() failure — followed by 4-byte LE len + message bytes
 
     // Memory operations
     Load      = 0x40,
     Store     = 0x41,
     LoadImm   = 0x42,  // push raw bytes (strings / PQC keys)
     LoadImm128 = 0x43, // push a 16-byte big-endian u128 (UInt256 values)
-                       // TODO: promote to LoadImm256([u8;32]) when primitive-types crate is added
 
     // PQC operations
     DilithiumVerify  = 0x80,
@@ -99,6 +101,7 @@ impl TryFrom<u8> for OpCode {
             0x31 => Ok(OpCode::JumpIf),
             0x32 => Ok(OpCode::Call),
             0x33 => Ok(OpCode::Return),
+            0x34 => Ok(OpCode::Revert),
             0x40 => Ok(OpCode::Load),
             0x41 => Ok(OpCode::Store),
             0x42 => Ok(OpCode::LoadImm),

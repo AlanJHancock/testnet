@@ -85,10 +85,16 @@ fn value_display(v: &Value) -> String {
 
 /// Parse a single JSON arg value (number or quoted decimal string) into a VM Value.
 fn parse_arg(v: &serde_json::Value) -> Result<Value, String> {
+    // UInt256 semantics: all arguments must be non-negative integers.
+    // Negative values are rejected here so the VM never sees a negative
+    // I32 where an unsigned quantity is expected.
     match v {
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
+                if i < 0 {
+                    return Err(format!("UInt256 arguments must be non-negative, got {}", i));
+                }
+                if i <= i32::MAX as i64 {
                     return Ok(Value::I32(i as i32));
                 }
                 return Ok(Value::U128(i as u128));
@@ -100,12 +106,13 @@ fn parse_arg(v: &serde_json::Value) -> Result<Value, String> {
         }
         serde_json::Value::String(s) => {
             let s = s.trim();
+            // Reject explicit negative strings
+            if s.starts_with('-') {
+                return Err(format!("UInt256 arguments must be non-negative, got {}", s));
+            }
             match s.parse::<u128>() {
                 Ok(u) => Ok(if u <= i32::MAX as u128 { Value::I32(u as i32) } else { Value::U128(u) }),
-                Err(_) => match s.parse::<i64>() {
-                    Ok(i) => Ok(Value::I32(i as i32)),
-                    Err(_) => Err(format!("Cannot parse {:?} as an integer", s)),
-                }
+                Err(_) => Err(format!("Cannot parse {:?} as a non-negative integer", s)),
             }
         }
         other => Err(format!("Expected number or string, got {}", other)),
@@ -322,6 +329,10 @@ async fn session_run_handler(
                 success: true, result: result_json, output, error: None,
             }))
         }
+        Err(synq_vm::VMError::Reverted(msg)) => (StatusCode::OK, RespJson(RunResponse {
+            success: false, result: None, output: String::new(),
+            error: Some(format!("require failed: {}", msg)),
+        })),
         Err(e) => (StatusCode::OK, RespJson(RunResponse {
             success: false, result: None, output: String::new(),
             error: Some(format!("{}", e)),

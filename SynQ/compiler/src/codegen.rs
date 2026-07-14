@@ -202,7 +202,7 @@ impl CodeGenerator {
                 self.assembler.emit_op(OpCode::Pop);
                 Ok(())
             }
-            Statement::Require(cond, _msg) => {
+            Statement::Require(cond, msg) => {
                 // require(cond, msg): compiles to a JumpIf-based
                 // conditional abort. If the condition is TRUE we jump
                 // PAST the Halt (execution continues normally); if FALSE
@@ -212,9 +212,13 @@ impl CodeGenerator {
                 self.gen_expression(cond, scope)?;
                 self.assembler.emit_op(OpCode::JumpIf);
                 let jump_target_pos = self.assembler.emit_placeholder_u32();
-                self.assembler.emit_op(OpCode::Halt);
-                let after_halt = self.assembler.current_pos() as u32;
-                self.assembler.patch_u32(jump_target_pos, after_halt);
+                // Emit Revert opcode + length-prefixed message.
+                // emit_bytes() already prepends the 4-byte LE length.
+                self.assembler.emit_op(OpCode::Revert);
+                let msg_bytes = msg.as_bytes();
+                self.assembler.emit_bytes(msg_bytes);
+                let after_revert = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(jump_target_pos, after_revert);
                 Ok(())
             }
             Statement::Assignment(name, expr) => {
