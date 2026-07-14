@@ -6398,7 +6398,7 @@ mod tests {
         );
         assert!(
             consensus.has_commit_quorum(&active_validators, &votes),
-            "four valid signers must satisfy 4-of-6 quorum regardless of Synergy Score"
+            "the required dynamic quorum must be independent of Synergy Score"
         );
 
         let qc = consensus
