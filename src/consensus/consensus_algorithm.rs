@@ -2767,12 +2767,15 @@ impl ProofOfSynergy {
             .ok_or_else(|| {
                 format!("epoch {current_epoch} boundary block {boundary_height} is unavailable")
             })?;
-        let mut qc = DualQuorumConsensus::committed_qc_for_block_hash(&block.hash).ok_or_else(|| {
-            format!(
-                "finalized QC for epoch {current_epoch} boundary block {boundary_height} ({}) is unavailable",
-                block.hash
-            )
-        })?;
+        let mut qc = DualQuorumConsensus::committed_qcs_for_block_hashes([block.hash.as_str()])
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                format!(
+                    "finalized QC for epoch {current_epoch} boundary block {boundary_height} ({}) is unavailable",
+                    block.hash
+                )
+            })?;
         let expected_epoch = epoch_for_block_height(block.block_index, epoch_length);
         let normalize_legacy_epoch = qc.epoch_number != expected_epoch;
         if normalize_legacy_epoch
@@ -5125,6 +5128,38 @@ mod tests {
         assert_eq!(previous_qc.block_hash, boundary_hash);
         assert_eq!(previous_qc.epoch_number, 0);
         assert_eq!(previous_qc.aggregate_signature, vec![1]);
+    }
+
+    #[test]
+    fn previous_qc_loads_epoch_boundary_from_archive_after_hot_retention() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let _retention = EnvVarGuard::set("SYNERGY_COMMITTED_QC_HOT_RETENTION_BLOCKS", "3");
+        let mut chain = BlockChain::new();
+        let (manager, boundary_block, boundary_qc) = signed_boundary_fixture(1_000, 0);
+        let boundary_hash = boundary_block.hash.clone();
+        chain.add_block(boundary_block);
+        DualQuorumConsensus::record_committed_qc_checked(boundary_qc.clone()).unwrap();
+
+        for height in 1_001..=1_004 {
+            let mut later_qc = boundary_qc.clone();
+            let later_hash = format!("post-boundary-{height}");
+            later_qc.block_hash = later_hash.clone();
+            later_qc.votes[0].block_hash = later_hash;
+            later_qc.votes[0].block_index = height;
+            DualQuorumConsensus::record_committed_qc_checked(later_qc).unwrap();
+        }
+
+        assert!(
+            DualQuorumConsensus::committed_qc_for_block_hash(&boundary_hash).is_none(),
+            "fixture must evict the boundary QC from the hot store"
+        );
+
+        let previous_qc =
+            ProofOfSynergy::get_previous_quorum_certificate(&chain, 1, 1_000, &manager).unwrap();
+
+        assert_eq!(previous_qc.block_hash, boundary_hash);
+        assert_eq!(previous_qc.epoch_number, 0);
     }
 
     #[test]
