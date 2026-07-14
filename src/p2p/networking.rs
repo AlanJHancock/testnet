@@ -3578,21 +3578,19 @@ fn resolve_bootstrap_dial_targets(config: &NodeConfig) -> Vec<String> {
     let mut targets = HashSet::<String>::new();
 
     for bootnode in &config.network.bootnodes {
-        if let Some(dial) = parse_bootnode_dial_address(bootnode) {
-            if peer_target_allowed_by_local_scope(config, &dial) {
-                targets.insert(dial);
-            }
+        if let Some(dial) = normalize_peer_target(config, bootnode) {
+            targets.insert(dial);
         }
     }
 
     for dial in resolve_dns_bootstrap_targets(&config.network.bootstrap_dns_records) {
-        if peer_target_allowed_by_local_scope(config, &dial) {
+        if let Some(dial) = normalize_peer_target(config, &dial) {
             targets.insert(dial);
         }
     }
 
     for dial in resolve_seed_server_targets(&config.network.seed_servers) {
-        if peer_target_allowed_by_local_scope(config, &dial) {
+        if let Some(dial) = normalize_peer_target(config, &dial) {
             targets.insert(dial);
         }
     }
@@ -8253,6 +8251,9 @@ fn normalize_peer_target(config: &NodeConfig, value: &str) -> Option<String> {
     }
 
     let parsed = parse_bootnode_dial_address(value)?;
+    if local_validator_vpn_peer_scope(config) && is_validator_vpn_dial_address(&parsed) {
+        return None;
+    }
     peer_target_allowed_by_local_scope(config, &parsed).then_some(parsed)
 }
 
@@ -9868,9 +9869,10 @@ mod tests {
         insert_seed_server_target, is_validator_vpn_dial_address,
         is_validator_vpn_relayer_dial_address, local_node_runs_validator_consensus,
         local_node_uses_service_batch_durability, local_peer_identity,
-        merge_peer_state_from_existing, parse_block_sync_busy_retry, parse_bootnode_dial_address,
-        peer_has_identifying_metadata, peer_identity_key, peer_is_eligible_block_sync_source,
-        peer_matches_address, peer_readiness_exclusion_reason_at, peer_write_gate,
+        merge_peer_state_from_existing, normalize_peer_target, parse_block_sync_busy_retry,
+        parse_bootnode_dial_address, peer_has_identifying_metadata, peer_identity_key,
+        peer_is_eligible_block_sync_source, peer_matches_address,
+        peer_readiness_exclusion_reason_at, peer_write_gate,
         pending_incoming_connections_from_host, preferred_connection_direction,
         preflight_validator_activation_transactions, receive_message,
         recover_peer_validator_address_for_vote_target, release_block_sync_apply_slot_after_worker,
@@ -10937,6 +10939,7 @@ mod tests {
             resolve_peer_transport_address(&config, "10.70.10.1:5622"),
             Some("10.70.10.1:5622".to_string())
         );
+        assert_eq!(normalize_peer_target(&config, "10.70.10.1:5622"), None);
         assert_eq!(
             resolve_peer_transport_address(&config, "10.70.20.1:5622"),
             Some("10.70.20.1:5622".to_string())
@@ -12934,7 +12937,7 @@ mod tests {
     }
 
     #[test]
-    fn activation_application_failure_self_quarantines_after_peer_block_apply() {
+    fn unfunded_activation_is_rejected_before_peer_block_append_or_quarantine() {
         let _guard = block_application_test_guard();
         let quarantine_path = crate::utils::resolve_data_path("data/validator_quarantine.json");
         let previous_quarantine = fs::read(&quarantine_path).ok();
@@ -12965,7 +12968,7 @@ mod tests {
             )),
             "fndsa".to_string(),
         );
-        let block = signed_block(
+        let block = Block::new_with_timestamp(
             1,
             vec![activation_tx],
             genesis.hash.clone(),
@@ -12977,21 +12980,14 @@ mod tests {
         chain.add_block(genesis);
         let blockchain = Arc::new(Mutex::new(chain));
 
-        let applied = apply_block_if_new(
-            &blockchain,
-            block.clone(),
-            Some(test_quorum_certificate(&block)),
-        );
-
+        let error = preflight_validator_activation_transactions(std::iter::once(&block))
+            .expect_err("unfunded activation must fail before validators sign or append it");
+        assert!(error.contains("nWei bonded"));
+        assert_eq!(blockchain.lock().unwrap().last().unwrap().block_index, 0);
         assert!(
-            !applied,
-            "activation failure must reject the P2P apply result"
+            current_self_quarantine_record().is_none(),
+            "rejecting invalid uncommitted input must not quarantine a healthy validator"
         );
-        assert_eq!(blockchain.lock().unwrap().last().unwrap().block_index, 1);
-        let quarantine = current_self_quarantine_record()
-            .expect("activation failure must self-quarantine the validator");
-        assert!(quarantine.reason.contains("activation transaction"));
-        assert_eq!(quarantine.divergence_height.0, 1);
 
         let _ = fs::remove_file(&quarantine_path);
         if let Some(previous_quarantine) = previous_quarantine {

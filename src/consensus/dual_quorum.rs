@@ -9,9 +9,11 @@ use crate::consensus::validator_keys::{
     verify_signer_key_matches_validator_at_height,
 };
 use crate::crypto::pqc::{PQCCiphertext, PQCManager, PQCPrivateKey, PQCPublicKey, PQCSignature};
+use crate::token::TOKEN_MANAGER;
 use crate::validator::{
     assert_epoch_validator_set_compatible_for_height, canonical_validator_clusters_for_epoch,
-    consensus_membership_validators, consensus_membership_validators_for_height, Validator,
+    consensus_membership_validators, consensus_membership_validators_for_height,
+    is_validator_activation_transaction, validate_validator_activation_transaction, Validator,
     ValidatorManager, ValidatorPerformanceUpdate, TESTNET_VALIDATOR_CLUSTER_SIZE,
     VALIDATOR_MANAGER,
 };
@@ -296,8 +298,6 @@ pub struct DualQuorumConsensus {
     pub penalization_enabled: bool,
     pub minimum_validator_count: usize,
     pub validator_vote_threshold: usize,
-    pub validation_quorum_threshold: f64,
-    pub cooperation_quorum_threshold: f64,
     pub vote_timeout: u64,
     pub block_timeout: u64,
     pub current_epoch: u64,
@@ -323,8 +323,6 @@ impl DualQuorumConsensus {
             penalization_enabled,
             minimum_validator_count: minimum_validator_count.max(1),
             validator_vote_threshold,
-            validation_quorum_threshold: VALIDATOR_QUORUM_RATIO,
-            cooperation_quorum_threshold: VALIDATOR_QUORUM_RATIO,
             vote_timeout: vote_timeout_secs
                 .max(FAST_CONSENSUS_VOTE_TIMEOUT_SECS)
                 .min(MAX_FAST_CONSENSUS_VOTE_TIMEOUT_SECS),
@@ -437,7 +435,8 @@ impl DualQuorumConsensus {
 
     fn validate_block_proposal(&self, block: &Block) -> Result<(), String> {
         Self::validate_block_proposal_static(block)?;
-        verify_block_proposer_key_matches_validator(block, &self.validator_manager)
+        verify_block_proposer_key_matches_validator(block, &self.validator_manager)?;
+        Self::validate_validator_activations(block, &self.validator_manager)
     }
 
     pub fn validate_block_proposal_static(block: &Block) -> Result<(), String> {
@@ -452,6 +451,30 @@ impl DualQuorumConsensus {
             Self::verify_transaction_static(tx)?;
         }
 
+        Ok(())
+    }
+
+    fn validate_validator_activations(
+        block: &Block,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<(), String> {
+        for tx in &block.transactions {
+            if !is_validator_activation_transaction(tx) {
+                continue;
+            }
+            validate_validator_activation_transaction(
+                tx,
+                TOKEN_MANAGER.as_ref(),
+                validator_manager,
+            )
+            .map_err(|error| {
+                format!(
+                    "validator activation preflight failed at height {} for transaction {}: {error}",
+                    block.block_index,
+                    tx.hash()
+                )
+            })?;
+        }
         Ok(())
     }
 
@@ -818,9 +841,10 @@ impl DualQuorumConsensus {
     ) -> Result<Vote, String> {
         Self::validate_block_proposal_static(proposed_block)?;
         verify_block_proposer_key_matches_validator(proposed_block, &VALIDATOR_MANAGER)?;
+        Self::validate_validator_activations(proposed_block, &VALIDATOR_MANAGER)?;
 
         let active_validators = consensus_membership_validators_for_height(
-            VALIDATOR_MANAGER.get_active_validators(),
+            VALIDATOR_MANAGER.get_all_validators(),
             proposed_block.block_index,
         )?;
         let cluster_context = Self::cluster_context_for_validators(
@@ -1746,13 +1770,14 @@ impl DualQuorumConsensus {
         round_number: u64,
         validator_manager: &Arc<ValidatorManager>,
     ) -> Result<Vote, String> {
+        Self::validate_validator_activations(proposed_block, validator_manager)?;
         assert_epoch_validator_set_compatible_for_height(proposed_block.block_index).map_err(
             |error| {
                 format!("refusing vote because validator-set snapshot is incompatible: {error}")
             },
         )?;
         let active_validators = consensus_membership_validators_for_height(
-            validator_manager.get_active_validators(),
+            validator_manager.get_all_validators(),
             proposed_block.block_index,
         )?;
         let cluster_context = Self::cluster_context_for_validators(
@@ -2079,8 +2104,7 @@ impl DualQuorumConsensus {
         } else {
             0.0
         };
-        let required_validation_ratio =
-            self.validation_quorum_threshold.max(VALIDATOR_QUORUM_RATIO);
+        let required_validation_ratio = VALIDATOR_QUORUM_RATIO;
         let validation_quorum_met = validation_ratio + 0.000_001 >= required_validation_ratio;
 
         // Check cooperation quorum using the same dynamic integer threshold.
@@ -2147,8 +2171,7 @@ impl DualQuorumConsensus {
         }
 
         let cumulative_weight = self.calculate_cumulative_vote_weight(votes);
-        let required_validation_ratio =
-            self.validation_quorum_threshold.max(VALIDATOR_QUORUM_RATIO);
+        let required_validation_ratio = VALIDATOR_QUORUM_RATIO;
         cumulative_weight + 0.000_001 >= total_live_weight * required_validation_ratio
     }
 
@@ -2213,8 +2236,7 @@ impl DualQuorumConsensus {
             return false;
         }
 
-        let required_validation_ratio =
-            self.validation_quorum_threshold.max(VALIDATOR_QUORUM_RATIO);
+        let required_validation_ratio = VALIDATOR_QUORUM_RATIO;
         cumulative_weight + 0.000_001 >= total_live_weight * required_validation_ratio
     }
 
@@ -2406,7 +2428,10 @@ impl DualQuorumConsensus {
             ));
         }
 
-        if validator_manager.get_current_epoch() == epoch {
+        let has_scheduled_activation = active_validators
+            .iter()
+            .any(|validator| validator.status == crate::validator::ValidatorStatus::Shadow);
+        if validator_manager.get_current_epoch() == epoch && !has_scheduled_activation {
             if validator_manager.get_cluster_count() != expected_cluster_count {
                 return Err(format!(
                     "validator registry cluster count {} does not match canonical count {}",
@@ -2516,7 +2541,7 @@ impl DualQuorumConsensus {
         validator_manager: &Arc<ValidatorManager>,
     ) -> Result<ConsensusClusterContext, String> {
         let active_validators = consensus_membership_validators_for_height(
-            validator_manager.get_active_validators(),
+            validator_manager.get_all_validators(),
             vote.block_index,
         )?;
         Self::cluster_context_for_validators(
@@ -2544,7 +2569,7 @@ impl DualQuorumConsensus {
 
     fn consensus_membership_for_height(&self, height: u64) -> Result<Vec<Validator>, String> {
         consensus_membership_validators_for_height(
-            self.validator_manager.get_active_validators(),
+            self.validator_manager.get_all_validators(),
             height,
         )
     }
@@ -2682,7 +2707,7 @@ impl DualQuorumConsensus {
         }
 
         let active_validators = consensus_membership_validators_for_height(
-            validator_manager.get_active_validators(),
+            validator_manager.get_all_validators(),
             block.block_index,
         )
         .map_err(|error| {
@@ -3802,7 +3827,7 @@ impl DualQuorumConsensus {
 
         if let Some(expected_cluster_id) = expected_cluster_id {
             let Ok(active_validators) = consensus_membership_validators_for_height(
-                self.validator_manager.get_active_validators(),
+                self.validator_manager.get_all_validators(),
                 vote.block_index,
             ) else {
                 return false;
@@ -3834,7 +3859,7 @@ impl DualQuorumConsensus {
 
     fn vote_validator_is_active(&self, vote: &Vote) -> bool {
         consensus_membership_validators_for_height(
-            self.validator_manager.get_active_validators(),
+            self.validator_manager.get_all_validators(),
             vote.block_index,
         )
         .map(|validators| {
@@ -4536,7 +4561,7 @@ mod tests {
                         ],
                         "pending_validators": ["validator7"],
                         "quorum_threshold": 4,
-                        "validator_set_hash": "six-validator-set"
+                        "validator_set_hash": "pre-transition-set"
                     },
                     {
                         "chain_id": 1264,
@@ -4553,7 +4578,7 @@ mod tests {
                             "validator7"
                         ],
                         "quorum_threshold": 5,
-                        "validator_set_hash": "seven-validator-set"
+                        "validator_set_hash": "post-transition-set"
                     }
                 ]
             })
@@ -4630,8 +4655,12 @@ mod tests {
             1,
         );
         assert_eq!(
-            validator_manager.apply_pending_shadow_activations(100),
-            vec!["validator7".to_string()]
+            validator_manager
+                .get_validator("validator7")
+                .expect("validator7 should remain registered")
+                .status,
+            ValidatorStatus::Shadow,
+            "the height-scoped membership resolver must not require an early registry mutation"
         );
         let vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
             "validator7",
@@ -4642,6 +4671,14 @@ mod tests {
         )
         .expect("validator7 must create a vote at its effective height");
         assert_eq!(vote.block_index, 100);
+        assert_eq!(
+            validator_manager
+                .get_validator("validator7")
+                .expect("validator7 should remain registered")
+                .status,
+            ValidatorStatus::Shadow,
+            "vote construction must not mutate finalized validator state"
+        );
 
         fs::remove_dir_all(temp_dir).ok();
     }

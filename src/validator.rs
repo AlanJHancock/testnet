@@ -836,10 +836,9 @@ impl ValidatorRegistry {
                     return Err(error);
                 }
             };
-        let active_validators: Vec<Validator> =
-            self.get_active_validators().into_iter().cloned().collect();
+        let validator_candidates = self.validators.values().cloned().collect::<Vec<_>>();
         let cluster_members = match canonical_validator_clusters_for_height(
-            active_validators,
+            validator_candidates,
             effective_epoch,
             height,
         ) {
@@ -1559,6 +1558,7 @@ pub fn apply_validator_activation_transaction(
     validator_manager: &Arc<ValidatorManager>,
     block_height: u64,
 ) -> Result<String, String> {
+    validate_validator_activation_transaction(tx, token_manager, validator_manager)?;
     let (validator, public_key, name, _stake_amount) = parse_validator_activation(tx)?;
     let minimum_stake = validator_manager
         .minimum_stake_amount()
@@ -1637,6 +1637,37 @@ pub fn apply_validator_activation_transaction(
     }
 }
 
+pub fn validate_validator_activation_transaction(
+    tx: &Transaction,
+    token_manager: &TokenManager,
+    validator_manager: &Arc<ValidatorManager>,
+) -> Result<(), String> {
+    let (validator, _public_key, _name, _stake_amount) = parse_validator_activation(tx)?;
+    let minimum_stake = validator_manager
+        .minimum_stake_amount()
+        .max(canonical_minimum_validator_stake_nwei());
+    let bonded_stake = token_manager.get_staked_balance(&validator, "SNRG");
+    if bonded_stake < minimum_stake {
+        return Err(format!(
+            "Validator {validator} has {bonded_stake} nWei bonded; {minimum_stake} nWei is required for activation."
+        ));
+    }
+
+    if let Some(existing) = validator_manager.get_validator(&validator) {
+        if matches!(
+            &existing.status,
+            ValidatorStatus::Jailed | ValidatorStatus::Slashed
+        ) {
+            return Err(format!(
+                "Validator {validator} is {:?}; activation replay will not revive disciplined validators.",
+                existing.status
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 pub fn replay_validator_activation_transactions(
     chain: &crate::block::BlockChain,
     token_manager: &TokenManager,
@@ -1703,6 +1734,10 @@ pub fn consensus_membership_validators_for_height(
     validators: Vec<Validator>,
     height: u64,
 ) -> Result<Vec<Validator>, String> {
+    let validators = validators
+        .into_iter()
+        .filter(|validator| validator_is_consensus_member_at_height(validator, height))
+        .collect::<Vec<_>>();
     let max_validators = configured_max_validators(&validators);
     // Height-scoped manifests remain useful as compatibility evidence, but the
     // replayed registry is the membership authority. A stale manifest must not
@@ -1736,6 +1771,26 @@ pub fn consensus_membership_validators_for_height(
     }
 
     Ok(consensus_membership_validators(validators))
+}
+
+fn validator_is_consensus_member_at_height(validator: &Validator, height: u64) -> bool {
+    let activation_is_effective = validator
+        .activation_effective_height
+        .is_none_or(|effective_height| effective_height <= height);
+    let has_required_stake = validator.stake_amount >= validator.min_stake_required;
+
+    match validator.status {
+        ValidatorStatus::Active => activation_is_effective && has_required_stake,
+        ValidatorStatus::Shadow => {
+            validator.activation_effective_height.is_some()
+                && activation_is_effective
+                && has_required_stake
+        }
+        ValidatorStatus::Inactive
+        | ValidatorStatus::Jailed
+        | ValidatorStatus::Slashed
+        | ValidatorStatus::Pending => false,
+    }
 }
 
 /// Hash the live active validator membership in its canonical consensus order.
@@ -3411,6 +3466,7 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
     fn height_scoped_validator_set_boundary_allows_the_split_at_h_plus_1001() {
         let _env_lock = validator_test_env_lock();
         let activation_height = 70_000;
+        let recorded_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS;
         let effective_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS + 1;
         let all_addresses = validator_addresses(0, 9);
         let old_addresses = validator_addresses(0, 8);
@@ -3441,7 +3497,32 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
         let _snapshot_path =
             EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
 
-        let mut registry = active_registry(10);
+        let mut registry = active_registry(9);
+        registry
+            .register_validator(pending_registration(9))
+            .expect("tenth validator should register");
+        registry
+            .start_shadow_activation("validator-9", activation_height)
+            .expect("tenth validator should enter the shadow window");
+
+        for (height, expected_count) in [
+            (activation_height, 9),
+            (recorded_height, 9),
+            (effective_height, 10),
+            (effective_height + 1, 10),
+        ] {
+            let membership = consensus_membership_validators_for_height(
+                registry.validators.values().cloned().collect(),
+                height,
+            )
+            .expect("height-scoped membership should resolve");
+            assert_eq!(
+                membership.len(),
+                expected_count,
+                "unexpected validator count at height {height}"
+            );
+        }
+
         registry
             .reorganize_clusters_for_height(12, effective_height - 1)
             .expect("old validator set should be usable before activation boundary");
@@ -3451,13 +3532,13 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
                 .values()
                 .map(|cluster| cluster.validators.len())
                 .collect::<Vec<_>>(),
-            vec![5, 5]
+            vec![9]
         );
         assert!(registry
             .get_validator_by_address("validator-9")
             .expect("tenth validator should remain in local registry")
             .cluster_id
-            .is_some());
+            .is_none());
 
         registry
             .reorganize_clusters_for_height(12, effective_height)
@@ -3470,6 +3551,25 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
             .collect::<Vec<_>>();
         cluster_sizes.sort_unstable();
         assert_eq!(cluster_sizes, vec![5, 5]);
+        assert_eq!(
+            registry
+                .get_validator_by_address("validator-9")
+                .expect("tenth validator should remain in local registry")
+                .status,
+            ValidatorStatus::Shadow,
+            "computing the effective-height cluster must not finalize activation early"
+        );
+
+        assert_eq!(
+            registry.apply_pending_shadow_activations(effective_height),
+            vec!["validator-9"]
+        );
+        let historical = consensus_membership_validators_for_height(
+            registry.validators.values().cloned().collect(),
+            recorded_height,
+        )
+        .expect("historical membership should remain resolvable after promotion");
+        assert_eq!(historical.len(), 9);
 
         std::fs::remove_dir_all(temp_dir).ok();
     }

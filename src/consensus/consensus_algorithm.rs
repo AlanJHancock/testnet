@@ -21,8 +21,8 @@ use crate::token::TOKEN_MANAGER;
 use crate::validator::{
     apply_validator_activation_transaction, consensus_membership_validators,
     consensus_membership_validators_for_height, is_validator_activation_transaction,
-    replay_validator_activation_transactions, Validator, ValidatorManager,
-    TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
+    replay_validator_activation_transactions, validate_validator_activation_transaction, Validator,
+    ValidatorManager, TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
 };
 use crate::wallet::WALLET_MANAGER;
 use crate::{debug, info, warn};
@@ -703,10 +703,9 @@ impl ProofOfSynergy {
                         // Get active validators, then reduce them to the authoritative
                         // height-specific consensus membership before leader or quorum
                         // math uses the set.
-                        let registry_active_validators = validator_manager.get_active_validators();
-                        let registry_active_count = registry_active_validators.len();
+                        let registry_active_count = validator_manager.get_active_validators().len();
                         let active_validators = match Self::consensus_membership_for_next_block(
-                            registry_active_validators,
+                            validator_manager.get_all_validators(),
                             latest_block.block_index,
                         ) {
                             Ok(validators) => validators,
@@ -1451,6 +1450,35 @@ impl ProofOfSynergy {
                                     );
                                     continue;
                                 }
+                                if let Err(error) =
+                                    Self::validate_finalized_validator_activations(
+                                        &new_block,
+                                        TOKEN_MANAGER.as_ref(),
+                                        &validator_manager,
+                                    )
+                                {
+                                    timing_trace::emit(
+                                        "rejected_proposal",
+                                        serde_json::json!({
+                                            "height": new_block.block_index,
+                                            "block_hash": new_block.hash.clone(),
+                                            "previous_hash": new_block.previous_hash.clone(),
+                                            "chosen_proposer": selected_validator.address.clone(),
+                                            "local_validator": local_validator_address.clone(),
+                                            "local_view_round": view_offset,
+                                            "reason": error.clone(),
+                                            "validator_activation_preflight": true
+                                        }),
+                                    );
+                                    warn!(
+                                        "consensus",
+                                        "Rejecting committed block before durable finalization because validator activation preflight failed",
+                                        "height" => new_block.block_index,
+                                        "hash" => new_block.hash.clone(),
+                                        "error" => error
+                                    );
+                                    continue;
+                                }
 
                                 // Block committed - update chain.
                                 // Reset view-change state: the chain has advanced, so the next
@@ -1640,13 +1668,13 @@ impl ProofOfSynergy {
                                                 Ok(record) => {
                                                     warn!(
                                                         "consensus",
-                                                        "Validator activation application failed; entering self-quarantine",
+                                                        "Validator activation application failed after finalization; self-quarantined and terminating",
                                                         "height" => new_block.block_index,
                                                         "tx_hash" => new_block.hash.clone(),
                                                         "quarantine_height" => record.divergence_height.0,
                                                         "error" => error
                                                     );
-                                                    continue;
+                                                    process::exit(1);
                                                 }
                                                 Err(quarantine_error) => {
                                                     warn!(
@@ -1698,12 +1726,12 @@ impl ProofOfSynergy {
                                             Ok(record) => {
                                                 warn!(
                                                     "consensus",
-                                                    "Validator registry persistence failed; entering self-quarantine",
+                                                    "Validator registry persistence failed after finalization; self-quarantined and terminating",
                                                     "height" => new_block.block_index,
                                                     "quarantine_height" => record.divergence_height.0,
                                                     "error" => error
                                                 );
-                                                continue;
+                                                process::exit(1);
                                             }
                                             Err(quarantine_error) => {
                                                 warn!(
@@ -3455,6 +3483,27 @@ impl ProofOfSynergy {
         *TEST_PROPOSAL_CACHE_DIR
             .lock()
             .expect("test proposal cache lock should succeed") = path;
+    }
+
+    fn validate_finalized_validator_activations(
+        block: &Block,
+        token_manager: &crate::token::TokenManager,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<(), String> {
+        for tx in &block.transactions {
+            if !is_validator_activation_transaction(tx) {
+                continue;
+            }
+            validate_validator_activation_transaction(tx, token_manager, validator_manager)
+                .map_err(|error| {
+                    format!(
+                        "validator activation preflight failed at height {} for transaction {}: {error}",
+                        block.block_index,
+                        tx.hash()
+                    )
+                })?;
+        }
+        Ok(())
     }
 
     fn apply_finalized_validator_activations(

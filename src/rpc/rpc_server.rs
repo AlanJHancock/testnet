@@ -926,14 +926,10 @@ fn canonical_epoch_cluster_assignments(
     epoch: u64,
     height: u64,
 ) -> Result<Vec<EpochClusterAssignmentSnapshot>, String> {
-    let active_validators = registry
-        .get_active_validators()
-        .into_iter()
-        .cloned()
-        .collect::<Vec<_>>();
+    let validator_candidates = registry.validators.values().cloned().collect::<Vec<_>>();
     let effective_epoch = effective_cluster_epoch_for_height(epoch, height)?;
     let height_scoped_membership =
-        consensus_membership_validators_for_height(active_validators, height)?;
+        consensus_membership_validators_for_height(validator_candidates, height)?;
     let assignment_hash =
         canonical_validator_clusters_digest(&height_scoped_membership, effective_epoch);
     Ok(
