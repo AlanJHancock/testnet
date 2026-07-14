@@ -463,7 +463,7 @@ impl DualQuorumConsensus {
         round_number: u64,
         transient_vote_recovery_min_age_secs: u64,
     ) -> Result<Vec<Vote>, String> {
-        let active_validators = self.collect_active_validators();
+        let active_validators = self.consensus_membership_for_height(proposed_block.block_index)?;
         if active_validators.len() < self.minimum_validator_count {
             return Err(format!(
                 "Insufficient active validators: {} active in consensus membership, {} required",
@@ -819,9 +819,13 @@ impl DualQuorumConsensus {
         Self::validate_block_proposal_static(proposed_block)?;
         verify_block_proposer_key_matches_validator(proposed_block, &VALIDATOR_MANAGER)?;
 
+        let active_validators = consensus_membership_validators_for_height(
+            VALIDATOR_MANAGER.get_active_validators(),
+            proposed_block.block_index,
+        )?;
         let cluster_context = Self::cluster_context_for_validators(
             &VALIDATOR_MANAGER,
-            &consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators()),
+            &active_validators,
             epoch_number,
             &proposed_block.validator_id,
         )?;
@@ -1747,8 +1751,10 @@ impl DualQuorumConsensus {
                 format!("refusing vote because validator-set snapshot is incompatible: {error}")
             },
         )?;
-        let active_validators =
-            consensus_membership_validators(validator_manager.get_active_validators());
+        let active_validators = consensus_membership_validators_for_height(
+            validator_manager.get_active_validators(),
+            proposed_block.block_index,
+        )?;
         let cluster_context = Self::cluster_context_for_validators(
             validator_manager,
             &active_validators,
@@ -2047,10 +2053,12 @@ impl DualQuorumConsensus {
             .cluster_vote_summary(&cluster_context.validators, votes)
             .map_err(|error| format!("invalid cluster vote set: {error}"))?;
 
-        if self.collect_active_validators().len() < self.minimum_validator_count {
+        let consensus_membership =
+            self.consensus_membership_for_height(proposed_block.block_index)?;
+        if consensus_membership.len() < self.minimum_validator_count {
             return Err(format!(
                 "Insufficient active validators: {} active, {} required",
-                self.collect_active_validators().len(),
+                consensus_membership.len(),
                 self.minimum_validator_count
             ));
         }
@@ -2486,7 +2494,7 @@ impl DualQuorumConsensus {
         proposed_block: &Block,
         epoch: u64,
     ) -> Result<ConsensusClusterContext, String> {
-        let active_validators = self.collect_active_validators();
+        let active_validators = self.consensus_membership_for_height(proposed_block.block_index)?;
         let context = Self::cluster_context_for_validators(
             &self.validator_manager,
             &active_validators,
@@ -2508,7 +2516,7 @@ impl DualQuorumConsensus {
         validator_manager: &Arc<ValidatorManager>,
     ) -> Result<ConsensusClusterContext, String> {
         let active_validators = consensus_membership_validators_for_height(
-            validator_manager.get_all_validators(),
+            validator_manager.get_active_validators(),
             vote.block_index,
         )?;
         Self::cluster_context_for_validators(
@@ -2534,8 +2542,11 @@ impl DualQuorumConsensus {
         Ok(())
     }
 
-    fn collect_active_validators(&self) -> Vec<Validator> {
-        consensus_membership_validators(self.validator_manager.get_active_validators())
+    fn consensus_membership_for_height(&self, height: u64) -> Result<Vec<Validator>, String> {
+        consensus_membership_validators_for_height(
+            self.validator_manager.get_active_validators(),
+            height,
+        )
     }
 
     fn resolve_local_validator_address() -> Option<String> {
@@ -2671,7 +2682,7 @@ impl DualQuorumConsensus {
         }
 
         let active_validators = consensus_membership_validators_for_height(
-            validator_manager.get_all_validators(),
+            validator_manager.get_active_validators(),
             block.block_index,
         )
         .map_err(|error| {
@@ -3790,7 +3801,12 @@ impl DualQuorumConsensus {
         }
 
         if let Some(expected_cluster_id) = expected_cluster_id {
-            let active_validators = self.collect_active_validators();
+            let Ok(active_validators) = consensus_membership_validators_for_height(
+                self.validator_manager.get_active_validators(),
+                vote.block_index,
+            ) else {
+                return false;
+            };
             let Ok(cluster_context) = Self::cluster_context_for_validators(
                 &self.validator_manager,
                 &active_validators,
@@ -3818,7 +3834,7 @@ impl DualQuorumConsensus {
 
     fn vote_validator_is_active(&self, vote: &Vote) -> bool {
         consensus_membership_validators_for_height(
-            self.validator_manager.get_all_validators(),
+            self.validator_manager.get_active_validators(),
             vote.block_index,
         )
         .map(|validators| {
@@ -4367,6 +4383,19 @@ mod tests {
             "validator6",
             "validator7",
         ]);
+        {
+            let mut registry = validator_manager
+                .registry
+                .lock()
+                .expect("transition test registry should lock");
+            let validator = registry
+                .validators
+                .get_mut("validator7")
+                .expect("transition validator should be registered");
+            validator.status = ValidatorStatus::Shadow;
+            validator.activation_recorded_height = Some(99);
+            validator.activation_effective_height = Some(100);
+        }
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -4450,6 +4479,171 @@ mod tests {
             error.contains("outside active validator set"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn vote_creation_and_qc_verification_agree_at_validator_set_transition() {
+        let _epoch_set_env_guard = epoch_set_env_test_lock()
+            .lock()
+            .expect("epoch validator set env test lock should succeed");
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        let validator_manager = approved_validator_manager(&[
+            "validator1",
+            "validator2",
+            "validator3",
+            "validator4",
+            "validator5",
+            "validator6",
+            "validator7",
+        ]);
+        {
+            let mut registry = validator_manager
+                .registry
+                .lock()
+                .expect("transition test registry should lock");
+            let validator = registry
+                .validators
+                .get_mut("validator7")
+                .expect("transition validator should be registered");
+            validator.status = ValidatorStatus::Shadow;
+            validator.activation_recorded_height = Some(99);
+            validator.activation_effective_height = Some(100);
+        }
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = env::temp_dir().join(format!("synergy-membership-transition-{unique}"));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        fs::write(
+            &snapshot_path,
+            serde_json::json!({
+                "epoch_validator_sets": [
+                    {
+                        "chain_id": 1264,
+                        "epoch_id": 0,
+                        "validator_set_version": 1,
+                        "effective_from_height": 1,
+                        "effective_to_height": 99,
+                        "active_validators": [
+                            "validator1",
+                            "validator2",
+                            "validator3",
+                            "validator4",
+                            "validator5",
+                            "validator6"
+                        ],
+                        "pending_validators": ["validator7"],
+                        "quorum_threshold": 4,
+                        "validator_set_hash": "six-validator-set"
+                    },
+                    {
+                        "chain_id": 1264,
+                        "epoch_id": 1,
+                        "validator_set_version": 2,
+                        "effective_from_height": 100,
+                        "active_validators": [
+                            "validator1",
+                            "validator2",
+                            "validator3",
+                            "validator4",
+                            "validator5",
+                            "validator6",
+                            "validator7"
+                        ],
+                        "quorum_threshold": 5,
+                        "validator_set_hash": "seven-validator-set"
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _snapshot_guard =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let mut before_boundary = Block::new(
+            99,
+            vec![],
+            "parent-hash".to_string(),
+            "validator1".to_string(),
+            1,
+        );
+        let (proposer_public_key, proposer_signature) = sign_with_local_validator_key_for_height(
+            before_boundary.block_index,
+            "validator1",
+            before_boundary.hash.as_bytes(),
+            &validator_manager,
+        )
+        .expect("validator1 proposer key should sign pre-transition block");
+        before_boundary.proposer_public_key = proposer_public_key.key_data;
+        before_boundary.block_signature = proposer_signature.signature_data;
+        before_boundary.block_signature_algorithm = "fndsa".to_string();
+
+        let vote_error = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator7",
+            &before_boundary,
+            0,
+            1,
+            &validator_manager,
+        )
+        .expect_err("pending validator must not create a pre-transition vote");
+        assert!(
+            vote_error.contains("not in the canonical proposal cluster"),
+            "unexpected vote error: {vote_error}"
+        );
+
+        let mut pre_transition_qc = test_qc(&before_boundary.hash);
+        pre_transition_qc.votes = vec![Vote {
+            validator_address: "validator7".to_string(),
+            block_hash: before_boundary.hash.clone(),
+            block_index: before_boundary.block_index,
+            epoch_number: 0,
+            round_number: 1,
+            signature: PQCSignature {
+                algorithm: PQCAlgorithm::FNDSA,
+                signature_data: Vec::new(),
+                message_hash: Vec::new(),
+                public_key_id: String::new(),
+                created_at: 0,
+            },
+            signer_public_key: Vec::new(),
+            timestamp: before_boundary.timestamp,
+        }];
+        let qc_error = DualQuorumConsensus::verify_commit_certificate_for_block_static(
+            &before_boundary,
+            &pre_transition_qc,
+            &validator_manager,
+        )
+        .expect_err("the QC verifier must reject the same pending signer");
+        assert!(
+            qc_error.contains("outside active validator set"),
+            "unexpected QC error: {qc_error}"
+        );
+
+        let after_boundary = Block::new(
+            100,
+            vec![],
+            "parent-hash".to_string(),
+            "validator1".to_string(),
+            1,
+        );
+        assert_eq!(
+            validator_manager.apply_pending_shadow_activations(100),
+            vec!["validator7".to_string()]
+        );
+        let vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator7",
+            &after_boundary,
+            1,
+            1,
+            &validator_manager,
+        )
+        .expect("validator7 must create a vote at its effective height");
+        assert_eq!(vote.block_index, 100);
+
+        fs::remove_dir_all(temp_dir).ok();
     }
 
     #[test]
