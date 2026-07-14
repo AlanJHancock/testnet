@@ -1,5 +1,6 @@
 use crate::cluster::quorum_threshold;
 use crate::synergy_types::{SYNERGY_TESTNET_V2_CHAIN_ID, SYNERGY_TESTNET_V2_NETWORK_ID};
+use crate::validator::{canonical_validator_clusters_for_epoch, Validator};
 use crate::validator_lifecycle::REQUIRED_VALIDATOR_STAKE_NWEI;
 use serde::{Deserialize, Serialize};
 
@@ -219,6 +220,14 @@ pub struct CommunityClusterAssignmentPreviewInput {
     #[serde(default)]
     pub requested_cluster_id: Option<u64>,
     #[serde(default)]
+    pub planned_validator_addresses: Vec<String>,
+    #[serde(default)]
+    pub assignment_epoch: u64,
+    #[serde(default)]
+    pub activation_height: Option<u64>,
+    #[serde(default)]
+    pub activation_effective_height: Option<u64>,
+    #[serde(default)]
     pub anti_affinity_passed: bool,
     #[serde(default)]
     pub fault_domain_diversity_passed: bool,
@@ -231,6 +240,14 @@ pub struct CommunityClusterAssignmentPreviewInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommunityClusterMembershipPreview {
+    pub cluster_id: u64,
+    pub validator_ids: Vec<String>,
+    pub quorum_threshold: usize,
+    pub active_liveness_margin: isize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommunityClusterAssignmentPreviewReport {
     pub ok: bool,
     pub decision: String,
@@ -240,6 +257,11 @@ pub struct CommunityClusterAssignmentPreviewReport {
     pub planned_validator_count: usize,
     pub dynamic_quorum_threshold: usize,
     pub active_liveness_margin: isize,
+    pub cluster_memberships: Vec<CommunityClusterMembershipPreview>,
+    pub assignment_epoch: u64,
+    pub activation_height: Option<u64>,
+    pub activation_recorded_height: Option<u64>,
+    pub activation_effective_height: Option<u64>,
     pub findings: Vec<OnboardingFinding>,
 }
 
@@ -894,10 +916,49 @@ pub fn preview_community_cluster_assignment(
         "validator id is required",
         &input.validator_id,
     );
-    if input.requested_cluster_id.is_none() {
+    if input.planned_validator_addresses.is_empty() {
         findings.push(error(
-            "cluster_assignment_missing",
-            "cluster assignment preview requires a planned cluster id",
+            "planned_validator_addresses_missing",
+            "cluster assignment preview requires the planned validator address set",
+        ));
+    }
+    if input.planned_validator_addresses.len() != input.planned_validator_count {
+        findings.push(error(
+            "planned_validator_addresses_count_mismatch",
+            format!(
+                "planned validator address count {} must equal planned validator count {}",
+                input.planned_validator_addresses.len(),
+                input.planned_validator_count
+            ),
+        ));
+    }
+    if input
+        .planned_validator_addresses
+        .iter()
+        .any(|address| address.trim().is_empty())
+    {
+        findings.push(error(
+            "planned_validator_address_missing",
+            "planned validator addresses must be non-empty",
+        ));
+    }
+    let mut unique_addresses = input.planned_validator_addresses.clone();
+    unique_addresses.sort_unstable();
+    unique_addresses.dedup();
+    if unique_addresses.len() != input.planned_validator_addresses.len() {
+        findings.push(error(
+            "duplicate_planned_validator_address",
+            "planned validator addresses must be unique",
+        ));
+    }
+    if !input
+        .planned_validator_addresses
+        .iter()
+        .any(|address| address == &input.validator_id)
+    {
+        findings.push(error(
+            "validator_id_not_in_planned_set",
+            "validator id must be present in the planned validator address set",
         ));
     }
     if input.planned_validator_count <= input.existing_validator_count {
@@ -930,9 +991,119 @@ pub fn preview_community_cluster_assignment(
             "cluster assignment cannot depend on archive-contained evidence",
         ));
     }
-    let dynamic_quorum_threshold = quorum_threshold(input.planned_validator_count);
-    let active_liveness_margin =
-        input.planned_validator_count as isize - dynamic_quorum_threshold as isize;
+
+    let activation_recorded_height = match input.activation_height {
+        Some(activation_height) => {
+            match activation_height.checked_add(crate::validator::VALIDATOR_SHADOW_PHASE_BLOCKS) {
+                Some(recorded_height) => Some(recorded_height),
+                None => {
+                    findings.push(error(
+                        "activation_height_overflow",
+                        "activation height cannot be advanced by the shadow phase",
+                    ));
+                    None
+                }
+            }
+        }
+        None => {
+            findings.push(error(
+                "activation_height_missing",
+                "activation height H is required for cluster assignment preview",
+            ));
+            None
+        }
+    };
+    let expected_activation_effective_height = activation_recorded_height.and_then(|height| {
+        height.checked_add(1).or_else(|| {
+            findings.push(error(
+                "activation_effective_height_overflow",
+                "activation effective height cannot be derived from the shadow completion height",
+            ));
+            None
+        })
+    });
+    if input.activation_effective_height.is_none() {
+        findings.push(error(
+            "activation_effective_height_missing",
+            "activation effective height H+1001 is required for cluster assignment preview",
+        ));
+    } else if input.activation_effective_height != expected_activation_effective_height {
+        findings.push(error(
+            "activation_effective_height_mismatch",
+            format!(
+                "activation effective height {:?} must equal shadow completion height {:?} plus one",
+                input.activation_effective_height, activation_recorded_height
+            ),
+        ));
+    }
+
+    let can_compute_clusters = !input.planned_validator_addresses.is_empty()
+        && input.planned_validator_addresses.len() == input.planned_validator_count
+        && input
+            .planned_validator_addresses
+            .iter()
+            .all(|address| !address.trim().is_empty())
+        && unique_addresses.len() == input.planned_validator_addresses.len();
+    let cluster_memberships = if can_compute_clusters {
+        let planned_validators = input
+            .planned_validator_addresses
+            .iter()
+            .map(|address| {
+                Validator::new(
+                    address.clone(),
+                    format!("community-preview-key-{address}"),
+                    format!("Community preview validator {address}"),
+                    0,
+                )
+            })
+            .collect::<Vec<_>>();
+        canonical_validator_clusters_for_epoch(&planned_validators, input.assignment_epoch)
+            .into_iter()
+            .map(|(cluster_id, members)| {
+                let validator_ids = members
+                    .into_iter()
+                    .map(|validator| validator.address)
+                    .collect::<Vec<_>>();
+                let validator_count = validator_ids.len();
+                let cluster_quorum_threshold = quorum_threshold(validator_count);
+                CommunityClusterMembershipPreview {
+                    cluster_id,
+                    validator_ids,
+                    quorum_threshold: cluster_quorum_threshold,
+                    active_liveness_margin: validator_count as isize
+                        - cluster_quorum_threshold as isize,
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let selected_membership = cluster_memberships.iter().find(|membership| {
+        membership
+            .validator_ids
+            .iter()
+            .any(|id| id == &input.validator_id)
+    });
+    if let Some(requested_cluster_id) = input.requested_cluster_id {
+        if let Some(membership) = selected_membership {
+            if requested_cluster_id != membership.cluster_id {
+                findings.push(error(
+                    "requested_cluster_assignment_mismatch",
+                    format!(
+                        "requested cluster {} does not match canonical cluster {}",
+                        requested_cluster_id, membership.cluster_id
+                    ),
+                ));
+            }
+        }
+    }
+    let dynamic_quorum_threshold = selected_membership
+        .map(|membership| membership.quorum_threshold)
+        .unwrap_or_default();
+    let active_liveness_margin = selected_membership
+        .map(|membership| membership.active_liveness_margin)
+        .unwrap_or_default();
+    let cluster_assignment = selected_membership.map(|membership| membership.cluster_id);
     let has_errors = has_errors(&findings);
     CommunityClusterAssignmentPreviewReport {
         ok: !has_errors,
@@ -944,10 +1115,15 @@ pub fn preview_community_cluster_assignment(
         .to_string(),
         dry_run_only: true,
         validator_id: input.validator_id.clone(),
-        cluster_assignment: input.requested_cluster_id,
+        cluster_assignment,
         planned_validator_count: input.planned_validator_count,
         dynamic_quorum_threshold,
         active_liveness_margin,
+        cluster_memberships,
+        assignment_epoch: input.assignment_epoch,
+        activation_height: input.activation_height,
+        activation_recorded_height,
+        activation_effective_height: input.activation_effective_height,
         findings,
     }
 }
@@ -1711,7 +1887,13 @@ mod tests {
             validator_id: "validator-7".to_string(),
             existing_validator_count: 6,
             planned_validator_count: 7,
-            requested_cluster_id: Some(1),
+            requested_cluster_id: Some(0),
+            planned_validator_addresses: (1..=7)
+                .map(|index| format!("validator-{index}"))
+                .collect(),
+            assignment_epoch: 0,
+            activation_height: Some(640_000),
+            activation_effective_height: Some(641_001),
             anti_affinity_passed: true,
             fault_domain_diversity_passed: true,
             would_reduce_quorum: false,
@@ -1854,6 +2036,187 @@ mod tests {
         assert!(!report.ok);
         assert!(codes.contains(&"unsafe_cluster_assignment".to_string()));
         assert_eq!(report.dynamic_quorum_threshold, 5);
+    }
+
+    fn cluster_assignment_for_count(
+        validator_count: usize,
+        validator_id: &str,
+        epoch: u64,
+        activation_height: u64,
+    ) -> CommunityClusterAssignmentPreviewInput {
+        CommunityClusterAssignmentPreviewInput {
+            chain_id: SYNERGY_TESTNET_V2_CHAIN_ID,
+            network_id: SYNERGY_TESTNET_V2_NETWORK_ID.to_string(),
+            validator_id: validator_id.to_string(),
+            existing_validator_count: validator_count - 1,
+            planned_validator_count: validator_count,
+            requested_cluster_id: None,
+            planned_validator_addresses: (1..=validator_count)
+                .map(|index| format!("validator-{index}"))
+                .collect(),
+            assignment_epoch: epoch,
+            activation_height: Some(activation_height),
+            activation_effective_height: Some(activation_height + 1_001),
+            anti_affinity_passed: true,
+            fault_domain_diversity_passed: true,
+            would_reduce_quorum: false,
+            would_displace_active_validator: false,
+            archive_contained_dependency: false,
+        }
+    }
+
+    #[test]
+    fn cluster_assignment_preview_reports_four_of_six_quorum() {
+        let input = cluster_assignment_for_count(6, "validator-6", 12, 70_000);
+        let report = preview_community_cluster_assignment(&input);
+
+        assert!(report.ok, "{:?}", report.findings);
+        assert_eq!(report.cluster_memberships.len(), 1);
+        assert_eq!(report.cluster_memberships[0].validator_ids.len(), 6);
+        assert_eq!(report.cluster_memberships[0].quorum_threshold, 4);
+        assert_eq!(report.dynamic_quorum_threshold, 4);
+        assert_eq!(report.activation_height, Some(70_000));
+        assert_eq!(report.activation_recorded_height, Some(71_000));
+        assert_eq!(report.activation_effective_height, Some(71_001));
+    }
+
+    #[test]
+    fn cluster_assignment_preview_reports_six_of_nine_quorum() {
+        let input = cluster_assignment_for_count(9, "validator-9", 12, 80_000);
+        let report = preview_community_cluster_assignment(&input);
+
+        assert!(report.ok, "{:?}", report.findings);
+        assert_eq!(report.cluster_memberships.len(), 1);
+        assert_eq!(report.cluster_memberships[0].validator_ids.len(), 9);
+        assert_eq!(report.cluster_memberships[0].quorum_threshold, 6);
+        assert_eq!(report.dynamic_quorum_threshold, 6);
+    }
+
+    #[test]
+    fn cluster_assignment_preview_reports_two_five_validator_clusters_with_four_of_five_quorum() {
+        let input = cluster_assignment_for_count(10, "validator-10", 12, 90_000);
+        let report = preview_community_cluster_assignment(&input);
+
+        assert!(report.ok, "{:?}", report.findings);
+        assert_eq!(report.cluster_memberships.len(), 2);
+        assert_eq!(
+            report
+                .cluster_memberships
+                .iter()
+                .map(|membership| membership.validator_ids.len())
+                .collect::<Vec<_>>(),
+            vec![5, 5]
+        );
+        assert!(report
+            .cluster_memberships
+            .iter()
+            .all(|membership| membership.quorum_threshold == 4));
+        assert_eq!(report.dynamic_quorum_threshold, 4);
+        assert_eq!(report.active_liveness_margin, 1);
+        assert_eq!(
+            report
+                .cluster_memberships
+                .iter()
+                .flat_map(|membership| membership.validator_ids.iter())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            10
+        );
+    }
+
+    #[test]
+    fn cluster_assignment_preview_is_deterministic_for_two_cluster_output() {
+        let input = cluster_assignment_for_count(10, "validator-10", 27, 100_000);
+        let mut reordered = input.clone();
+        reordered.planned_validator_addresses.reverse();
+
+        let first = preview_community_cluster_assignment(&input);
+        let second = preview_community_cluster_assignment(&reordered);
+        let runtime_validators = input
+            .planned_validator_addresses
+            .iter()
+            .map(|address| {
+                Validator::new(
+                    address.clone(),
+                    format!("runtime-preview-key-{address}"),
+                    format!("Runtime preview validator {address}"),
+                    0,
+                )
+            })
+            .collect::<Vec<_>>();
+        let runtime_memberships =
+            canonical_validator_clusters_for_epoch(&runtime_validators, input.assignment_epoch)
+                .into_iter()
+                .map(|(cluster_id, members)| {
+                    let validator_ids = members
+                        .into_iter()
+                        .map(|validator| validator.address)
+                        .collect::<Vec<_>>();
+                    let validator_count = validator_ids.len();
+                    CommunityClusterMembershipPreview {
+                        cluster_id,
+                        validator_ids,
+                        quorum_threshold: quorum_threshold(validator_count),
+                        active_liveness_margin: validator_count as isize
+                            - quorum_threshold(validator_count) as isize,
+                    }
+                })
+                .collect::<Vec<_>>();
+
+        assert_eq!(first.cluster_memberships, second.cluster_memberships);
+        assert_eq!(first.cluster_memberships, runtime_memberships);
+        assert_eq!(first.cluster_assignment, second.cluster_assignment);
+        assert_eq!(first.dynamic_quorum_threshold, 4);
+    }
+
+    #[test]
+    fn cluster_assignment_preview_scales_at_runtime_cluster_thresholds() {
+        for (validator_count, expected_sizes, expected_quorums) in [
+            (11, vec![6, 5], vec![4, 4]),
+            (14, vec![7, 7], vec![5, 5]),
+            (15, vec![5, 5, 5], vec![4, 4, 4]),
+        ] {
+            let input = cluster_assignment_for_count(
+                validator_count,
+                &format!("validator-{validator_count}"),
+                33,
+                120_000 + validator_count as u64,
+            );
+            let report = preview_community_cluster_assignment(&input);
+
+            assert!(report.ok, "{validator_count}: {:?}", report.findings);
+            assert_eq!(
+                report
+                    .cluster_memberships
+                    .iter()
+                    .map(|membership| membership.validator_ids.len())
+                    .collect::<Vec<_>>(),
+                expected_sizes
+            );
+            assert_eq!(
+                report
+                    .cluster_memberships
+                    .iter()
+                    .map(|membership| membership.quorum_threshold)
+                    .collect::<Vec<_>>(),
+                expected_quorums
+            );
+        }
+    }
+
+    #[test]
+    fn cluster_assignment_preview_rejects_inconsistent_effective_height() {
+        let mut input = cluster_assignment_for_count(10, "validator-10", 12, 110_000);
+        input.activation_effective_height = Some(111_000);
+        let report = preview_community_cluster_assignment(&input);
+
+        assert!(!report.ok);
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "activation_effective_height_mismatch"));
+        assert_eq!(report.activation_recorded_height, Some(111_000));
+        assert_eq!(report.activation_effective_height, Some(111_000));
     }
 
     #[test]
