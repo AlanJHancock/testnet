@@ -233,6 +233,8 @@ pub struct ValidatorRegistry {
     pub cluster_size: usize,
     pub epoch_length: u64,
     pub current_epoch: u64,
+    #[serde(default)]
+    pub validator_set_version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,26 +333,6 @@ impl EpochValidatorSetSnapshot {
                 .unwrap_or(true)
     }
 
-    fn active_validator_addresses(&self) -> Result<Vec<String>, String> {
-        let mut addresses = Vec::with_capacity(self.active_validators.len());
-        let mut seen = HashSet::new();
-        for member in &self.active_validators {
-            let address = member.validator_address().ok_or_else(|| {
-                "epoch validator set contains an empty active validator".to_string()
-            })?;
-            if !seen.insert(address.clone()) {
-                return Err(format!(
-                    "epoch validator set contains duplicate active validator {address}"
-                ));
-            }
-            addresses.push(address);
-        }
-        if addresses.is_empty() {
-            return Err("epoch validator set has no active validators".to_string());
-        }
-        Ok(addresses)
-    }
-
     fn validate_local_compatibility(&self) -> Result<(), String> {
         if self.snapshot_format_version > SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION {
             return Err(format!(
@@ -411,23 +393,6 @@ pub fn local_epoch_validator_set_protocol_version() -> String {
     canonical_genesis()
         .map(|genesis| genesis.protocol_version().to_string())
         .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
-}
-
-impl EpochValidatorMember {
-    fn validator_address(&self) -> Option<String> {
-        match self {
-            EpochValidatorMember::Address(address) => {
-                let trimmed = address.trim();
-                (!trimmed.is_empty()).then(|| trimmed.to_string())
-            }
-            EpochValidatorMember::Record {
-                validator_address, ..
-            } => {
-                let trimmed = validator_address.trim();
-                (!trimmed.is_empty()).then(|| trimmed.to_string())
-            }
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -578,6 +543,7 @@ impl ValidatorRegistry {
             cluster_size: TESTNET_VALIDATOR_CLUSTER_SIZE,
             epoch_length: 30000,
             current_epoch: 0,
+            validator_set_version: 0,
         }
     }
 
@@ -637,6 +603,7 @@ impl ValidatorRegistry {
             validator.activation_tx_hash = Some(registration.registration_tx_hash);
 
             self.validators.insert(address.to_string(), validator);
+            self.validator_set_version = self.validator_set_version.saturating_add(1);
 
             // Trigger cluster reorganization
             self.reorganize_clusters();
@@ -749,6 +716,7 @@ impl ValidatorRegistry {
         }
 
         if !activated.is_empty() {
+            self.validator_set_version = self.validator_set_version.saturating_add(1);
             if self
                 .reorganize_clusters_for_height(self.current_epoch, finalized_height)
                 .is_err()
@@ -978,6 +946,8 @@ impl ValidatorRegistry {
                 }
             }
 
+            self.validator_set_version = self.validator_set_version.saturating_add(1);
+
             // Trigger cluster reorganization
             self.reorganize_clusters();
 
@@ -994,6 +964,7 @@ impl ValidatorRegistry {
                 validator.consecutive_missed_votes = 0;
                 validator.missed_vote_window = 0;
                 validator.update_activity();
+                self.validator_set_version = self.validator_set_version.saturating_add(1);
                 self.reorganize_clusters();
                 Ok(())
             } else {
@@ -1109,6 +1080,8 @@ impl ValidatorManager {
                     registry
                         .validators
                         .insert(address.to_string(), active_validator);
+                    registry.validator_set_version =
+                        registry.validator_set_version.saturating_add(1);
                     registry.reorganize_clusters();
                     return Ok(());
                 }
@@ -1425,14 +1398,6 @@ fn epoch_validator_set_for_height(
     Ok(None)
 }
 
-fn epoch_validator_addresses_for_height(height: u64) -> Result<Option<Vec<String>>, String> {
-    let Some(set) = epoch_validator_set_for_height(height)? else {
-        return Ok(None);
-    };
-    set.validate_local_compatibility()?;
-    set.active_validator_addresses().map(Some)
-}
-
 pub fn epoch_validator_set_hash_for_height(height: u64) -> Result<Option<String>, String> {
     Ok(epoch_validator_set_for_height(height)?
         .and_then(|set| normalized_optional_string(set.validator_set_hash.as_deref())))
@@ -1474,35 +1439,36 @@ fn current_configured_consensus_order(
         .map(|validator| validator.address.clone())
         .collect::<HashSet<_>>();
 
-    if let Ok(Some(migration)) = consensus_fork::active_consensus_fork_migration() {
-        let mut ordered = migration
-            .new_validator_registry
-            .iter()
-            .map(|entry| entry.validator_address.clone())
-            .filter(|address| active_addresses.contains(address))
-            .collect::<Vec<_>>();
-        ordered.truncate(max_validators);
-        if !ordered.is_empty() {
-            return (Some(ordered), max_validators);
-        }
-    }
+    let configured_order = consensus_fork::active_consensus_fork_migration()
+        .ok()
+        .flatten()
+        .map(|migration| {
+            migration
+                .new_validator_registry
+                .into_iter()
+                .map(|entry| entry.validator_address)
+                .collect::<Vec<_>>()
+        })
+        .or_else(|| {
+            canonical_genesis().ok().map(|genesis| {
+                genesis
+                    .validators()
+                    .iter()
+                    .map(|entry| entry.operator_address.clone())
+                    .collect::<Vec<_>>()
+            })
+        });
 
-    if let Ok(genesis) = canonical_genesis() {
-        let genesis_addresses = genesis
-            .validators()
-            .iter()
-            .map(|entry| entry.operator_address.clone())
-            .collect::<HashSet<_>>();
-        let mut ordered = genesis
-            .validators()
-            .iter()
-            .map(|entry| entry.operator_address.clone())
+    if let Some(configured_order) = configured_order {
+        let configured_addresses = configured_order.iter().cloned().collect::<HashSet<_>>();
+        let mut ordered = configured_order
+            .into_iter()
             .filter(|address| active_addresses.contains(address))
             .collect::<Vec<_>>();
         let mut added_validators = active_validators
             .iter()
             .map(|validator| validator.address.clone())
-            .filter(|address| !genesis_addresses.contains(address))
+            .filter(|address| !configured_addresses.contains(address))
             .collect::<Vec<_>>();
         added_validators.sort();
         ordered.extend(added_validators);
@@ -1738,8 +1704,11 @@ pub fn consensus_membership_validators_for_height(
     height: u64,
 ) -> Result<Vec<Validator>, String> {
     let max_validators = configured_max_validators(&validators);
-    if let Some(ordered_addresses) = epoch_validator_addresses_for_height(height)? {
-        return validators_for_authoritative_order(validators, ordered_addresses, max_validators);
+    // Height-scoped manifests remain useful as compatibility evidence, but the
+    // replayed registry is the membership authority. A stale manifest must not
+    // suppress an activation that reached its recorded effective height.
+    if let Some(set) = epoch_validator_set_for_height(height)? {
+        set.validate_local_compatibility()?;
     }
 
     if let Some(migration) = consensus_fork::active_consensus_fork_migration()? {
@@ -1749,32 +1718,53 @@ pub fn consensus_membership_validators_for_height(
                 .iter()
                 .map(|entry| entry.validator_address.clone())
                 .collect::<Vec<_>>();
-            return validators_for_authoritative_order(
-                validators,
-                ordered_addresses,
-                max_validators,
-            );
-        }
-    }
-
-    if let Ok(genesis) = canonical_genesis() {
-        let ordered_addresses = genesis
-            .validators()
-            .iter()
-            .map(|entry| entry.operator_address.clone())
-            .collect::<Vec<_>>();
-        if !ordered_addresses.is_empty() {
-            if let Ok(genesis_validators) = validators_for_authoritative_order(
+            let mut membership = validators_for_authoritative_order(
                 validators.clone(),
-                ordered_addresses,
+                ordered_addresses.clone(),
                 max_validators,
-            ) {
-                return Ok(genesis_validators);
-            }
+            )?;
+            let known_addresses = ordered_addresses.into_iter().collect::<HashSet<_>>();
+            let mut additions = validators
+                .into_iter()
+                .filter(|validator| !known_addresses.contains(&validator.address))
+                .collect::<Vec<_>>();
+            additions.sort_by(|left, right| left.address.cmp(&right.address));
+            membership.extend(additions);
+            membership.truncate(max_validators);
+            return Ok(membership);
         }
     }
 
     Ok(consensus_membership_validators(validators))
+}
+
+/// Hash the live active validator membership in its canonical consensus order.
+/// Only fields that affect validator identity, voting key material, or bonded
+/// voting weight are included; local performance observations are excluded.
+pub fn canonical_active_validator_set_hash(active_validators: &[Validator]) -> String {
+    let ordered = consensus_membership_validators(active_validators.to_vec());
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"synergy-active-validator-set-v1");
+    hasher.update((ordered.len() as u64).to_be_bytes());
+    for validator in ordered {
+        for value in [validator.address.as_str(), validator.public_key.as_str()] {
+            hasher.update((value.len() as u64).to_be_bytes());
+            hasher.update(value.as_bytes());
+        }
+        hasher.update(validator.stake_amount.to_be_bytes());
+    }
+    hex::encode(hasher.finalize())
+}
+
+impl ValidatorRegistry {
+    pub fn canonical_active_validator_set_hash(&self) -> String {
+        let active_validators = self
+            .get_active_validators()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        canonical_active_validator_set_hash(&active_validators)
+    }
 }
 
 pub fn canonical_validator_clusters_for_height(
@@ -2260,18 +2250,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         std::fs::remove_dir_all(temp_dir).ok();
-        assert_eq!(
-            historical_addresses,
-            vec![
-                "validator-1",
-                "validator-2",
-                "validator-3",
-                "validator-4",
-                "validator-5",
-                "validator-6"
-            ]
-        );
-        assert!(!historical_addresses.contains(&"validator-7"));
+        assert_eq!(historical_addresses, validator_addresses(1, 7));
     }
 
     #[test]
@@ -2422,12 +2401,11 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
         let addresses = membership_addresses(&membership);
 
         std::fs::remove_dir_all(temp_dir).ok();
-        assert_eq!(addresses, validator_addresses(1, 6));
-        assert!(!addresses.contains(&"validator-7".to_string()));
+        assert_eq!(addresses, all_addresses);
         assert_eq!(
             crate::consensus::dual_quorum::required_validator_quorum(membership.len()),
-            4,
-            "peer/config/VPN drift must not inflate quorum beyond the EpochValidatorSet"
+            5,
+            "peer/config/VPN drift must not remove replayed active validators"
         );
     }
 
@@ -2477,12 +2455,11 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
         std::fs::remove_dir_all(temp_dir).ok();
         let before_addresses = membership_addresses(&before_boundary);
         let boundary_addresses = membership_addresses(&at_boundary);
-        assert_eq!(before_addresses, validator_addresses(1, 6));
-        assert!(!before_addresses.contains(&"validator-7".to_string()));
-        assert_eq!(boundary_addresses, validator_addresses(1, 7));
+        assert_eq!(before_addresses, all_addresses);
+        assert_eq!(boundary_addresses, all_addresses);
         assert_eq!(
             crate::consensus::dual_quorum::required_validator_quorum(before_boundary.len()),
-            4
+            5
         );
         assert_eq!(
             crate::consensus::dual_quorum::required_validator_quorum(at_boundary.len()),
@@ -2538,8 +2515,8 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
         let boundary_addresses = membership_addresses(&at_boundary);
         assert_eq!(before_addresses, validator_addresses(1, 6));
         assert!(before_addresses.contains(&"validator-6".to_string()));
-        assert_eq!(boundary_addresses, validator_addresses(1, 5));
-        assert!(!boundary_addresses.contains(&"validator-6".to_string()));
+        assert_eq!(boundary_addresses, validator_addresses(1, 6));
+        assert!(boundary_addresses.contains(&"validator-6".to_string()));
     }
 
     #[test]
@@ -2587,8 +2564,9 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
             .collect::<Vec<_>>();
 
         std::fs::remove_dir_all(temp_dir).ok();
-        assert_eq!(membership_addresses, canonical);
-        assert!(!membership_addresses.contains(&"synv11wsfus6ghzgjvm4glpatuy8tnyacrwealyjv"));
+        assert_eq!(&membership_addresses[..canonical.len()], canonical);
+        assert_eq!(membership_addresses.len(), canonical.len() + 1);
+        assert!(membership_addresses.contains(&"synv11wsfus6ghzgjvm4glpatuy8tnyacrwealyjv"));
     }
 
     #[test]
@@ -3286,6 +3264,147 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
             canonical_validator_clusters_digest(&ordered, 12),
             canonical_validator_clusters_digest(&reversed, 12)
         );
+        assert_eq!(
+            canonical_active_validator_set_hash(&ordered),
+            canonical_active_validator_set_hash(&reversed)
+        );
+    }
+
+    #[test]
+    fn active_validator_set_hash_is_live_and_changes_after_shadow_promotion() {
+        let _env_lock = validator_test_env_lock();
+        let mut registry = active_registry(6);
+        let genesis_hash = canonical_genesis()
+            .expect("canonical genesis should load")
+            .value()
+            .get("integrity")
+            .and_then(|integrity| integrity.get("validator_set_hash"))
+            .and_then(|hash| hash.as_str())
+            .expect("canonical genesis should contain a validator set hash")
+            .to_string();
+        let six_node_hash = registry.canonical_active_validator_set_hash();
+
+        assert_ne!(six_node_hash, genesis_hash);
+
+        let temp_dir = unique_test_dir("live-hash-stale-epoch-json");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([{
+                "effective_from_height": 0,
+                "validator_set_hash": "stale-static-validator-set"
+            }]),
+        );
+        let _snapshot_env =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+        assert_eq!(
+            registry.canonical_active_validator_set_hash(),
+            six_node_hash
+        );
+
+        let registration = pending_registration(6);
+        registry
+            .register_validator(registration)
+            .expect("validator should register before shadow activation");
+        registry
+            .start_shadow_activation("validator-6", 10)
+            .expect("validator should enter shadow activation");
+        assert_eq!(
+            registry.canonical_active_validator_set_hash(),
+            six_node_hash
+        );
+
+        assert_eq!(
+            registry.apply_pending_shadow_activations(1_011),
+            vec!["validator-6"]
+        );
+        let seven_node_hash = registry.canonical_active_validator_set_hash();
+        assert_ne!(seven_node_hash, six_node_hash);
+        assert_eq!(registry.get_active_validators().len(), 7);
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn replayed_tenth_activation_enters_membership_despite_stale_height_manifest() {
+        let _env_lock = validator_test_env_lock();
+        let activation_height = 42;
+        let effective_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS + 1;
+        let temp_dir = unique_test_dir("stale-manifest-tenth-activation");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([{
+                "effective_from_height": 0,
+                "active_validators": validator_addresses(0, 8),
+                "validator_set_hash": "stale-nine-validator-set"
+            }]),
+        );
+        let _snapshot_env =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let public_key = "replay-tenth-public-key";
+        let (token_manager, tenth_address, activation_tx) =
+            funded_activation_fixture(public_key, vec![31, 32, 33]);
+        let validator_manager = Arc::new(ValidatorManager::new());
+        {
+            let mut registry = validator_manager.registry.lock().unwrap();
+            for index in 0..9 {
+                let validator = active_validator(&format!("validator-{index}"));
+                registry
+                    .validators
+                    .insert(validator.address.clone(), validator);
+            }
+        }
+
+        let mut chain = BlockChain::new();
+        chain.add_block(Block::new_with_timestamp(
+            activation_height,
+            vec![activation_tx],
+            "genesis".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            1,
+        ));
+        chain.add_block(Block::new_with_timestamp(
+            activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS,
+            Vec::new(),
+            "activation-record-block".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            2,
+        ));
+        chain.add_block(Block::new_with_timestamp(
+            effective_height,
+            Vec::new(),
+            "activation-effective-block".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            3,
+        ));
+
+        let (applied, failed) =
+            replay_validator_activation_transactions(&chain, &token_manager, &validator_manager);
+        assert_eq!((applied, failed), (1, 0));
+        assert_eq!(
+            validator_manager
+                .get_validator(&tenth_address)
+                .expect("replayed tenth validator should exist")
+                .status,
+            ValidatorStatus::Active
+        );
+
+        let membership = consensus_membership_validators_for_height(
+            validator_manager.get_active_validators(),
+            effective_height,
+        )
+        .expect("stale manifest must not block live membership");
+        assert!(membership
+            .iter()
+            .any(|validator| validator.address == tenth_address));
+        assert_eq!(membership.len(), 10);
+        std::fs::remove_dir_all(temp_dir).ok();
     }
 
     #[test]
@@ -3332,13 +3451,13 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
                 .values()
                 .map(|cluster| cluster.validators.len())
                 .collect::<Vec<_>>(),
-            vec![9]
+            vec![5, 5]
         );
         assert!(registry
             .get_validator_by_address("validator-9")
             .expect("tenth validator should remain in local registry")
             .cluster_id
-            .is_none());
+            .is_some());
 
         registry
             .reorganize_clusters_for_height(12, effective_height)

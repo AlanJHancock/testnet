@@ -34,12 +34,13 @@ use crate::synq_receipts::{
 use crate::token::TOKEN_MANAGER;
 use crate::transaction::Transaction;
 use crate::validator::{
-    balanced_validator_cluster_id, canonical_validator_cluster_address,
-    canonical_validator_clusters_digest, canonical_validator_clusters_for_epoch,
-    canonical_validator_clusters_for_height, consensus_membership_validators_for_height,
-    effective_cluster_epoch_for_height, target_validator_cluster_count, Validator,
-    ValidatorManager, ValidatorRegistry, ValidatorStatus, INITIAL_VALIDATOR_SYNERGY_SCORE,
-    TESTNET_MIN_VALIDATOR_STAKE_NWEI, VALIDATOR_MANAGER,
+    balanced_validator_cluster_id, canonical_active_validator_set_hash,
+    canonical_validator_cluster_address, canonical_validator_clusters_digest,
+    canonical_validator_clusters_for_epoch, canonical_validator_clusters_for_height,
+    consensus_membership_validators_for_height, effective_cluster_epoch_for_height,
+    target_validator_cluster_count, Validator, ValidatorManager, ValidatorRegistry,
+    ValidatorStatus, INITIAL_VALIDATOR_SYNERGY_SCORE, TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+    VALIDATOR_MANAGER,
 };
 use crate::wallet::WALLET_MANAGER;
 use crate::{info, warn};
@@ -1255,6 +1256,68 @@ fn validator_to_rpc_json(
         object.insert("nickname".to_string(), json!(nickname));
     }
     value
+}
+
+fn validator_set_snapshot_json(
+    chain: &Arc<Mutex<BlockChain>>,
+    validator_manager: &Arc<ValidatorManager>,
+) -> Value {
+    // Capture the chain height before taking the registry lock so this read-only
+    // endpoint never establishes a chain-lock -> registry-lock dependency.
+    let finalized_height = chain_tip_snapshot_for_status(chain).height.unwrap_or(0);
+    let Ok(registry) = validator_manager.registry.lock() else {
+        return json!({
+            "error": "validator registry is temporarily unavailable",
+            "chain_id": 1264,
+            "is_latest": false,
+        });
+    };
+
+    let active = registry
+        .get_active_validators()
+        .into_iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let active = crate::validator::consensus_membership_validators(active);
+    let validator_set_hash = canonical_active_validator_set_hash(&active);
+    let addresses_for_status = |status: ValidatorStatus| {
+        let mut addresses = registry
+            .validators
+            .values()
+            .filter(|validator| validator.status == status)
+            .map(|validator| validator.address.clone())
+            .collect::<Vec<_>>();
+        addresses.sort();
+        addresses
+    };
+    let active_addresses = active
+        .iter()
+        .map(|validator| validator.address.clone())
+        .collect::<Vec<_>>();
+
+    json!({
+        "chain_id": 1264,
+        "network_id": current_network_id(),
+        "snapshot_format_version": 1,
+        "protocol_version": current_protocol_version(),
+        "binary_version": env!("CARGO_PKG_VERSION"),
+        "epoch_id": registry.current_epoch,
+        "validator_set_version": registry.validator_set_version,
+        "effective_from_height": finalized_height,
+        "current_finalized_height": finalized_height,
+        "active_validators": active_addresses.clone(),
+        "pending_validators": addresses_for_status(ValidatorStatus::Pending),
+        "syncing_validators": addresses_for_status(ValidatorStatus::Shadow),
+        "eligible_validators": active_addresses,
+        "jailed_validators": addresses_for_status(ValidatorStatus::Jailed),
+        "removed_validators": addresses_for_status(ValidatorStatus::Slashed),
+        "quorum_threshold": required_validator_quorum(active.len()),
+        "validator_set_hash": validator_set_hash,
+        "local_validator_set_hash": validator_set_hash,
+        "network_validator_set_hash": validator_set_hash,
+        "is_latest": true,
+        "generated_at_utc": current_timestamp(),
+    })
 }
 
 fn network_cluster_summary(validators: &[Validator]) -> Value {
@@ -2935,6 +2998,8 @@ fn handle_json_rpc(
             });
             json!(validators.into_iter().take(count).collect::<Vec<_>>())
         }
+
+        "synergy_getValidatorSetSnapshot" => validator_set_snapshot_json(chain, validator_manager),
 
         "synergy_slashValidator" => {
             if let (Some(address), Some(reason)) = (
@@ -5092,6 +5157,7 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_getShadowStatus"
         | "synergy_getRejoinEligibility"
         | "synergy_getValidatorSet"
+        | "synergy_getValidatorSetSnapshot"
         | "synergy_getProtocolConfig"
         | "synergy_getAegisStatus"
         | "synergy_getAegisCapabilities"
@@ -10629,6 +10695,76 @@ mod tests {
         assert_eq!(matched.stake_amount, first_validator.stake_nwei);
         assert_eq!(matched.status, ValidatorStatus::Active);
         assert_eq!(matched.total_blocks_produced, 1);
+    }
+
+    #[test]
+    fn validator_set_snapshot_reports_live_membership_and_hashes() {
+        let validator_manager = Arc::new(ValidatorManager::new());
+        {
+            let mut registry = validator_manager.registry.lock().unwrap();
+            for index in 0..6 {
+                let mut validator = Validator::new(
+                    format!("snapshot-validator-{index}"),
+                    format!("snapshot-key-{index}"),
+                    format!("Snapshot Validator {index}"),
+                    TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+                );
+                validator.status = ValidatorStatus::Active;
+                registry
+                    .validators
+                    .insert(validator.address.clone(), validator);
+            }
+            for (address, status) in [
+                ("snapshot-pending", ValidatorStatus::Pending),
+                ("snapshot-shadow", ValidatorStatus::Shadow),
+                ("snapshot-jailed", ValidatorStatus::Jailed),
+                ("snapshot-slashed", ValidatorStatus::Slashed),
+            ] {
+                let mut validator = Validator::new(
+                    address.to_string(),
+                    format!("{address}-key"),
+                    address.to_string(),
+                    TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+                );
+                validator.status = status;
+                registry.validators.insert(address.to_string(), validator);
+            }
+            registry.current_epoch = 12;
+            registry.validator_set_version = 7;
+        }
+
+        let chain = Arc::new(Mutex::new(BlockChain::new()));
+        let snapshot = handle_json_rpc(
+            "synergy_getValidatorSetSnapshot",
+            json!([]),
+            &TX_POOL,
+            &chain,
+            &validator_manager,
+        );
+
+        assert_eq!(
+            rpc_method_exposure("synergy_getValidatorSetSnapshot"),
+            Some(RpcMethodExposure::PublicRead)
+        );
+        assert_eq!(snapshot["chain_id"], json!(1264));
+        assert_eq!(snapshot["snapshot_format_version"], json!(1));
+        assert_eq!(snapshot["epoch_id"], json!(12));
+        assert_eq!(snapshot["validator_set_version"], json!(7));
+        assert_eq!(snapshot["active_validators"].as_array().unwrap().len(), 6);
+        assert_eq!(snapshot["pending_validators"], json!(["snapshot-pending"]));
+        assert_eq!(snapshot["syncing_validators"], json!(["snapshot-shadow"]));
+        assert_eq!(snapshot["jailed_validators"], json!(["snapshot-jailed"]));
+        assert_eq!(snapshot["removed_validators"], json!(["snapshot-slashed"]));
+        assert_eq!(snapshot["quorum_threshold"], json!(4));
+        assert_eq!(
+            snapshot["validator_set_hash"],
+            snapshot["local_validator_set_hash"]
+        );
+        assert_eq!(
+            snapshot["validator_set_hash"],
+            snapshot["network_validator_set_hash"]
+        );
+        assert_eq!(snapshot["is_latest"], json!(true));
     }
 
     #[test]

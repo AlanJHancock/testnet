@@ -1,6 +1,8 @@
 use crate::block::{Block, BlockChain, HOT_CHAIN_RETENTION_BLOCKS_ENV};
 use crate::config::NodeConfig;
-use crate::consensus::anti_divergence::current_validator_quarantine_duty_block;
+use crate::consensus::anti_divergence::{
+    current_validator_quarantine_duty_block, record_self_quarantine_for_canonical_lock_conflict,
+};
 use crate::consensus::chain_durability::{
     append_committed_block_bodies, append_committed_block_body,
 };
@@ -24,9 +26,9 @@ use crate::sync::SyncState;
 use crate::synergy_types::{AegisPqKeyId, AegisPqKeyRole, Epoch};
 use crate::transaction::Transaction;
 use crate::validator::{
-    apply_validator_activation_transaction, consensus_membership_validators,
-    is_validator_activation_transaction, ValidatorManager, ValidatorRegistration,
-    VALIDATOR_MANAGER,
+    apply_validator_activation_transaction, canonical_active_validator_set_hash,
+    consensus_membership_validators, is_validator_activation_transaction, ValidatorManager,
+    ValidatorRegistration, VALIDATOR_MANAGER,
 };
 use crate::{debug, error, info, warn};
 use hickory_resolver::config::ResolverConfig;
@@ -489,17 +491,7 @@ fn local_p2p_role(config: &NodeConfig) -> String {
 }
 
 fn canonical_validator_set_hash() -> String {
-    canonical_genesis()
-        .ok()
-        .and_then(|genesis| {
-            genesis
-                .value()
-                .get("integrity")
-                .and_then(|value| value.get("validator_set_hash"))
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_default()
+    canonical_active_validator_set_hash(&VALIDATOR_MANAGER.get_active_validators())
 }
 
 fn canonical_json_subtree_hash(path: &[&str]) -> String {
@@ -1538,8 +1530,9 @@ fn prune_stale_peers(
 ) {
     let now = current_timestamp();
     let active_validator_addresses =
-        configured_vote_target_validator_addresses(config, &HashSet::new())
+        consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
             .into_iter()
+            .map(|validator| validator.address)
             .collect::<HashSet<_>>();
     let mut peers = connected_peers.lock().unwrap();
     let stale_peer_keys = peers
@@ -3712,9 +3705,11 @@ fn status_ready_validator_addresses(
 ) -> Vec<String> {
     let mut validators = HashSet::<String>::new();
     let active_validator_addresses =
-        configured_vote_target_validator_addresses(config, &HashSet::new())
+        consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
             .into_iter()
+            .map(|validator| validator.address)
             .collect::<HashSet<_>>();
+    let expected_validator_set_hash = canonical_validator_set_hash();
     let now = current_timestamp();
 
     if current_validator_quarantine_duty_block().is_none() {
@@ -3735,7 +3730,7 @@ fn status_ready_validator_addresses(
             ) else {
                 continue;
             };
-            if peer_readiness_exclusion_reason_at(peer, now, Some(&canonical_validator_set_hash()))
+            if peer_readiness_exclusion_reason_at(peer, now, Some(&expected_validator_set_hash))
                 .is_some()
             {
                 continue;
@@ -3756,6 +3751,7 @@ fn status_ready_validator_addresses_with_local_duty_gate(
     local_duties_disabled: bool,
 ) -> Vec<String> {
     let mut validators = HashSet::<String>::new();
+    let expected_validator_set_hash = canonical_validator_set_hash();
 
     if !local_duties_disabled {
         if let Some(local_validator) = announced_validator_address(config) {
@@ -3766,7 +3762,7 @@ fn status_ready_validator_addresses_with_local_duty_gate(
     let now = current_timestamp();
     if let Ok(peers) = connected_peers.lock() {
         for peer in peers.values() {
-            if peer_readiness_exclusion_reason_at(peer, now, Some(&canonical_validator_set_hash()))
+            if peer_readiness_exclusion_reason_at(peer, now, Some(&expected_validator_set_hash))
                 .is_some()
             {
                 continue;
@@ -5968,7 +5964,7 @@ fn handle_vote_message(
 }
 
 fn recover_active_vote_validator_from_payload(
-    config: &NodeConfig,
+    _config: &NodeConfig,
     vote_validator_address: &str,
 ) -> Option<(String, Option<String>)> {
     let vote_validator_address = vote_validator_address.trim();
@@ -5977,8 +5973,9 @@ fn recover_active_vote_validator_from_payload(
     }
 
     let active_validator_addresses =
-        configured_vote_target_validator_addresses(config, &HashSet::new())
+        consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
             .into_iter()
+            .map(|validator| validator.address)
             .collect::<HashSet<_>>();
     if active_validator_addresses.contains(vote_validator_address) {
         return Some((vote_validator_address.to_string(), None));
@@ -8835,7 +8832,15 @@ fn apply_block_if_new(
 
     prune_transaction_hashes_from_pool(&confirmed_hashes);
     crate::dag::commit_blocks(&applied_blocks);
-    apply_token_state_for_blocks(&applied_blocks);
+    if let Err(error) = apply_token_state_for_blocks(&applied_blocks) {
+        quarantine_after_validator_activation_failure(
+            applied_blocks
+                .last()
+                .expect("applied block list is non-empty"),
+            &error,
+        );
+        return false;
+    }
 
     true
 }
@@ -9149,7 +9154,12 @@ fn apply_block_batch_batched_durability(
     }
 
     prune_transaction_hashes_from_pool(&confirmed_hashes);
-    apply_token_state_for_blocks(&applied_blocks);
+    if let Err(error) = apply_token_state_for_blocks(&applied_blocks) {
+        if let Some(block) = applied_blocks.last() {
+            quarantine_after_validator_activation_failure(block, &error);
+        }
+        return 0;
+    }
     applied
 }
 
@@ -9400,7 +9410,12 @@ fn apply_block_batch_legacy(
     }
 
     prune_transaction_hashes_from_pool(&confirmed_hashes);
-    apply_token_state_for_blocks(&applied_blocks);
+    if let Err(error) = apply_token_state_for_blocks(&applied_blocks) {
+        if let Some(block) = applied_blocks.last() {
+            quarantine_after_validator_activation_failure(block, &error);
+        }
+        return 0;
+    }
 
     applied
 }
@@ -9413,9 +9428,39 @@ fn block_matches_legacy_canonical_lock(block: &Block) -> bool {
         .unwrap_or(false)
 }
 
-fn apply_token_state_for_blocks(blocks: &[Block]) {
+fn quarantine_after_validator_activation_failure(block: &Block, error: &str) {
+    let reason = format!(
+        "validator activation state application failed at finalized height {}: {error}",
+        block.block_index
+    );
+    if let Err(quarantine_error) = record_self_quarantine_for_canonical_lock_conflict(
+        block.block_index,
+        None,
+        &block.hash,
+        &reason,
+    ) {
+        warn!(
+            "p2p",
+            "Validator activation failure could not persist self-quarantine; refusing consensus participation in-process",
+            "height" => block.block_index,
+            "block_hash" => block.hash.clone(),
+            "error" => error.to_string(),
+            "quarantine_error" => quarantine_error
+        );
+    } else {
+        warn!(
+            "p2p",
+            "Validator activation failure self-quarantined node",
+            "height" => block.block_index,
+            "block_hash" => block.hash.clone(),
+            "error" => error.to_string()
+        );
+    }
+}
+
+fn apply_token_state_for_blocks(blocks: &[Block]) -> Result<(), String> {
     if blocks.is_empty() {
-        return;
+        return Ok(());
     }
 
     let token_manager = crate::token::TOKEN_MANAGER.clone();
@@ -9460,13 +9505,20 @@ fn apply_token_state_for_blocks(blocks: &[Block]) {
                             "message" => message
                         );
                     }
-                    Err(error) => warn!(
-                        "p2p",
-                        "Failed to apply synced validator activation",
-                        "block_height" => block.block_index,
-                        "tx_hash" => tx.hash(),
-                        "error" => error
-                    ),
+                    Err(error) => {
+                        let failure = format!(
+                            "activation transaction {} could not be applied: {error}",
+                            tx.hash()
+                        );
+                        warn!(
+                            "p2p",
+                            "Failed to apply synced validator activation; refusing consensus participation",
+                            "block_height" => block.block_index,
+                            "tx_hash" => tx.hash(),
+                            "error" => failure.clone()
+                        );
+                        return Err(failure);
+                    }
                 }
             }
         }
@@ -9511,14 +9563,14 @@ fn apply_token_state_for_blocks(blocks: &[Block]) {
         }
     }
     if applied_validator_activations > 0 {
-        if let Err(error) = validator_manager.save_registry("data/validator_registry.json") {
-            warn!(
-                "p2p",
-                "Failed to persist validator registry after synced activation",
-                "error" => error.to_string()
-            );
-        }
+        validator_manager
+            .save_registry("data/validator_registry.json")
+            .map_err(|error| {
+                format!("validator registry persistence failed after activation: {error}")
+            })?;
     }
+
+    Ok(())
 }
 
 fn should_persist_chain_tip(tip_height: u64) -> bool {
@@ -12686,6 +12738,74 @@ mod tests {
 
         assert!(!apply_block_if_new(&blockchain, unsigned_block, None));
         assert_eq!(blockchain.lock().unwrap().last().unwrap().block_index, 0);
+    }
+
+    #[test]
+    fn activation_application_failure_self_quarantines_after_peer_block_apply() {
+        let _guard = block_application_test_guard();
+        let quarantine_path = crate::utils::resolve_data_path("data/validator_quarantine.json");
+        let previous_quarantine = fs::read(&quarantine_path).ok();
+        let _ = fs::remove_file(&quarantine_path);
+
+        let genesis = Block::new_with_timestamp(
+            0,
+            Vec::new(),
+            "genesis".to_string(),
+            "synv1leader".to_string(),
+            0,
+            100,
+        );
+        let activation_address =
+            crate::address::generate_validator_address("activation-application-failure-key", 1);
+        let activation_tx = crate::transaction::Transaction::new(
+            activation_address.clone(),
+            activation_address,
+            0,
+            0,
+            vec![1, 2, 3],
+            1,
+            21_000,
+            Some(format!(
+                "validator_activation:{{\"validator\":\"{}\",\"public_key\":\"activation-application-failure-key\",\"name\":\"Unfunded Validator\",\"stake_amount_nwei\":{}}}",
+                crate::address::generate_validator_address("activation-application-failure-key", 1),
+                crate::validator::TESTNET_MIN_VALIDATOR_STAKE_NWEI
+            )),
+            "fndsa".to_string(),
+        );
+        let block = signed_block(
+            1,
+            vec![activation_tx],
+            genesis.hash.clone(),
+            "synv1leader".to_string(),
+            1,
+            102,
+        );
+        let mut chain = BlockChain::new();
+        chain.add_block(genesis);
+        let blockchain = Arc::new(Mutex::new(chain));
+
+        let applied = apply_block_if_new(
+            &blockchain,
+            block.clone(),
+            Some(test_quorum_certificate(&block)),
+        );
+
+        assert!(
+            !applied,
+            "activation failure must reject the P2P apply result"
+        );
+        assert_eq!(blockchain.lock().unwrap().last().unwrap().block_index, 1);
+        let quarantine = current_self_quarantine_record()
+            .expect("activation failure must self-quarantine the validator");
+        assert!(quarantine.reason.contains("activation transaction"));
+        assert_eq!(quarantine.divergence_height.0, 1);
+
+        let _ = fs::remove_file(&quarantine_path);
+        if let Some(previous_quarantine) = previous_quarantine {
+            fs::write(&quarantine_path, previous_quarantine)
+                .expect("previous quarantine record should be restored");
+        }
+        clear_legacy_canonical_locks_for_tests();
     }
 
     #[test]
