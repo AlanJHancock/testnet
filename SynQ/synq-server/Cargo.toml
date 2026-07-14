@@ -10,4 +10,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tower-http = { version = "0.5", features = ["cors"] }
 synq-compiler = { path = "../compiler" }
+synq-vm       = { path = "../vm" }
 hex = { workspace = true }
