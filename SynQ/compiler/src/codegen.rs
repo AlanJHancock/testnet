@@ -246,7 +246,7 @@ impl CodeGenerator {
                 // via LoadImm128 so UInt256 state variables are not silently
                 // truncated. Small values stay as Push/i32 for backward compat.
                 // TODO: promote to LoadImm256 when primitive-types crate is added.
-                if *n > i32::MAX as u64 {
+                if *n > i32::MAX as u128 {
                     self.assembler.emit_op(OpCode::LoadImm128);
                     self.assembler.emit_u128(*n as u128);
                 } else {

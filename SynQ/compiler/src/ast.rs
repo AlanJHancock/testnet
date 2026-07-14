@@ -114,6 +114,6 @@ pub enum Type {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Literal {
     String(String),
-    Number(u64),
+    Number(u128),  // u128 so literals up to UInt256 range parse correctly
     Bool(bool),
 }

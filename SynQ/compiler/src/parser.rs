@@ -179,7 +179,7 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
         }
         Rule::literal         => parse_expression(pair.into_inner().next().unwrap()),
         Rule::number_literal  => Expression::Literal(Literal::Number(
-            pair.as_str().parse().unwrap_or(0)
+            pair.as_str().parse::<u128>().unwrap_or(0)
         )),
         Rule::string_literal  => Expression::Literal(Literal::String(
             pair.as_str().trim_matches('"').to_string()
