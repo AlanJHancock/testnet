@@ -88,6 +88,32 @@ pub fn canonical_validator_clusters_for_epoch(
         .collect()
 }
 
+pub fn canonical_validator_cluster_address(cluster_id: u64, members: &[Validator]) -> String {
+    let cluster_group = ((cluster_id % 5) + 1) as u8;
+    let validator_addresses = members
+        .iter()
+        .map(|validator| validator.address.clone())
+        .collect::<Vec<_>>();
+    let cluster_seed = format!("cluster-{cluster_id}-{}", validator_addresses.join("-"));
+    generate_cluster_address(&cluster_seed, cluster_group)
+}
+
+pub fn canonical_validator_clusters_digest(active_validators: &[Validator], epoch: u64) -> String {
+    let cluster_members = canonical_validator_clusters_for_epoch(active_validators, epoch);
+    let mut hasher = Sha3_256::new();
+    hasher.update(epoch.to_be_bytes());
+    for (cluster_id, members) in cluster_members {
+        hasher.update(cluster_id.to_be_bytes());
+        hasher.update((members.len() as u64).to_be_bytes());
+        for validator in members {
+            let address = validator.address.as_bytes();
+            hasher.update((address.len() as u64).to_be_bytes());
+            hasher.update(address);
+        }
+    }
+    hex::encode(hasher.finalize())
+}
+
 pub fn balanced_validator_cluster_id(index: usize, active_validator_count: usize) -> Option<u64> {
     let cluster_count = target_validator_cluster_count(active_validator_count);
     if cluster_count == 0 || index >= active_validator_count {
@@ -723,7 +749,12 @@ impl ValidatorRegistry {
         }
 
         if !activated.is_empty() {
-            self.reorganize_clusters();
+            if self
+                .reorganize_clusters_for_height(self.current_epoch, finalized_height)
+                .is_err()
+            {
+                self.clear_cluster_assignments();
+            }
         }
 
         activated
@@ -820,27 +851,47 @@ impl ValidatorRegistry {
         let active_validators: Vec<Validator> =
             self.get_active_validators().into_iter().cloned().collect();
 
+        let cluster_members = canonical_validator_clusters_for_epoch(&active_validators, epoch);
+        self.apply_cluster_memberships(cluster_members);
+    }
+
+    pub fn reorganize_clusters_for_height(
+        &mut self,
+        epoch: u64,
+        height: u64,
+    ) -> Result<(), String> {
+        self.current_epoch = epoch;
+        let active_validators: Vec<Validator> =
+            self.get_active_validators().into_iter().cloned().collect();
+        let cluster_members =
+            canonical_validator_clusters_for_height(active_validators, epoch, height)?;
+        self.apply_cluster_memberships(cluster_members);
+        Ok(())
+    }
+
+    fn clear_cluster_assignments(&mut self) {
+        self.clusters.clear();
         for validator in self.validators.values_mut() {
             validator.cluster_id = None;
             validator.cluster_address = None;
         }
-        self.clusters.clear();
+    }
 
-        if active_validators.is_empty() {
+    fn apply_cluster_memberships(&mut self, cluster_members: Vec<(u64, Vec<Validator>)>) {
+        self.clear_cluster_assignments();
+
+        if cluster_members.is_empty() {
             return;
         }
 
-        let cluster_members = canonical_validator_clusters_for_epoch(&active_validators, epoch);
-
         let now = Validator::current_timestamp();
         for (cluster_id, members) in cluster_members {
-            let cluster_group = ((cluster_id % 5) + 1) as u8;
             let validator_addresses: Vec<String> = members
                 .iter()
                 .map(|validator| validator.address.clone())
                 .collect();
-            let cluster_seed = format!("cluster-{}-{}", cluster_id, validator_addresses.join("-"));
-            let cluster_address = generate_cluster_address(&cluster_seed, cluster_group);
+            let cluster_address = canonical_validator_cluster_address(cluster_id, &members);
+            let cluster_group = ((cluster_id % 5) + 1) as u8;
             let total_stake = members.iter().map(|validator| validator.stake_amount).sum();
             let average_synergy_score = members
                 .iter()
@@ -1709,6 +1760,19 @@ pub fn consensus_membership_validators_for_height(
     Ok(consensus_membership_validators(validators))
 }
 
+pub fn canonical_validator_clusters_for_height(
+    active_validators: Vec<Validator>,
+    epoch: u64,
+    height: u64,
+) -> Result<Vec<(u64, Vec<Validator>)>, String> {
+    let height_scoped_membership =
+        consensus_membership_validators_for_height(active_validators, height)?;
+    Ok(canonical_validator_clusters_for_epoch(
+        &height_scoped_membership,
+        epoch,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1717,6 +1781,7 @@ mod tests {
         self, ConsensusForkMigration, ForkValidatorConsensusKey,
     };
     use base64::{engine::general_purpose, Engine as _};
+    use std::collections::BTreeMap;
     use std::sync::{Mutex, MutexGuard};
 
     static VALIDATOR_TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -3026,6 +3091,181 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
 
         assert_eq!(registry.clusters.len(), 2);
         assert_eq!(cluster_sizes, vec![5, 5]);
+    }
+
+    #[test]
+    fn tenth_validator_activation_at_h_plus_1001_produces_exact_two_five_validator_clusters() {
+        let activation_height = 50_000;
+        let effective_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS + 1;
+        let mut registry = active_registry(9);
+        let registration = pending_registration(9);
+        let tenth_address = registration.address.clone();
+        registry
+            .register_validator(registration)
+            .expect("tenth validator registration should be pending");
+        registry
+            .start_shadow_activation(&tenth_address, activation_height)
+            .expect("tenth validator should enter shadow activation");
+
+        assert!(registry
+            .apply_pending_shadow_activations(effective_height - 1)
+            .is_empty());
+        assert_eq!(
+            registry.apply_pending_shadow_activations(effective_height),
+            vec![tenth_address.clone()]
+        );
+
+        let mut actual = registry
+            .clusters
+            .iter()
+            .map(|(cluster_id, cluster)| {
+                (
+                    *cluster_id,
+                    cluster.validators.iter().cloned().collect::<Vec<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for members in actual.values_mut() {
+            members.sort();
+        }
+        let active = registry
+            .get_active_validators()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let expected = canonical_validator_clusters_for_epoch(&active, registry.current_epoch)
+            .into_iter()
+            .map(|(cluster_id, members)| {
+                (
+                    cluster_id,
+                    members
+                        .into_iter()
+                        .map(|validator| validator.address)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut expected = expected;
+        for members in expected.values_mut() {
+            members.sort();
+        }
+
+        assert_eq!(
+            actual, expected,
+            "activation must publish the exact canonical map"
+        );
+        assert_eq!(actual.len(), 2);
+        assert_eq!(
+            actual.values().map(Vec::len).collect::<Vec<_>>(),
+            vec![5, 5]
+        );
+        assert_eq!(
+            actual
+                .values()
+                .flatten()
+                .cloned()
+                .collect::<HashSet<_>>()
+                .len(),
+            10
+        );
+    }
+
+    #[test]
+    fn independently_ordered_validator_registries_have_identical_membership_and_digest() {
+        let addresses = validator_addresses(0, 9);
+        let ordered = active_validators_from_addresses(&addresses);
+        let mut reversed = ordered.clone();
+        reversed.reverse();
+        reversed.rotate_left(3);
+
+        let canonical = canonical_validator_clusters_for_epoch(&ordered, 12);
+        let independently_ordered = canonical_validator_clusters_for_epoch(&reversed, 12);
+        let membership = |clusters: Vec<(u64, Vec<Validator>)>| {
+            clusters
+                .into_iter()
+                .map(|(cluster_id, members)| {
+                    (
+                        cluster_id,
+                        members
+                            .into_iter()
+                            .map(|validator| validator.address)
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+
+        assert_eq!(membership(canonical), membership(independently_ordered));
+        assert_eq!(
+            canonical_validator_clusters_digest(&ordered, 12),
+            canonical_validator_clusters_digest(&reversed, 12)
+        );
+    }
+
+    #[test]
+    fn height_scoped_validator_set_boundary_allows_the_split_at_h_plus_1001() {
+        let _env_lock = validator_test_env_lock();
+        let activation_height = 70_000;
+        let effective_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS + 1;
+        let all_addresses = validator_addresses(0, 9);
+        let old_addresses = validator_addresses(0, 8);
+        let temp_dir = unique_test_dir("cluster-height-boundary");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([
+                {
+                    "epoch_id": 12,
+                    "validator_set_version": 1,
+                    "effective_from_height": 0,
+                    "effective_to_height": effective_height - 1,
+                    "active_validators": old_addresses,
+                    "validator_set_hash": "nine-validator-set"
+                },
+                {
+                    "epoch_id": 13,
+                    "validator_set_version": 2,
+                    "effective_from_height": effective_height,
+                    "active_validators": all_addresses,
+                    "previous_set_hash": "nine-validator-set",
+                    "validator_set_hash": "ten-validator-set"
+                }
+            ]),
+        );
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let mut registry = active_registry(10);
+        registry
+            .reorganize_clusters_for_height(12, effective_height - 1)
+            .expect("old validator set should be usable before activation boundary");
+        assert_eq!(
+            registry
+                .clusters
+                .values()
+                .map(|cluster| cluster.validators.len())
+                .collect::<Vec<_>>(),
+            vec![9]
+        );
+        assert!(registry
+            .get_validator_by_address("validator-9")
+            .expect("tenth validator should remain in local registry")
+            .cluster_id
+            .is_none());
+
+        registry
+            .reorganize_clusters_for_height(13, effective_height)
+            .expect("new validator set should be usable at activation boundary");
+        let mut cluster_sizes = registry
+            .clusters
+            .values()
+            .map(|cluster| cluster.validators.len())
+            .collect::<Vec<_>>();
+        cluster_sizes.sort_unstable();
+        assert_eq!(cluster_sizes, vec![5, 5]);
+
+        std::fs::remove_dir_all(temp_dir).ok();
     }
 
     #[test]
