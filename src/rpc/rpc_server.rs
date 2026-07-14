@@ -5732,13 +5732,20 @@ fn chain_identity_json() -> Value {
 fn protocol_config_json() -> Value {
     let configured_count = configured_validator_addresses().len();
     let active_count = VALIDATOR_MANAGER.get_active_validators().len();
+    protocol_config_json_for_validator_counts(configured_count, active_count)
+}
+
+fn protocol_config_json_for_validator_counts(
+    configured_count: usize,
+    active_count: usize,
+) -> Value {
     let validator_count = if active_count > 0 {
         active_count
     } else {
-        configured_count.max(1)
+        configured_count
     };
-    let required_quorum = required_validator_quorum(validator_count).max(1);
-    let cluster_count = target_validator_cluster_count(validator_count).max(1);
+    let required_quorum = required_validator_quorum(validator_count);
+    let cluster_count = target_validator_cluster_count(validator_count);
     json!({
         "chain": chain_identity_json(),
         "protocol_version": current_protocol_version(),
@@ -10392,6 +10399,32 @@ mod tests {
         validator.cluster_address = Some(format!("cluster-{cluster_id}"));
         validator.status = status;
         validator
+    }
+
+    #[test]
+    fn protocol_config_reports_zero_topology_for_empty_network() {
+        let config = protocol_config_json_for_validator_counts(0, 0);
+
+        assert_eq!(config["validator_count"], json!(0));
+        assert_eq!(config["validator_quorum"]["required"], json!(0));
+        assert_eq!(config["validator_quorum"]["total"], json!(0));
+        assert_eq!(config["cluster_count"], json!(0));
+        assert_eq!(config["cluster_id"], Value::Null);
+    }
+
+    #[test]
+    fn protocol_config_prefers_active_topology_and_uses_configured_fallback() {
+        let configured = protocol_config_json_for_validator_counts(6, 0);
+        assert_eq!(configured["validator_count"], json!(6));
+        assert_eq!(configured["validator_quorum"]["required"], json!(4));
+        assert_eq!(configured["cluster_count"], json!(1));
+        assert_eq!(configured["cluster_id"], json!(0));
+
+        let active = protocol_config_json_for_validator_counts(6, 10);
+        assert_eq!(active["validator_count"], json!(10));
+        assert_eq!(active["validator_quorum"]["required"], json!(7));
+        assert_eq!(active["cluster_count"], json!(2));
+        assert_eq!(active["cluster_id"], Value::Null);
     }
 
     #[test]
