@@ -24,9 +24,12 @@ current live validators from this branch.
 1. Build release binaries from the reviewed commit.
 2. Verify artifact hashes and rollback binary hashes.
 3. Run `synergy-node validator inspect-state` and `verify-state` on each target
-   state directory.
-4. Run `synergy-node validator migrate-state --dry-run` on each target.
-5. Run `synergy-node validator rebuild-derived-indexes --dry-run` on each target.
+   state directory. For verified compact append-log state, use the explicit
+   `--allow-testnet-recovery-checkpoint` flag.
+4. Run `synergy-node validator migrate-state --dry-run` on each target, passing
+   the same explicit compact-state flag when required.
+5. Run `synergy-node validator rebuild-derived-indexes --dry-run` on each target,
+   passing the same explicit compact-state flag when required.
 6. Upgrade one non-leader validator candidate only after health gates pass.
 7. Wait for post-upgrade height advancement, validator health, qRPC health,
    metrics, and Atlas/RPC parity.

@@ -25,14 +25,16 @@ state mutation.
 
 ```bash
 synergy-node validator inspect-state --state-root <workspace-copy>
-synergy-node validator verify-state --state-root <workspace-copy>
-synergy-node validator migrate-state --state-root <workspace-copy> --dry-run
-synergy-node validator rebuild-derived-indexes --state-root <workspace-copy> --dry-run
+synergy-node validator verify-state --state-root <workspace-copy> [--allow-testnet-recovery-checkpoint]
+synergy-node validator migrate-state --state-root <workspace-copy> --dry-run [--allow-testnet-recovery-checkpoint]
+synergy-node validator rebuild-derived-indexes --state-root <workspace-copy> --dry-run [--allow-testnet-recovery-checkpoint]
 ```
 
-The state verifier must pass before migration. Compacted state requires
-`state_checkpoint.json`, and checkpoint height/hash/digests must agree with the
-body store, canonical lock, and committed QC evidence.
+The state verifier must pass before migration. Commands are strict by default.
+The explicit `--allow-testnet-recovery-checkpoint` option may be used only when
+the compact append-log or approved testnet recovery evidence passes the same
+fail-closed verifier. Corrupt, conflicting, or incomplete QC/lock evidence still
+fails even when the option is present.
 
 ## Apply Rules
 
