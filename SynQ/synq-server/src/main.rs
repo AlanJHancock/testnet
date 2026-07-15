@@ -367,15 +367,19 @@ async fn attest_handler(
     }
 
     // Item 2: server-side EIP-191 verification
-    // Step 1: compute bytecode hash server-side (never trust client-supplied hash)
+    // Step 1: compute bytecode keccak256 server-side (canonical, never trust client hash)
     let bytecode_hash: [u8; 32] = keccak256(&raw_bytecode);
+    let bytecode_hash_hex = format!("0x{}", hex_encode(&bytecode_hash));
 
-    // Step 2: reconstruct the EIP-191 prefixed message
-    // personal_sign signs: keccak256("\x19Ethereum Signed Message:\n32" + bytecode_hash_bytes)
-    // The message being signed is the 32-byte hash, so the length prefix is the string "32"
-    let mut prefixed = Vec::with_capacity(60);
-    prefixed.extend_from_slice(b"\x19Ethereum Signed Message:\n32");
-    prefixed.extend_from_slice(&bytecode_hash);
+    // Step 2: reconstruct the exact text message the demo signs via personal_sign.
+    // The demo calls: personal_sign("SynQ bytecode keccak256:\n" + keccak256_hex, address)
+    // MetaMask applies EIP-191: keccak256("\x19Ethereum Signed Message:\n" + len + message)
+    let message = format!("SynQ bytecode keccak256:\n{}", bytecode_hash_hex);
+    let message_bytes = message.as_bytes();
+    let mut prefixed = Vec::with_capacity(30 + message_bytes.len());
+    prefixed.extend_from_slice(b"\x19Ethereum Signed Message:\n");
+    prefixed.extend_from_slice(message_bytes.len().to_string().as_bytes());
+    prefixed.extend_from_slice(message_bytes);
     let prefixed_hash: [u8; 32] = keccak256(&prefixed);
 
     // Step 3: ecrecover — extract the signer's address
@@ -455,7 +459,7 @@ async fn attest_handler(
                 "security_level":  format!("{:?}", pqc_sig.security_level),
                 "public_key":      hex_encode(&keypair.public_key),
                 "signature":       hex_encode(&pqc_sig.signature),
-                "signed_payload":  "SynQAttestationV1: magic(16) || scheme(1) || bytecode_hash(32) || evm_signer(20) || issued_at(4) || raw_bytecode",
+                "signed_payload":  "SynQAttestationV1: magic(16) || scheme(1) || keccak256_bytecode(32) || evm_signer(20) || issued_at_u32be(4) || raw_bytecode",
             },
             "trust_model": "ephemeral-self-signed",
             "note": "Ephemeral keypair: proves integrity of this attestation bundle but does not establish compiler identity. EVM signer address was independently recovered via ecrecover.",
