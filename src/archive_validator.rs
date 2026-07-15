@@ -830,7 +830,7 @@ mod tests {
     use super::*;
     use crate::consensus::self_realign::{
         create_snapshot_manifest, sign_snapshot_manifest, SnapshotBuildInput, SnapshotQcEvidence,
-        SNAPSHOT_CLASS_VALIDATOR_PRUNED,
+        SNAPSHOT_CLASS_VALIDATOR_PRUNED, VALIDATOR_PRUNED_REQUIRED_STATE_FILES,
     };
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::synergy_types::{AegisPqPublicKey, Epoch};
@@ -851,9 +851,14 @@ mod tests {
             .as_nanos();
         let root = std::env::temp_dir().join(format!("synergy-archive-reseed-{label}-{unique}"));
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("chain.json"), b"[]").unwrap();
-        std::fs::write(root.join("canonical_locks.json"), b"{}").unwrap();
-        std::fs::write(root.join("committed_qcs.jsonl"), b"{}\n").unwrap();
+        for file_name in VALIDATOR_PRUNED_REQUIRED_STATE_FILES {
+            let contents = match *file_name {
+                "chain.json" => b"[]".as_slice(),
+                "committed_blocks.jsonl" | "committed_qcs.jsonl" => b"{}\n".as_slice(),
+                _ => b"{}".as_slice(),
+            };
+            std::fs::write(root.join(file_name), contents).unwrap();
+        }
         root
     }
 

@@ -79,6 +79,7 @@ const MAX_STATUS_SYNC_BATCH: u32 = 48;
 const PUBLIC_HISTORY_GATEWAY_DIAL_ADDRESSES: &[&str] = &[
     "167.86.83.83:5623",
     "73.79.66.255:5622",
+    "rpc.synergynode.xyz:5623",
     "archive.synergynode.xyz:5615",
     "73.79.66.255:5615",
 ];
@@ -122,6 +123,9 @@ const PEER_STATUS_FRESHNESS_TTL_SECS: u64 = STALE_VALIDATOR_STATUS_SECS;
 const STATUS_READY_TTL_SECS: u64 = STALE_VALIDATOR_STATUS_SECS;
 const DUTY_DISABLED_TTL_SECS: u64 = STALE_VALIDATOR_STATUS_SECS;
 const QUARANTINE_STATUS_TTL_SECS: u64 = STALE_VALIDATOR_STATUS_SECS;
+const STATUS_REQUEST_MIN_INTERVAL_SECS: u64 = 5;
+const STATUS_RESPONSE_MIN_INTERVAL_SECS: u64 = 5;
+const MAX_STATUS_RATE_LIMIT_ENTRIES: usize = 1024;
 const BACKGROUND_SYNC_POLL_MILLIS: u64 = 1000;
 // A bounded historical QC index warm-up can take roughly 70 seconds on large logs.
 const SERVICE_BLOCK_SYNC_RESPONSE_TIMEOUT_SECS: u64 = 120;
@@ -207,6 +211,10 @@ lazy_static! {
     static ref BLOCK_SYNC_RETRY_ACTIVE: Mutex<HashSet<(String, u64)>> = Mutex::new(HashSet::new());
     static ref SERVICE_SYNC_COORDINATOR: Mutex<ServiceSyncCoordinator> =
         Mutex::new(ServiceSyncCoordinator::default());
+    static ref STATUS_REQUEST_LAST_SENT: Mutex<HashMap<String, (u64, u64)>> =
+        Mutex::new(HashMap::new());
+    static ref STATUS_RESPONSE_LAST_SENT: Mutex<HashMap<String, (u64, u64)>> =
+        Mutex::new(HashMap::new());
 }
 
 static BLOCK_SYNC_WORKERS_INIT: Once = Once::new();
@@ -280,6 +288,10 @@ struct ServiceSyncFlight {
 struct ServiceSyncCoordinator {
     next_generation: u64,
     in_flight: Option<ServiceSyncFlight>,
+    /// Authenticated source identities consumed by the current sync attempt.
+    /// This is cleared only after a batch applies successfully or an explicit
+    /// test/operator reset, so watchdog failover cannot cycle indefinitely.
+    attempted_sources: HashSet<String>,
 }
 
 pub struct P2PNetwork {
@@ -296,6 +308,9 @@ pub struct P2PNetwork {
 
 struct PeerConnection {
     address: String,
+    /// The endpoint observed on the connected socket. `address` may be a requested
+    /// DNS/validator alias and is not sufficient for authorization.
+    connected_endpoint: Option<String>,
     direction: ConnectionDirection,
     public_address: Option<String>,
     validator_address: Option<String>,
@@ -307,6 +322,8 @@ struct PeerConnection {
     txs_received: u64,
     stream: Option<TcpStream>,
     node_id: Option<String>,
+    /// The role from the verified handshake. Status messages must not be used for this.
+    handshake_role: Option<String>,
     version: Option<String>,
     capabilities: Vec<String>,
     last_known_height: u64,
@@ -356,6 +373,7 @@ struct CachedPeerState {
     public_address: Option<String>,
     validator_address: Option<String>,
     node_id: Option<String>,
+    handshake_role: Option<String>,
     version: Option<String>,
     capabilities: Vec<String>,
     last_known_height: u64,
@@ -1007,6 +1025,55 @@ fn normalized_status_string(value: Option<&str>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn claim_status_rate_limit(
+    last_sent: &Mutex<HashMap<String, (u64, u64)>>,
+    peer_address: &str,
+    session_id: u64,
+    now: u64,
+    min_interval_secs: u64,
+) -> bool {
+    let mut entries = last_sent
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((last_session_id, last_sent_at)) = entries.get(peer_address).copied() {
+        if last_session_id == session_id && now.saturating_sub(last_sent_at) < min_interval_secs {
+            return false;
+        }
+    }
+
+    entries.insert(peer_address.to_string(), (session_id, now));
+    if entries.len() > MAX_STATUS_RATE_LIMIT_ENTRIES {
+        if let Some((oldest_peer, _)) = entries
+            .iter()
+            .min_by_key(|(_, (_, sent_at))| *sent_at)
+            .map(|(peer, entry)| (peer.clone(), *entry))
+        {
+            entries.remove(&oldest_peer);
+        }
+    }
+    true
+}
+
+fn should_request_status(peer_address: &str, session_id: u64) -> bool {
+    claim_status_rate_limit(
+        &STATUS_REQUEST_LAST_SENT,
+        peer_address,
+        session_id,
+        current_timestamp(),
+        STATUS_REQUEST_MIN_INTERVAL_SECS,
+    )
+}
+
+fn should_send_status_response(peer_address: &str, session_id: u64) -> bool {
+    claim_status_rate_limit(
+        &STATUS_RESPONSE_LAST_SENT,
+        peer_address,
+        session_id,
+        current_timestamp(),
+        STATUS_RESPONSE_MIN_INTERVAL_SECS,
+    )
+}
+
 fn peer_has_remote_status(peer: &PeerConnection) -> bool {
     peer.status_received_at.is_some() && !peer.genesis_hash.trim().is_empty()
 }
@@ -1127,17 +1194,25 @@ fn peer_matches_address(peer: &PeerConnection, requested_address: &str) -> bool 
 }
 
 fn peer_is_public_history_gateway(peer: &PeerConnection) -> bool {
-    let node_id = peer
-        .node_id
+    peer.handshake_role
         .as_deref()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-
-    (node_id.contains("rpc") || node_id.contains("gateway") || node_id.contains("archive"))
-        && PUBLIC_HISTORY_GATEWAY_DIAL_ADDRESSES
-            .iter()
-            .any(|address| peer_matches_address(peer, address))
+        .map(|role| {
+            matches!(
+                role.trim().to_ascii_lowercase().as_str(),
+                "rpc_gateway"
+                    | "rpc_gateway_node"
+                    | "archive_validator"
+                    | "archive_validator_node"
+                    | "indexer_explorer"
+                    | "indexer_and_explorer_node"
+            )
+        })
+        .unwrap_or(false)
+        && PUBLIC_HISTORY_GATEWAY_DIAL_ADDRESSES.iter().any(|address| {
+            peer.connected_endpoint.as_deref().is_some_and(|endpoint| {
+                connected_endpoint_matches_configured_address(endpoint, address)
+            })
+        })
 }
 
 fn peer_has_authenticated_public_history_gateway_status(
@@ -1587,6 +1662,7 @@ fn build_cached_peer_state(peer: &PeerConnection) -> Option<(String, CachedPeerS
             public_address: peer.public_address.clone(),
             validator_address: peer.validator_address.clone(),
             node_id: peer.node_id.clone(),
+            handshake_role: peer.handshake_role.clone(),
             version: peer.version.clone(),
             capabilities: peer.capabilities.clone(),
             last_known_height: peer.last_known_height,
@@ -1635,6 +1711,9 @@ fn merge_cached_state_into_peer(peer: &mut PeerConnection, state: &CachedPeerSta
     }
     if peer.node_id.is_none() {
         peer.node_id = state.node_id.clone();
+    }
+    if peer.handshake_role.is_none() {
+        peer.handshake_role = state.handshake_role.clone();
     }
     if peer.version.is_none() {
         peer.version = state.version.clone();
@@ -1696,6 +1775,7 @@ fn merge_peer_state_from_existing(existing: &PeerConnection, replacement: &mut P
             public_address: existing.public_address.clone(),
             validator_address: existing.validator_address.clone(),
             node_id: existing.node_id.clone(),
+            handshake_role: existing.handshake_role.clone(),
             version: existing.version.clone(),
             capabilities: existing.capabilities.clone(),
             last_known_height: existing.last_known_height,
@@ -2087,6 +2167,12 @@ fn service_sync_identity(peer_address: &str, session_id: u64) -> ServiceSyncFlig
     }
 }
 
+fn service_sync_source_key(peer_address: &str, peer: &PeerConnection) -> String {
+    peer_identity_from_connection(peer)
+        .filter(|identity| !identity.trim().is_empty())
+        .unwrap_or_else(|| peer_address.to_string())
+}
+
 fn service_sync_phase_timeout(phase: ServiceSyncPhase) -> Duration {
     match phase {
         ServiceSyncPhase::AwaitingResponse => {
@@ -2172,22 +2258,69 @@ fn service_sync_start_flight(
     remote_height: u64,
     from_height: u64,
     count: u32,
+    expected_generation: Option<u64>,
 ) -> bool {
     if count == 0 {
         return false;
     }
+
+    let authorized = context
+        .connected_peers
+        .lock()
+        .ok()
+        .and_then(|peers| {
+            peers.get(&peer_address).map(|peer| {
+                peer_is_eligible_block_sync_source_for_local(&context.config, peer)
+                    && current_peer_session_id(&peer_address) == Some(session_id)
+            })
+        })
+        .unwrap_or(false);
+    if !authorized {
+        debug!(
+            "p2p",
+            "Refusing service block sync request to unauthorized source",
+            "peer" => peer_address.clone(),
+            "session_id" => session_id
+        );
+        return false;
+    }
+
+    let source_key = context
+        .connected_peers
+        .lock()
+        .ok()
+        .and_then(|peers| {
+            peers
+                .get(&peer_address)
+                .map(|peer| service_sync_source_key(&peer_address, peer))
+        })
+        .unwrap_or_else(|| peer_address.clone());
 
     let identity = service_sync_identity(&peer_address, session_id);
     let (generation, expired_flight) = {
         let mut coordinator = SERVICE_SYNC_COORDINATOR
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if expected_generation
+            .map(|expected| coordinator.next_generation != expected)
+            .unwrap_or(false)
+        {
+            return false;
+        }
         if coordinator
             .in_flight
             .as_ref()
             .map(|flight| !service_sync_flight_expired(flight))
             .unwrap_or(false)
         {
+            return false;
+        }
+        if !coordinator.attempted_sources.insert(source_key) {
+            debug!(
+                "p2p",
+                "Refusing to retry an authenticated service sync source in the same attempt",
+                "peer" => peer_address.clone()
+            );
             return false;
         }
 
@@ -2248,6 +2381,7 @@ fn service_sync_start_next(
     context: &ServiceSyncContext,
     excluded: Option<&ServiceSyncFlightIdentity>,
     preferred: Option<&ServiceSyncFlightIdentity>,
+    expected_generation: Option<u64>,
 ) -> bool {
     if service_sync_has_active_flight() {
         return false;
@@ -2278,7 +2412,7 @@ fn service_sync_start_next(
             .iter()
             .filter_map(|(address, peer)| {
                 if peer.stream.is_none()
-                    || !peer_is_eligible_block_sync_source(peer)
+                    || !peer_is_eligible_block_sync_source_for_local(&context.config, peer)
                     || peer.last_known_height <= local_height
                 {
                     return None;
@@ -2334,6 +2468,7 @@ fn service_sync_start_next(
             remote_height,
             from_height,
             count,
+            expected_generation,
         ) {
             return true;
         }
@@ -2367,9 +2502,18 @@ fn service_sync_release_and_reassign(
 
     let identity = failed_identity.unwrap_or_else(|| flight.identity.clone());
     if continue_with_same_source {
-        let _ = service_sync_start_next(&flight.context, None, Some(&identity));
+        {
+            let mut coordinator = SERVICE_SYNC_COORDINATOR
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if coordinator.next_generation != generation {
+                return;
+            }
+            coordinator.attempted_sources.clear();
+        }
+        let _ = service_sync_start_next(&flight.context, None, Some(&identity), Some(generation));
     } else {
-        let _ = service_sync_start_next(&flight.context, Some(&identity), None);
+        let _ = service_sync_start_next(&flight.context, Some(&identity), None, Some(generation));
     }
 }
 
@@ -2379,8 +2523,22 @@ fn service_sync_request_from_status(
     peer_state_cache: &PeerStateCacheArc,
     config: &NodeConfig,
 ) -> bool {
+    {
+        let mut coordinator = SERVICE_SYNC_COORDINATOR
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if coordinator.in_flight.is_none() && !coordinator.attempted_sources.is_empty() {
+            // A fresh authenticated status event is the explicit boundary for a
+            // new sync attempt. The preceding attempt remains bounded to one
+            // request per source, while the generation bump prevents stale
+            // watchdog/disconnect work from re-entering this attempt.
+            coordinator.next_generation = coordinator.next_generation.wrapping_add(1);
+            coordinator.attempted_sources.clear();
+        }
+    }
     service_sync_start_next(
         &service_sync_context(blockchain, connected_peers, peer_state_cache, config),
+        None,
         None,
         None,
     )
@@ -2409,6 +2567,7 @@ fn service_sync_request_explicit(
         remote_height,
         from_height,
         count,
+        None,
     )
 }
 
@@ -2522,8 +2681,9 @@ fn service_sync_release_disconnected_peer(peer_address: &str, session_id: Option
     };
 
     let identity = flight.identity.clone();
+    let generation = flight.generation;
     let _ = spawn_named_thread("p2p-service-sync-disconnect", move || {
-        let _ = service_sync_start_next(&flight.context, Some(&identity), None);
+        let _ = service_sync_start_next(&flight.context, Some(&identity), None, Some(generation));
     });
 }
 
@@ -2534,6 +2694,7 @@ fn reset_service_sync_coordinator_for_tests() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     coordinator.next_generation = coordinator.next_generation.wrapping_add(1);
     coordinator.in_flight = None;
+    coordinator.attempted_sources.clear();
 }
 
 fn handle_status_message(
@@ -2564,8 +2725,25 @@ fn handle_status_message(
         return;
     }
 
+    if !authorize_chain_requester_for_session(
+        connected_peers,
+        peer_state_cache,
+        config,
+        peer_address,
+        session_id,
+        "status",
+    ) {
+        return;
+    }
+
     let local_genesis_hash = resolve_local_genesis_hash(blockchain);
-    let (peer_validator_address, peer_node_id, peer_connected_at) = {
+    let (
+        peer_validator_address,
+        peer_connected_at,
+        peer_is_active_validator,
+        peer_is_designated_support,
+        peer_is_designated_relayer,
+    ) = {
         let peers = connected_peers.lock().unwrap();
         if !peer_session_is_current(peer_address, session_id) {
             return;
@@ -2575,13 +2753,32 @@ fn handle_status_message(
             .map(|peer| {
                 (
                     peer.validator_address.clone(),
-                    peer.node_id.clone(),
                     peer.connected_at,
+                    peer_is_active_consensus_validator(config, peer),
+                    peer_is_designated_support_sync_source(config, peer),
+                    peer_is_designated_relayer_sync_source(config, peer),
                 )
             })
-            .unwrap_or((None, None, current_timestamp()))
+            .unwrap_or((None, current_timestamp(), false, false, false))
     };
     let now = current_timestamp();
+    if local_node_runs_validator_consensus(config)
+        && (quarantined || consensus_duties_disabled)
+        && !peer_is_designated_support
+    {
+        warn!(
+            "p2p",
+            "Disconnecting duty-disabled or quarantined non-support peer",
+            "peer" => peer_address.to_string(),
+            "validator_address" => peer_validator_address.clone().unwrap_or_default(),
+            "quarantined" => quarantined,
+            "consensus_duties_disabled" => consensus_duties_disabled,
+            "recovery_state" => recovery_state.unwrap_or_default().to_string()
+        );
+        let mut peers = connected_peers.lock().unwrap();
+        disconnect_peer_entry_for_session(peer_state_cache, &mut peers, peer_address, session_id);
+        return;
+    }
     let validator_genesis_pending = genesis_hash.is_empty()
         && peer_validator_address
             .as_deref()
@@ -2686,9 +2883,11 @@ fn handle_status_message(
         chain.last().map(|block| block.block_index).unwrap_or(0)
     };
     if !status_peer_is_eligible_block_sync_source(
+        config,
         peer_validator_address.as_deref(),
-        peer_node_id.as_deref(),
-        recovery_state,
+        peer_is_active_validator,
+        peer_is_designated_support,
+        peer_is_designated_relayer,
         quarantined,
         consensus_duties_disabled,
     ) {
@@ -2713,6 +2912,7 @@ fn handle_status_message(
             return;
         };
         request_blocks_from_connected_peer(
+            config,
             connected_peers,
             peer_state_cache,
             peer_address,
@@ -3808,24 +4008,195 @@ fn peer_is_active_validator_sync_source(peer: &PeerConnection) -> bool {
         && !peer_duties_disabled_active_at(peer, now)
 }
 
-fn peer_is_eligible_block_sync_source(peer: &PeerConnection) -> bool {
+fn peer_is_eligible_block_sync_source(config: &NodeConfig, peer: &PeerConnection) -> bool {
     let now = current_timestamp();
     if peer_quarantine_active_at(peer, now) {
         return false;
     }
 
-    !peer_duties_disabled_active_at(peer, now)
-        || !peer_has_validator_identity(peer)
-        || peer_identity_is_support_sync_source(
-            peer.node_id.as_deref(),
-            peer.recovery_state.as_deref(),
+    (peer_is_active_consensus_validator(config, peer)
+        && peer_has_fresh_remote_status_at(peer, now)
+        && !peer_duties_disabled_active_at(peer, now))
+        || peer_is_designated_support_sync_source(config, peer)
+}
+
+fn peer_connected_endpoint(peer: &PeerConnection) -> Option<String> {
+    peer.connected_endpoint.clone().or_else(|| {
+        peer.stream
+            .as_ref()
+            .and_then(|stream| stream.peer_addr().ok())
+            .map(|address| address.to_string())
+    })
+}
+
+fn configured_support_endpoint_matches(config: &NodeConfig, peer: &PeerConnection) -> bool {
+    let Some(endpoint) = peer_connected_endpoint(peer) else {
+        return false;
+    };
+    PUBLIC_HISTORY_GATEWAY_DIAL_ADDRESSES
+        .iter()
+        .copied()
+        .chain(PUBLIC_RELAYER_DIAL_ADDRESSES.iter().copied())
+        .chain(
+            config
+                .network
+                .persistent_peers
+                .iter()
+                .chain(config.network.additional_dial_targets.iter())
+                .map(|value| value.as_str()),
+        )
+        .filter_map(|address| parse_bootnode_dial_address(address))
+        .any(|address| connected_endpoint_matches_configured_address(&endpoint, &address))
+}
+
+fn peer_endpoint_matches_configured_list(
+    peer: &PeerConnection,
+    configured_addresses: impl IntoIterator<Item = impl AsRef<str>>,
+) -> bool {
+    let Some(endpoint) = peer_connected_endpoint(peer) else {
+        return false;
+    };
+    configured_addresses.into_iter().any(|address| {
+        parse_bootnode_dial_address(address.as_ref()).is_some_and(|configured| {
+            connected_endpoint_matches_configured_address(&endpoint, &configured)
+        })
+    })
+}
+
+fn connected_endpoint_matches_configured_address(
+    connected_address: &str,
+    configured_address: &str,
+) -> bool {
+    let Some((connected_host, connected_port)) = endpoint_host_port(connected_address) else {
+        return false;
+    };
+    let Some((configured_host, configured_port)) = endpoint_host_port(configured_address) else {
+        return false;
+    };
+    if connected_port != configured_port {
+        return false;
+    }
+
+    let Some(connected_ip) = connected_host.parse::<std::net::IpAddr>().ok() else {
+        // A peer's authenticated transport endpoint must come from the socket,
+        // which is represented as a numeric address. A self-reported hostname
+        // is not evidence of where the connection actually came from.
+        return false;
+    };
+    if let Some(configured_ip) = configured_host.parse::<std::net::IpAddr>().ok() {
+        return connected_ip == configured_ip;
+    }
+
+    (configured_host.as_str(), configured_port)
+        .to_socket_addrs()
+        .map(|addresses| {
+            addresses
+                .into_iter()
+                .any(|address| address.ip() == connected_ip)
+        })
+        .unwrap_or(false)
+}
+
+fn endpoint_host_port(address: &str) -> Option<(String, u16)> {
+    let normalized = parse_bootnode_dial_address(address)?;
+    if let Some(stripped) = normalized.strip_prefix('[') {
+        let (host, port) = stripped.rsplit_once("]:")?;
+        return Some((host.to_string(), port.parse().ok()?));
+    }
+    let (host, port) = normalized.rsplit_once(':')?;
+    Some((host.to_string(), port.parse().ok()?))
+}
+
+fn peer_is_designated_support_sync_source(config: &NodeConfig, peer: &PeerConnection) -> bool {
+    let history_endpoint = peer_endpoint_matches_configured_list(
+        peer,
+        PUBLIC_HISTORY_GATEWAY_DIAL_ADDRESSES.iter().copied(),
+    );
+    let relayer_endpoint =
+        peer_endpoint_matches_configured_list(peer, PUBLIC_RELAYER_DIAL_ADDRESSES.iter().copied());
+    let configured_endpoint = configured_support_endpoint_matches(config, peer);
+    let role = peer
+        .handshake_role
+        .as_deref()
+        .map(|value| value.trim().to_ascii_lowercase());
+
+    (history_endpoint
+        && matches!(
+            role.as_deref(),
+            Some(
+                "rpc_gateway"
+                    | "rpc_gateway_node"
+                    | "archive_validator"
+                    | "archive_validator_node"
+                    | "indexer_explorer"
+                    | "indexer_and_explorer_node"
+            )
+        ))
+        || ((relayer_endpoint || configured_endpoint)
+            && matches!(role.as_deref(), Some("relayer" | "relayer_node")))
+}
+
+fn peer_is_designated_relayer_sync_source(config: &NodeConfig, peer: &PeerConnection) -> bool {
+    peer.handshake_role
+        .as_deref()
+        .map(|role| {
+            matches!(
+                role.trim().to_ascii_lowercase().as_str(),
+                "relayer" | "relayer_node"
+            )
+        })
+        .unwrap_or(false)
+        && peer_endpoint_matches_configured_list(
+            peer,
+            PUBLIC_RELAYER_DIAL_ADDRESSES
+                .iter()
+                .copied()
+                .chain(
+                    config
+                        .network
+                        .persistent_peers
+                        .iter()
+                        .map(|value| value.as_str()),
+                )
+                .chain(
+                    config
+                        .network
+                        .additional_dial_targets
+                        .iter()
+                        .map(|value| value.as_str()),
+                ),
         )
 }
 
+fn local_validator_requires_designated_sync_sources(config: &NodeConfig) -> bool {
+    local_node_runs_validator_consensus(config)
+        && (current_validator_quarantine_duty_block().is_some()
+            || !announced_validator_address(config).is_some_and(|address| {
+                consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
+                    .into_iter()
+                    .any(|validator| validator.address == address)
+            }))
+}
+
+fn peer_is_eligible_block_sync_source_for_local(
+    config: &NodeConfig,
+    peer: &PeerConnection,
+) -> bool {
+    if local_node_uses_relayer_only_topology(config) {
+        return peer_is_designated_relayer_sync_source(config, peer);
+    }
+    if local_validator_requires_designated_sync_sources(config) {
+        return peer_is_designated_support_sync_source(config, peer);
+    }
+    peer_is_eligible_block_sync_source(config, peer)
+}
+
 fn status_peer_is_eligible_block_sync_source(
+    config: &NodeConfig,
     peer_validator_address: Option<&str>,
-    peer_node_id: Option<&str>,
-    recovery_state: Option<&str>,
+    peer_is_active_validator: bool,
+    peer_is_designated_support: bool,
+    peer_is_designated_relayer: bool,
     quarantined: bool,
     consensus_duties_disabled: bool,
 ) -> bool {
@@ -3833,39 +4204,70 @@ fn status_peer_is_eligible_block_sync_source(
         return false;
     }
 
-    !consensus_duties_disabled
-        || peer_validator_address
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_none()
-        || peer_identity_is_support_sync_source(peer_node_id, recovery_state)
+    if local_node_uses_relayer_only_topology(config) {
+        return peer_is_designated_relayer;
+    }
+    if local_validator_requires_designated_sync_sources(config) {
+        return peer_is_designated_support;
+    }
+    (!consensus_duties_disabled && peer_is_active_validator)
+        || peer_is_designated_support
+        || peer_validator_address.is_none() && peer_is_designated_relayer
 }
 
-fn peer_identity_is_support_sync_source(
-    peer_node_id: Option<&str>,
-    recovery_state: Option<&str>,
+fn peer_is_authorized_block_sync_requester(config: &NodeConfig, peer: &PeerConnection) -> bool {
+    !peer.quarantined
+        && !peer.consensus_duties_disabled
+        && (peer_is_active_consensus_validator(config, peer)
+            || peer_is_designated_support_sync_source(config, peer))
+}
+
+fn authorize_chain_requester_for_session(
+    connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
+    config: &NodeConfig,
+    peer_address: &str,
+    session_id: u64,
+    request_kind: &str,
 ) -> bool {
-    let node_id = peer_node_id.unwrap_or_default().trim().to_ascii_lowercase();
-    let recovery_state = recovery_state
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
+    if !local_node_runs_validator_consensus(config) {
+        return true;
+    }
 
-    node_id.starts_with("sentry")
-        || node_id.starts_with("relayer")
-        || node_id.starts_with("relay")
-        || node_id.contains("rpc")
-        || node_id.contains("gateway")
-        || node_id.contains("archive")
-        || recovery_state.contains("support")
-        || recovery_state.contains("sentry")
-        || recovery_state.contains("relay")
+    let authorized = {
+        let peers = connected_peers.lock().unwrap();
+        peer_session_is_current(peer_address, session_id)
+            && peers
+                .get(peer_address)
+                .map(|peer| peer_is_authorized_block_sync_requester(config, peer))
+                .unwrap_or(false)
+    };
+    if authorized {
+        return true;
+    }
+
+    warn!(
+        "p2p",
+        "Refusing canonical chain request from non-active, non-support peer",
+        "peer" => peer_address.to_string(),
+        "session_id" => session_id,
+        "request_kind" => request_kind.to_string()
+    );
+    let mut peers = connected_peers.lock().unwrap();
+    disconnect_peer_entry_for_session(peer_state_cache, &mut peers, peer_address, session_id);
+    false
 }
 
-fn select_block_sync_targets(peers: &PeerMap, max_targets: usize) -> Vec<String> {
+fn select_block_sync_targets(
+    config: &NodeConfig,
+    peers: &PeerMap,
+    max_targets: usize,
+) -> Vec<String> {
     let mut candidates = peers
         .iter()
-        .filter(|(_, peer)| peer.stream.is_some() && peer_is_eligible_block_sync_source(peer))
+        .filter(|(_, peer)| {
+            peer.stream.is_some() && peer_is_eligible_block_sync_source_for_local(config, peer)
+        })
         .map(|(address, peer)| {
             let has_validator_identity = peer
                 .validator_address
@@ -3895,6 +4297,15 @@ fn select_block_sync_targets(peers: &PeerMap, max_targets: usize) -> Vec<String>
         .take(max_targets.max(1))
         .map(|(address, _, _, _)| address)
         .collect()
+}
+
+fn best_connected_block_sync_source_height(config: &NodeConfig, peers: &PeerMap) -> u64 {
+    peers
+        .values()
+        .filter(|peer| peer_is_eligible_block_sync_source_for_local(config, peer))
+        .map(|peer| peer.last_known_height)
+        .max()
+        .unwrap_or(0)
 }
 
 fn best_connected_validator_height_with_support(
@@ -4346,11 +4757,14 @@ fn configure_peer_stream(stream: &TcpStream) {
     let _ = stream.set_write_timeout(None);
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PeerSnapshot {
     pub address: String,
     pub direction: String,
     pub node_id: Option<String>,
+    /// Derived only after the signed P2P handshake and endpoint authorization.
+    pub authenticated_designated_support: bool,
+    pub authenticated_designated_relayer: bool,
     pub public_address: Option<String>,
     pub validator_address: Option<String>,
     pub version: Option<String>,
@@ -4377,7 +4791,7 @@ pub struct PeerSnapshot {
     pub txs_received: u64,
 }
 
-fn build_peer_snapshot(peer: &PeerConnection, now: u64) -> PeerSnapshot {
+fn build_peer_snapshot(config: &NodeConfig, peer: &PeerConnection, now: u64) -> PeerSnapshot {
     let expected_validator_set_hash = canonical_validator_set_hash();
     PeerSnapshot {
         address: peer
@@ -4390,6 +4804,8 @@ fn build_peer_snapshot(peer: &PeerConnection, now: u64) -> PeerSnapshot {
             ConnectionDirection::Outgoing => "outgoing".to_string(),
         },
         node_id: peer.node_id.clone(),
+        authenticated_designated_support: peer_is_designated_support_sync_source(config, peer),
+        authenticated_designated_relayer: peer_is_designated_relayer_sync_source(config, peer),
         public_address: peer.public_address.clone(),
         validator_address: peer.validator_address.clone(),
         version: peer.version.clone(),
@@ -4795,6 +5211,8 @@ impl P2PNetwork {
                     "txs_sent": peer.txs_sent,
                     "txs_received": peer.txs_received,
                     "node_id": peer.node_id,
+                    "authenticated_designated_support": peer.authenticated_designated_support,
+                    "authenticated_designated_relayer": peer.authenticated_designated_relayer,
                     "public_address": peer.public_address,
                     "validator_address": peer.validator_address,
                     "version": peer.version,
@@ -4849,15 +5267,24 @@ impl P2PNetwork {
         let peers = self.connected_peers.lock().unwrap();
         peers
             .values()
-            .map(|peer| build_peer_snapshot(peer, now))
+            .map(|peer| build_peer_snapshot(&self.config, peer, now))
             .collect()
+    }
+
+    /// Return the local sync-source policy from the same onboarding, duty, and
+    /// quarantine state used by role startup. Caller-provided flags are only a
+    /// compatibility fallback when no network is attached to the sync manager.
+    pub fn support_sources_only_policy(&self) -> bool {
+        local_sync_requires_support_sources_authoritatively(&self.config)
     }
 
     pub fn request_blocks(&self, from_height: u64, count: u32) {
         if local_node_uses_service_batch_durability(&self.config) {
             let target = {
                 let peers = self.connected_peers.lock().unwrap();
-                select_block_sync_targets(&peers, 1).into_iter().next()
+                select_block_sync_targets(&self.config, &peers, 1)
+                    .into_iter()
+                    .next()
             };
             if let Some(target) = target {
                 let _ = self.request_blocks_from_peer(&target, from_height, count);
@@ -4869,7 +5296,7 @@ impl P2PNetwork {
 
         let target_sessions = {
             let peers = self.connected_peers.lock().unwrap();
-            select_block_sync_targets(&peers, 1)
+            select_block_sync_targets(&self.config, &peers, 1)
                 .into_iter()
                 .filter_map(|address| Some((address.clone(), current_peer_session_id(&address)?)))
                 .collect::<Vec<_>>()
@@ -4901,6 +5328,24 @@ impl P2PNetwork {
         else {
             return false;
         };
+        let authorized = self
+            .connected_peers
+            .lock()
+            .ok()
+            .and_then(|peers| {
+                peers
+                    .get(&resolved_peer_address)
+                    .map(|peer| peer_is_eligible_block_sync_source_for_local(&self.config, peer))
+            })
+            .unwrap_or(false);
+        if !authorized {
+            debug!(
+                "p2p",
+                "Refusing explicit block sync request to unauthorized source",
+                "peer" => resolved_peer_address.clone()
+            );
+            return false;
+        }
         if local_node_uses_service_batch_durability(&self.config) {
             return service_sync_request_explicit(
                 &self.blockchain,
@@ -4963,19 +5408,13 @@ impl P2PNetwork {
     }
 
     pub fn request_peer_statuses(&self) {
-        let message = NetworkMessage::GetStatus;
         for (address, session_id) in peer_session_targets(&self.connected_peers) {
-            if let Err(error) = send_peer_message_for_session(
+            request_status_from_connected_peer(
                 &self.connected_peers,
                 &self.peer_state_cache,
                 &address,
                 session_id,
-                &message,
-                Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
-                "status-request",
-            ) {
-                warn!("p2p", "Failed to request status", "peer" => address, "error" => error);
-            }
+            );
         }
     }
 
@@ -5071,19 +5510,24 @@ impl P2PNetwork {
                     let (local_height, best_peer_height) = {
                         let chain = network.blockchain.lock().unwrap();
                         let local = chain.last().map(|b| b.block_index).unwrap_or(0);
-                        let supported_best = network.get_best_validator_peer_height_with_support(
-                            required_validator_support,
-                        );
-                        let best = if supported_best > 0 {
-                            supported_best
-                        } else {
-                            let peers = network.connected_peers.lock().unwrap();
-                            peers
-                                .values()
-                                .map(|p| p.last_known_height)
-                                .max()
-                                .unwrap_or(0)
-                        };
+                        let best =
+                            if local_validator_requires_designated_sync_sources(&network.config)
+                                || local_node_uses_relayer_only_topology(&network.config)
+                            {
+                                let peers = network.connected_peers.lock().unwrap();
+                                best_connected_block_sync_source_height(&network.config, &peers)
+                            } else {
+                                let supported_best = network
+                                    .get_best_validator_peer_height_with_support(
+                                        required_validator_support,
+                                    );
+                                if supported_best > 0 {
+                                    supported_best
+                                } else {
+                                    let peers = network.connected_peers.lock().unwrap();
+                                    best_connected_block_sync_source_height(&network.config, &peers)
+                                }
+                            };
                         (local, best)
                     };
                     // Keep validator catch-up batches bounded while allowing service
@@ -5223,6 +5667,16 @@ fn request_status_from_connected_peer(
     peer_address: &str,
     session_id: u64,
 ) {
+    if !should_request_status(peer_address, session_id) {
+        debug!(
+            "p2p",
+            "Suppressing status request inside peer-session rate limit",
+            "peer" => peer_address.to_string(),
+            "session_id" => session_id
+        );
+        return;
+    }
+
     let message = NetworkMessage::GetStatus;
     if let Err(error) = send_peer_message_for_session(
         connected_peers,
@@ -5243,6 +5697,7 @@ fn request_status_from_connected_peer(
 }
 
 fn request_blocks_from_connected_peer(
+    config: &NodeConfig,
     connected_peers: &PeersArc,
     peer_state_cache: &PeerStateCacheArc,
     peer_address: &str,
@@ -5250,6 +5705,25 @@ fn request_blocks_from_connected_peer(
     from_height: u64,
     count: u32,
 ) {
+    let authorized = connected_peers
+        .lock()
+        .ok()
+        .and_then(|peers| {
+            peers.get(peer_address).map(|peer| {
+                peer_is_eligible_block_sync_source_for_local(config, peer)
+                    && current_peer_session_id(peer_address) == Some(session_id)
+            })
+        })
+        .unwrap_or(false);
+    if !authorized {
+        debug!(
+            "p2p",
+            "Refusing lower-level block sync request to unauthorized source",
+            "peer" => peer_address.to_string(),
+            "session_id" => session_id
+        );
+        return;
+    }
     let message = NetworkMessage::GetBlocks { from_height, count };
     if let Err(error) = send_peer_message_for_session(
         connected_peers,
@@ -6083,6 +6557,17 @@ fn handle_get_blocks_message(
         return;
     }
 
+    if !authorize_chain_requester_for_session(
+        connected_peers,
+        peer_state_cache,
+        config,
+        peer_address,
+        session_id,
+        "blocks",
+    ) {
+        return;
+    }
+
     let (policy, min_serve_interval_secs, refuse_deep_support_sync) = {
         let local_height = {
             let chain = blockchain.lock().unwrap();
@@ -6096,7 +6581,7 @@ fn handle_get_blocks_message(
         (
             block_sync_response_policy(config, peer),
             block_sync_min_serve_interval_secs(config, peer),
-            support_peer_sync_request_is_too_deep(peer, local_height, from_height),
+            support_peer_sync_request_is_too_deep(config, peer, local_height, from_height),
         )
     };
     let now = current_timestamp();
@@ -6340,6 +6825,33 @@ fn local_node_runs_validator_consensus(config: &NodeConfig) -> bool {
         || exposes_consensus_service
 }
 
+fn local_sync_requires_support_sources_authoritatively(config: &NodeConfig) -> bool {
+    if !local_node_runs_validator_consensus(config) || config.node.bootstrap_only {
+        return false;
+    }
+
+    let local_validator = announced_validator_address(config);
+    let allowlisted = !config.node.strict_validator_allowlist
+        || local_validator.as_deref().is_some_and(|address| {
+            config
+                .node
+                .allowed_validator_addresses
+                .iter()
+                .any(|allowed| allowed.trim() == address)
+        });
+    let consensus_authorized = local_validator.as_deref().is_some_and(|address| {
+        consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
+            .into_iter()
+            .any(|validator| validator.address == address)
+    });
+    let onboarding = config.validator.state_sync_before_join && !consensus_authorized;
+    let quarantined =
+        current_validator_quarantine_duty_block().is_some() && !local_vote_only_rejoin_active();
+    let consensus_duties_disabled = !allowlisted || !consensus_authorized;
+
+    consensus_duties_disabled || onboarding || quarantined
+}
+
 fn local_node_uses_service_batch_durability(config: &NodeConfig) -> bool {
     if local_node_runs_validator_consensus(config) {
         return false;
@@ -6388,7 +6900,72 @@ fn local_node_uses_service_batch_durability(config: &NodeConfig) -> bool {
         || SERVICE_COMPILED_PROFILES.contains(&compiled_profile.as_str())
 }
 
-fn peer_is_active_consensus_validator(peer: &PeerConnection) -> bool {
+fn configured_validator_transport_matches_peer(
+    config: &NodeConfig,
+    peer: &PeerConnection,
+    validator_address: &str,
+) -> bool {
+    let Some(endpoint) = peer_connected_endpoint(peer) else {
+        return false;
+    };
+    let Some(transport) = config
+        .network
+        .validator_vpn_transports
+        .iter()
+        .find(|transport| {
+            normalize_validator_address_target(&transport.validator_address)
+                .is_some_and(|configured| configured == validator_address)
+        })
+    else {
+        return false;
+    };
+    parse_bootnode_dial_address(&transport.dial_address).is_some_and(|configured| {
+        connected_endpoint_matches_configured_address(&endpoint, &configured)
+    })
+}
+
+fn configured_validator_identity_matches_peer(
+    config: &NodeConfig,
+    peer: &PeerConnection,
+    validator_address: &str,
+) -> bool {
+    let Some(node_id) = peer.node_id.as_deref().map(str::trim) else {
+        return false;
+    };
+    if node_id.is_empty() {
+        return false;
+    }
+
+    let configured_addresses = if config.node.allowed_validator_addresses.is_empty() {
+        canonical_genesis()
+            .ok()
+            .map(|genesis| {
+                genesis
+                    .validators()
+                    .iter()
+                    .map(|validator| validator.operator_address.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        config.node.allowed_validator_addresses.clone()
+    };
+    let Some(slot) = configured_addresses
+        .iter()
+        .position(|configured| configured.trim() == validator_address)
+        .map(|slot| slot + 1)
+    else {
+        return false;
+    };
+    [
+        format!("validator-node-{slot:02}"),
+        format!("genesisval{slot}"),
+    ]
+    .iter()
+    .any(|expected| node_id.eq_ignore_ascii_case(expected))
+}
+
+fn peer_is_active_consensus_validator(config: &NodeConfig, peer: &PeerConnection) -> bool {
     let Some(peer_validator_address) = peer
         .validator_address
         .as_deref()
@@ -6398,9 +6975,12 @@ fn peer_is_active_consensus_validator(peer: &PeerConnection) -> bool {
         return false;
     };
 
-    consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
+    let active = consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
         .into_iter()
-        .any(|validator| validator.address == peer_validator_address)
+        .any(|validator| validator.address == peer_validator_address);
+    active
+        && (configured_validator_transport_matches_peer(config, peer, peer_validator_address)
+            || configured_validator_identity_matches_peer(config, peer, peer_validator_address))
 }
 
 fn block_sync_response_policy(
@@ -6415,7 +6995,7 @@ fn block_sync_response_policy(
     }
 
     let serving_support_peer = !peer
-        .map(peer_is_active_consensus_validator)
+        .map(|peer| peer_is_active_consensus_validator(config, peer))
         .unwrap_or(false);
 
     if serving_support_peer {
@@ -6437,7 +7017,7 @@ fn block_sync_min_serve_interval_secs(config: &NodeConfig, peer: Option<&PeerCon
     if !local_node_runs_validator_consensus(config) {
         SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS
     } else if peer
-        .map(peer_is_active_consensus_validator)
+        .map(|peer| peer_is_active_consensus_validator(config, peer))
         .unwrap_or(false)
     {
         BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS
@@ -6447,12 +7027,13 @@ fn block_sync_min_serve_interval_secs(config: &NodeConfig, peer: Option<&PeerCon
 }
 
 fn support_peer_sync_request_is_too_deep(
+    config: &NodeConfig,
     peer: Option<&PeerConnection>,
     local_height: u64,
     from_height: u64,
 ) -> bool {
     let serving_support_peer = !peer
-        .map(peer_is_active_consensus_validator)
+        .map(|peer| peer_is_active_consensus_validator(config, peer))
         .unwrap_or(false);
     serving_support_peer
         && local_height.saturating_sub(from_height) > MAX_SUPPORT_PEER_DEEP_SYNC_LAG
@@ -6695,6 +7276,11 @@ fn publish_peer_connection(
             peer_address.to_string(),
             PeerConnection {
                 address: peer_address.to_string(),
+                connected_endpoint: writer
+                    .get_ref()
+                    .peer_addr()
+                    .ok()
+                    .map(|address| address.to_string()),
                 direction,
                 public_address: None,
                 validator_address: None,
@@ -6706,6 +7292,7 @@ fn publish_peer_connection(
                 txs_received: 0,
                 stream: Some(stream),
                 node_id: None,
+                handshake_role: None,
                 version: None,
                 capabilities: Vec::new(),
                 last_known_height: 0,
@@ -7072,6 +7659,14 @@ fn handle_messages(
                             continue;
                         }
 
+                        // `role` is covered by the verified handshake signature. Keep only
+                        // this authenticated value for history-source authorization.
+                        let authenticated_handshake_role = role
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(ToOwned::to_owned);
+
                         let announced_validator_address = validator_address
                             .as_ref()
                             .map(|value| value.trim().to_string())
@@ -7167,6 +7762,8 @@ fn handle_messages(
                                             session_id,
                                         ) {
                                             peer.node_id = Some(node_id.clone());
+                                            peer.handshake_role =
+                                                authenticated_handshake_role.clone();
                                             peer.version = Some(version.clone());
                                             peer.capabilities = capabilities.clone();
                                             peer.public_address = normalized_public_address.clone();
@@ -7225,6 +7822,8 @@ fn handle_messages(
                                                     if let Some(peer) = peers.get_mut(&existing_key)
                                                     {
                                                         peer.node_id = Some(node_id.clone());
+                                                        peer.handshake_role =
+                                                            authenticated_handshake_role.clone();
                                                         peer.version = Some(version.clone());
                                                         peer.capabilities = capabilities.clone();
                                                         if normalized_public_address
@@ -7301,6 +7900,7 @@ fn handle_messages(
                                                     ) {
                                                         let existing_peer = PeerConnection {
                                                             address: String::new(),
+                                                            connected_endpoint: None,
                                                             direction:
                                                                 ConnectionDirection::Outgoing,
                                                             public_address: existing_state
@@ -7318,6 +7918,9 @@ fn handle_messages(
                                                             txs_received: 0,
                                                             stream: None,
                                                             node_id: existing_state.node_id.clone(),
+                                                            handshake_role: existing_state
+                                                                .handshake_role
+                                                                .clone(),
                                                             version: existing_state.version.clone(),
                                                             capabilities: existing_state
                                                                 .capabilities
@@ -7396,6 +7999,7 @@ fn handle_messages(
                                 peer_for_session_mut(&mut peers, &peer_address, session_id)
                             {
                                 peer.node_id = Some(node_id.clone());
+                                peer.handshake_role = authenticated_handshake_role.clone();
                                 peer.version = Some(version.clone());
                                 peer.capabilities = capabilities.clone();
                                 peer.public_address = normalized_public_address.clone();
@@ -7667,6 +8271,25 @@ fn handle_messages(
                         );
                     }
                     NetworkMessage::GetStatus => {
+                        if !authorize_chain_requester_for_session(
+                            &connected_peers,
+                            &peer_state_cache,
+                            &config,
+                            &peer_address,
+                            session_id,
+                            "status-request",
+                        ) {
+                            continue;
+                        }
+                        if !should_send_status_response(&peer_address, session_id) {
+                            debug!(
+                                "p2p",
+                                "Suppressing status response inside peer-session rate limit",
+                                "peer" => peer_address.clone(),
+                                "session_id" => session_id
+                            );
+                            continue;
+                        }
                         let status = build_local_status_message(&blockchain, &config);
 
                         if let Err(error) = send_peer_message_for_session(
@@ -7734,6 +8357,17 @@ fn handle_messages(
                             continue;
                         }
 
+                        if !authorize_chain_requester_for_session(
+                            &connected_peers,
+                            &peer_state_cache,
+                            &config,
+                            &peer_address,
+                            session_id,
+                            "block-headers",
+                        ) {
+                            continue;
+                        }
+
                         let headers = {
                             let chain = blockchain.lock().unwrap();
                             chain
@@ -7787,6 +8421,17 @@ fn handle_messages(
                             ) {
                                 warn!("p2p", "Failed to send bootstrap-only block bodies", "peer" => peer_address.clone(), "error" => error);
                             }
+                            continue;
+                        }
+
+                        if !authorize_chain_requester_for_session(
+                            &connected_peers,
+                            &peer_state_cache,
+                            &config,
+                            &peer_address,
+                            session_id,
+                            "block-bodies",
+                        ) {
                             continue;
                         }
 
@@ -9853,26 +10498,28 @@ fn dial_peer_async(
 mod tests {
     use super::{
         apply_block_batch, apply_block_batch_for_role, apply_block_if_new, apply_status_to_peer,
-        background_poll_interval, begin_peer_session, best_connected_validator_height,
-        block_sync_min_serve_interval_secs, block_sync_request_range,
-        block_sync_request_range_with_overlap, block_sync_response_policy, build_local_handshake,
+        authorize_chain_requester_for_session, background_poll_interval, begin_peer_session,
+        best_connected_validator_height, block_sync_min_serve_interval_secs,
+        block_sync_request_range, block_sync_request_range_with_overlap,
+        block_sync_response_policy, build_local_handshake,
         build_local_handshake_with_extra_capabilities, build_local_status_message,
         bypasses_shared_message_queue, cache_peer_state, cache_pending_block,
         canonical_genesis_hash, canonical_validator_public_address, chain_has_block_sync_overlap,
-        chain_snapshot_clone_allowed, collect_known_peer_addresses,
+        chain_snapshot_clone_allowed, claim_status_rate_limit, collect_known_peer_addresses,
         configured_public_address_for_validator, configured_seed_server_dial_targets,
         configured_validator_p2p_dials, configured_validator_public_address_map,
-        connected_peer_key_for_address, connected_validator_participants,
-        current_bootstrap_refresh_interval, current_timestamp, dial_with_timeout,
-        disconnect_peer_after_poisoned_write, disconnect_peer_entry, dispatch_peer_message,
-        ensure_peer_status_allows_chain_data, handle_status_message, hydrate_peer_from_cache,
-        insert_seed_server_target, is_validator_vpn_dial_address,
-        is_validator_vpn_relayer_dial_address, local_node_runs_validator_consensus,
-        local_node_uses_service_batch_durability, local_peer_identity,
-        merge_peer_state_from_existing, normalize_peer_target, parse_block_sync_busy_retry,
-        parse_bootnode_dial_address, peer_has_identifying_metadata, peer_identity_key,
-        peer_is_eligible_block_sync_source, peer_matches_address,
-        peer_readiness_exclusion_reason_at, peer_write_gate,
+        connected_endpoint_matches_configured_address, connected_peer_key_for_address,
+        connected_validator_participants, current_bootstrap_refresh_interval, current_timestamp,
+        dial_with_timeout, disconnect_peer_after_poisoned_write, disconnect_peer_entry,
+        dispatch_peer_message, ensure_peer_status_allows_chain_data, handle_get_blocks_message,
+        handle_status_message, hydrate_peer_from_cache, insert_seed_server_target,
+        is_validator_vpn_dial_address, is_validator_vpn_relayer_dial_address,
+        local_node_runs_validator_consensus, local_node_uses_service_batch_durability,
+        local_peer_identity, merge_peer_state_from_existing, normalize_peer_target,
+        parse_block_sync_busy_retry, parse_bootnode_dial_address, peer_has_identifying_metadata,
+        peer_identity_key, peer_is_authorized_block_sync_requester,
+        peer_is_designated_support_sync_source, peer_is_eligible_block_sync_source,
+        peer_matches_address, peer_readiness_exclusion_reason_at, peer_write_gate,
         pending_incoming_connections_from_host, preferred_connection_direction,
         preflight_validator_activation_transactions, receive_message,
         recover_peer_validator_address_for_vote_target, release_block_sync_apply_slot_after_worker,
@@ -9883,9 +10530,9 @@ mod tests {
         service_sync_request_from_status, should_canonicalize_validator_public_address,
         should_disconnect_for_status_genesis_mismatch, should_prune_stale_peer,
         should_request_missing_blocks, should_resolve_duplicate_session,
-        status_ready_validator_addresses, status_ready_validator_addresses_with_local_duty_gate,
-        status_ready_validator_participants, status_sync_batch,
-        support_peer_sync_request_is_too_deep, sync_batch_limit_for_role,
+        status_peer_is_eligible_block_sync_source, status_ready_validator_addresses,
+        status_ready_validator_addresses_with_local_duty_gate, status_ready_validator_participants,
+        status_sync_batch, support_peer_sync_request_is_too_deep, sync_batch_limit_for_role,
         validate_outbound_frame_length, validate_vote_request_extends_local_tip,
         validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_batch_with_bounded_parallelism,
@@ -9896,9 +10543,10 @@ mod tests {
         DEFAULT_BOOTSTRAP_REFRESH_SECS, DUTY_DISABLED_TTL_SECS, IMMEDIATE_STATUS_SYNC_BATCH,
         MAX_P2P_FRAME_BYTES, MAX_STATUS_SYNC_BATCH, MAX_SUPPORT_NODE_BLOCK_SYNC_RESPONSE_BLOCKS,
         MAX_VALIDATOR_SUPPORT_SYNC_RESPONSE_BLOCKS, NORMAL_BOOTSTRAP_REFRESH_SECS,
-        PEER_WRITE_GATES, PENDING_BLOCKS, QUARANTINE_STATUS_TTL_SECS,
+        PEER_SESSION_IDS, PEER_WRITE_GATES, PENDING_BLOCKS, QUARANTINE_STATUS_TTL_SECS,
         SERVICE_BLOCK_SYNC_RESPONSE_TIMEOUT_SECS, SERVICE_SYNC_COORDINATOR,
         STALE_UNIDENTIFIED_PEER_SECS, STALE_VALIDATOR_STATUS_SECS, STATUS_READY_TTL_SECS,
+        STATUS_REQUEST_MIN_INTERVAL_SECS, STATUS_RESPONSE_MIN_INTERVAL_SECS,
         SUPPORT_NODE_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS, TEST_COMMIT_VERIFIER_VALIDATOR_MANAGER,
         VALIDATOR_SUPPORT_BLOCK_SYNC_MIN_SERVE_INTERVAL_SECS,
     };
@@ -9947,6 +10595,18 @@ mod tests {
             .lock()
             .expect("service sync test lock should not be poisoned");
         reset_service_sync_coordinator_for_tests();
+        BLOCK_SYNC_APPLY_ACTIVE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        PEER_SESSION_IDS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        PEER_WRITE_GATES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         guard
     }
 
@@ -9968,7 +10628,7 @@ mod tests {
             .accept()
             .expect("service sync test stream should be accepted");
         server
-            .set_read_timeout(Some(Duration::from_millis(250)))
+            .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("service sync test stream should set a read timeout");
         Some((client, server))
     }
@@ -9976,6 +10636,7 @@ mod tests {
     fn service_sync_test_config() -> NodeConfig {
         let mut config = NodeConfig::default();
         config.identity.role = "relayer".to_string();
+        config.network.additional_dial_targets = vec!["127.0.0.1:5622".to_string()];
         config
     }
 
@@ -9986,9 +10647,16 @@ mod tests {
         height: u64,
     ) -> PeerConnection {
         let mut peer = test_peer_with_validator_address(Some(validator_address));
-        peer.address = address.to_string();
+        peer.address = if address.ends_with('b') {
+            "relay2.synergynode.xyz:5622".to_string()
+        } else {
+            "relay1.synergynode.xyz:5622".to_string()
+        };
         peer.stream = Some(client);
+        peer.connected_endpoint = Some("127.0.0.1:5622".to_string());
         peer.node_id = Some(address.to_string());
+        peer.handshake_role = Some("relayer".to_string());
+        peer.public_address = Some(peer.address.clone());
         peer.last_known_height = height;
         peer.status_received_at = Some(current_timestamp());
         peer.genesis_hash = canonical_genesis_hash();
@@ -10021,7 +10689,9 @@ mod tests {
             txs_sent: 0,
             txs_received: 0,
             stream: None,
+            connected_endpoint: None,
             node_id: Some("peer-a".to_string()),
+            handshake_role: None,
             version: Some("1.0.0".to_string()),
             capabilities: vec!["blocks".to_string()],
             last_known_height: 0,
@@ -10258,17 +10928,26 @@ mod tests {
 
     #[test]
     fn block_sync_source_accepts_duty_disabled_support_peer_but_not_shadow_validator() {
+        let mut config = NodeConfig::default();
+        config.network.additional_dial_targets = vec!["127.0.0.1:5622".to_string()];
         let mut relayer_peer =
             test_peer_with_validator_address(Some("synv21ga3nsdjagzt9pmks4mzjq4vdjyngdwq6jst632"));
         relayer_peer.node_id = Some("sentry1".to_string());
+        relayer_peer.handshake_role = Some("relayer".to_string());
+        relayer_peer.address = "relay1.synergynode.xyz:5622".to_string();
+        relayer_peer.public_address = Some("relay1.synergynode.xyz:5622".to_string());
+        relayer_peer.connected_endpoint = Some("127.0.0.1:5622".to_string());
         relayer_peer.consensus_duties_disabled = true;
         relayer_peer.last_known_height = 195_000;
-        assert!(peer_is_eligible_block_sync_source(&relayer_peer));
+        assert!(peer_is_eligible_block_sync_source(&config, &relayer_peer));
 
         let mut shadow_validator = test_peer_with_validator_address(Some("synv1shadow"));
         shadow_validator.consensus_duties_disabled = true;
         shadow_validator.last_known_height = 195_000;
-        assert!(!peer_is_eligible_block_sync_source(&shadow_validator));
+        assert!(!peer_is_eligible_block_sync_source(
+            &config,
+            &shadow_validator
+        ));
     }
 
     lazy_static! {
@@ -10741,7 +11420,9 @@ mod tests {
             txs_sent: 0,
             txs_received: 0,
             stream: None,
+            connected_endpoint: None,
             node_id: Some("testnet-peer-b".to_string()),
+            handshake_role: None,
             version: Some("1.0.0".to_string()),
             capabilities: vec!["blocks".to_string()],
             last_known_height: 42,
@@ -10770,7 +11451,9 @@ mod tests {
             txs_sent: 0,
             txs_received: 0,
             stream: None,
+            connected_endpoint: None,
             node_id: Some("testnet-peer-b".to_string()),
+            handshake_role: None,
             version: Some("1.0.0".to_string()),
             capabilities: vec!["blocks".to_string()],
             last_known_height: 0,
@@ -10810,7 +11493,9 @@ mod tests {
             txs_sent: 0,
             txs_received: 0,
             stream: None,
+            connected_endpoint: None,
             node_id: Some("testnet-peer-a".to_string()),
+            handshake_role: None,
             version: Some("1.0.0".to_string()),
             capabilities: vec!["blocks".to_string()],
             last_known_height: 9,
@@ -10837,7 +11522,9 @@ mod tests {
             txs_sent: 0,
             txs_received: 0,
             stream: None,
+            connected_endpoint: None,
             node_id: Some("testnet-peer-a".to_string()),
+            handshake_role: None,
             version: None,
             capabilities: Vec::new(),
             last_known_height: 0,
@@ -11115,7 +11802,9 @@ mod tests {
                 txs_sent: 0,
                 txs_received: 0,
                 stream: None,
+                connected_endpoint: None,
                 node_id: Some("testnet-public".to_string()),
+                handshake_role: None,
                 version: None,
                 capabilities: Vec::new(),
                 last_known_height: 0,
@@ -11218,7 +11907,9 @@ mod tests {
             txs_sent: 0,
             txs_received: 0,
             stream: None,
+            connected_endpoint: None,
             node_id: None,
+            handshake_role: None,
             version: None,
             capabilities: Vec::new(),
             last_known_height: 0,
@@ -11360,7 +12051,9 @@ mod tests {
             txs_sent: 0,
             txs_received: 0,
             stream: None,
+            connected_endpoint: None,
             node_id: None,
+            handshake_role: None,
             version: None,
             capabilities: Vec::new(),
             last_known_height: 0,
@@ -11404,7 +12097,9 @@ mod tests {
             txs_sent: 0,
             txs_received: 0,
             stream: None,
+            connected_endpoint: None,
             node_id: Some("genesisval5".to_string()),
+            handshake_role: None,
             version: None,
             capabilities: Vec::new(),
             last_known_height: 0,
@@ -11642,7 +12337,9 @@ mod tests {
                 txs_sent: 0,
                 txs_received: 0,
                 stream: None,
+                connected_endpoint: None,
                 node_id: Some("testnet-incoming".to_string()),
+                handshake_role: None,
                 version: None,
                 capabilities: Vec::new(),
                 last_known_height: 0,
@@ -11672,7 +12369,9 @@ mod tests {
                 txs_sent: 0,
                 txs_received: 0,
                 stream: None,
+                connected_endpoint: None,
                 node_id: Some("testnet-outgoing".to_string()),
+                handshake_role: None,
                 version: None,
                 capabilities: Vec::new(),
                 last_known_height: 0,
@@ -11713,7 +12412,9 @@ mod tests {
             txs_sent: 0,
             txs_received: 0,
             stream: None,
+            connected_endpoint: None,
             node_id: None,
+            handshake_role: None,
             version: None,
             capabilities: Vec::new(),
             last_known_height: 0,
@@ -11740,7 +12441,9 @@ mod tests {
             txs_sent: 0,
             txs_received: 0,
             stream: None,
+            connected_endpoint: None,
             node_id: Some("testnet-peer-a".to_string()),
+            handshake_role: None,
             version: None,
             capabilities: Vec::new(),
             last_known_height: 0,
@@ -11777,7 +12480,9 @@ mod tests {
                 txs_sent: 0,
                 txs_received: 0,
                 stream: None,
+                connected_endpoint: None,
                 node_id: Some("bootnode2".to_string()),
+                handshake_role: None,
                 version: Some("1.0.0".to_string()),
                 capabilities: Vec::new(),
                 last_known_height: 0,
@@ -11807,7 +12512,9 @@ mod tests {
                 txs_sent: 0,
                 txs_received: 0,
                 stream: None,
+                connected_endpoint: None,
                 node_id: Some("genesisval2".to_string()),
+                handshake_role: None,
                 version: Some("1.0.0".to_string()),
                 capabilities: Vec::new(),
                 last_known_height: 0,
@@ -11837,7 +12544,9 @@ mod tests {
                 txs_sent: 0,
                 txs_received: 0,
                 stream: None,
+                connected_endpoint: None,
                 node_id: None,
+                handshake_role: None,
                 version: None,
                 capabilities: Vec::new(),
                 last_known_height: 0,
@@ -11879,7 +12588,9 @@ mod tests {
                 txs_sent: 0,
                 txs_received: 0,
                 stream: None,
+                connected_endpoint: None,
                 node_id: None,
+                handshake_role: None,
                 version: None,
                 capabilities: Vec::new(),
                 last_known_height: 0,
@@ -12028,7 +12739,9 @@ mod tests {
                 txs_sent: 0,
                 txs_received: 0,
                 stream: None,
+                connected_endpoint: None,
                 node_id: Some("validator-pending".to_string()),
+                handshake_role: None,
                 version: Some("1.0.0".to_string()),
                 capabilities: Vec::new(),
                 last_known_height: 0,
@@ -12081,7 +12794,9 @@ mod tests {
                 txs_sent: 0,
                 txs_received: 0,
                 stream: None,
+                connected_endpoint: None,
                 node_id: Some("validator-mismatch".to_string()),
+                handshake_role: None,
                 version: Some("1.0.0".to_string()),
                 capabilities: Vec::new(),
                 last_known_height: 10,
@@ -12184,6 +12899,17 @@ mod tests {
         let config = service_sync_test_config();
         let genesis_hash = canonical_genesis_hash();
 
+        {
+            let peers = connected_peers.lock().unwrap();
+            assert!(peer_is_designated_support_sync_source(
+                &config,
+                peers.get("peer-a").expect("peer-a should be connected"),
+            ));
+            assert!(super::peer_is_eligible_block_sync_source_for_local(
+                &config,
+                peers.get("peer-a").expect("peer-a should be connected"),
+            ));
+        }
         handle_status_message(
             &blockchain,
             &connected_peers,
@@ -13271,7 +13997,12 @@ mod tests {
 
         let mut config = NodeConfig::default();
         config.identity.role = "validator".to_string();
-        let active_peer = test_peer_with_validator_address(Some(active_validator));
+        config.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
+            validator_address: active_validator.to_string(),
+            dial_address: "10.70.10.7:5622".to_string(),
+        }];
+        let mut active_peer = test_peer_with_validator_address(Some(active_validator));
+        active_peer.connected_endpoint = Some("10.70.10.7:5622".to_string());
 
         assert_eq!(
             block_sync_min_serve_interval_secs(&config, Some(&active_peer)),
@@ -13303,26 +14034,38 @@ mod tests {
         configure_canonical_genesis_path_for_tests();
         let active_validator = "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs";
         ensure_test_validator_key(active_validator);
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+        config.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
+            validator_address: active_validator.to_string(),
+            dial_address: "10.70.10.1:5622".to_string(),
+        }];
 
         let support_peer = test_peer_with_validator_address(Some("synv1support"));
         let active_peer = test_peer_with_validator_address(Some(active_validator));
+        let mut active_peer = active_peer;
+        active_peer.connected_endpoint = Some("10.70.10.1:5622".to_string());
 
         assert!(support_peer_sync_request_is_too_deep(
+            &config,
             Some(&support_peer),
             250_000,
             11_666
         ));
         assert!(!support_peer_sync_request_is_too_deep(
+            &config,
             Some(&support_peer),
             50_000,
             11_666
         ));
         assert!(!support_peer_sync_request_is_too_deep(
+            &config,
             Some(&support_peer),
             50_000,
             49_500
         ));
         assert!(!support_peer_sync_request_is_too_deep(
+            &config,
             Some(&active_peer),
             50_000,
             11_666
@@ -13360,6 +14103,279 @@ mod tests {
 
         release_block_sync_peer(&active, "peer-a", 7);
         assert!(reserve_block_sync_peer(&active, "peer-a", 7));
+    }
+
+    #[test]
+    fn status_rate_limit_suppresses_feedback_until_the_session_window_expires() {
+        let last_sent = Mutex::new(HashMap::new());
+
+        assert!(claim_status_rate_limit(
+            &last_sent,
+            "peer-a",
+            7,
+            100,
+            STATUS_REQUEST_MIN_INTERVAL_SECS,
+        ));
+        assert!(!claim_status_rate_limit(
+            &last_sent,
+            "peer-a",
+            7,
+            104,
+            STATUS_REQUEST_MIN_INTERVAL_SECS,
+        ));
+        assert!(claim_status_rate_limit(
+            &last_sent,
+            "peer-a",
+            7,
+            105,
+            STATUS_REQUEST_MIN_INTERVAL_SECS,
+        ));
+        assert!(claim_status_rate_limit(
+            &last_sent,
+            "peer-a",
+            8,
+            101,
+            STATUS_RESPONSE_MIN_INTERVAL_SECS,
+        ));
+    }
+
+    #[test]
+    fn canonical_validators_only_serve_active_or_designated_sync_requesters() {
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+        config.network.additional_dial_targets = vec!["127.0.0.1:5622".to_string()];
+        let mut onboarding_peer = test_peer_with_validator_address(Some("synv1onboarding"));
+        onboarding_peer.node_id = Some("validator-onboarding".to_string());
+        onboarding_peer.quarantined = true;
+        onboarding_peer.consensus_duties_disabled = true;
+        assert!(!peer_is_authorized_block_sync_requester(
+            &config,
+            &onboarding_peer
+        ));
+
+        let mut support_peer = test_peer_with_validator_address(None);
+        support_peer.node_id = Some("sentry1".to_string());
+        support_peer.handshake_role = Some("relayer".to_string());
+        support_peer.address = "relay1.synergynode.xyz:5622".to_string();
+        support_peer.public_address = Some("relay1.synergynode.xyz:5622".to_string());
+        support_peer.connected_endpoint = Some("127.0.0.1:5622".to_string());
+        assert!(peer_is_designated_support_sync_source(
+            &config,
+            &support_peer
+        ));
+        assert!(peer_is_authorized_block_sync_requester(
+            &config,
+            &support_peer
+        ));
+
+        let mut spoofed_support = test_peer_with_validator_address(None);
+        spoofed_support.handshake_role = Some("relayer".to_string());
+        spoofed_support.public_address = Some("relay1.synergynode.xyz:5622".to_string());
+        spoofed_support.node_id = Some("sentry1".to_string());
+        assert!(
+            !peer_is_designated_support_sync_source(&config, &spoofed_support),
+            "a self-reported public support address must not override the connected endpoint"
+        );
+
+        support_peer.consensus_duties_disabled = true;
+        assert!(!peer_is_authorized_block_sync_requester(
+            &config,
+            &support_peer
+        ));
+    }
+
+    #[test]
+    fn forged_active_validator_address_without_matching_transport_is_not_authorized() {
+        configure_canonical_genesis_path_for_tests();
+        let active_validator = "synv1forgedtransportxxxxxxxxxxxxxxxxxxxx";
+        ensure_test_validator_key(active_validator);
+
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+        config.node.allowed_validator_addresses = vec![active_validator.to_string()];
+        config.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
+            validator_address: active_validator.to_string(),
+            dial_address: "10.70.10.7:5622".to_string(),
+        }];
+
+        let mut forged = test_peer_with_validator_address(Some(active_validator));
+        forged.node_id = Some("peer-a".to_string());
+        forged.connected_endpoint = Some("10.70.10.8:5622".to_string());
+
+        assert!(!super::peer_is_active_consensus_validator(&config, &forged));
+        assert!(!peer_is_authorized_block_sync_requester(&config, &forged));
+    }
+
+    #[test]
+    fn configured_support_endpoint_matches_dns_and_ip_only_at_exact_port() {
+        assert!(connected_endpoint_matches_configured_address(
+            "127.0.0.1:5623",
+            "localhost:5623"
+        ));
+        assert!(!connected_endpoint_matches_configured_address(
+            "127.0.0.1:5622",
+            "localhost:5623"
+        ));
+        assert!(!connected_endpoint_matches_configured_address(
+            "127.0.0.1:5624",
+            "localhost:5623"
+        ));
+        assert!(!connected_endpoint_matches_configured_address(
+            "RPC.SYNERGYNODE.XYZ:5623",
+            "rpc.synergynode.xyz:5623"
+        ));
+        assert!(!connected_endpoint_matches_configured_address(
+            "rpc.synergynode.xyz:5624",
+            "rpc.synergynode.xyz:5623"
+        ));
+    }
+
+    #[test]
+    fn authenticated_support_classification_propagates_without_public_address_trust() {
+        let config = NodeConfig::default();
+        let blockchain = Arc::new(Mutex::new(BlockChain::new()));
+        let network = P2PNetwork::new(blockchain, &config);
+
+        let mut authenticated = test_peer_with_validator_address(None);
+        authenticated.address = "rpc.synergynode.xyz:5623".to_string();
+        authenticated.public_address = Some("relay1.synergynode.xyz:9999".to_string());
+        authenticated.node_id = Some("untrusted-looking-name".to_string());
+        authenticated.handshake_role = Some("rpc_gateway_node".to_string());
+        authenticated.connected_endpoint = Some("167.86.83.83:5623".to_string());
+        network
+            .connected_peers
+            .lock()
+            .unwrap()
+            .insert(authenticated.address.clone(), authenticated);
+
+        let snapshot = network
+            .collect_peer_snapshots()
+            .into_iter()
+            .next()
+            .expect("peer snapshot");
+        assert!(snapshot.authenticated_designated_support);
+        assert!(!snapshot.authenticated_designated_relayer);
+
+        let mut spoofed = test_peer_with_validator_address(None);
+        spoofed.address = "peer-a:5622".to_string();
+        spoofed.public_address = Some("rpc.synergynode.xyz:5623".to_string());
+        spoofed.handshake_role = Some("rpc_gateway_node".to_string());
+        assert!(!peer_is_designated_support_sync_source(
+            &NodeConfig::default(),
+            &spoofed
+        ));
+
+        let mut vpn_spoof = test_peer_with_validator_address(None);
+        vpn_spoof.address = "relay1.synergynode.xyz:5622".to_string();
+        vpn_spoof.public_address = Some("relay1.synergynode.xyz:5622".to_string());
+        vpn_spoof.handshake_role = Some("relayer".to_string());
+        vpn_spoof.connected_endpoint = Some("10.70.20.77:5622".to_string());
+        assert!(!peer_is_designated_support_sync_source(
+            &NodeConfig::default(),
+            &vpn_spoof
+        ));
+    }
+
+    #[test]
+    fn authoritative_support_policy_fails_closed_for_unactivated_validator() {
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+        config.node.validator_address = "synv1notactive".to_string();
+        config.validator.state_sync_before_join = false;
+
+        assert!(super::local_sync_requires_support_sources_authoritatively(
+            &config
+        ));
+    }
+
+    #[test]
+    fn canonical_get_blocks_disconnects_unactivated_requester_before_serving_history() {
+        let _session_guard = peer_session_test_guard();
+        let blockchain = Arc::new(Mutex::new(BlockChain::new()));
+        let connected_peers = Arc::new(Mutex::new(HashMap::new()));
+        let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+
+        let mut peer = test_peer_with_validator_address(Some("synv1onboarding"));
+        peer.node_id = Some("validator-onboarding".to_string());
+        peer.quarantined = true;
+        peer.consensus_duties_disabled = true;
+        connected_peers
+            .lock()
+            .unwrap()
+            .insert(peer.address.clone(), peer);
+        let session_id = super::begin_peer_session("peer-a");
+
+        handle_get_blocks_message(
+            &blockchain,
+            &connected_peers,
+            &peer_state_cache,
+            &config,
+            "peer-a",
+            session_id,
+            0,
+            MAX_STATUS_SYNC_BATCH,
+        );
+
+        assert!(!connected_peers.lock().unwrap().contains_key("peer-a"));
+    }
+
+    #[test]
+    fn canonical_chain_request_gate_disconnects_ordinary_unactivated_requesters() {
+        let _session_guard = peer_session_test_guard();
+        let connected_peers = Arc::new(Mutex::new(HashMap::new()));
+        let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+
+        for request_kind in ["status-request", "status", "block-headers", "block-bodies"] {
+            let mut peer =
+                test_peer_with_validator_address(Some("synv1ordinaryunactivatedrequester"));
+            peer.node_id = Some("validator-onboarding".to_string());
+            connected_peers
+                .lock()
+                .unwrap()
+                .insert("peer-a".to_string(), peer);
+            let session_id = begin_peer_session("peer-a");
+
+            assert!(!authorize_chain_requester_for_session(
+                &connected_peers,
+                &peer_state_cache,
+                &config,
+                "peer-a",
+                session_id,
+                request_kind,
+            ));
+            assert!(!connected_peers.lock().unwrap().contains_key("peer-a"));
+        }
+    }
+
+    #[test]
+    fn duty_disabled_anonymous_status_is_not_a_block_sync_source() {
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+        assert!(!status_peer_is_eligible_block_sync_source(
+            &config, None, false, false, false, false, true,
+        ));
+        assert!(!status_peer_is_eligible_block_sync_source(
+            &config,
+            Some("synv1support"),
+            false,
+            false,
+            false,
+            false,
+            true,
+        ));
+        assert!(status_peer_is_eligible_block_sync_source(
+            &config,
+            Some("synv1support"),
+            false,
+            true,
+            false,
+            false,
+            true,
+        ));
     }
 
     #[test]
@@ -13419,7 +14435,9 @@ mod tests {
                 txs_sent: 0,
                 txs_received: 0,
                 stream: None,
+                connected_endpoint: None,
                 node_id: Some("testnet-peer-a".to_string()),
+                handshake_role: None,
                 version: Some("1.0.0".to_string()),
                 capabilities: vec!["blocks".to_string()],
                 last_known_height: 0,
@@ -13496,6 +14514,7 @@ mod tests {
     #[test]
     fn status_handler_records_genesis_hash_and_requests_blocks_without_deadlocking() {
         let _session_guard = peer_session_test_guard();
+        let _service_sync_guard = service_sync_test_guard();
         let listener = match TcpListener::bind("127.0.0.1:0") {
             Ok(listener) => listener,
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
@@ -13516,14 +14535,16 @@ mod tests {
         let connected_peers = Arc::new(Mutex::new(HashMap::new()));
         let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
         let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
         config.node.validator_address = "synv1local".to_string();
+        config.network.additional_dial_targets = vec!["127.0.0.1:5622".to_string()];
 
         connected_peers.lock().unwrap().insert(
             "peer-a".to_string(),
             PeerConnection {
-                address: "peer-a".to_string(),
+                address: "relay1.synergynode.xyz:5622".to_string(),
                 direction: ConnectionDirection::Outgoing,
-                public_address: Some("genesisval2.synergy-network.io:5622".to_string()),
+                public_address: Some("relay1.synergynode.xyz:5622".to_string()),
                 validator_address: Some("synv1peer-a".to_string()),
                 connected_at: 100,
                 last_seen: 100,
@@ -13532,7 +14553,9 @@ mod tests {
                 txs_sent: 0,
                 txs_received: 0,
                 stream: Some(client),
+                connected_endpoint: Some("127.0.0.1:5622".to_string()),
                 node_id: Some("testnet-peer-a".to_string()),
+                handshake_role: Some("relayer".to_string()),
                 version: Some("1.0.0".to_string()),
                 capabilities: vec!["blocks".to_string()],
                 last_known_height: 0,
@@ -13603,8 +14626,48 @@ mod tests {
     }
 
     #[test]
+    fn canonical_status_handler_disconnects_quarantined_unactivated_peer() {
+        let _session_guard = peer_session_test_guard();
+        let blockchain = Arc::new(Mutex::new(BlockChain::new()));
+        let connected_peers = Arc::new(Mutex::new(HashMap::new()));
+        let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+
+        let mut peer = test_peer_with_validator_address(Some("synv1onboarding"));
+        peer.node_id = Some("validator-onboarding".to_string());
+        connected_peers
+            .lock()
+            .unwrap()
+            .insert(peer.address.clone(), peer);
+        let session_id = super::begin_peer_session("peer-a");
+
+        handle_status_message(
+            &blockchain,
+            &connected_peers,
+            &peer_state_cache,
+            &config,
+            "peer-a",
+            session_id,
+            9_300,
+            "stale-snapshot-tip",
+            "canonical-genesis",
+            Some(current_timestamp()),
+            Some("synv1onboarding"),
+            Some("validator-onboarding"),
+            None,
+            true,
+            true,
+            Some("malformed_quarantine_marker"),
+        );
+
+        assert!(!connected_peers.lock().unwrap().contains_key("peer-a"));
+    }
+
+    #[test]
     fn status_handler_requests_blocks_from_duty_disabled_support_peer() {
         let _session_guard = peer_session_test_guard();
+        let _service_sync_guard = service_sync_test_guard();
         let listener = match TcpListener::bind("127.0.0.1:0") {
             Ok(listener) => listener,
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
@@ -13624,11 +14687,16 @@ mod tests {
         let blockchain = Arc::new(Mutex::new(BlockChain::new()));
         let connected_peers = Arc::new(Mutex::new(HashMap::new()));
         let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
-        let config = NodeConfig::default();
+        let mut config = NodeConfig::default();
+        config.network.additional_dial_targets = vec!["127.0.0.1:5622".to_string()];
 
         let mut support_peer =
             test_peer_with_validator_address(Some("synv21ga3nsdjagzt9pmks4mzjq4vdjyngdwq6jst632"));
         support_peer.node_id = Some("sentry1".to_string());
+        support_peer.handshake_role = Some("relayer".to_string());
+        support_peer.address = "relay1.synergynode.xyz:5622".to_string();
+        support_peer.public_address = Some("relay1.synergynode.xyz:5622".to_string());
+        support_peer.connected_endpoint = Some("127.0.0.1:5622".to_string());
         support_peer.stream = Some(client);
         support_peer.status_received_at = None;
         support_peer.consensus_duties_disabled = true;
@@ -13756,7 +14824,9 @@ mod tests {
                     txs_sent: 0,
                     txs_received: 0,
                     stream: None,
+                    connected_endpoint: None,
                     node_id: None,
+                    handshake_role: None,
                     version: None,
                     capabilities: Vec::new(),
                     last_known_height: 0,
@@ -13805,7 +14875,9 @@ mod tests {
                 txs_sent: 0,
                 txs_received: 0,
                 stream: None,
+                connected_endpoint: None,
                 node_id: None,
+                handshake_role: None,
                 version: None,
                 capabilities: Vec::new(),
                 last_known_height: 0,
@@ -13835,7 +14907,9 @@ mod tests {
                 txs_sent: 0,
                 txs_received: 0,
                 stream: None,
+                connected_endpoint: None,
                 node_id: None,
+                handshake_role: None,
                 version: None,
                 capabilities: Vec::new(),
                 last_known_height: 0,
@@ -13902,7 +14976,9 @@ mod tests {
                 txs_sent: 0,
                 txs_received: 0,
                 stream: None,
+                connected_endpoint: None,
                 node_id: None,
+                handshake_role: None,
                 version: None,
                 capabilities: Vec::new(),
                 last_known_height: 99,
@@ -13932,7 +15008,9 @@ mod tests {
                 txs_sent: 0,
                 txs_received: 0,
                 stream: None,
+                connected_endpoint: None,
                 node_id: None,
+                handshake_role: None,
                 version: None,
                 capabilities: Vec::new(),
                 last_known_height: 7,
@@ -13971,6 +15049,8 @@ mod tests {
                 txs_received: 0,
                 stream: None,
                 node_id: None,
+                connected_endpoint: None,
+                handshake_role: None,
                 version: None,
                 capabilities: Vec::new(),
                 last_known_height: 12,
@@ -14001,6 +15081,8 @@ mod tests {
                 txs_received: 0,
                 stream: None,
                 node_id: None,
+                connected_endpoint: None,
+                handshake_role: None,
                 version: None,
                 capabilities: Vec::new(),
                 last_known_height: 12,
@@ -14031,6 +15113,8 @@ mod tests {
                 txs_received: 0,
                 stream: None,
                 node_id: None,
+                connected_endpoint: None,
+                handshake_role: None,
                 version: None,
                 capabilities: Vec::new(),
                 last_known_height: 20,
@@ -14535,7 +15619,9 @@ mod tests {
             txs_sent: 0,
             txs_received: 0,
             stream: None,
+            connected_endpoint: None,
             node_id: None,
+            handshake_role: None,
             version: None,
             capabilities: Vec::new(),
             last_known_height: 0,
@@ -14601,7 +15687,9 @@ mod tests {
             txs_sent: 0,
             txs_received: 0,
             stream: None,
+            connected_endpoint: None,
             node_id: None,
+            handshake_role: None,
             version: None,
             capabilities: Vec::new(),
             last_known_height: 0,
@@ -14664,6 +15752,8 @@ mod tests {
             txs_received: 0,
             stream: None,
             node_id: Some("synv1peer-b".to_string()),
+            connected_endpoint: None,
+            handshake_role: None,
             version: Some("1.0.0".to_string()),
             capabilities: vec!["blocks".to_string()],
             last_known_height: 0,

@@ -55,8 +55,41 @@ const SNAPSHOT_ALLOWED_FILES: &[&str] = &[
     "state_checkpoint.json",
 ];
 
+pub const VALIDATOR_PRUNED_REQUIRED_STATE_FILES: &[&str] = &[
+    "chain.json",
+    "committed_blocks.jsonl",
+    "canonical_locks.json",
+    "committed_qcs.jsonl",
+    "token_state.json",
+    "validator_registry.json",
+];
+
 pub fn launch_snapshot_allowed_files() -> &'static [&'static str] {
     SNAPSHOT_ALLOWED_FILES
+}
+
+pub fn required_snapshot_files_for_class(snapshot_class: &str) -> &'static [&'static str] {
+    if normalize_snapshot_class(snapshot_class) == Some(SNAPSHOT_CLASS_VALIDATOR_PRUNED) {
+        VALIDATOR_PRUNED_REQUIRED_STATE_FILES
+    } else {
+        &[]
+    }
+}
+
+pub fn validate_snapshot_file_contract(
+    snapshot_class: &str,
+    present_files: &[&str],
+) -> Result<(), String> {
+    for required_file in required_snapshot_files_for_class(snapshot_class) {
+        if !present_files.iter().any(|present| present == required_file) {
+            return Err(format!(
+                "snapshot class {} requires state file {}",
+                normalize_snapshot_class(snapshot_class).unwrap_or(snapshot_class),
+                required_file
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn normalize_snapshot_class(value: &str) -> Option<&'static str> {
@@ -255,6 +288,57 @@ impl RealignmentState {
     pub fn can_shadow_observe(self) -> bool {
         matches!(self, Self::CaughtUp | Self::ShadowObserving)
     }
+}
+
+fn recovery_state_from_status_value(value: &serde_json::Value) -> Option<RealignmentState> {
+    let state = ["new_state", "typed_status", "recovery_state", "status"]
+        .iter()
+        .filter_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
+        .map(|state| state.trim().to_ascii_uppercase())
+        .find(|state| !state.is_empty());
+    let vote_only = value
+        .get("vote_only_rejoin")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        || value
+            .get("proposer_duties_disabled")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+    if vote_only {
+        return Some(RealignmentState::VoteOnly);
+    }
+    match state?.as_str() {
+        "ACTIVE" => Some(RealignmentState::Active),
+        "SUSPECT" => Some(RealignmentState::Suspect),
+        "QUARANTINED" | "SELF_QUARANTINED_DIVERGENCE" => Some(RealignmentState::Quarantined),
+        "EVIDENCE_PRESERVED" => Some(RealignmentState::EvidencePreserved),
+        "CHAIN_DATA_WIPE_READY" => Some(RealignmentState::ChainDataWipeReady),
+        "CHAIN_DATA_WIPED" => Some(RealignmentState::ChainDataWiped),
+        "SNAPSHOT_DISCOVERY" => Some(RealignmentState::SnapshotDiscovery),
+        "SNAPSHOT_DOWNLOADING" => Some(RealignmentState::SnapshotDownloading),
+        "SNAPSHOT_VERIFIED" => Some(RealignmentState::SnapshotVerified),
+        "SNAPSHOT_RESTORED" => Some(RealignmentState::SnapshotRestored),
+        "SPEED_SYNCING" => Some(RealignmentState::SpeedSyncing),
+        "CAUGHT_UP" => Some(RealignmentState::CaughtUp),
+        "SHADOW_OBSERVING" | "SHADOW" => Some(RealignmentState::ShadowObserving),
+        "SHADOW_PASSED" => Some(RealignmentState::ShadowPassed),
+        "READY_TO_REJOIN" => Some(RealignmentState::ReadyToRejoin),
+        "VOTE_ONLY" | "VOTEONLY" => Some(RealignmentState::VoteOnly),
+        "PENDING_REACTIVATION" => Some(RealignmentState::PendingReactivation),
+        "FAILED_CLOSED" => Some(RealignmentState::FailedClosed),
+        _ => None,
+    }
+}
+
+/// Read the durable recovery state written by rejoin and promotion operations.
+///
+/// Quarantine marker files are deliberately removed after their evidence is
+/// preserved, so restart-time duty gates must also consult this status file.
+pub fn persisted_recovery_state() -> Option<RealignmentState> {
+    let path = crate::utils::resolve_data_path("data/self_heal_status.json");
+    let bytes = fs::read(path).ok()?;
+    let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
+    recovery_state_from_status_value(&value)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1026,15 +1110,15 @@ impl RealignmentLifecycle {
 }
 
 pub fn create_snapshot_manifest(input: SnapshotBuildInput) -> Result<SnapshotManifest, String> {
-    let files = collect_snapshot_files(&input.state_dir)?;
+    let snapshot_class = normalize_snapshot_class(&input.snapshot_class)
+        .ok_or_else(|| format!("unsupported snapshot class {}", input.snapshot_class))?
+        .to_string();
+    let files = collect_snapshot_files(&input.state_dir, &snapshot_class)?;
     let full_archive_sha256 = manifest_files_digest(&files)?;
     let state_root = match input.state_root {
         Some(root) if !root.trim().is_empty() => Some(root),
         _ => Some(snapshot_state_root_digest(&files)?),
     };
-    let snapshot_class = normalize_snapshot_class(&input.snapshot_class)
-        .ok_or_else(|| format!("unsupported snapshot class {}", input.snapshot_class))?
-        .to_string();
     let allowed_restore_roles = if input.allowed_restore_roles.is_empty() {
         default_allowed_restore_roles_for_class(&snapshot_class)
             .ok_or_else(|| format!("unsupported snapshot class {snapshot_class}"))?
@@ -1154,6 +1238,14 @@ pub fn verify_signed_snapshot_manifest(
             manifest.snapshot_class.clone()
         }
     };
+    let manifest_files = manifest
+        .files
+        .iter()
+        .map(|entry| entry.relative_path.as_str())
+        .collect::<Vec<_>>();
+    if let Err(error) = validate_snapshot_file_contract(&normalized_class, &manifest_files) {
+        errors.push(error);
+    }
     if let Some(expected_class) = policy.expected_snapshot_class.as_deref() {
         match normalize_snapshot_class(expected_class) {
             Some(expected) if expected == normalized_class => {}
@@ -1483,6 +1575,14 @@ pub fn build_snapshot_restore_plan(
     target_data_dir: &Path,
     verification: &SnapshotVerificationReport,
 ) -> Result<SnapshotRestorePlan, String> {
+    let manifest_files = signed
+        .manifest
+        .files
+        .iter()
+        .map(|entry| entry.relative_path.as_str())
+        .collect::<Vec<_>>();
+    validate_snapshot_file_contract(&signed.manifest.snapshot_class, &manifest_files)
+        .map_err(|error| format!("refusing restore plan: {error}"))?;
     if !verification.success {
         return Err("refusing restore plan: snapshot verification failed".to_string());
     }
@@ -1542,7 +1642,10 @@ fn allowed_transition(current: RealignmentState, next: RealignmentState) -> bool
     )
 }
 
-fn collect_snapshot_files(state_dir: &Path) -> Result<Vec<SnapshotFileEntry>, String> {
+fn collect_snapshot_files(
+    state_dir: &Path,
+    snapshot_class: &str,
+) -> Result<Vec<SnapshotFileEntry>, String> {
     let mut files = Vec::new();
     let data_dir = if state_dir.join("data").is_dir() {
         state_dir.join("data")
@@ -1560,6 +1663,11 @@ fn collect_snapshot_files(state_dir: &Path) -> Result<Vec<SnapshotFileEntry>, St
     if files.is_empty() {
         return Err("snapshot contains no chain/state files".to_string());
     }
+    let present_files = files
+        .iter()
+        .map(|entry| entry.relative_path.as_str())
+        .collect::<Vec<_>>();
+    validate_snapshot_file_contract(snapshot_class, &present_files)?;
     Ok(files)
 }
 
@@ -1954,8 +2062,11 @@ mod tests {
     fn state_dir() -> PathBuf {
         let root = temp_root("state");
         fs::write(root.join("chain.json"), b"chain").unwrap();
+        fs::write(root.join("committed_blocks.jsonl"), b"blocks\n").unwrap();
         fs::write(root.join("canonical_locks.json"), b"locks").unwrap();
         fs::write(root.join("committed_qcs.jsonl"), b"qcs").unwrap();
+        fs::write(root.join("token_state.json"), b"token-state").unwrap();
+        fs::write(root.join("validator_registry.json"), b"validators").unwrap();
         root
     }
 
@@ -2020,6 +2131,63 @@ mod tests {
         assert!(report.file_checksums_verified);
         assert_eq!(report.snapshot_class, SNAPSHOT_CLASS_VALIDATOR_PRUNED);
         assert_eq!(report.allowed_restore_roles, vec!["validator".to_string()]);
+    }
+
+    #[test]
+    fn validator_pruned_snapshot_requires_token_state_for_creation_and_restore() {
+        let root = state_dir();
+        fs::remove_file(root.join("token_state.json")).unwrap();
+        let (_signer, key_id, public) = signer();
+        let error = create_snapshot_manifest(SnapshotBuildInput {
+            state_dir: root,
+            snapshot_class: SNAPSHOT_CLASS_VALIDATOR_PRUNED.to_string(),
+            allowed_restore_roles: vec!["validator".to_string()],
+            snapshot_height: 100,
+            snapshot_block_hash: "block-hash".to_string(),
+            parent_hash: "parent-hash".to_string(),
+            state_root: None,
+            canonical_lock_height: 100,
+            canonical_lock_hash: "block-hash".to_string(),
+            qc_evidence: qc_evidence(),
+            active_validator_set: validators(),
+            source_node_id: "validator-2".to_string(),
+            source_role: "VALIDATOR".to_string(),
+            runtime_checksum: "runtime-sha256".to_string(),
+            source_node_quarantined: false,
+            source_node_majority_branch: true,
+            conflict_height_hash: Some("block-hash".to_string()),
+            manifest_signer_uma_id: "archive-1".to_string(),
+            manifest_signing_key_id: key_id,
+            manifest_signer_public_key: public,
+            manifest_signature_epoch: 0,
+            created_at: 1,
+        })
+        .expect_err("validator-pruned creation must require token state");
+        assert!(
+            error.contains("token_state.json"),
+            "unexpected error: {error}"
+        );
+
+        let mut signed = signed_manifest();
+        signed
+            .manifest
+            .files
+            .retain(|entry| entry.relative_path != "token_state.json");
+        let report = verify(&signed);
+        assert!(!report.success);
+        assert!(report
+            .errors
+            .iter()
+            .any(|error| error.contains("token_state.json")));
+        let restore_error = build_snapshot_restore_plan(
+            "validator-1",
+            &signed,
+            "snapshot.tar",
+            Path::new("data"),
+            &report,
+        )
+        .expect_err("restore must reject an incomplete validator-pruned snapshot");
+        assert!(restore_error.contains("token_state.json"));
     }
 
     #[test]
@@ -2497,8 +2665,11 @@ mod tests {
     fn snapshot_rejects_chain_json_with_trailing_bytes() {
         let root = temp_root("trailing-chain-json");
         fs::write(root.join("chain.json"), b"[{\"block_index\":100,\"hash\":\"block-hash\",\"previous_hash\":\"parent-hash\",\"transactions\":[],\"validator_id\":\"validator-1\",\"nonce\":1}]stale-tail").unwrap();
+        fs::write(root.join("committed_blocks.jsonl"), b"blocks\n").unwrap();
         fs::write(root.join("canonical_locks.json"), b"locks").unwrap();
         fs::write(root.join("committed_qcs.jsonl"), b"qcs").unwrap();
+        fs::write(root.join("token_state.json"), b"token-state").unwrap();
+        fs::write(root.join("validator_registry.json"), b"validators").unwrap();
         let (mut signer, key_id, public) = signer();
         let manifest = create_snapshot_manifest(SnapshotBuildInput {
             state_dir: root.clone(),
@@ -2686,7 +2857,7 @@ mod tests {
         let root = temp_root("forbidden");
         fs::write(root.join("chain.json"), b"chain").unwrap();
         fs::write(root.join("validator.key"), b"secret").unwrap();
-        let files = collect_snapshot_files(&root).unwrap();
+        let files = collect_snapshot_files(&root, SNAPSHOT_CLASS_ARCHIVE_FULL).unwrap();
         assert!(files
             .iter()
             .all(|entry| entry.relative_path != "validator.key"));

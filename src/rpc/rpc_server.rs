@@ -40,9 +40,10 @@ use crate::validator::{
     canonical_validator_cluster_address, canonical_validator_cluster_plan_for_epoch,
     canonical_validator_clusters_digest, canonical_validator_clusters_for_epoch,
     canonical_validator_clusters_for_height, consensus_membership_validators_for_height,
-    effective_cluster_epoch_for_height, target_validator_cluster_count, Validator,
-    ValidatorManager, ValidatorRegistry, ValidatorStatus, INITIAL_VALIDATOR_SYNERGY_SCORE,
-    TESTNET_MIN_VALIDATOR_STAKE_NWEI, VALIDATOR_MANAGER,
+    effective_cluster_epoch_for_height, replay_validator_activation_transactions,
+    target_validator_cluster_count, Validator, ValidatorManager, ValidatorRegistry,
+    ValidatorStatus, INITIAL_VALIDATOR_SYNERGY_SCORE, TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+    VALIDATOR_MANAGER,
 };
 use crate::wallet::WALLET_MANAGER;
 use crate::{info, warn};
@@ -576,6 +577,14 @@ pub use self::SHARED_CHAIN as CHAIN;
 //     pub static ref AIVM_RUNTIME: Arc<AIVMRuntime> = Arc::new(AIVMRuntime::new());
 // }
 
+fn replay_validator_activations_from_canonical_chain(
+    canonical_chain: &BlockChain,
+    token_manager: &crate::token::TokenManager,
+    validator_manager: &Arc<ValidatorManager>,
+) -> (u64, u64) {
+    replay_validator_activation_transactions(canonical_chain, token_manager, validator_manager)
+}
+
 pub fn start_rpc_server(
     bind_address: &str,
     ws_bind_address: Option<String>,
@@ -590,40 +599,67 @@ pub fn start_rpc_server(
         }
     }
 
-    // Load validator registry from disk if it exists
+    // Load the registry first so replay can repair stale entries as well as rebuild a missing file.
     let validator_registry_path = "data/validator_registry.json";
     if let Err(e) = VALIDATOR_MANAGER.load_registry(validator_registry_path) {
         println!("ℹ️ No validator registry found at startup: {}", e);
-    } else {
-        let validators = VALIDATOR_MANAGER.get_active_validators();
-        println!(
-            "✅ Loaded {} validators from registry at startup",
-            validators.len()
+    }
+
+    // SHARED_CHAIN has already passed canonical genesis and chain-body validation during
+    // initialization. Keep the validated chain locked while replay scans it by reference so a
+    // missing or stale registry cannot suppress an activated validator or double chain memory.
+    let ((activation_replayed, activation_failed), chain_height) = {
+        let canonical_chain = SHARED_CHAIN
+            .lock()
+            .expect("canonical startup chain lock should not be poisoned");
+        let replay_result = replay_validator_activations_from_canonical_chain(
+            &canonical_chain,
+            &TOKEN_MANAGER,
+            &VALIDATOR_MANAGER,
         );
-        let chain_height = persisted_chain_tip()
+        let chain_height = canonical_chain
+            .last()
             .map(|block| block.block_index)
             .unwrap_or(0);
-        match reconcile_validator_registry_clusters_for_height(&VALIDATOR_MANAGER, chain_height) {
-            Ok(true) => {
-                if let Err(error) = VALIDATOR_MANAGER.save_registry(validator_registry_path) {
-                    println!(
-                        "⚠️ Failed to persist startup validator cluster reconciliation at height {}: {}",
-                        chain_height, error
-                    );
-                }
-            }
-            Ok(false) => {}
-            Err(error) => {
+        if let Some(block) = canonical_chain.last() {
+            cache_last_known_good_chain_tip(block);
+        }
+        (replay_result, chain_height)
+    };
+    if activation_replayed > 0 {
+        println!(
+            "🔁 Replayed {} validator activation transaction(s) at startup",
+            activation_replayed
+        );
+    }
+    if activation_failed > 0 {
+        eprintln!(
+            "⚠️ Rejected {} validator activation transaction(s) at startup; fail-closed validation left them unapplied",
+            activation_failed
+        );
+    }
+
+    let validators = VALIDATOR_MANAGER.get_active_validators();
+    println!(
+        "✅ Loaded {} validators from registry at startup",
+        validators.len()
+    );
+    match reconcile_validator_registry_clusters_for_height(&VALIDATOR_MANAGER, chain_height) {
+        Ok(changed) if changed || activation_replayed > 0 => {
+            if let Err(error) = VALIDATOR_MANAGER.save_registry(validator_registry_path) {
                 println!(
-                    "⚠️ Failed to reconcile validator clusters at startup height {}: {}",
+                    "⚠️ Failed to persist startup validator registry repair at height {}: {}",
                     chain_height, error
                 );
             }
         }
-    }
-
-    if let Some(block) = persisted_chain_tip() {
-        cache_last_known_good_chain_tip(&block);
+        Ok(_) => {}
+        Err(error) => {
+            println!(
+                "⚠️ Failed to reconcile validator clusters at startup height {}: {}",
+                chain_height, error
+            );
+        }
     }
 
     if let Some(ws_bind_address) = ws_bind_address {
@@ -10525,6 +10561,124 @@ mod tests {
         assert_eq!(second["fault_tolerance_f"].as_u64(), Some(2));
         assert_eq!(second["can_finalize"].as_bool(), Some(false));
         assert_eq!(second["health"].as_str(), Some("halted_safely"));
+    }
+
+    #[test]
+    fn startup_replay_restores_stale_registry_before_membership_and_reconciliation() {
+        let public_key = "startup-replay-public-key";
+        let validator_address = crate::address::generate_validator_address(public_key, 1);
+        let bonded_stake = TESTNET_MIN_VALIDATOR_STAKE_NWEI;
+        let funding_source = canonical_genesis()
+            .expect("canonical genesis should load")
+            .balances()
+            .iter()
+            .find(|balance| balance.balance_nwei >= bonded_stake)
+            .expect("canonical genesis should provide a funding balance")
+            .address
+            .clone();
+        let token_manager = crate::token::TokenManager::new();
+        token_manager
+            .transfer_tokens(&funding_source, &validator_address, "SNRG", bonded_stake, 0)
+            .expect("test validator should receive genesis-funded stake");
+        token_manager
+            .stake_tokens(&validator_address, &validator_address, "SNRG", bonded_stake)
+            .expect("test validator should bond stake");
+
+        let activation_tx = Transaction::new(
+            validator_address.clone(),
+            validator_address.clone(),
+            0,
+            0,
+            vec![31, 32, 33],
+            1,
+            21_000,
+            Some(format!(
+                "validator_activation:{{\"validator\":\"{}\",\"public_key\":\"{}\",\"name\":\"Startup Replay Validator\",\"stake_amount_nwei\":{}}}",
+                validator_address, public_key, bonded_stake
+            )),
+            "fndsa".to_string(),
+        );
+        let activation_height = 1;
+        let recorded_height = activation_height + crate::validator::VALIDATOR_SHADOW_PHASE_BLOCKS;
+        let effective_height = recorded_height + 1;
+        let mut chain = BlockChain::new();
+        chain
+            .genesis()
+            .expect("test chain should initialize canonical genesis");
+        let genesis_hash = chain
+            .last()
+            .expect("initialized chain should contain canonical genesis")
+            .hash
+            .clone();
+        chain.add_block(Block::new_with_timestamp(
+            activation_height,
+            vec![activation_tx],
+            genesis_hash,
+            "genesis-validator".to_string(),
+            0,
+            1,
+        ));
+        let recorded_parent = chain.last().unwrap().hash.clone();
+        chain.add_block(Block::new_with_timestamp(
+            recorded_height,
+            Vec::new(),
+            recorded_parent,
+            "genesis-validator".to_string(),
+            0,
+            2,
+        ));
+        let effective_parent = chain.last().unwrap().hash.clone();
+        chain.add_block(Block::new_with_timestamp(
+            effective_height,
+            Vec::new(),
+            effective_parent,
+            "genesis-validator".to_string(),
+            0,
+            3,
+        ));
+
+        let validator_manager = Arc::new(ValidatorManager::new());
+        let mut stale = Validator::new(
+            validator_address.clone(),
+            "stale-public-key".to_string(),
+            "Stale Validator".to_string(),
+            bonded_stake,
+        );
+        stale.status = ValidatorStatus::Inactive;
+        validator_manager
+            .registry
+            .lock()
+            .expect("validator registry should lock")
+            .validators
+            .insert(validator_address.clone(), stale);
+
+        let (replayed, rejected) = replay_validator_activations_from_canonical_chain(
+            &chain,
+            &token_manager,
+            &validator_manager,
+        );
+        assert_eq!((replayed, rejected), (1, 0));
+
+        let membership = consensus_membership_validators_for_height(
+            validator_manager.get_all_validators(),
+            effective_height,
+        )
+        .expect("replayed activation should be usable by height-scoped membership");
+        assert!(membership
+            .iter()
+            .any(|validator| validator.address == validator_address));
+
+        assert!(reconcile_validator_registry_clusters_for_height(
+            &validator_manager,
+            effective_height,
+        )
+        .expect("startup reconciliation should see replayed active validator"));
+        let restored = validator_manager
+            .get_validator(&validator_address)
+            .expect("replayed validator should remain in the registry");
+        assert_eq!(restored.status, ValidatorStatus::Active);
+        assert_eq!(restored.public_key, public_key);
+        assert!(restored.cluster_id.is_some());
     }
 
     #[test]

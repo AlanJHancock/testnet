@@ -8,7 +8,8 @@ use crate::consensus::dual_quorum::DualQuorumConsensus;
 use crate::consensus::self_realign::{
     apply_chain_state_wipe_plan, build_chain_state_wipe_plan, build_snapshot_restore_plan,
     default_allowed_restore_roles_for_class, fail_closed_mutation_response,
-    launch_snapshot_allowed_files, sign_snapshot_manifest, snapshot_class_uses_compact_history,
+    launch_snapshot_allowed_files, persisted_recovery_state, required_snapshot_files_for_class,
+    sign_snapshot_manifest, snapshot_class_uses_compact_history, validate_snapshot_file_contract,
     verify_signed_snapshot_manifest, QuarantineMarker, RealignmentState, ShadowDecisionRecord,
     ShadowObservation, SignedSnapshotManifest, SnapshotBuildInput, SnapshotQcEvidence,
     SnapshotSchedule, SnapshotVerificationPolicy, ValidatorDutyGate, WipeApplyPreconditions,
@@ -29,6 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -40,6 +42,7 @@ const DIAGNOSTIC_STALE_TRANSIENT_VOTE_LOCK_SECS: u64 = 30;
 const SHADOW_REJOIN_EPOCH_SIZE: u64 = 1_000;
 const PRUNED_SNAPSHOT_HISTORY_WINDOW_BLOCKS: u64 = 5_000;
 const SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT: u64 = 175_518;
+static SNAPSHOT_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct VoteLockEntry {
@@ -170,6 +173,15 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn unique_snapshot_path_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let counter = SNAPSHOT_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{nanos}-{counter}", std::process::id())
 }
 
 fn shadow_epoch_bounds(start_height: u64, latest_height: u64) -> Result<ShadowEpochBounds, String> {
@@ -474,7 +486,7 @@ fn marker_recovery_state(marker_paths: &[String]) -> RealignmentState {
         }
     }
     if marker_paths.is_empty() {
-        RealignmentState::Active
+        persisted_recovery_state().unwrap_or(RealignmentState::Active)
     } else {
         RealignmentState::Quarantined
     }
@@ -1092,6 +1104,14 @@ fn copy_snapshot_state_files(
     snapshot_block: &BlockSummary,
     materialized_lock: Option<&SnapshotCanonicalLockMaterialization>,
 ) -> Result<usize, String> {
+    for required_file in required_snapshot_files_for_class(snapshot_class) {
+        if !data_dir.join(required_file).is_file() {
+            return Err(format!(
+                "snapshot class {} requires state file {}",
+                snapshot_class, required_file
+            ));
+        }
+    }
     fs::create_dir_all(snapshot_dir).map_err(|error| {
         format!(
             "create snapshot state directory {}: {error}",
@@ -2042,6 +2062,14 @@ fn restore_snapshot_files(
     snapshot_root: &Path,
     target_data_dir: &Path,
 ) -> Result<Vec<String>, String> {
+    let manifest_files = signed
+        .manifest
+        .files
+        .iter()
+        .map(|entry| entry.relative_path.as_str())
+        .collect::<Vec<_>>();
+    validate_snapshot_file_contract(&signed.manifest.snapshot_class, &manifest_files)
+        .map_err(|error| format!("snapshot restore refused: {error}"))?;
     fs::create_dir_all(target_data_dir).map_err(|error| {
         format!(
             "create target data directory {}: {error}",
@@ -2171,15 +2199,28 @@ pub fn quarantine_status() -> Value {
 
     let recovery_state = marker_recovery_state(&marker_paths);
     let duty_gate = ValidatorDutyGate::for_state(recovery_state);
+    let quarantined = !marker_paths.is_empty()
+        || !matches!(
+            recovery_state,
+            RealignmentState::Active | RealignmentState::VoteOnly
+        );
+    let status = if quarantined {
+        "quarantined"
+    } else if recovery_state == RealignmentState::VoteOnly {
+        "vote_only"
+    } else {
+        "healthy"
+    };
 
     json!({
         "chain": chain_identity(),
-        "status": if marker_paths.is_empty() { "healthy" } else { "quarantined" },
-        "quarantined": !marker_paths.is_empty(),
+        "status": status,
+        "quarantined": quarantined,
         "recovery_state": recovery_state,
         "duty_gate": duty_gate,
         "rejoin_eligibility": recovery_state == RealignmentState::ReadyToRejoin,
         "marker_paths": marker_paths,
+        "recovery_state_persisted": persisted_recovery_state().is_some(),
     })
 }
 
@@ -2784,101 +2825,128 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
     fs::create_dir_all(&snapshot_root)
         .map_err(|error| format!("create snapshot root {}: {error}", snapshot_root.display()))?;
     let created_at = now_secs();
-    let snapshot_dir = snapshot_root.join(format!("snapshot-{}-{}", snapshot_height, created_at));
-    fs::create_dir_all(&snapshot_dir).map_err(|error| {
+    let path_id = unique_snapshot_path_id();
+    let temporary_dir = snapshot_root.join(format!(
+        ".snapshot-{snapshot_height}-{created_at}-{path_id}.tmp"
+    ));
+    let snapshot_dir =
+        snapshot_root.join(format!("snapshot-{snapshot_height}-{created_at}-{path_id}"));
+    fs::create_dir(&temporary_dir).map_err(|error| {
         format!(
-            "create snapshot directory {}: {error}",
-            snapshot_dir.display()
+            "create temporary snapshot directory {}: {error}",
+            temporary_dir.display()
         )
     })?;
-    copy_snapshot_state_files(
-        &data_dir,
-        &snapshot_dir,
-        snapshot_height,
-        &snapshot_class,
-        &block,
-        materialized_lock.as_ref(),
-    )?;
 
-    let mut signer = AegisPqvmSigner::initialize_required().map_err(|error| error.to_string())?;
-    let source_node_id = snapshot_source_node_id();
-    let signer_uma = format!("snapshot-source:{source_node_id}");
-    let signing_key_id = signer
-        .generate_and_register_key(
-            &signer_uma,
-            vec![AegisPqKeyRole::ArchiveSnapshotSigner],
-            Epoch(0),
-        )
-        .map_err(|error| error.to_string())?;
-    let signer_public_key = signer
-        .public_key_record(&signing_key_id)
-        .map_err(|error| error.to_string())?;
-    let manifest = crate::consensus::self_realign::create_snapshot_manifest(SnapshotBuildInput {
-        state_dir: snapshot_dir.clone(),
-        snapshot_class,
-        allowed_restore_roles,
-        snapshot_height: block.height,
-        snapshot_block_hash: block.hash.clone(),
-        parent_hash: block.parent_hash.clone(),
-        state_root: None,
-        canonical_lock_height: snapshot_height,
-        canonical_lock_hash: canonical_lock_hash.clone(),
-        qc_evidence: SnapshotQcEvidence {
-            committed_qc_height: qc.height,
-            committed_qc_hash: qc.hash.clone(),
-            vote_count: qc.vote_count,
-            signer_set: signer_set.clone(),
-            aegis_pqc_verified: qc.verified,
-            duplicate_signer_check_passed: signer_set_unique,
-            active_validator_count: active_validator_set.len(),
-            active_validator_set_meets_baseline: active_validator_set.len()
-                >= BASELINE_VALIDATOR_COUNT,
-            relayers_rpc_support_counted_toward_quorum: false,
-        },
-        active_validator_set: active_validator_set.clone(),
-        source_node_id,
-        source_role: options
-            .source_role
-            .unwrap_or_else(|| "VALIDATOR".to_string()),
-        runtime_checksum: current_runtime_checksum()?,
-        source_node_quarantined: false,
-        source_node_majority_branch: true,
-        conflict_height_hash: options.conflict_height_hash,
-        manifest_signer_uma_id: signer_uma,
-        manifest_signing_key_id: signing_key_id,
-        manifest_signer_public_key: signer_public_key,
-        manifest_signature_epoch: 0,
-        created_at,
-    })?;
-    let signed = sign_snapshot_manifest(&mut signer, manifest)?;
-    let manifest_path = snapshot_dir.join(format!("snapshot-{}-manifest.json", snapshot_height));
-    let manifest_bytes = serde_json::to_vec_pretty(&signed)
-        .map_err(|error| format!("serialize signed snapshot manifest: {error}"))?;
-    fs::write(&manifest_path, manifest_bytes).map_err(|error| {
-        format!(
-            "write snapshot manifest {}: {error}",
-            manifest_path.display()
-        )
-    })?;
-    let verification = verify_signed_snapshot_manifest(
-        &signed,
-        &SnapshotVerificationPolicy::default(),
-        Some(&snapshot_dir),
-    );
-    if !verification.success {
-        return Err(format!(
-            "created snapshot failed verification: {}",
-            verification.errors.join("; ")
-        ));
-    }
-    snapshot_metadata_consistency_report(&signed, &snapshot_dir).map_err(|error| {
-        format!("created snapshot failed materialized-state consistency: {error}")
-    })?;
-    enforce_snapshot_retention(
-        &snapshot_root,
-        SnapshotSchedule::launch_default().retain_last,
-    )?;
-    Ok(json!({
+    let result = (|| -> Result<Value, String> {
+        copy_snapshot_state_files(
+            &data_dir,
+            &temporary_dir,
+            snapshot_height,
+            &snapshot_class,
+            &block,
+            materialized_lock.as_ref(),
+        )?;
+
+        let mut signer =
+            AegisPqvmSigner::initialize_required().map_err(|error| error.to_string())?;
+        let source_node_id = snapshot_source_node_id();
+        let signer_uma = format!("snapshot-source:{source_node_id}");
+        let signing_key_id = signer
+            .generate_and_register_key(
+                &signer_uma,
+                vec![AegisPqKeyRole::ArchiveSnapshotSigner],
+                Epoch(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let signer_public_key = signer
+            .public_key_record(&signing_key_id)
+            .map_err(|error| error.to_string())?;
+        let manifest =
+            crate::consensus::self_realign::create_snapshot_manifest(SnapshotBuildInput {
+                state_dir: temporary_dir.clone(),
+                snapshot_class,
+                allowed_restore_roles,
+                snapshot_height: block.height,
+                snapshot_block_hash: block.hash.clone(),
+                parent_hash: block.parent_hash.clone(),
+                state_root: None,
+                canonical_lock_height: snapshot_height,
+                canonical_lock_hash: canonical_lock_hash.clone(),
+                qc_evidence: SnapshotQcEvidence {
+                    committed_qc_height: qc.height,
+                    committed_qc_hash: qc.hash.clone(),
+                    vote_count: qc.vote_count,
+                    signer_set: signer_set.clone(),
+                    aegis_pqc_verified: qc.verified,
+                    duplicate_signer_check_passed: signer_set_unique,
+                    active_validator_count: active_validator_set.len(),
+                    active_validator_set_meets_baseline: active_validator_set.len()
+                        >= BASELINE_VALIDATOR_COUNT,
+                    relayers_rpc_support_counted_toward_quorum: false,
+                },
+                active_validator_set: active_validator_set.clone(),
+                source_node_id,
+                source_role: options
+                    .source_role
+                    .unwrap_or_else(|| "VALIDATOR".to_string()),
+                runtime_checksum: current_runtime_checksum()?,
+                source_node_quarantined: false,
+                source_node_majority_branch: true,
+                conflict_height_hash: options.conflict_height_hash,
+                manifest_signer_uma_id: signer_uma,
+                manifest_signing_key_id: signing_key_id,
+                manifest_signer_public_key: signer_public_key,
+                manifest_signature_epoch: 0,
+                created_at,
+            })?;
+        let signed = sign_snapshot_manifest(&mut signer, manifest)?;
+        let temporary_manifest_path =
+            temporary_dir.join(format!("snapshot-{}-manifest.json", snapshot_height));
+        let manifest_bytes = serde_json::to_vec_pretty(&signed)
+            .map_err(|error| format!("serialize signed snapshot manifest: {error}"))?;
+        fs::write(&temporary_manifest_path, manifest_bytes).map_err(|error| {
+            format!(
+                "write snapshot manifest {}: {error}",
+                temporary_manifest_path.display()
+            )
+        })?;
+        let verification = verify_signed_snapshot_manifest(
+            &signed,
+            &SnapshotVerificationPolicy {
+                current_finalized_height: Some(latest_canonical_lock_height),
+                ..SnapshotVerificationPolicy::default()
+            },
+            Some(&temporary_dir),
+        );
+        if !verification.success {
+            return Err(format!(
+                "created snapshot failed verification: {}",
+                verification.errors.join("; ")
+            ));
+        }
+        snapshot_metadata_consistency_report(&signed, &temporary_dir).map_err(|error| {
+            format!("created snapshot failed materialized-state consistency: {error}")
+        })?;
+        if snapshot_dir.exists() {
+            return Err(format!(
+                "refusing to replace existing snapshot artifact {}",
+                snapshot_dir.display()
+            ));
+        }
+        fs::rename(&temporary_dir, &snapshot_dir).map_err(|error| {
+            format!(
+                "atomically publish snapshot {}: {error}",
+                snapshot_dir.display()
+            )
+        })?;
+        enforce_snapshot_retention(
+            &snapshot_root,
+            SnapshotSchedule::launch_default().retain_last,
+        )?;
+        let manifest_path =
+            snapshot_dir.join(format!("snapshot-{}-manifest.json", snapshot_height));
+        Ok(json!({
         "success": true,
         "typed_status": "SNAPSHOT_CREATED",
         "chain": chain_identity(),
@@ -2908,7 +2976,12 @@ pub fn create_snapshot_with_options(options: CreateSnapshotOptions) -> Result<Va
         "chain_state_mutated": false,
         "canonical_locks_mutated": false,
         "committed_qcs_mutated": false,
-    }))
+        }))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&temporary_dir);
+    }
+    result
 }
 
 pub fn verify_snapshot(manifest_path: &str, snapshot_root: Option<&str>) -> Result<Value, String> {
@@ -2961,6 +3034,16 @@ pub fn self_heal_from_snapshot(
     snapshot_root: Option<&str>,
 ) -> Result<Value, String> {
     require_local_testnet_v2()?;
+    let validator_id = crate::config::resolve_runtime_validator_address()
+        .unwrap_or_else(|| "unknown-validator".to_string());
+    let Some(current_finalized_height) = latest_canonical_lock_height() else {
+        return Ok(json!(fail_closed_mutation_response(
+            validator_id,
+            RealignmentState::Quarantined,
+            "self-heal-from-snapshot requires current finalized height from canonical_locks.json",
+            "data/self-heal-evidence"
+        )));
+    };
     let manifest_path_buf = PathBuf::from(manifest_path);
     let signed = read_signed_snapshot_manifest(&manifest_path_buf)?;
     let snapshot_root = resolved_snapshot_root(&manifest_path_buf, snapshot_root)?;
@@ -2969,16 +3052,20 @@ pub fn self_heal_from_snapshot(
         &SnapshotVerificationPolicy {
             expected_snapshot_class: Some(SNAPSHOT_CLASS_VALIDATOR_PRUNED.to_string()),
             target_role: Some("validator".to_string()),
+            current_finalized_height: Some(current_finalized_height),
             ..SnapshotVerificationPolicy::default()
         },
         Some(&snapshot_root),
     );
     if !verification_report.success {
+        let verification_errors = verification_report.errors.join("; ");
         return Ok(json!(fail_closed_mutation_response(
             crate::config::resolve_runtime_validator_address()
                 .unwrap_or_else(|| "unknown-validator".to_string()),
             RealignmentState::Quarantined,
-            "snapshot verification failed; self-heal remains quarantined",
+            format!(
+                "snapshot verification failed; self-heal remains quarantined: {verification_errors}"
+            ),
             "data/self-heal-evidence"
         )));
     }
@@ -3015,8 +3102,6 @@ pub fn self_heal_from_snapshot(
         )));
     }
 
-    let validator_id = crate::config::resolve_runtime_validator_address()
-        .unwrap_or_else(|| "unknown-validator".to_string());
     let target_data_dir = crate::utils::resolve_data_path("data");
     let evidence_path = crate::utils::resolve_data_path(&format!(
         "data/self-heal-evidence/{}-snapshot-restore",
@@ -3729,6 +3814,7 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
             "SHADOW_PASSED"
         },
         "new_state": new_state,
+        "recovery_state": new_state,
         "common_height": common_height,
         "common_hash": common_hash,
         "latest_committed_qc_height": qc.height,
@@ -3748,6 +3834,7 @@ pub fn request_rejoin_with_options(options: RejoinRequestOptions) -> Result<Valu
             options.operator_approved_emergency_leader_stall_recovery,
         "vote_only_rejoin": report.new_state == RealignmentState::VoteOnly,
         "proposer_duties_disabled": report.new_state == RealignmentState::VoteOnly,
+        "support_sources_only": report.new_state == RealignmentState::VoteOnly,
         "probation_required_blocks": vote_only_probation_blocks(),
         "next_required_action": if report.new_state == RealignmentState::VoteOnly {
             "continue_vote_only_probation_then_promote_to_proposer_after_no_divergence"
@@ -4081,12 +4168,12 @@ mod tests {
         read_block_at_height, read_latest_block_summary, rejoin_eligibility,
         request_rejoin_with_options, self_heal_from_snapshot, shadow_status,
         snapshot_metadata_consistency_report, snapshot_source_node_id,
-        start_shadow_observe_with_options, sync_from_canonical_peer_with_options, BlockSummary,
-        CommittedBlockLogEntry, CreateSnapshotOptions, EmergencyLeaderStallPromotionOptions,
-        OperatorQuarantineOptions, RejoinRequestOptions, SnapshotCanonicalLockMaterialization,
-        StartShadowObserveOptions, SyncFromCanonicalPeerOptions,
-        DIAGNOSTIC_STALE_TRANSIENT_VOTE_LOCK_SECS, EXPECTED_CHAIN_ID, EXPECTED_NETWORK_ID,
-        SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT,
+        start_shadow_observe_with_options, sync_from_canonical_peer_with_options,
+        unique_snapshot_path_id, BlockSummary, CommittedBlockLogEntry, CreateSnapshotOptions,
+        EmergencyLeaderStallPromotionOptions, OperatorQuarantineOptions, RejoinRequestOptions,
+        SnapshotCanonicalLockMaterialization, StartShadowObserveOptions,
+        SyncFromCanonicalPeerOptions, DIAGNOSTIC_STALE_TRANSIENT_VOTE_LOCK_SECS, EXPECTED_CHAIN_ID,
+        EXPECTED_NETWORK_ID, SNAPSHOT_CONTAMINATION_SENTINEL_HEIGHT,
     };
     use crate::block::{Block, BlockChain};
     use crate::config::NodeConfig;
@@ -4095,11 +4182,12 @@ mod tests {
     use crate::consensus::self_realign::{
         create_snapshot_manifest, required_snapshot_quorum_for_validator_count,
         sign_snapshot_manifest, QuarantineMarker, SnapshotBuildInput, SnapshotQcEvidence,
-        SNAPSHOT_CLASS_VALIDATOR_PRUNED,
+        SNAPSHOT_CLASS_VALIDATOR_PRUNED, VALIDATOR_PRUNED_REQUIRED_STATE_FILES,
     };
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::crypto::pqc::{PQCAlgorithm, PQCManager};
     use crate::synergy_types::{AegisPqKeyRole, Epoch};
+    use crate::validator::{Validator, ValidatorRegistry, ValidatorStatus};
     use base64::engine::general_purpose;
     use base64::Engine as _;
     use serde_json::{json, Value};
@@ -4289,6 +4377,12 @@ mod tests {
                 + "\n",
         )
         .expect("snapshot QCs should be written");
+        fs::write(snapshot_root.join("committed_blocks.jsonl"), b"{}\n")
+            .expect("snapshot committed blocks should be written");
+        fs::write(snapshot_root.join("token_state.json"), b"{}")
+            .expect("snapshot token state should be written");
+        fs::write(snapshot_root.join("validator_registry.json"), b"{}")
+            .expect("snapshot validator registry should be written");
 
         let mut signer = AegisPqvmSigner::initialize_required().expect("test signer should init");
         let key_id = signer
@@ -4351,6 +4445,21 @@ mod tests {
         )
         .expect("signed manifest should be written");
         (snapshot_root, manifest_path)
+    }
+
+    fn ensure_validator_pruned_state_files(data_dir: &Path) {
+        for file_name in VALIDATOR_PRUNED_REQUIRED_STATE_FILES {
+            let path = data_dir.join(file_name);
+            if path.exists() {
+                continue;
+            }
+            let contents = if file_name.ends_with(".jsonl") {
+                b"{\"height\":0}\n".as_slice()
+            } else {
+                b"{}".as_slice()
+            };
+            fs::write(path, contents).expect("complete validator-pruned state should be written");
+        }
     }
 
     fn write_vote_lock(root: &Path, updated_at: u64, second_hash: Option<&str>) {
@@ -4475,38 +4584,30 @@ mod tests {
 
     fn write_legacy_qc_fixture_at_height(root: &Path, height: u64) {
         let mut manager = PQCManager::new();
-        let mut validators = serde_json::Map::new();
+        let mut registry = ValidatorRegistry::new();
         let mut keys = Vec::new();
         for index in 0..5 {
             let address = format!("synv11testvalidator{index}");
             let (public_key, private_key) = manager
                 .generate_keypair(PQCAlgorithm::FNDSA)
                 .expect("test PQC keypair should be generated");
-            validators.insert(
-                address.clone(),
-                json!({
-                    "address": address,
-                    "status": "Active",
-                    "public_key": format!(
-                        "fn-dsa:{}",
-                        general_purpose::STANDARD.encode(&public_key.key_data)
-                    ),
-                    "synergy_score": 100.0,
-                    "cluster_id": 0,
-                }),
+            let encoded_public_key = format!(
+                "fn-dsa:{}",
+                general_purpose::STANDARD.encode(&public_key.key_data)
             );
+            let mut validator = Validator::new(
+                address.clone(),
+                encoded_public_key,
+                format!("test-validator-{index}"),
+                50_000,
+            );
+            validator.status = ValidatorStatus::Active;
+            registry.validators.insert(address.clone(), validator);
             keys.push((address, public_key, private_key));
         }
-        fs::write(
-            root.join("data/validator_registry.json"),
-            json!({
-                "validators": validators,
-                "clusters": {"0": []},
-                "current_epoch": 0,
-            })
-            .to_string(),
-        )
-        .expect("test validator registry should be written");
+        registry
+            .save_to_file(root.join("data/validator_registry.json"))
+            .expect("test validator registry should be written");
 
         let block_hash = test_hash(height);
         let votes = keys
@@ -4591,6 +4692,94 @@ mod tests {
         });
         let error = result.expect_err("snapshot creation should fail closed without proof");
         assert!(error.contains("source_node_majority_branch_proven"));
+    }
+
+    #[test]
+    fn snapshot_retry_uses_unique_staging_artifacts_and_cleans_failed_attempt() {
+        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
+            .lock()
+            .expect("diagnostics env lock should succeed");
+        let root = test_runtime_root("snapshot-retry-staging");
+        install_test_genesis(&root);
+        install_test_config(&root, 1264, "synergy-testnet-v2");
+        write_chain_range(&root, 100, 101);
+        write_canonical_lock_at_height(&root, 101);
+        write_legacy_qc_fixture_at_height(&root, 101);
+        write_empty_vote_locks(&root);
+
+        let error = with_runtime_root(&root, || {
+            create_snapshot_with_options(CreateSnapshotOptions {
+                source_node_majority_branch_proven: true,
+                ..CreateSnapshotOptions::default()
+            })
+            .expect_err("missing required state must fail after staging begins")
+        });
+        assert!(
+            error.contains("committed_blocks.jsonl"),
+            "unexpected error: {error}"
+        );
+
+        let snapshot_root = root.join("data/snapshots");
+        let entries = fs::read_dir(&snapshot_root)
+            .map(|entries| entries.filter_map(Result::ok).collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert!(
+            entries.iter().all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".snapshot-")),
+            "failed snapshot attempt left a temporary artifact"
+        );
+        assert!(
+            entries
+                .iter()
+                .all(|entry| !entry.file_name().to_string_lossy().starts_with("snapshot-")),
+            "failed snapshot attempt published a partial artifact"
+        );
+
+        let first_id = unique_snapshot_path_id();
+        let second_id = unique_snapshot_path_id();
+        assert_ne!(first_id, second_id, "retry must never reuse a staging id");
+    }
+
+    #[test]
+    fn validator_pruned_snapshot_copy_rejects_missing_token_before_publication() {
+        let root = test_runtime_root("snapshot-copy-requires-token-state");
+        let data_dir = root.join("data");
+        fs::write(
+            data_dir.join("chain.json"),
+            json!([{"block_index": 10, "hash": "h10", "previous_hash": "h9"}]).to_string(),
+        )
+        .unwrap();
+        fs::write(data_dir.join("committed_blocks.jsonl"), b"{}\n").unwrap();
+        fs::write(
+            data_dir.join("canonical_locks.json"),
+            json!({"10": {"height": 10, "hash": "h10"}}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            data_dir.join("committed_qcs.jsonl"),
+            json!({"qc": {"votes": [{"block_index": 10}], "block_hash": "h10"}}).to_string() + "\n",
+        )
+        .unwrap();
+        fs::write(data_dir.join("validator_registry.json"), b"{}").unwrap();
+        let snapshot_dir = root.join("snapshot");
+
+        let error = copy_snapshot_state_files(
+            &data_dir,
+            &snapshot_dir,
+            10,
+            SNAPSHOT_CLASS_VALIDATOR_PRUNED,
+            &test_block_summary(10, "h10"),
+            None,
+        )
+        .expect_err("missing token state must fail before snapshot publication");
+
+        assert!(
+            error.contains("token_state.json"),
+            "unexpected error: {error}"
+        );
+        assert!(!snapshot_dir.exists());
     }
 
     #[test]
@@ -4700,6 +4889,7 @@ mod tests {
         )
         .unwrap();
         let snapshot_dir = root.join("snapshot");
+        ensure_validator_pruned_state_files(&data_dir);
 
         copy_snapshot_state_files(
             &data_dir,
@@ -4758,6 +4948,7 @@ mod tests {
         )
         .unwrap();
         let snapshot_dir = root.join("snapshot");
+        ensure_validator_pruned_state_files(&data_dir);
 
         copy_snapshot_state_files(
             &data_dir,
@@ -4837,6 +5028,7 @@ mod tests {
         )
         .unwrap();
         let snapshot_dir = root.join("snapshot");
+        ensure_validator_pruned_state_files(&data_dir);
 
         copy_snapshot_state_files(
             &data_dir,
@@ -4915,6 +5107,7 @@ mod tests {
         )
         .unwrap();
         let snapshot_dir = root.join("snapshot");
+        ensure_validator_pruned_state_files(&data_dir);
 
         let error = copy_snapshot_state_files(
             &data_dir,
@@ -4972,6 +5165,7 @@ mod tests {
         )
         .unwrap();
         let snapshot_dir = root.join("snapshot");
+        ensure_validator_pruned_state_files(&data_dir);
 
         copy_snapshot_state_files(
             &data_dir,
@@ -5025,6 +5219,7 @@ mod tests {
         )
         .unwrap();
         let snapshot_dir = root.join("snapshot");
+        ensure_validator_pruned_state_files(&data_dir);
         let validator_count = 5;
         let materialized_lock = SnapshotCanonicalLockMaterialization {
             block: BlockSummary {
@@ -5580,6 +5775,64 @@ mod tests {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .contains("local validator quarantine"));
+    }
+
+    #[test]
+    fn self_heal_rejects_snapshot_when_current_finalized_height_is_unavailable() {
+        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
+            .lock()
+            .expect("diagnostics env lock should succeed");
+        let root = test_runtime_root("self-heal-requires-current-finalized-height");
+        install_test_genesis(&root);
+        let (snapshot_root, manifest_path) = write_valid_signed_snapshot(&root);
+
+        let report = with_runtime_root(&root, || {
+            self_heal_from_snapshot(
+                manifest_path.to_str().unwrap(),
+                Some(snapshot_root.to_str().unwrap()),
+            )
+            .expect("missing current finalized height should return typed failure")
+        });
+
+        assert_eq!(report.get("success").and_then(Value::as_bool), Some(false));
+        assert!(report
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("current finalized height"));
+    }
+
+    #[test]
+    fn self_heal_rejects_snapshot_beyond_allowed_lag() {
+        let _guard = DIAGNOSTICS_TEST_ENV_LOCK
+            .lock()
+            .expect("diagnostics env lock should succeed");
+        let root = test_runtime_root("self-heal-rejects-old-snapshot");
+        install_test_genesis(&root);
+        write_minimal_chain_state(&root);
+        operator_quarantine(&root);
+        fs::write(
+            root.join("data/canonical_locks.json"),
+            json!({"20000": {"height": 20000, "hash": "current-finalized"}}).to_string(),
+        )
+        .expect("current finalized lock should be written");
+        let (snapshot_root, manifest_path) = write_valid_signed_snapshot(&root);
+
+        let report = with_runtime_root(&root, || {
+            self_heal_from_snapshot(
+                manifest_path.to_str().unwrap(),
+                Some(snapshot_root.to_str().unwrap()),
+            )
+            .expect("stale snapshot should return typed failure")
+        });
+
+        assert_eq!(report.get("success").and_then(Value::as_bool), Some(false));
+        assert!(report
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("stale beyond allowed lag"));
+        assert!(root.join("data/validator_quarantine.json").exists());
     }
 
     #[test]
@@ -6347,6 +6600,32 @@ mod tests {
         assert_eq!(
             report.get("next_required_action").and_then(Value::as_str),
             Some("continue_vote_only_probation_then_promote_to_proposer_after_no_divergence")
+        );
+
+        let restarted_status = with_runtime_root(&root, quarantine_status);
+        assert_eq!(
+            restarted_status
+                .get("recovery_state")
+                .and_then(Value::as_str),
+            Some("VOTE_ONLY")
+        );
+        assert_eq!(
+            restarted_status.get("status").and_then(Value::as_str),
+            Some("vote_only")
+        );
+        assert_eq!(
+            restarted_status
+                .get("duty_gate")
+                .and_then(|gate| gate.get("can_propose"))
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            restarted_status
+                .get("duty_gate")
+                .and_then(|gate| gate.get("can_vote"))
+                .and_then(Value::as_bool),
+            Some(true)
         );
     }
 
