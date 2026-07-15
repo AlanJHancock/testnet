@@ -3885,12 +3885,16 @@ fn resolve_bootstrap_dial_targets(config: &NodeConfig) -> Vec<String> {
         .chain(config.network.additional_dial_targets.iter())
     {
         if let Some(target) = normalize_peer_target(config, dial) {
-            targets.insert(target);
+            if validator_bootstrap_target_owned_by_local(config, &target) {
+                targets.insert(target);
+            }
         }
     }
 
     for validator in consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators()) {
-        if validator_vpn_transport_for_target(config, &validator.address).is_some() {
+        if validator_vpn_transport_for_target(config, &validator.address).is_some()
+            && validator_bootstrap_target_owned_by_local(config, &validator.address)
+        {
             targets.insert(validator.address);
         }
     }
@@ -3903,6 +3907,23 @@ fn resolve_bootstrap_dial_targets(config: &NodeConfig) -> Vec<String> {
     let mut ordered = targets.into_iter().collect::<Vec<_>>();
     ordered.sort();
     ordered
+}
+
+fn validator_bootstrap_target_owned_by_local(config: &NodeConfig, target: &str) -> bool {
+    if !local_node_runs_validator_consensus(config) {
+        return true;
+    }
+
+    let Some(remote_validator) = normalize_validator_address_target(target) else {
+        return true;
+    };
+    let Some(local_validator) = announced_validator_address(config)
+        .and_then(|address| normalize_validator_address_target(&address))
+    else {
+        return true;
+    };
+
+    local_validator < remote_validator
 }
 
 fn self_dial_aliases(config: &NodeConfig) -> HashSet<String> {
@@ -10718,7 +10739,7 @@ mod tests {
         status_ready_validator_addresses_with_local_duty_gate, status_ready_validator_participants,
         status_sync_batch, support_peer_sync_request_is_too_deep, sync_batch_limit_for_role,
         validate_outbound_frame_length, validate_vote_request_extends_local_tip,
-        validator_status_genesis_grace_remaining_secs,
+        validator_bootstrap_target_owned_by_local, validator_status_genesis_grace_remaining_secs,
         validator_status_genesis_within_grace_window, verify_batch_with_bounded_parallelism,
         verify_handshake_pq_signature, vote_request_parent_sync_range,
         with_peer_stream_outside_peers_lock, ConnectionDirection, DialTargetsArc,
@@ -12485,8 +12506,8 @@ mod tests {
     fn resolve_bootstrap_dial_targets_excludes_public_targets_for_vpn_validator() {
         let mut config = NodeConfig::default();
         config.identity.role = "validator".to_string();
-        config.node.validator_address = "synv1validator7".to_string();
-        config.p2p.public_address = "synv1validator7".to_string();
+        config.node.validator_address = "synv1validator0".to_string();
+        config.p2p.public_address = "synv1validator0".to_string();
         config.network.validator_vpn_transports = vec![
             ValidatorVpnTransportConfig {
                 validator_address: "synv1validator1".to_string(),
@@ -12505,7 +12526,7 @@ mod tests {
             "genesisval2.synergy-network.io:5622".to_string(),
             "synv1validator1".to_string(),
             "10.70.20.1:5622".to_string(),
-            "synv1validator7".to_string(),
+            "synv1validator0".to_string(),
         ];
         config.network.persistent_peers = vec!["synv1validator2".to_string()];
 
@@ -12519,6 +12540,36 @@ mod tests {
                 "synv1validator2".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn validator_bootstrap_dial_ownership_is_deterministic_per_pair() {
+        let mut validator = NodeConfig::default();
+        validator.identity.role = "validator".to_string();
+        validator.node.validator_address = "synv1validator2".to_string();
+
+        assert!(!validator_bootstrap_target_owned_by_local(
+            &validator,
+            "synv1validator1"
+        ));
+        assert!(validator_bootstrap_target_owned_by_local(
+            &validator,
+            "synv1validator3"
+        ));
+        assert!(validator_bootstrap_target_owned_by_local(
+            &validator,
+            "10.70.20.1:5622"
+        ));
+
+        validator.identity.role = "relayer".to_string();
+        assert!(validator_bootstrap_target_owned_by_local(
+            &validator,
+            "synv1validator1"
+        ));
+        assert!(validator_bootstrap_target_owned_by_local(
+            &validator,
+            "synv1validator3"
+        ));
     }
 
     #[test]
