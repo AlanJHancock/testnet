@@ -58,20 +58,6 @@ pub fn sha3_digest(data: &[u8]) -> [u8; 32] {
 // We provide a single process-wide implementation here, backed by
 // pqrust-internals/getrandom.
 
-unsafe fn fill_randombytes(buf: *mut u8, len: usize) -> libc::c_int {
-    if len == 0 {
-        return 0;
-    }
-    if buf.is_null() {
-        return -1;
-    }
-    let out = core::slice::from_raw_parts_mut(buf, len);
-    match getrandom::getrandom(out) {
-        Ok(()) => 0,
-        Err(_) => -1,
-    }
-}
-
 #[no_mangle]
 /// Fill `buf` with `len` random bytes from the process RNG backend.
 ///
@@ -80,19 +66,8 @@ unsafe fn fill_randombytes(buf: *mut u8, len: usize) -> libc::c_int {
 /// `buf` must be valid for writes of at least `len` bytes. The pointer may be
 /// null only when `len == 0`.
 pub unsafe extern "C" fn randombytes(buf: *mut u8, len: libc::c_ulonglong) -> libc::c_int {
-    fill_randombytes(buf, len as usize)
-}
-
-#[no_mangle]
-/// Compatibility export for PQClean wrappers that still call the older symbol.
-///
-/// # Safety
-///
-/// `buf` must be valid for writes of at least `len` bytes. The pointer may be
-/// null only when `len == 0`.
-#[allow(non_snake_case)]
-pub unsafe extern "C" fn PQRUST_RUST_randombytes(buf: *mut u8, len: libc::size_t) -> libc::c_int {
-    fill_randombytes(buf, len)
+    // pqrust_internals::PQRUST_RUST_randombytes uses `size_t`.
+    pqrust_internals::PQRUST_RUST_randombytes(buf, len as libc::size_t)
 }
 
 #[no_mangle]

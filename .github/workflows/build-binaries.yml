@@ -117,6 +117,10 @@ jobs:
         shell: bash
         run: scripts/testnet/check-pqc-consensus-guard.sh
 
+      - name: Enforce PQC RNG symbol ownership
+        shell: bash
+        run: scripts/testnet/check-pqc-rng-symbol-ownership.sh
+
       - name: Enforce release manifest portability
         shell: bash
         run: scripts/testnet/check-release-manifests.sh
