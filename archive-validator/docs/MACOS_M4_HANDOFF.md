@@ -46,6 +46,13 @@ SMB-backed storage is limited to:
 /Volumes/Synergy_Archive/archive-validator/incoming/bootstrap
 ```
 
+The split paths are one installation contract. The defaults above can be
+overridden together with `--app-root`, `--publish-root`, and `--storage-volume`
+or with `SYNERGY_ARCHIVE_APP_ROOT`, `SYNERGY_SNAPSHOT_PUBLISH_ROOT`, and
+`SYNERGY_ARCHIVE_STORAGE_VOLUME`. The installer rejects a publish tree inside
+the local runtime tree and rejects a publish tree outside the selected storage
+volume. Do not substitute a similarly named volume.
+
 The installer verifies the packaged checksums and Apple Silicon executables,
 installs `zstd` through Homebrew if required, removes quarantine attributes from
 the package and installed payloads, sets root-owned executable and LaunchDaemon
@@ -150,6 +157,12 @@ it walks only the currently used role classes and publishes eligible
 `archive-full` is created every 15,000 finalized blocks; all other default
 classes are created every 5,000 finalized blocks. A class-specific
 `--snapshot-class` is only for bounded manual repair runs.
+
+The worker launchd job uses `KeepAlive` plus a five-minute `StartInterval` and
+passes both resolved roots explicitly. It remains fail-closed when the proof
+marker is missing, invalid, stale, or does not match the latest local canonical
+height and hash, so a disconnected or lagging archive cannot publish an older
+snapshot.
 
 For an operator-triggered snapshot:
 

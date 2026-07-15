@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -170,8 +170,7 @@ fn record_qrpc_fallback(reason: &str) {
 
 fn persisted_chain_tip() -> Option<Block> {
     let chain_path = crate::utils::resolve_data_path("data/chain.json");
-    BlockChain::load_from_file(chain_path.to_str().unwrap_or("data/chain.json"))
-        .and_then(|chain| chain.last().cloned())
+    BlockChain::load_last_from_file(chain_path.to_str().unwrap_or("data/chain.json"))
 }
 
 fn cached_or_load_chain_tip<F>(cached: Option<Block>, load_persisted: F) -> Option<Block>
@@ -4605,6 +4604,15 @@ fn handle_json_rpc(
             Err(_) => json!({"error": "Failed to access reward ledger"}),
         },
 
+        // synergy_checkRewardInvariants
+        "synergy_checkRewardInvariants" => {
+            let epoch = params.get(0).and_then(|value| value.as_u64());
+            match crate::rewards::REWARD_LEDGER.lock() {
+                Ok(ledger) => json!(ledger.check_invariants(epoch)),
+                Err(_) => json!({"error": "Failed to access reward ledger"}),
+            }
+        },
+
         // synergy_getValidatorPerformance
         "synergy_getValidatorPerformance" => {
             if let Some(address) = params.get(0).and_then(|v| v.as_str()) {
@@ -5505,6 +5513,7 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_getEpochFeeDistribution"
         | "synergy_getClusterRewardEscrow"
         | "synergy_getTreasuryRecovery"
+        | "synergy_checkRewardInvariants"
         | "synergy_getValidatorPerformance"
         | "synergy_getValidatorQueue"
         | "synergy_getValidatorSlashingHistory"
@@ -6215,23 +6224,67 @@ fn latest_finalized_head_json(chain: &Arc<Mutex<BlockChain>>) -> Value {
     }
 }
 
+const REVERSE_LINE_CHUNK_BYTES: usize = 64 * 1024;
+
+fn read_last_nonempty_line(path: &Path) -> std::io::Result<Option<String>> {
+    let mut file = fs::File::open(path)?;
+    let mut position = file.seek(SeekFrom::End(0))?;
+    let mut suffix = Vec::new();
+
+    while position > 0 {
+        let chunk_len = usize::try_from(position.min(REVERSE_LINE_CHUNK_BYTES as u64))
+            .unwrap_or(REVERSE_LINE_CHUNK_BYTES);
+        position -= chunk_len as u64;
+        file.seek(SeekFrom::Start(position))?;
+
+        let mut chunk = vec![0_u8; chunk_len];
+        file.read_exact(&mut chunk)?;
+        chunk.extend_from_slice(&suffix);
+
+        let mut line_end = chunk.len();
+        for newline in chunk
+            .iter()
+            .enumerate()
+            .rev()
+            .filter_map(|(index, byte)| (*byte == b'\n').then_some(index))
+        {
+            let line = &chunk[newline + 1..line_end];
+            if line.iter().any(|byte| !byte.is_ascii_whitespace()) {
+                return String::from_utf8(line.to_vec())
+                    .map(Some)
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error));
+            }
+            line_end = newline;
+        }
+
+        suffix = chunk[..line_end].to_vec();
+    }
+
+    if suffix.iter().any(|byte| !byte.is_ascii_whitespace()) {
+        return String::from_utf8(suffix)
+            .map(Some)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error));
+    }
+    Ok(None)
+}
+
 fn latest_committed_qc_json() -> Value {
     let path = crate::utils::resolve_data_path("data/committed_qcs.jsonl");
-    let Ok(content) = fs::read_to_string(&path) else {
+    let Ok(last_line) = read_last_nonempty_line(&path) else {
         return json!({
             "found": false,
             "path": path.to_string_lossy(),
             "chain": chain_identity_json(),
         });
     };
-    let Some(line) = content.lines().rev().find(|line| !line.trim().is_empty()) else {
+    let Some(line) = last_line else {
         return json!({
             "found": false,
             "path": path.to_string_lossy(),
             "chain": chain_identity_json(),
         });
     };
-    match serde_json::from_str::<Value>(line) {
+    match serde_json::from_str::<Value>(&line) {
         Ok(mut value) => {
             if let Value::Object(ref mut obj) = value {
                 obj.insert("found".to_string(), json!(true));
@@ -9928,6 +9981,7 @@ mod tests {
             "synergy_getFeeCollector",
             "synergy_getFeeCollectorBalance",
             "synergy_getBurnLedger",
+            "synergy_checkRewardInvariants",
         ] {
             enforce_rpc_exposure_policy(method, &context)
                 .unwrap_or_else(|error| panic!("{method} should be public: {error:?}"));
@@ -9996,6 +10050,47 @@ mod tests {
         assert_eq!(ledger["assetId"], "SNRG");
         assert_eq!(ledger["burnAddress"], crate::address::NETWORK_BURN_ADDRESS);
         assert!(ledger["records"].is_array());
+    }
+
+    #[test]
+    fn reward_invariant_rpc_returns_epoch_scoped_report() {
+        let tx_pool = Arc::new(Mutex::new(Vec::<Transaction>::new()));
+        let chain = Arc::new(Mutex::new(BlockChain::new()));
+        let validator_manager = Arc::new(ValidatorManager::new());
+
+        let report = handle_json_rpc(
+            "synergy_checkRewardInvariants",
+            json!([787]),
+            &tx_pool,
+            &chain,
+            &validator_manager,
+        );
+
+        assert_eq!(report["epoch"], 787);
+        assert!(report["checked_invariants"].is_array());
+        assert!(report["violations"].is_array());
+        assert!(report["passed"].is_boolean());
+    }
+
+    #[test]
+    fn read_last_nonempty_line_handles_large_lines_and_missing_final_newline() {
+        let path = std::env::temp_dir().join(format!(
+            "synergy-rpc-last-line-{}-{}.jsonl",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let large_line = format!("{{\"payload\":\"{}\"}}", "x".repeat(96 * 1024));
+        fs::write(&path, format!("{{\"height\":1}}\n{large_line}\n  \n")).unwrap();
+        assert_eq!(read_last_nonempty_line(&path).unwrap(), Some(large_line));
+        fs::write(&path, b"first\nlast").unwrap();
+        assert_eq!(
+            read_last_nonempty_line(&path).unwrap().as_deref(),
+            Some("last")
+        );
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

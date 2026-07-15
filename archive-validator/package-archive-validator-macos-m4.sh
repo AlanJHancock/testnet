@@ -52,6 +52,7 @@ install -m 0755 "${CARGO_TARGET_DIR}/release/aegis-pqvm" "${PAYLOAD}/bin/aegis-p
 install -m 0755 "${CARGO_TARGET_DIR}/release/synergy-archive-validator-node" "${PAYLOAD}/bin/synergy-archive-validator-node"
 install -m 0755 "${ROOT_DIR}/macos/archive-authority.py" "${PAYLOAD}/bin/synergy-archive"
 install -m 0755 "${ROOT_DIR}/macos-m4/setup-archive-validator-m4.sh" "${PAYLOAD}/setup-archive-validator-m4.sh"
+install -m 0755 "${ROOT_DIR}/macos-m4/archive-paths.sh" "${PAYLOAD}/archive-paths.sh"
 install -m 0755 "${ROOT_DIR}/macos-m4/restore-archive-bootstrap-m4.sh" "${PAYLOAD}/restore-archive-bootstrap-m4.sh"
 install -m 0755 "${ROOT_DIR}/macos-m4/verify-archive-validator-m4.sh" "${PAYLOAD}/verify-archive-validator-m4.sh"
 install -m 0755 "${ROOT_DIR}/macos-m4/run-isolated-mac-acceptance.sh" "${PAYLOAD}/run-isolated-mac-acceptance.sh"
