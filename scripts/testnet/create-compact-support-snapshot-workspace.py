@@ -295,6 +295,7 @@ def main() -> int:
     if output_workspace.exists():
         shutil.rmtree(output_workspace)
     output_data.mkdir(parents=True)
+    (output_workspace / "state" / "store").mkdir(parents=True)
     copy_config(source_workspace, output_workspace, args.source_config)
 
     chain_count, snapshot_hash = write_compact_chain(
@@ -349,6 +350,7 @@ def main() -> int:
         "canonical_locks": lock_count,
         "committed_qcs": qcs_count,
         "committed_blocks": committed_blocks_count,
+        "runtime_workspace_gate_ready": True,
         "keys_or_configs_copied_into_snapshot_data": False,
     }
     (output_workspace / "compact-source-workspace-manifest.json").write_text(

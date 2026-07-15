@@ -1,5 +1,9 @@
 use crate::address::{generate_validator_cluster_address, is_valid_cluster_address};
-use crate::consensus::dual_quorum::required_validator_quorum;
+use crate::consensus::dual_quorum::required_cluster_quorum;
+use crate::validator::{
+    canonical_validator_cluster_address, canonical_validator_cluster_plan_for_epoch_with_seed,
+    target_validator_cluster_count, CanonicalValidatorClusterRotation, Validator, ValidatorStatus,
+};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::{BTreeMap, HashMap};
@@ -32,14 +36,14 @@ impl Default for ClusterConfig {
     fn default() -> Self {
         Self {
             minimum_cluster_size: 5,
-            target_cluster_size: 12,
-            maximum_cluster_size: 25,
+            target_cluster_size: 7,
+            maximum_cluster_size: 10,
             minimum_clusters_for_parallel_consensus: 2,
             parallel_consensus_min_validators: 10,
             routine_rotation_bps: 2_500,
             risk_rotation_bps: 5_000,
             emergency_rotation_bps: 10_000,
-            full_rotation_interval_epochs: 6,
+            full_rotation_interval_epochs: 10,
             anti_affinity_enabled: true,
             co_cluster_history_window_epochs: 12,
             max_pair_repetition_within_window: 3,
@@ -189,38 +193,14 @@ pub fn fault_tolerance_f(cluster_size: usize) -> usize {
 }
 
 pub fn quorum_threshold(cluster_size: usize) -> usize {
-    required_validator_quorum(cluster_size)
+    required_cluster_quorum(cluster_size)
 }
 
 pub fn cluster_count_for_active_validators(
     active_validator_count: usize,
-    config: &ClusterConfig,
+    _config: &ClusterConfig,
 ) -> usize {
-    if active_validator_count == 0 {
-        return 0;
-    }
-    if active_validator_count < config.parallel_consensus_min_validators {
-        return 1;
-    }
-
-    let mut cluster_count = active_validator_count / config.target_cluster_size;
-    cluster_count = cluster_count.max(1);
-    if active_validator_count >= config.parallel_consensus_min_validators {
-        cluster_count = cluster_count.max(config.minimum_clusters_for_parallel_consensus);
-    }
-
-    while cluster_count > 1 && active_validator_count / cluster_count < config.minimum_cluster_size
-    {
-        cluster_count -= 1;
-    }
-
-    while cluster_count > 1
-        && active_validator_count.div_ceil(cluster_count) > config.maximum_cluster_size
-    {
-        cluster_count += 1;
-    }
-
-    cluster_count.max(1)
+    target_validator_cluster_count(active_validator_count)
 }
 
 pub fn balanced_cluster_sizes(active_validator_count: usize, config: &ClusterConfig) -> Vec<usize> {
@@ -270,55 +250,93 @@ pub struct ClusterAssignment {
 pub fn compute_cluster_assignments(
     epoch_id: u64,
     active_validators: &[ValidatorAssignmentInput],
-    network_id: &str,
-    genesis_hash: &str,
+    _network_id: &str,
+    _genesis_hash: &str,
     randomness_source: &str,
     generated_block_height: u64,
     config: &ClusterConfig,
 ) -> Result<ClusterAssignmentSet, String> {
     config.validate()?;
-    let mut validators: Vec<_> = active_validators
+    let validators = active_validators
         .iter()
         .filter(|validator| !validator.jailed && !validator.slashed)
         .cloned()
-        .collect();
-    validators.sort_by(|left, right| {
-        validator_assignment_key(epoch_id, randomness_source, left)
-            .cmp(&validator_assignment_key(
-                epoch_id,
-                randomness_source,
-                right,
-            ))
-            .then_with(|| left.validator_id.cmp(&right.validator_id))
-    });
+        .collect::<Vec<_>>();
+    let unique_ids = validators
+        .iter()
+        .map(|validator| validator.validator_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    if unique_ids.len() != validators.len() {
+        return Err(
+            "active validator assignment input contains duplicate validator IDs".to_string(),
+        );
+    }
 
-    let sizes = balanced_cluster_sizes(validators.len(), config);
-    let rotation_mode = if config.full_rotation_interval_epochs > 0
-        && epoch_id % config.full_rotation_interval_epochs == 0
-    {
-        RotationMode::FullPlannedReshuffle
-    } else {
-        RotationMode::RoutineRotation
+    let previous_cluster_ids = validators
+        .iter()
+        .filter_map(|validator| validator.previous_cluster_address.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .enumerate()
+        .map(|(index, address)| (address, index as u64))
+        .collect::<HashMap<_, _>>();
+    let runtime_validators = validators
+        .iter()
+        .map(|input| {
+            let mut validator = Validator::new(
+                input.validator_id.clone(),
+                input.validator_id.clone(),
+                input.validator_id.clone(),
+                u64::try_from(input.stake_nwei).unwrap_or(u64::MAX),
+            );
+            validator.status = ValidatorStatus::Active;
+            validator.finalized_synergy_score_bps = input.synergy_score_bps.min(BPS_DENOMINATOR);
+            validator.synergy_score = validator.finalized_synergy_score_bps as f64 / 100.0;
+            validator.cluster_id = input
+                .previous_cluster_address
+                .as_ref()
+                .and_then(|address| previous_cluster_ids.get(address).copied());
+            if validator.cluster_id.is_some() {
+                validator.cluster_assignment_epoch = Some(epoch_id.saturating_sub(1));
+            }
+            validator
+        })
+        .collect::<Vec<_>>();
+    let plan = canonical_validator_cluster_plan_for_epoch_with_seed(
+        &runtime_validators,
+        epoch_id,
+        randomness_source,
+    );
+    let rotation_mode = match plan.rotation {
+        CanonicalValidatorClusterRotation::LowScoreEpoch
+        | CanonicalValidatorClusterRotation::None => RotationMode::RoutineRotation,
+        CanonicalValidatorClusterRotation::CapacityExpansion
+        | CanonicalValidatorClusterRotation::FullEpoch
+        | CanonicalValidatorClusterRotation::StateRepair => RotationMode::FullPlannedReshuffle,
     };
-
-    let mut cursor = 0usize;
-    let mut assignments = Vec::with_capacity(sizes.len());
-    for (cluster_index, size) in sizes.iter().enumerate() {
+    let assignment_reason = match plan.rotation {
+        CanonicalValidatorClusterRotation::None => "stable_epoch_assignment",
+        CanonicalValidatorClusterRotation::CapacityExpansion => "capacity_expansion",
+        CanonicalValidatorClusterRotation::LowScoreEpoch => "low_score_epoch_rotation",
+        CanonicalValidatorClusterRotation::FullEpoch => "ten_epoch_full_reshuffle",
+        CanonicalValidatorClusterRotation::StateRepair => "assignment_state_repair",
+    };
+    let mut assignments = Vec::with_capacity(plan.clusters.len());
+    for (_cluster_index, members) in plan.clusters {
         let cluster_address =
-            derive_synergy_cluster_address(network_id, genesis_hash, cluster_index as u64, 0);
-        let validator_ids = validators[cursor..cursor + *size]
+            canonical_validator_cluster_address(assignments.len() as u64, &members);
+        let validator_ids = members
             .iter()
-            .map(|validator| validator.validator_id.clone())
+            .map(|validator| validator.address.clone())
             .collect::<Vec<_>>();
-        cursor += *size;
         assignments.push(ClusterAssignment {
             epoch_id,
             cluster_address,
-            quorum_threshold: quorum_threshold(*size),
-            fault_tolerance_f: fault_tolerance_f(*size),
+            quorum_threshold: quorum_threshold(validator_ids.len()),
+            fault_tolerance_f: fault_tolerance_f(validator_ids.len()),
             validator_ids,
             rotation_mode: rotation_mode.clone(),
-            assignment_reason: "deterministic_epoch_assignment".to_string(),
+            assignment_reason: assignment_reason.to_string(),
         });
     }
 
@@ -330,20 +348,6 @@ pub fn compute_cluster_assignments(
         randomness_source: randomness_source.to_string(),
         generated_block_height,
     })
-}
-
-fn validator_assignment_key(
-    epoch_id: u64,
-    randomness_source: &str,
-    validator: &ValidatorAssignmentInput,
-) -> String {
-    let mut hasher = Sha3_256::new();
-    hasher.update(epoch_id.to_le_bytes());
-    hasher.update(randomness_source.as_bytes());
-    hasher.update(validator.validator_id.as_bytes());
-    hasher.update(validator.stake_nwei.to_le_bytes());
-    hasher.update(validator.synergy_score_bps.to_le_bytes());
-    hex::encode(hasher.finalize())
 }
 
 fn hash_assignment_set(
@@ -873,21 +877,21 @@ mod tests {
         assert_eq!(balanced_cluster_sizes(9, &config), vec![9]);
         assert_eq!(balanced_cluster_sizes(10, &config), vec![5, 5]);
         assert_eq!(balanced_cluster_sizes(18, &config), vec![9, 9]);
-        assert_eq!(balanced_cluster_sizes(36, &config), vec![12, 12, 12]);
+        assert_eq!(balanced_cluster_sizes(36, &config), vec![8, 7, 7, 7, 7]);
         assert_eq!(
             balanced_cluster_sizes(60, &config),
-            vec![12, 12, 12, 12, 12]
+            vec![8, 8, 8, 8, 7, 7, 7, 7]
         );
         assert_eq!(
             balanced_cluster_sizes(100, &config),
-            vec![13, 13, 13, 13, 12, 12, 12, 12]
+            vec![8, 8, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7]
         );
     }
 
     #[test]
     fn quorum_and_fault_tolerance_are_bft_derived() {
         assert_eq!(fault_tolerance_f(5), 1);
-        assert_eq!(quorum_threshold(5), 4);
+        assert_eq!(quorum_threshold(5), 3);
         assert_eq!(fault_tolerance_f(6), 1);
         assert_eq!(quorum_threshold(6), 4);
         assert_eq!(fault_tolerance_f(7), 2);
@@ -936,7 +940,7 @@ mod tests {
     #[test]
     fn dynamic_cluster_assignment_supports_three_clusters() {
         let config = ClusterConfig::default();
-        let active = validators(36);
+        let active = validators(21);
         let assignments = compute_cluster_assignments(
             12,
             &active,
@@ -952,8 +956,8 @@ mod tests {
         assert!(assignments
             .cluster_assignments
             .iter()
-            .all(|assignment| assignment.validator_ids.len() == 12
-                && assignment.quorum_threshold == quorum_threshold(12)));
+            .all(|assignment| assignment.validator_ids.len() == 7
+                && assignment.quorum_threshold == 5));
     }
 
     #[test]

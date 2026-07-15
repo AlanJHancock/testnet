@@ -16,7 +16,9 @@ use crate::consensus::consensus_algorithm::ProofOfSynergy;
 use crate::consensus::consensus_fork;
 use crate::consensus::dao_governance::{DAOGovernance, SynergyOracle};
 use crate::consensus::dual_quorum::{EntropyBeacon, ValidatorRotation};
-use crate::consensus::self_realign::EXPECTED_GENESIS_HASH;
+use crate::consensus::self_realign::{
+    persisted_recovery_state, RealignmentState, EXPECTED_GENESIS_HASH,
+};
 use crate::consensus::synergy_score::SynergyScoreCalculator;
 use crate::consensus::validator_keys::{
     load_local_validator_keypair_for_height, validator_public_key_with_declared_algorithm,
@@ -829,10 +831,6 @@ fn is_validator_profile(profile: Option<&RoleProfile>) -> bool {
 
 fn local_validator_is_consensus_authorized(config: &NodeConfig) -> bool {
     let validator_address = resolve_local_validator_address(config);
-    if config.node.strict_validator_allowlist && !is_validator_allowed(config, &validator_address) {
-        return false;
-    }
-
     consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
         .iter()
         .any(|validator| validator.address == validator_address)
@@ -857,11 +855,15 @@ fn should_require_state_sync_before_join(
     config: &NodeConfig,
     profile: Option<&RoleProfile>,
 ) -> bool {
-    if !config.validator.state_sync_before_join {
+    if !is_validator_profile(profile) || config.node.bootstrap_only {
         return false;
     }
 
-    if !is_validator_profile(profile) || config.node.bootstrap_only {
+    if recovery_state_requires_support_sources(persisted_recovery_state()) {
+        return true;
+    }
+
+    if !config.validator.state_sync_before_join {
         return false;
     }
 
@@ -870,6 +872,51 @@ fn should_require_state_sync_before_join(
     }
 
     true
+}
+
+fn recovery_state_requires_support_sources(state: Option<RealignmentState>) -> bool {
+    state
+        .map(|state| state != RealignmentState::Active)
+        .unwrap_or(false)
+}
+
+fn local_sync_requires_support_sources_for_state(
+    validator_profile: bool,
+    consensus_duties_disabled: bool,
+    onboarding: bool,
+    quarantined: bool,
+) -> bool {
+    validator_profile && (consensus_duties_disabled || onboarding || quarantined)
+}
+
+fn local_sync_requires_support_sources(config: &NodeConfig, profile: Option<&RoleProfile>) -> bool {
+    let validator_profile = is_validator_profile(profile);
+    if !validator_profile || config.node.bootstrap_only {
+        return false;
+    }
+
+    let consensus_duties_disabled = !local_validator_is_consensus_authorized(config)
+        || recovery_state_requires_support_sources(persisted_recovery_state());
+    let onboarding = should_require_state_sync_before_join(config, profile);
+    let quarantined = crate::consensus::diagnostics::quarantine_status()
+        .get("quarantined")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    local_sync_requires_support_sources_for_state(
+        validator_profile,
+        consensus_duties_disabled,
+        onboarding,
+        quarantined,
+    )
+}
+
+fn refresh_sync_source_policy(config: &NodeConfig, profile: Option<&RoleProfile>) -> bool {
+    let support_sources_only = local_sync_requires_support_sources(config, profile);
+    if let Ok(mut manager) = SYNC_MANAGER.try_lock() {
+        manager.set_support_sources_only(support_sources_only);
+    }
+    support_sources_only
 }
 
 fn should_watch_for_validator_activation_consensus(
@@ -1289,8 +1336,6 @@ fn infer_synergy_env(config: &NodeConfig) -> &'static str {
     let name = config.network.name.to_ascii_lowercase();
     if name.contains("testnet") {
         "testnet"
-    } else if name.contains("testnet") {
-        "testnet"
     } else {
         "mainnet"
     }
@@ -1401,10 +1446,12 @@ fn maybe_preload_launch_block1_transaction(
         ));
     }
 
-    let required_balance = envelope
-        .transaction
-        .amount
-        .saturating_add(envelope.transaction.get_fee());
+    let required_balance = envelope.transaction.amount.saturating_add(
+        envelope
+            .transaction
+            .get_total_network_fee_u64()
+            .unwrap_or(u64::MAX),
+    );
     let sender_balance = TOKEN_MANAGER.get_balance(&envelope.transaction.sender, "SNRG");
     if sender_balance < required_balance {
         return Err(format!(
@@ -2209,6 +2256,14 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                 );
             }
 
+            let support_sources_only = refresh_sync_source_policy(&config, role_profile);
+            info!(
+                "main",
+                "Configured local sync source policy",
+                "support_sources_only" => support_sources_only,
+                "validator_profile" => is_validator_profile(role_profile)
+            );
+
             let metrics_enabled = should_start_metrics(&config);
             if metrics_enabled {
                 let metrics_bind_address =
@@ -2400,6 +2455,7 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             .expect("Error setting Ctrl-C handler");
 
             while running.load(Ordering::SeqCst) {
+                refresh_sync_source_policy(&config, role_profile);
                 if consensus_handle.is_none()
                     && watch_for_activation_consensus
                     && local_validator_is_consensus_authorized(&config)
@@ -2414,6 +2470,7 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                         process::exit(1);
                     }
                     consensus_handle = Some(spawn_consensus_engine());
+                    refresh_sync_source_policy(&config, role_profile);
                     write_role_runtime_report(
                         binary_name,
                         &config,
@@ -2817,6 +2874,14 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             );
 
             let mut cli_sync_manager = SyncManager::new(Arc::clone(&blockchain));
+            let role_profile =
+                resolve_configured_role(&config.identity.role, &config.role.compiled_profile)
+                    .ok()
+                    .flatten();
+            cli_sync_manager.set_support_sources_only(local_sync_requires_support_sources(
+                &config,
+                role_profile,
+            ));
             cli_sync_manager.attach_network(Arc::clone(&p2p_network));
 
             if check_only {
@@ -3317,6 +3382,59 @@ mod tests {
             &config,
             Some(NodeRole::Validator.profile())
         ));
+        assert!(local_sync_requires_support_sources(
+            &config,
+            Some(NodeRole::Validator.profile())
+        ));
+    }
+
+    #[test]
+    fn sync_source_policy_follows_authoritative_local_duty_state() {
+        assert!(local_sync_requires_support_sources_for_state(
+            true, true, false, false
+        ));
+        assert!(local_sync_requires_support_sources_for_state(
+            true, false, true, false
+        ));
+        assert!(local_sync_requires_support_sources_for_state(
+            true, false, false, true
+        ));
+        assert!(!local_sync_requires_support_sources_for_state(
+            true, false, false, false
+        ));
+        assert!(!local_sync_requires_support_sources_for_state(
+            false, true, true, true
+        ));
+    }
+
+    #[test]
+    fn persisted_vote_only_recovery_requires_support_sources_after_restart() {
+        assert!(recovery_state_requires_support_sources(Some(
+            RealignmentState::VoteOnly
+        )));
+        assert!(!recovery_state_requires_support_sources(Some(
+            RealignmentState::Active
+        )));
+    }
+
+    #[test]
+    fn activation_transition_clears_support_source_restriction() {
+        let before_activation =
+            local_sync_requires_support_sources_for_state(true, true, true, false);
+        let after_activation =
+            local_sync_requires_support_sources_for_state(true, false, false, false);
+
+        assert!(before_activation);
+        assert!(!after_activation);
+    }
+
+    #[test]
+    fn quarantine_transition_reenables_support_source_restriction() {
+        let active = local_sync_requires_support_sources_for_state(true, false, false, false);
+        let quarantined = local_sync_requires_support_sources_for_state(true, false, false, true);
+
+        assert!(!active);
+        assert!(quarantined);
     }
 
     #[test]
@@ -3368,10 +3486,14 @@ mod tests {
             &config,
             Some(NodeRole::Validator.profile())
         ));
+        assert!(!local_sync_requires_support_sources(
+            &config,
+            Some(NodeRole::Validator.profile())
+        ));
     }
 
     #[test]
-    fn active_validator_not_on_strict_allowlist_does_not_start_consensus() {
+    fn active_validator_not_on_stale_strict_allowlist_starts_consensus() {
         let address = "synv1activebutnotallowlisted";
         let _ = VALIDATOR_MANAGER.register_validator(ValidatorRegistration {
             address: address.to_string(),
@@ -3390,11 +3512,11 @@ mod tests {
         config.node.allowed_validator_addresses = vec!["synv1canonicalactive".to_string()];
         config.validator.state_sync_before_join = true;
 
-        assert!(!should_start_consensus(
+        assert!(should_start_consensus(
             &config,
             Some(NodeRole::Validator.profile())
         ));
-        assert!(should_require_state_sync_before_join(
+        assert!(!should_require_state_sync_before_join(
             &config,
             Some(NodeRole::Validator.profile())
         ));

@@ -31,15 +31,10 @@ ALLOWED_ROLES = {
 
 PRIVATE_HOSTNAMES = {"localhost"}
 
-CANONICAL_VALIDATOR_RECOMMENDATIONS = [
-    "62.146.182.207:5622",
-    "62.146.182.208:5622",
-    "62.146.182.209:5622",
-    "73.79.66.255:5622",
-    "194.163.183.166:5622",
-    "157.173.192.45:5622",
+CANONICAL_PUBLIC_RELAYER_RECOMMENDATIONS = [
     "relay1.synergynode.xyz:5622",
     "relay2.synergynode.xyz:5622",
+    "relay3.synergynode.xyz:5622",
 ]
 
 
@@ -200,6 +195,7 @@ class SeedConfig:
     static_registry: list[dict[str, Any]] = field(default_factory=list)
     dnsaddr_bootstrap: list[str] = field(default_factory=list)
     replication_peers: list[str] = field(default_factory=list)
+    public_bootstrap_roles: list[str] = field(default_factory=lambda: ["relayer"])
 
 
 class SeedState:
@@ -439,9 +435,9 @@ class SeedState:
         return sorted(out, key=lambda item: (str(item.get("role", "")), str(item.get("public_endpoint", ""))))
 
     def peer_list_payload(self) -> dict[str, Any]:
-        records = self.active_records()
+        records = self.public_bootstrap_records()
         endpoints = sorted({str(record["public_endpoint"]) for record in records})
-        dns_records = list(self.config.dnsaddr_bootstrap)
+        dns_records: list[str] = []
         for endpoint in endpoints:
             record = to_dnsaddr(endpoint)
             if record and record not in dns_records:
@@ -452,14 +448,14 @@ class SeedState:
             "seed_id": self.config.seed_id,
             "chain_id": self.config.chain_id,
             "generated_at": isoformat(),
-            "bootnodes": self.config.bootnodes,
+            "bootnodes": [],
             "dnsaddr_bootstrap": dns_records,
             "peers": endpoints,
             "registry": [self._public_record(record) for record in records],
         }
 
     def peers_payload(self, role: str | None = None) -> dict[str, Any]:
-        records = self.active_records(role)
+        records = self.public_bootstrap_records(role)
         return {
             "ok": True,
             "seed_id": self.config.seed_id,
@@ -468,6 +464,23 @@ class SeedState:
             "endpoints": [str(record["public_endpoint"]) for record in records],
             "peers": [self._public_record(record) for record in records],
         }
+
+    def public_bootstrap_records(self, role: str | None = None) -> list[dict[str, Any]]:
+        allowed_roles = {
+            normalized
+            for configured in self.config.public_bootstrap_roles
+            if (normalized := normalize_role(configured)) in ALLOWED_ROLES
+        }
+        if not allowed_roles:
+            return []
+        requested_role = normalize_role(role) if role else None
+        if requested_role and requested_role not in allowed_roles:
+            return []
+        return [
+            record
+            for record in self.active_records(requested_role)
+            if record.get("role") in allowed_roles
+        ]
 
     def health_payload(self) -> dict[str, Any]:
         self._purge_expired()
@@ -605,8 +618,8 @@ class SeedState:
                 continue
 
     def recommended_peers(self, *, exclude: str = "") -> list[str]:
-        active = {str(record["public_endpoint"]) for record in self.active_records()}
-        active.update(CANONICAL_VALIDATOR_RECOMMENDATIONS)
+        active = {str(record["public_endpoint"]) for record in self.public_bootstrap_records()}
+        active.update(CANONICAL_PUBLIC_RELAYER_RECOMMENDATIONS)
         active.discard(exclude)
         return sorted(endpoint for endpoint in active if not endpoint_rejection_reason(endpoint))
 
@@ -775,6 +788,7 @@ def load_config(path: Path) -> SeedConfig:
         static_registry=list(payload.get("static_registry", [])),
         dnsaddr_bootstrap=list(payload.get("dnsaddr_bootstrap", [])),
         replication_peers=list(payload.get("replication_peers", [])),
+        public_bootstrap_roles=list(payload.get("public_bootstrap_roles", ["relayer"])),
     )
 
 

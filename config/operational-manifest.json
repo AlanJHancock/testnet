@@ -55,27 +55,27 @@
       {
         "label": "sentry1",
         "public_host": "relay1.synergy-network.io",
-        "private_host": "10.69.0.1",
+        "private_host": "10.70.20.1",
         "public_ip": "195.26.241.95",
-        "private_ip": "10.69.0.1",
+        "private_ip": "10.70.20.1",
         "port": 5622,
         "metrics_port": 6030
       },
       {
         "label": "sentry2",
         "public_host": "relay2.synergy-network.io",
-        "private_host": "10.69.0.2",
+        "private_host": "10.70.20.2",
         "public_ip": "94.72.117.108",
-        "private_ip": "10.69.0.2",
+        "private_ip": "10.70.20.2",
         "port": 5622,
         "metrics_port": 6030
       },
       {
         "label": "sentry3",
         "public_host": "209.145.48.117",
-        "private_host": "10.69.0.3",
+        "private_host": "10.70.20.3",
         "public_ip": "209.145.48.117",
-        "private_ip": "10.69.0.3",
+        "private_ip": "10.70.20.3",
         "port": 5622,
         "metrics_port": 6030
       }
@@ -168,8 +168,8 @@
       "slot": 1,
       "label": "GenVal-01",
       "address": "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
-      "private_host": "10.69.10.1",
-      "private_ip": "10.69.10.1",
+      "private_host": "10.70.10.1",
+      "private_ip": "10.70.10.1",
       "public_ip": "62.146.182.207",
       "public_key_file": "config/genesis-validators/node-01.identity.json"
     },
@@ -177,8 +177,8 @@
       "slot": 2,
       "label": "GenVal-02",
       "address": "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt",
-      "private_host": "10.69.10.2",
-      "private_ip": "10.69.10.2",
+      "private_host": "10.70.10.2",
+      "private_ip": "10.70.10.2",
       "public_ip": "62.146.182.208",
       "public_key_file": "config/genesis-validators/node-02.identity.json"
     },
@@ -186,8 +186,8 @@
       "slot": 3,
       "label": "GenVal-03",
       "address": "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re",
-      "private_host": "10.69.10.3",
-      "private_ip": "10.69.10.3",
+      "private_host": "10.70.10.3",
+      "private_ip": "10.70.10.3",
       "public_ip": "62.146.182.209",
       "public_key_file": "config/genesis-validators/node-03.identity.json"
     },
@@ -195,8 +195,8 @@
       "slot": 4,
       "label": "GenVal-04",
       "address": "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5",
-      "private_host": "10.69.10.4",
-      "private_ip": "10.69.10.4",
+      "private_host": "10.70.10.4",
+      "private_ip": "10.70.10.4",
       "public_ip": "73.79.66.255",
       "public_key_file": "config/genesis-validators/node-04.identity.json"
     },
@@ -204,8 +204,8 @@
       "slot": 5,
       "label": "GenVal-05",
       "address": "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f",
-      "private_host": "10.69.10.5",
-      "private_ip": "10.69.10.5",
+      "private_host": "10.70.10.5",
+      "private_ip": "10.70.10.5",
       "public_ip": "194.163.183.166",
       "public_key_file": "config/genesis-validators/node-05.identity.json"
     },
@@ -213,8 +213,8 @@
       "slot": 6,
       "label": "GenVal-06",
       "address": "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx",
-      "private_host": "10.69.10.6",
-      "private_ip": "10.69.10.6",
+      "private_host": "10.70.10.6",
+      "private_ip": "10.70.10.6",
       "public_ip": "157.173.192.45",
       "activated_via_onboarding": true
     },

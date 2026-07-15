@@ -8,7 +8,8 @@ BOOTSTRAP_DNS_RECORDS='["_dnsaddr.bootstrap.synergy-network.io"]'
 SENTRY1_TARGETS='["relay1.synergy-network.io:5622"]'
 SENTRY2_TARGETS='["relay2.synergy-network.io:5622"]'
 SENTRY_EDGE_TARGETS='["relay1.synergy-network.io:5622", "relay2.synergy-network.io:5622"]'
-VALIDATOR_MESH_TARGETS='["10.69.0.1:5622", "10.69.0.2:5622", "10.69.0.3:5622", "10.69.0.4:5622", "10.69.0.5:5622", "10.69.0.6:5622"]'
+VALIDATOR_MESH_TARGETS='[]'
+RELAYER_SUPPORT_TARGETS='["relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622", "relay3.synergynode.xyz:5622"]'
 ALLOWED_VALIDATOR_ADDRESSES='["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs", "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt", "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re", "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5", "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f", "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx"]'
 
 generate_template() {
@@ -32,6 +33,10 @@ generate_template() {
     local additional_dial_targets="[]"
     local persistent_peers="[]"
     local enable_discovery="true"
+    local enable_peer_exchange="true"
+    local public_address="replace-with-public-host:$p2p_port"
+    local discovery_public_address="replace-with-public-host:$discovery_port"
+    local validator_vpn_transports=""
     local bootstrap_refresh_secs="60"
     local cors_enabled="false"
     local cors_origins="[]"
@@ -41,6 +46,7 @@ generate_template() {
     local snapshot_interval_blocks="5000"
     if [[ "$compiled_profile" == "validator_node" ]]; then
         strict_allowlist="true"
+        validator_vpn_transports="validator_vpn_transports = []"
     fi
     if [[ "$role_id" == "archive_validator" ]]; then
         snapshots_enabled="true"
@@ -55,7 +61,14 @@ generate_template() {
             additional_dial_targets="$VALIDATOR_MESH_TARGETS"
             persistent_peers="$VALIDATOR_MESH_TARGETS"
             enable_discovery="false"
+            enable_peer_exchange="false"
+            public_address=""
+            discovery_public_address=""
             bootstrap_refresh_secs="3600"
+            if [[ "$role_id" == "relayer" ]]; then
+                additional_dial_targets="$RELAYER_SUPPORT_TARGETS"
+                persistent_peers="$RELAYER_SUPPORT_TARGETS"
+            fi
             ;;
         sentry-edge)
             bootnodes="[]"
@@ -110,6 +123,7 @@ seed_servers = $seed_servers
 bootstrap_dns_records = $bootstrap_dns_records
 additional_dial_targets = $additional_dial_targets
 persistent_peers = $persistent_peers
+$validator_vpn_transports
 
 [blockchain]
 block_time = 2
@@ -169,12 +183,13 @@ cors_origins = $cors_origins
 
 [p2p]
 listen_address = "0.0.0.0:$p2p_port"
-public_address = "replace-with-public-host:$p2p_port"
+public_address = "$public_address"
 node_name = "$node_name"
 enable_discovery = $enable_discovery
+enable_peer_exchange = $enable_peer_exchange
 discovery_port = $discovery_port
 discovery_listen_address = "0.0.0.0:$discovery_port"
-discovery_public_address = "replace-with-public-host:$discovery_port"
+discovery_public_address = "$discovery_public_address"
 heartbeat_interval = 10
 bootstrap_refresh_secs = $bootstrap_refresh_secs
 

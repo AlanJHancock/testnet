@@ -1,24 +1,32 @@
 use crate::address::generate_cluster_address;
 use crate::consensus::consensus_fork;
-use crate::consensus::synergy_score::{
-    calculate_validator_epoch_score, ValidatorEpochEvidence, ValidatorSynergyScoreProfile,
-};
-use crate::consensus::validator_scoring_params::ValidatorScoringConfig;
+use crate::epoch::{epoch_start_height, TESTNET_EPOCH_LENGTH_BLOCKS};
 use crate::genesis::canonical_genesis;
+use crate::synergy_types::SYNERGY_TESTNET_V2_CHAIN_ID;
 use crate::token::TokenManager;
 use crate::transaction::Transaction;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub const EPOCH_VALIDATOR_SETS_ENV: &str = "SYNERGY_EPOCH_VALIDATOR_SETS_FILE";
+pub const DEFAULT_EPOCH_VALIDATOR_SETS_PATH: &str = "config/epoch-validator-sets.json";
+pub const SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION: u64 = 1;
+
 const VERBOSE_VALIDATOR_LOGS: bool = false;
 pub const INITIAL_VALIDATOR_SYNERGY_SCORE: f64 = 100.0;
+pub const INITIAL_VALIDATOR_SYNERGY_SCORE_BPS: u64 = 10_000;
 pub const TESTNET_VALIDATOR_CLUSTER_SIZE: usize = 7;
 pub const TESTNET_MIN_VALIDATOR_CLUSTER_SIZE: usize = 5;
 pub const TESTNET_FIRST_CLUSTER_SPLIT_THRESHOLD: usize = TESTNET_MIN_VALIDATOR_CLUSTER_SIZE * 2;
+pub const TESTNET_THIRD_CLUSTER_SPLIT_THRESHOLD: usize = TESTNET_VALIDATOR_CLUSTER_SIZE * 3;
+pub const TESTNET_CLUSTER_ROTATION_MIN_CLUSTERS: usize = 3;
+pub const TESTNET_LOW_SCORE_ROTATION_COUNT: usize = 2;
+pub const TESTNET_FULL_CLUSTER_ROTATION_EPOCH_INTERVAL: u64 = 10;
 pub const MISSED_VOTE_JAIL_THRESHOLD: u64 = 3;
 pub const MISSED_VOTE_SLASH_THRESHOLD: u64 = 6;
 pub const VALIDATOR_SHADOW_PHASE_BLOCKS: u64 = 1_000;
@@ -43,9 +51,307 @@ pub fn target_validator_cluster_count(active_validator_count: usize) -> usize {
         0
     } else if active_validator_count < TESTNET_FIRST_CLUSTER_SPLIT_THRESHOLD {
         1
+    } else if active_validator_count < TESTNET_THIRD_CLUSTER_SPLIT_THRESHOLD {
+        2
     } else {
-        2.max(active_validator_count.div_ceil(TESTNET_VALIDATOR_CLUSTER_SIZE))
+        active_validator_count / TESTNET_VALIDATOR_CLUSTER_SIZE
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct CanonicalValidatorClusterPlan {
+    pub clusters: Vec<(u64, Vec<Validator>)>,
+    pub cluster_count: usize,
+    pub full_reshuffle: bool,
+    pub rotation: CanonicalValidatorClusterRotation,
+    pub randomness_source: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalValidatorClusterRotation {
+    None,
+    CapacityExpansion,
+    LowScoreEpoch,
+    FullEpoch,
+    StateRepair,
+}
+
+pub fn canonical_validator_clusters_for_epoch(
+    active_validators: &[Validator],
+    epoch: u64,
+) -> Vec<(u64, Vec<Validator>)> {
+    canonical_validator_cluster_plan_for_epoch(active_validators, epoch).clusters
+}
+
+pub fn canonical_validator_cluster_plan_for_epoch(
+    active_validators: &[Validator],
+    epoch: u64,
+) -> CanonicalValidatorClusterPlan {
+    let randomness_source = canonical_epoch_cluster_seed(active_validators, epoch);
+    canonical_validator_cluster_plan_for_epoch_with_seed(
+        active_validators,
+        epoch,
+        &randomness_source,
+    )
+}
+
+pub fn canonical_validator_cluster_plan_for_epoch_with_seed(
+    active_validators: &[Validator],
+    epoch: u64,
+    randomness_source: &str,
+) -> CanonicalValidatorClusterPlan {
+    if active_validators.is_empty() {
+        return CanonicalValidatorClusterPlan {
+            clusters: Vec::new(),
+            cluster_count: 0,
+            full_reshuffle: false,
+            rotation: CanonicalValidatorClusterRotation::None,
+            randomness_source: randomness_source.to_string(),
+        };
+    }
+
+    let cluster_count = target_validator_cluster_count(active_validators.len());
+    let mut cluster_members: Vec<Vec<Validator>> = (0..cluster_count).map(|_| Vec::new()).collect();
+
+    if cluster_count == 1 {
+        let mut members = active_validators.to_vec();
+        sort_validators_by_epoch_rank(&mut members, epoch, randomness_source);
+        return CanonicalValidatorClusterPlan {
+            clusters: vec![(0, members)],
+            cluster_count,
+            full_reshuffle: active_validators
+                .iter()
+                .any(|validator| validator.cluster_id != Some(0)),
+            rotation: if active_validators
+                .iter()
+                .any(|validator| validator.cluster_id != Some(0))
+            {
+                CanonicalValidatorClusterRotation::CapacityExpansion
+            } else {
+                CanonicalValidatorClusterRotation::None
+            },
+            randomness_source: randomness_source.to_string(),
+        };
+    }
+
+    let expected_cluster_ids = (0..cluster_count as u64).collect::<HashSet<_>>();
+    let assigned_cluster_ids = active_validators
+        .iter()
+        .filter_map(|validator| validator.cluster_id)
+        .collect::<HashSet<_>>();
+    let invalid_assignment = active_validators.iter().any(|validator| {
+        validator
+            .cluster_id
+            .is_some_and(|cluster_id| cluster_id >= cluster_count as u64)
+    });
+    let capacity_expansion = assigned_cluster_ids != expected_cluster_ids;
+    let assigned_validators = active_validators
+        .iter()
+        .filter(|validator| validator.cluster_id.is_some())
+        .collect::<Vec<_>>();
+    let has_current_epoch_assignment = assigned_validators
+        .iter()
+        .any(|validator| validator.cluster_assignment_epoch == Some(epoch));
+    let has_stale_epoch_assignment = assigned_validators
+        .iter()
+        .any(|validator| validator.cluster_assignment_epoch != Some(epoch));
+    let mixed_assignment_epochs = has_current_epoch_assignment && has_stale_epoch_assignment;
+    let epoch_transition_due = !assigned_validators.is_empty()
+        && !has_current_epoch_assignment
+        && has_stale_epoch_assignment;
+    let rotations_enabled = cluster_count >= TESTNET_CLUSTER_ROTATION_MIN_CLUSTERS;
+    let full_epoch_rotation = rotations_enabled
+        && epoch > 0
+        && epoch % TESTNET_FULL_CLUSTER_ROTATION_EPOCH_INTERVAL == 0
+        && epoch_transition_due;
+    let low_score_epoch_rotation =
+        rotations_enabled && epoch_transition_due && !full_epoch_rotation;
+    let full_reshuffle =
+        invalid_assignment || capacity_expansion || mixed_assignment_epochs || full_epoch_rotation;
+    let rotation = if capacity_expansion {
+        CanonicalValidatorClusterRotation::CapacityExpansion
+    } else if invalid_assignment || mixed_assignment_epochs {
+        CanonicalValidatorClusterRotation::StateRepair
+    } else if full_epoch_rotation {
+        CanonicalValidatorClusterRotation::FullEpoch
+    } else if low_score_epoch_rotation {
+        CanonicalValidatorClusterRotation::LowScoreEpoch
+    } else {
+        CanonicalValidatorClusterRotation::None
+    };
+
+    if full_reshuffle {
+        let mut ordered_validators = active_validators.to_vec();
+        sort_validators_by_epoch_rank(&mut ordered_validators, epoch, randomness_source);
+        for (index, validator) in ordered_validators.into_iter().enumerate() {
+            cluster_members[index % cluster_count].push(validator);
+        }
+    } else {
+        let mut additions = Vec::new();
+        for validator in active_validators.iter().cloned() {
+            match validator.cluster_id {
+                Some(cluster_id) => cluster_members[cluster_id as usize].push(validator),
+                None => additions.push(validator),
+            }
+        }
+        if low_score_epoch_rotation {
+            rotate_low_score_cluster_members(&mut cluster_members, epoch, randomness_source);
+        }
+        sort_validators_by_epoch_rank(&mut additions, epoch, randomness_source);
+        for validator in additions {
+            let minimum_size = cluster_members.iter().map(Vec::len).min().unwrap_or(0);
+            let least_populated = cluster_members
+                .iter()
+                .enumerate()
+                .filter_map(|(cluster_index, members)| {
+                    (members.len() == minimum_size).then_some(cluster_index)
+                })
+                .collect::<Vec<_>>();
+            let rank = epoch_cluster_rank(epoch, randomness_source, &validator.address);
+            let tie_break = u64::from_be_bytes(rank[..8].try_into().unwrap_or([0; 8])) as usize;
+            let cluster_index = least_populated[tie_break % least_populated.len()];
+            cluster_members[cluster_index].push(validator);
+        }
+    }
+
+    for members in &mut cluster_members {
+        sort_validators_by_epoch_rank(members, epoch, randomness_source);
+    }
+    CanonicalValidatorClusterPlan {
+        clusters: cluster_members
+            .into_iter()
+            .enumerate()
+            .map(|(cluster_index, members)| (cluster_index as u64, members))
+            .collect(),
+        cluster_count,
+        full_reshuffle,
+        rotation,
+        randomness_source: randomness_source.to_string(),
+    }
+}
+
+fn rotate_low_score_cluster_members(
+    cluster_members: &mut [Vec<Validator>],
+    epoch: u64,
+    randomness_source: &str,
+) {
+    if cluster_members.len() < TESTNET_CLUSTER_ROTATION_MIN_CLUSTERS {
+        return;
+    }
+
+    let mut selected_by_cluster = Vec::with_capacity(cluster_members.len());
+    for members in cluster_members.iter_mut() {
+        let mut ranked = members.clone();
+        ranked.sort_by(|left, right| {
+            left.finalized_synergy_score_bps
+                .cmp(&right.finalized_synergy_score_bps)
+                .then_with(|| {
+                    epoch_cluster_rank(epoch, randomness_source, &left.address).cmp(
+                        &epoch_cluster_rank(epoch, randomness_source, &right.address),
+                    )
+                })
+                .then_with(|| left.address.cmp(&right.address))
+        });
+        let selected_addresses = ranked
+            .into_iter()
+            .take(TESTNET_LOW_SCORE_ROTATION_COUNT.min(members.len()))
+            .map(|validator| validator.address)
+            .collect::<HashSet<_>>();
+        let mut selected = Vec::with_capacity(selected_addresses.len());
+        members.retain(|validator| {
+            if selected_addresses.contains(&validator.address) {
+                selected.push(validator.clone());
+                false
+            } else {
+                true
+            }
+        });
+        sort_validators_by_epoch_rank(&mut selected, epoch, randomness_source);
+        selected_by_cluster.push(selected);
+    }
+
+    let mut cluster_order = (0..cluster_members.len()).collect::<Vec<_>>();
+    cluster_order.sort_by(|left, right| {
+        epoch_cluster_rank(epoch, randomness_source, &format!("cluster-{left}"))
+            .cmp(&epoch_cluster_rank(
+                epoch,
+                randomness_source,
+                &format!("cluster-{right}"),
+            ))
+            .then_with(|| left.cmp(right))
+    });
+    for (position, source_cluster) in cluster_order.iter().enumerate() {
+        let target_cluster = cluster_order[(position + 1) % cluster_order.len()];
+        cluster_members[target_cluster].append(&mut selected_by_cluster[*source_cluster]);
+    }
+}
+
+fn sort_validators_by_epoch_rank(
+    validators: &mut [Validator],
+    epoch: u64,
+    randomness_source: &str,
+) {
+    validators.sort_by(|left, right| {
+        epoch_cluster_rank(epoch, randomness_source, &left.address)
+            .cmp(&epoch_cluster_rank(
+                epoch,
+                randomness_source,
+                &right.address,
+            ))
+            .then_with(|| left.address.cmp(&right.address))
+    });
+}
+
+fn canonical_epoch_cluster_seed(active_validators: &[Validator], epoch: u64) -> String {
+    let current_seeds = active_validators
+        .iter()
+        .filter(|validator| validator.cluster_assignment_epoch == Some(epoch))
+        .filter_map(|validator| validator.cluster_assignment_seed.as_deref())
+        .filter(|seed| !seed.trim().is_empty())
+        .collect::<HashSet<_>>();
+    if current_seeds.len() == 1 {
+        return current_seeds
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+    }
+
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"synergy-validator-cluster-bootstrap-seed-v2");
+    hasher.update(SYNERGY_TESTNET_V2_CHAIN_ID.to_be_bytes());
+    if let Ok(genesis) = canonical_genesis() {
+        hasher.update(genesis.hash().as_bytes());
+    }
+    hasher.update(epoch.to_be_bytes());
+    hex::encode(hasher.finalize())
+}
+
+pub fn canonical_validator_cluster_address(cluster_id: u64, members: &[Validator]) -> String {
+    let cluster_group = ((cluster_id % 5) + 1) as u8;
+    let mut validator_addresses = members
+        .iter()
+        .map(|validator| validator.address.clone())
+        .collect::<Vec<_>>();
+    validator_addresses.sort();
+    let cluster_seed = format!("cluster-{cluster_id}-{}", validator_addresses.join("-"));
+    generate_cluster_address(&cluster_seed, cluster_group)
+}
+
+pub fn canonical_validator_clusters_digest(active_validators: &[Validator], epoch: u64) -> String {
+    let cluster_members = canonical_validator_clusters_for_epoch(active_validators, epoch);
+    let mut hasher = Sha3_256::new();
+    hasher.update(epoch.to_be_bytes());
+    for (cluster_id, members) in cluster_members {
+        hasher.update(cluster_id.to_be_bytes());
+        hasher.update((members.len() as u64).to_be_bytes());
+        for validator in members {
+            let address = validator.address.as_bytes();
+            hasher.update((address.len() as u64).to_be_bytes());
+            hasher.update(address);
+        }
+    }
+    hex::encode(hasher.finalize())
 }
 
 pub fn balanced_validator_cluster_id(index: usize, active_validator_count: usize) -> Option<u64> {
@@ -101,6 +407,8 @@ pub struct Validator {
 
     // Synergy scores
     pub synergy_score: f64,
+    #[serde(default = "default_finalized_synergy_score_bps")]
+    pub finalized_synergy_score_bps: u64,
     pub task_accuracy: f64,
     pub collaboration_score: f64,
     pub reputation_score: f64,
@@ -114,6 +422,12 @@ pub struct Validator {
     pub cluster_id: Option<u64>,
     #[serde(default)]
     pub cluster_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_assignment_epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_assignment_seed: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_assignment_effective_height: Option<u64>,
     pub status: ValidatorStatus,
     pub version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,6 +481,8 @@ pub struct ValidatorRegistry {
     pub cluster_size: usize,
     pub epoch_length: u64,
     pub current_epoch: u64,
+    #[serde(default)]
+    pub validator_set_version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +493,154 @@ pub struct ValidatorRegistration {
     pub stake_amount: u64,
     pub submitted_at: u64,
     pub registration_tx_hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpochValidatorSetSnapshot {
+    #[serde(default = "default_epoch_validator_set_format_version")]
+    pub snapshot_format_version: u64,
+    #[serde(default)]
+    pub chain_id: Option<u64>,
+    #[serde(default)]
+    pub epoch_id: Option<u64>,
+    #[serde(default)]
+    pub validator_set_version: Option<u64>,
+    pub effective_from_height: u64,
+    #[serde(default)]
+    pub effective_to_height: Option<u64>,
+    #[serde(default)]
+    pub active_validators: Vec<EpochValidatorMember>,
+    #[serde(default)]
+    pub pending_validators: Vec<EpochValidatorMember>,
+    #[serde(default)]
+    pub jailed_validators: Vec<EpochValidatorMember>,
+    #[serde(default)]
+    pub removed_validators: Vec<EpochValidatorMember>,
+    #[serde(default)]
+    pub quorum_threshold: Option<usize>,
+    #[serde(default)]
+    pub source_registry_hash: Option<String>,
+    #[serde(default)]
+    pub state_hash: Option<String>,
+    #[serde(default)]
+    pub previous_set_hash: Option<String>,
+    #[serde(default)]
+    pub validator_set_hash: Option<String>,
+    #[serde(
+        default,
+        alias = "protocol_version",
+        alias = "consensus_protocol_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub required_protocol_version: Option<String>,
+    #[serde(
+        default,
+        alias = "binary_version",
+        alias = "runtime_version",
+        alias = "required_runtime_version",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub required_binary_version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum EpochValidatorMember {
+    Address(String),
+    Record {
+        #[serde(
+            default,
+            alias = "address",
+            alias = "operator_address",
+            alias = "validator_id"
+        )]
+        validator_address: String,
+        #[serde(default)]
+        voting_weight: Option<u64>,
+        #[serde(default)]
+        proposer_eligible: Option<bool>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum EpochValidatorSetDocument {
+    List(Vec<EpochValidatorSetSnapshot>),
+    Wrapped {
+        #[serde(default, alias = "validator_sets")]
+        epoch_validator_sets: Vec<EpochValidatorSetSnapshot>,
+    },
+}
+
+impl EpochValidatorSetSnapshot {
+    fn applies_to_height(&self, height: u64) -> bool {
+        height >= self.effective_from_height
+            && self
+                .effective_to_height
+                .map(|effective_to| height <= effective_to)
+                .unwrap_or(true)
+    }
+
+    fn validate_local_compatibility(&self) -> Result<(), String> {
+        if self.snapshot_format_version > SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION {
+            return Err(format!(
+                "epoch validator set format version {} is newer than supported version {}; refusing consensus participation",
+                self.snapshot_format_version, SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION
+            ));
+        }
+
+        if let Some(required_protocol_version) =
+            normalized_optional_string(self.required_protocol_version.as_deref())
+        {
+            let local_protocol_version = local_epoch_validator_set_protocol_version();
+            if required_protocol_version != local_protocol_version {
+                return Err(format!(
+                    "epoch validator set requires protocol version {required_protocol_version}, local protocol version is {local_protocol_version}; refusing consensus participation"
+                ));
+            }
+        }
+
+        if let Some(required_binary_version) =
+            normalized_optional_string(self.required_binary_version.as_deref())
+        {
+            let local_binary_version = env!("CARGO_PKG_VERSION");
+            if required_binary_version != local_binary_version {
+                return Err(format!(
+                    "epoch validator set requires binary version {required_binary_version}, local binary version is {local_binary_version}; refusing consensus participation"
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EpochValidatorSetCompatibility {
+    pub snapshot_format_version: u64,
+    pub supported_snapshot_format_version: u64,
+    pub required_protocol_version: Option<String>,
+    pub local_protocol_version: String,
+    pub required_binary_version: Option<String>,
+    pub local_binary_version: String,
+    pub validator_set_hash: Option<String>,
+}
+
+fn default_epoch_validator_set_format_version() -> u64 {
+    SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION
+}
+
+fn normalized_optional_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+pub fn local_epoch_validator_set_protocol_version() -> String {
+    canonical_genesis()
+        .map(|genesis| genesis.protocol_version().to_string())
+        .unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())
 }
 
 #[derive(Debug)]
@@ -208,6 +672,7 @@ impl Validator {
             last_vote_timestamp: 0,
             equivocation_evidence_count: 0,
             synergy_score: INITIAL_VALIDATOR_SYNERGY_SCORE,
+            finalized_synergy_score_bps: INITIAL_VALIDATOR_SYNERGY_SCORE_BPS,
             task_accuracy: 100.0,
             collaboration_score: 0.0,
             reputation_score: 100.0,
@@ -216,6 +681,9 @@ impl Validator {
             min_stake_required: stake_amount,
             cluster_id: None,
             cluster_address: None,
+            cluster_assignment_epoch: None,
+            cluster_assignment_seed: None,
+            cluster_assignment_effective_height: None,
             status: ValidatorStatus::Pending,
             version: "1.0.0".to_string(),
             activation_tx_hash: None,
@@ -284,27 +752,20 @@ impl Validator {
     }
 
     pub fn calculate_synergy_score(&mut self) {
-        let current_score_bps = percent_score_to_bps(self.synergy_score);
-        let timestamp = Self::current_timestamp();
-        let profile = ValidatorSynergyScoreProfile::existing(
-            self.address.clone(),
-            None,
-            self.cluster_address.clone(),
-            current_score_bps,
-            current_score_bps,
-            1,
-            0,
-            timestamp,
-        );
-        let evidence = ValidatorEpochEvidence::from_validator(self, 0);
+        // Calculate synergy score based on multiple factors
+        let uptime_factor = self.uptime_percentage / 100.0;
+        let accuracy_factor = self.task_accuracy / 100.0;
+        let reputation_factor = self.reputation_score / 100.0;
+        let stake_factor = (self.stake_amount as f64 / self.min_stake_required as f64).min(2.0);
+        let slashing_factor = (1.0 - self.slashing_penalty.clamp(0.0, 1.0)).max(0.0);
 
-        if let Ok(computation) = calculate_validator_epoch_score(
-            &profile,
-            &evidence,
-            &ValidatorScoringConfig::default(),
-        ) {
-            self.synergy_score = computation.scorecard.score_after_bps as f64 / 100.0;
-        }
+        // Weighted average of factors
+        self.synergy_score = (uptime_factor * 0.3
+            + accuracy_factor * 0.3
+            + reputation_factor * 0.2
+            + stake_factor * 0.2)
+            * 100.0
+            * slashing_factor;
     }
 
     pub fn is_eligible(&self, min_stake: u64) -> bool {
@@ -332,8 +793,9 @@ impl ValidatorRegistry {
             min_stake_amount: 0, // Lowered for testnet (production: 1000)
             max_validators: 0,
             cluster_size: TESTNET_VALIDATOR_CLUSTER_SIZE,
-            epoch_length: 30000,
+            epoch_length: TESTNET_EPOCH_LENGTH_BLOCKS,
             current_epoch: 0,
+            validator_set_version: 0,
         }
     }
 
@@ -341,6 +803,9 @@ impl ValidatorRegistry {
         &mut self,
         registration: ValidatorRegistration,
     ) -> Result<String, String> {
+        if crate::address::is_network_burn_address(&registration.address) {
+            return Err("Network burn address cannot register as a validator".to_string());
+        }
         // Check if already registered
         if self.validators.contains_key(&registration.address) {
             return Err("Validator already registered".to_string());
@@ -390,6 +855,7 @@ impl ValidatorRegistry {
             validator.activation_tx_hash = Some(registration.registration_tx_hash);
 
             self.validators.insert(address.to_string(), validator);
+            self.validator_set_version = self.validator_set_version.saturating_add(1);
 
             // Trigger cluster reorganization
             self.reorganize_clusters();
@@ -502,7 +968,13 @@ impl ValidatorRegistry {
         }
 
         if !activated.is_empty() {
-            self.reorganize_clusters();
+            self.validator_set_version = self.validator_set_version.saturating_add(1);
+            if self
+                .reorganize_clusters_for_height(self.current_epoch, finalized_height)
+                .is_err()
+            {
+                self.clear_cluster_assignments();
+            }
         }
 
         activated
@@ -590,59 +1062,248 @@ impl ValidatorRegistry {
         self.validators.get(address)
     }
 
+    pub fn apply_finalized_synergy_scores(
+        &mut self,
+        scores_bps: &HashMap<String, u64>,
+    ) -> Result<(), String> {
+        let active_addresses = self
+            .get_active_validators()
+            .into_iter()
+            .map(|validator| validator.address.clone())
+            .collect::<Vec<_>>();
+        for address in &active_addresses {
+            let score_bps = scores_bps.get(address).ok_or_else(|| {
+                format!("finalized Synergy score snapshot is missing validator {address}")
+            })?;
+            if *score_bps > INITIAL_VALIDATOR_SYNERGY_SCORE_BPS {
+                return Err(format!(
+                    "finalized Synergy score for {address} exceeds 10000 basis points"
+                ));
+            }
+        }
+        for address in active_addresses {
+            let score_bps = scores_bps[&address];
+            if let Some(validator) = self.validators.get_mut(&address) {
+                validator.finalized_synergy_score_bps = score_bps;
+                validator.synergy_score = score_bps as f64 / 100.0;
+            }
+        }
+        Ok(())
+    }
+
     pub fn reorganize_clusters(&mut self) {
         self.reorganize_clusters_for_epoch(self.current_epoch);
     }
 
     pub fn reorganize_clusters_for_epoch(&mut self, epoch: u64) {
+        let active_validators: Vec<Validator> =
+            self.get_active_validators().into_iter().cloned().collect();
+        let randomness_source = canonical_epoch_cluster_seed(&active_validators, epoch);
+        let effective_height = epoch_start_height(epoch, self.epoch_length);
+        self.reorganize_clusters_for_epoch_with_seed(epoch, &randomness_source, effective_height);
+    }
+
+    pub fn reorganize_clusters_for_epoch_with_seed(
+        &mut self,
+        epoch: u64,
+        randomness_source: &str,
+        effective_height: u64,
+    ) {
         self.current_epoch = epoch;
-        let mut active_validators: Vec<Validator> =
+        let active_validators: Vec<Validator> =
             self.get_active_validators().into_iter().cloned().collect();
 
+        let plan = canonical_validator_cluster_plan_for_epoch_with_seed(
+            &active_validators,
+            epoch,
+            randomness_source,
+        );
+        self.apply_cluster_memberships(plan.clusters, epoch, randomness_source, effective_height);
+    }
+
+    pub fn reorganize_clusters_for_height(
+        &mut self,
+        epoch: u64,
+        height: u64,
+    ) -> Result<(), String> {
+        self.reconcile_clusters_for_height(epoch, height)
+            .map(|_| ())
+    }
+
+    pub fn reconcile_clusters_for_height(
+        &mut self,
+        epoch: u64,
+        height: u64,
+    ) -> Result<bool, String> {
+        let effective_epoch =
+            match effective_cluster_epoch_for_height(self.current_epoch.max(epoch), height) {
+                Ok(effective_epoch) => effective_epoch,
+                Err(error) => {
+                    self.clear_cluster_assignments();
+                    return Err(error);
+                }
+            };
+        let validator_candidates = self.validators.values().cloned().collect::<Vec<_>>();
+        let randomness_source =
+            canonical_epoch_cluster_seed(&validator_candidates, effective_epoch);
+        let cluster_members = match canonical_validator_clusters_for_height(
+            validator_candidates,
+            effective_epoch,
+            height,
+        ) {
+            Ok(cluster_members) => cluster_members,
+            Err(error) => {
+                self.clear_cluster_assignments();
+                return Err(error);
+            }
+        };
+        if self.cluster_memberships_are_canonical(
+            &cluster_members,
+            effective_epoch,
+            &randomness_source,
+            height,
+        ) {
+            return Ok(false);
+        }
+        self.apply_cluster_memberships(
+            cluster_members,
+            effective_epoch,
+            &randomness_source,
+            height,
+        );
+        self.current_epoch = effective_epoch;
+        Ok(true)
+    }
+
+    fn cluster_memberships_are_canonical(
+        &self,
+        cluster_members: &[(u64, Vec<Validator>)],
+        assignment_epoch: u64,
+        assignment_seed: &str,
+        assignment_effective_height: u64,
+    ) -> bool {
+        if self.current_epoch != assignment_epoch || self.clusters.len() != cluster_members.len() {
+            return false;
+        }
+
+        let mut expected_assignments = HashMap::new();
+        for (cluster_id, members) in cluster_members {
+            let cluster_address = canonical_validator_cluster_address(*cluster_id, members);
+            let expected_addresses = members
+                .iter()
+                .map(|validator| validator.address.clone())
+                .collect::<Vec<_>>();
+            let expected_total_stake = members
+                .iter()
+                .map(|validator| validator.stake_amount)
+                .sum::<u64>();
+            let expected_average_synergy_score = if members.is_empty() {
+                0.0
+            } else {
+                members
+                    .iter()
+                    .map(|validator| validator.synergy_score)
+                    .sum::<f64>()
+                    / members.len() as f64
+            };
+            let expected_group = ((*cluster_id % 5) + 1) as u8;
+
+            let Some(cluster) = self.clusters.get(cluster_id) else {
+                return false;
+            };
+            if cluster.id != *cluster_id
+                || cluster.address != cluster_address
+                || cluster.validators != expected_addresses
+                || cluster.total_stake != expected_total_stake
+                || cluster.average_synergy_score != expected_average_synergy_score
+                || cluster.group != expected_group
+            {
+                return false;
+            }
+
+            for member in members {
+                if expected_assignments
+                    .insert(
+                        member.address.clone(),
+                        (*cluster_id, cluster_address.clone()),
+                    )
+                    .is_some()
+                {
+                    return false;
+                }
+            }
+        }
+
+        let mut assigned_effective_height = None;
+        for address in expected_assignments.keys() {
+            let Some(validator) = self.validators.get(address) else {
+                return false;
+            };
+            let Some(effective_height) = validator.cluster_assignment_effective_height else {
+                return false;
+            };
+            if effective_height > assignment_effective_height {
+                return false;
+            }
+            if assigned_effective_height
+                .replace(effective_height)
+                .is_some_and(|existing| existing != effective_height)
+            {
+                return false;
+            }
+        }
+
+        self.validators.values().all(|validator| {
+            if let Some((cluster_id, cluster_address)) =
+                expected_assignments.get(&validator.address)
+            {
+                validator.cluster_id == Some(*cluster_id)
+                    && validator.cluster_address.as_deref() == Some(cluster_address.as_str())
+                    && validator.cluster_assignment_epoch == Some(assignment_epoch)
+                    && validator.cluster_assignment_seed.as_deref() == Some(assignment_seed)
+                    && validator.cluster_assignment_effective_height == assigned_effective_height
+            } else {
+                validator.cluster_id.is_none()
+                    && validator.cluster_address.is_none()
+                    && validator.cluster_assignment_epoch.is_none()
+                    && validator.cluster_assignment_seed.is_none()
+                    && validator.cluster_assignment_effective_height.is_none()
+            }
+        })
+    }
+
+    fn clear_cluster_assignments(&mut self) {
+        self.clusters.clear();
         for validator in self.validators.values_mut() {
             validator.cluster_id = None;
             validator.cluster_address = None;
+            validator.cluster_assignment_epoch = None;
+            validator.cluster_assignment_seed = None;
+            validator.cluster_assignment_effective_height = None;
         }
-        self.clusters.clear();
+    }
 
-        if active_validators.is_empty() {
+    fn apply_cluster_memberships(
+        &mut self,
+        cluster_members: Vec<(u64, Vec<Validator>)>,
+        assignment_epoch: u64,
+        assignment_seed: &str,
+        assignment_effective_height: u64,
+    ) {
+        self.clear_cluster_assignments();
+
+        if cluster_members.is_empty() {
             return;
         }
 
-        active_validators.sort_by(|a, b| {
-            epoch_cluster_rank(epoch, &a.address)
-                .cmp(&epoch_cluster_rank(epoch, &b.address))
-                .then_with(|| a.address.cmp(&b.address))
-        });
-
-        let cluster_count = target_validator_cluster_count(active_validators.len());
-        let base_cluster_size = active_validators.len() / cluster_count;
-        let extra_members = active_validators.len() % cluster_count;
-        let target_sizes: Vec<usize> = (0..cluster_count)
-            .map(|index| base_cluster_size + usize::from(index < extra_members))
-            .collect();
-        let mut cluster_members: Vec<Vec<Validator>> =
-            (0..cluster_count).map(|_| Vec::new()).collect();
-        let mut next_cluster_index = 0usize;
-
-        for validator in active_validators {
-            while cluster_members[next_cluster_index].len() >= target_sizes[next_cluster_index] {
-                next_cluster_index = (next_cluster_index + 1) % cluster_count;
-            }
-            cluster_members[next_cluster_index].push(validator);
-            next_cluster_index = (next_cluster_index + 1) % cluster_count;
-        }
-
         let now = Validator::current_timestamp();
-        for (cluster_index, members) in cluster_members.into_iter().enumerate() {
-            let cluster_id = cluster_index as u64;
-            let cluster_group = ((cluster_id % 5) + 1) as u8;
+        for (cluster_id, members) in cluster_members {
             let validator_addresses: Vec<String> = members
                 .iter()
                 .map(|validator| validator.address.clone())
                 .collect();
-            let cluster_seed = format!("cluster-{}-{}", cluster_id, validator_addresses.join("-"));
-            let cluster_address = generate_cluster_address(&cluster_seed, cluster_group);
+            let cluster_address = canonical_validator_cluster_address(cluster_id, &members);
+            let cluster_group = ((cluster_id % 5) + 1) as u8;
             let total_stake = members.iter().map(|validator| validator.stake_amount).sum();
             let average_synergy_score = members
                 .iter()
@@ -668,6 +1329,10 @@ impl ValidatorRegistry {
                 if let Some(validator) = self.validators.get_mut(&address) {
                     validator.cluster_id = Some(cluster_id);
                     validator.cluster_address = Some(cluster_address.clone());
+                    validator.cluster_assignment_epoch = Some(assignment_epoch);
+                    validator.cluster_assignment_seed = Some(assignment_seed.to_string());
+                    validator.cluster_assignment_effective_height =
+                        Some(assignment_effective_height);
                 }
             }
         }
@@ -712,6 +1377,8 @@ impl ValidatorRegistry {
                 }
             }
 
+            self.validator_set_version = self.validator_set_version.saturating_add(1);
+
             // Trigger cluster reorganization
             self.reorganize_clusters();
 
@@ -728,6 +1395,7 @@ impl ValidatorRegistry {
                 validator.consecutive_missed_votes = 0;
                 validator.missed_vote_window = 0;
                 validator.update_activity();
+                self.validator_set_version = self.validator_set_version.saturating_add(1);
                 self.reorganize_clusters();
                 Ok(())
             } else {
@@ -792,19 +1460,18 @@ impl ValidatorRegistry {
     }
 }
 
-fn percent_score_to_bps(score: f64) -> u64 {
-    if !score.is_finite() {
-        return 0;
-    }
-    let clamped = score.clamp(0.0, 100.0);
-    (clamped * 100.0).round() as u64
-}
-
-fn epoch_cluster_rank(epoch: u64, address: &str) -> [u8; 32] {
+fn epoch_cluster_rank(epoch: u64, randomness_source: &str, address: &str) -> [u8; 32] {
     let mut hasher = Sha3_256::new();
+    hasher.update(b"synergy-validator-cluster-rank-v2");
+    hasher.update(SYNERGY_TESTNET_V2_CHAIN_ID.to_be_bytes());
     hasher.update(epoch.to_be_bytes());
+    hasher.update(randomness_source.as_bytes());
     hasher.update(address.as_bytes());
     hasher.finalize().into()
+}
+
+fn default_finalized_synergy_score_bps() -> u64 {
+    INITIAL_VALIDATOR_SYNERGY_SCORE_BPS
 }
 
 #[derive(Debug, Clone)]
@@ -851,6 +1518,8 @@ impl ValidatorManager {
                     registry
                         .validators
                         .insert(address.to_string(), active_validator);
+                    registry.validator_set_version =
+                        registry.validator_set_version.saturating_add(1);
                     registry.reorganize_clusters();
                     return Ok(());
                 }
@@ -1011,9 +1680,41 @@ impl ValidatorManager {
         }
     }
 
+    pub fn get_current_epoch(&self) -> u64 {
+        self.registry
+            .lock()
+            .map(|registry| registry.current_epoch)
+            .unwrap_or(0)
+    }
+
+    pub fn apply_finalized_synergy_scores(
+        &self,
+        scores_bps: &HashMap<String, u64>,
+    ) -> Result<(), String> {
+        self.registry
+            .lock()
+            .map_err(|_| "failed to lock validator registry".to_string())?
+            .apply_finalized_synergy_scores(scores_bps)
+    }
+
     pub fn reorganize_clusters_for_epoch(&self, epoch: u64) {
         if let Ok(mut registry) = self.registry.lock() {
             registry.reorganize_clusters_for_epoch(epoch);
+        }
+    }
+
+    pub fn reorganize_clusters_for_epoch_with_seed(
+        &self,
+        epoch: u64,
+        randomness_source: &str,
+        effective_height: u64,
+    ) {
+        if let Ok(mut registry) = self.registry.lock() {
+            registry.reorganize_clusters_for_epoch_with_seed(
+                epoch,
+                randomness_source,
+                effective_height,
+            );
         }
     }
 
@@ -1089,46 +1790,148 @@ lazy_static::lazy_static! {
     pub static ref VALIDATOR_MANAGER: Arc<ValidatorManager> = Arc::new(ValidatorManager::new());
 }
 
-fn configured_consensus_order(active_validators: &[Validator]) -> (Option<Vec<String>>, usize) {
+fn configured_max_validators(active_validators: &[Validator]) -> usize {
     let config = crate::config::load_node_config(None).ok();
-    let max_validators = config
+    config
         .as_ref()
         .map(|config| config.consensus.max_validators.max(active_validators.len()))
-        .unwrap_or(usize::MAX);
+        .unwrap_or(usize::MAX)
+}
+
+fn epoch_validator_sets_path() -> Result<Option<PathBuf>, String> {
+    if let Ok(value) = std::env::var(EPOCH_VALIDATOR_SETS_ENV) {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        let path = PathBuf::from(trimmed);
+        if !path.is_file() {
+            return Err(format!(
+                "epoch validator set file {} does not exist",
+                path.display()
+            ));
+        }
+        return Ok(Some(path));
+    }
+
+    let path = std::env::var("SYNERGY_PROJECT_ROOT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| PathBuf::from(value).join(DEFAULT_EPOCH_VALIDATOR_SETS_PATH))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_EPOCH_VALIDATOR_SETS_PATH));
+    if path.is_file() {
+        Ok(Some(path))
+    } else {
+        Ok(None)
+    }
+}
+
+fn load_epoch_validator_sets() -> Result<Vec<EpochValidatorSetSnapshot>, String> {
+    let Some(path) = epoch_validator_sets_path()? else {
+        return Ok(Vec::new());
+    };
+    let raw = fs::read_to_string(&path)
+        .map_err(|error| format!("read epoch validator set file {}: {error}", path.display()))?;
+    let document: EpochValidatorSetDocument = serde_json::from_str(&raw)
+        .map_err(|error| format!("parse epoch validator set file {}: {error}", path.display()))?;
+    let mut sets = match document {
+        EpochValidatorSetDocument::List(sets) => sets,
+        EpochValidatorSetDocument::Wrapped {
+            epoch_validator_sets,
+        } => epoch_validator_sets,
+    };
+    sets.sort_by(|left, right| {
+        right
+            .effective_from_height
+            .cmp(&left.effective_from_height)
+            .then_with(|| right.validator_set_version.cmp(&left.validator_set_version))
+    });
+    Ok(sets)
+}
+
+fn epoch_validator_set_for_height(
+    height: u64,
+) -> Result<Option<EpochValidatorSetSnapshot>, String> {
+    for set in load_epoch_validator_sets()? {
+        if set.applies_to_height(height) {
+            return Ok(Some(set));
+        }
+    }
+    Ok(None)
+}
+
+pub fn epoch_validator_set_hash_for_height(height: u64) -> Result<Option<String>, String> {
+    Ok(epoch_validator_set_for_height(height)?
+        .and_then(|set| normalized_optional_string(set.validator_set_hash.as_deref())))
+}
+
+pub fn epoch_validator_set_compatibility_for_height(
+    height: u64,
+) -> Result<Option<EpochValidatorSetCompatibility>, String> {
+    Ok(
+        epoch_validator_set_for_height(height)?.map(|set| EpochValidatorSetCompatibility {
+            snapshot_format_version: set.snapshot_format_version,
+            supported_snapshot_format_version: SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION,
+            required_protocol_version: normalized_optional_string(
+                set.required_protocol_version.as_deref(),
+            ),
+            local_protocol_version: local_epoch_validator_set_protocol_version(),
+            required_binary_version: normalized_optional_string(
+                set.required_binary_version.as_deref(),
+            ),
+            local_binary_version: env!("CARGO_PKG_VERSION").to_string(),
+            validator_set_hash: normalized_optional_string(set.validator_set_hash.as_deref()),
+        }),
+    )
+}
+
+pub fn assert_epoch_validator_set_compatible_for_height(height: u64) -> Result<(), String> {
+    let Some(set) = epoch_validator_set_for_height(height)? else {
+        return Ok(());
+    };
+    set.validate_local_compatibility()
+}
+
+fn current_configured_consensus_order(
+    active_validators: &[Validator],
+) -> (Option<Vec<String>>, usize) {
+    let max_validators = configured_max_validators(active_validators);
     let active_addresses = active_validators
         .iter()
         .map(|validator| validator.address.clone())
         .collect::<HashSet<_>>();
 
-    if let Ok(Some(migration)) = consensus_fork::active_consensus_fork_migration() {
-        let mut ordered = migration
-            .new_validator_registry
-            .iter()
-            .map(|entry| entry.validator_address.clone())
-            .filter(|address| active_addresses.contains(address))
-            .collect::<Vec<_>>();
-        ordered.truncate(max_validators);
-        if !ordered.is_empty() {
-            return (Some(ordered), max_validators);
-        }
-    }
+    let configured_order = consensus_fork::active_consensus_fork_migration()
+        .ok()
+        .flatten()
+        .map(|migration| {
+            migration
+                .new_validator_registry
+                .into_iter()
+                .map(|entry| entry.validator_address)
+                .collect::<Vec<_>>()
+        })
+        .or_else(|| {
+            canonical_genesis().ok().map(|genesis| {
+                genesis
+                    .validators()
+                    .iter()
+                    .map(|entry| entry.operator_address.clone())
+                    .collect::<Vec<_>>()
+            })
+        });
 
-    if let Ok(genesis) = canonical_genesis() {
-        let genesis_addresses = genesis
-            .validators()
-            .iter()
-            .map(|entry| entry.operator_address.clone())
-            .collect::<HashSet<_>>();
-        let mut ordered = genesis
-            .validators()
-            .iter()
-            .map(|entry| entry.operator_address.clone())
+    if let Some(configured_order) = configured_order {
+        let configured_addresses = configured_order.iter().cloned().collect::<HashSet<_>>();
+        let mut ordered = configured_order
+            .into_iter()
             .filter(|address| active_addresses.contains(address))
             .collect::<Vec<_>>();
         let mut added_validators = active_validators
             .iter()
             .map(|validator| validator.address.clone())
-            .filter(|address| !genesis_addresses.contains(address))
+            .filter(|address| !configured_addresses.contains(address))
             .collect::<Vec<_>>();
         added_validators.sort();
         ordered.extend(added_validators);
@@ -1139,6 +1942,27 @@ fn configured_consensus_order(active_validators: &[Validator]) -> (Option<Vec<St
     }
 
     (None, max_validators)
+}
+
+fn validators_for_authoritative_order(
+    active_validators: Vec<Validator>,
+    ordered_addresses: Vec<String>,
+    max_validators: usize,
+) -> Result<Vec<Validator>, String> {
+    let validators_by_address = active_validators
+        .into_iter()
+        .map(|validator| (validator.address.clone(), validator))
+        .collect::<HashMap<_, _>>();
+    let mut validators = Vec::with_capacity(ordered_addresses.len());
+    for address in ordered_addresses.into_iter().take(max_validators) {
+        let Some(validator) = validators_by_address.get(&address) else {
+            return Err(format!(
+                "authoritative validator set references validator {address} missing from local registry"
+            ));
+        };
+        validators.push(validator.clone());
+    }
+    Ok(validators)
 }
 
 pub fn is_validator_activation_transaction(tx: &Transaction) -> bool {
@@ -1198,6 +2022,7 @@ pub fn apply_validator_activation_transaction(
     validator_manager: &Arc<ValidatorManager>,
     block_height: u64,
 ) -> Result<String, String> {
+    validate_validator_activation_transaction(tx, token_manager, validator_manager)?;
     let (validator, public_key, name, _stake_amount) = parse_validator_activation(tx)?;
     let minimum_stake = validator_manager
         .minimum_stake_amount()
@@ -1276,6 +2101,37 @@ pub fn apply_validator_activation_transaction(
     }
 }
 
+pub fn validate_validator_activation_transaction(
+    tx: &Transaction,
+    token_manager: &TokenManager,
+    validator_manager: &Arc<ValidatorManager>,
+) -> Result<(), String> {
+    let (validator, _public_key, _name, _stake_amount) = parse_validator_activation(tx)?;
+    let minimum_stake = validator_manager
+        .minimum_stake_amount()
+        .max(canonical_minimum_validator_stake_nwei());
+    let bonded_stake = token_manager.get_staked_balance(&validator, "SNRG");
+    if bonded_stake < minimum_stake {
+        return Err(format!(
+            "Validator {validator} has {bonded_stake} nWei bonded; {minimum_stake} nWei is required for activation."
+        ));
+    }
+
+    if let Some(existing) = validator_manager.get_validator(&validator) {
+        if matches!(
+            &existing.status,
+            ValidatorStatus::Jailed | ValidatorStatus::Slashed
+        ) {
+            return Err(format!(
+                "Validator {validator} is {:?}; activation replay will not revive disciplined validators.",
+                existing.status
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 pub fn replay_validator_activation_transactions(
     chain: &crate::block::BlockChain,
     token_manager: &TokenManager,
@@ -1320,7 +2176,7 @@ fn canonical_minimum_validator_stake_nwei() -> u64 {
 }
 
 pub fn consensus_membership_validators(active_validators: Vec<Validator>) -> Vec<Validator> {
-    let (configured_order, max_validators) = configured_consensus_order(&active_validators);
+    let (configured_order, max_validators) = current_configured_consensus_order(&active_validators);
     if let Some(ordered_addresses) = configured_order {
         let validators_by_address = active_validators
             .into_iter()
@@ -1338,6 +2194,128 @@ pub fn consensus_membership_validators(active_validators: Vec<Validator>) -> Vec
     fallback_validators
 }
 
+pub fn consensus_membership_validators_for_height(
+    validators: Vec<Validator>,
+    height: u64,
+) -> Result<Vec<Validator>, String> {
+    let validators = validators
+        .into_iter()
+        .filter(|validator| validator_is_consensus_member_at_height(validator, height))
+        .collect::<Vec<_>>();
+    let max_validators = configured_max_validators(&validators);
+    // Height-scoped manifests remain useful as compatibility evidence, but the
+    // replayed registry is the membership authority. A stale manifest must not
+    // suppress an activation that reached its recorded effective height.
+    if let Some(set) = epoch_validator_set_for_height(height)? {
+        set.validate_local_compatibility()?;
+    }
+
+    if let Some(migration) = consensus_fork::active_consensus_fork_migration()? {
+        if migration.applies_to_height(height) {
+            let ordered_addresses = migration
+                .new_validator_registry
+                .iter()
+                .map(|entry| entry.validator_address.clone())
+                .collect::<Vec<_>>();
+            let mut membership = validators_for_authoritative_order(
+                validators.clone(),
+                ordered_addresses.clone(),
+                max_validators,
+            )?;
+            let known_addresses = ordered_addresses.into_iter().collect::<HashSet<_>>();
+            let mut additions = validators
+                .into_iter()
+                .filter(|validator| !known_addresses.contains(&validator.address))
+                .collect::<Vec<_>>();
+            additions.sort_by(|left, right| left.address.cmp(&right.address));
+            membership.extend(additions);
+            membership.truncate(max_validators);
+            return Ok(membership);
+        }
+    }
+
+    Ok(consensus_membership_validators(validators))
+}
+
+fn validator_is_consensus_member_at_height(validator: &Validator, height: u64) -> bool {
+    let activation_is_effective = validator
+        .activation_effective_height
+        .is_none_or(|effective_height| effective_height <= height);
+    let has_required_stake = validator.stake_amount >= validator.min_stake_required;
+
+    match validator.status {
+        ValidatorStatus::Active => activation_is_effective && has_required_stake,
+        ValidatorStatus::Shadow => {
+            validator.activation_effective_height.is_some()
+                && activation_is_effective
+                && has_required_stake
+        }
+        ValidatorStatus::Inactive
+        | ValidatorStatus::Jailed
+        | ValidatorStatus::Slashed
+        | ValidatorStatus::Pending => false,
+    }
+}
+
+/// Hash the live active validator membership in its canonical consensus order.
+/// Only fields that affect validator identity, voting key material, or bonded
+/// voting weight are included; local performance observations are excluded.
+pub fn canonical_active_validator_set_hash(active_validators: &[Validator]) -> String {
+    let ordered = consensus_membership_validators(active_validators.to_vec());
+    let mut hasher = Sha3_256::new();
+    hasher.update(b"synergy-active-validator-set-v1");
+    hasher.update((ordered.len() as u64).to_be_bytes());
+    for validator in ordered {
+        for value in [validator.address.as_str(), validator.public_key.as_str()] {
+            hasher.update((value.len() as u64).to_be_bytes());
+            hasher.update(value.as_bytes());
+        }
+        hasher.update(validator.stake_amount.to_be_bytes());
+    }
+    hex::encode(hasher.finalize())
+}
+
+impl ValidatorRegistry {
+    pub fn canonical_active_validator_set_hash(&self) -> String {
+        let active_validators = self
+            .get_active_validators()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        canonical_active_validator_set_hash(&active_validators)
+    }
+}
+
+pub fn canonical_validator_clusters_for_height(
+    active_validators: Vec<Validator>,
+    epoch: u64,
+    height: u64,
+) -> Result<Vec<(u64, Vec<Validator>)>, String> {
+    let effective_epoch = effective_cluster_epoch_for_height(epoch, height)?;
+    let height_scoped_membership =
+        consensus_membership_validators_for_height(active_validators, height)?;
+    Ok(canonical_validator_clusters_for_epoch(
+        &height_scoped_membership,
+        effective_epoch,
+    ))
+}
+
+pub fn effective_cluster_epoch_for_height(supplied_epoch: u64, height: u64) -> Result<u64, String> {
+    let Some(set) = epoch_validator_set_for_height(height)? else {
+        return Ok(supplied_epoch);
+    };
+    set.validate_local_compatibility()?;
+    let Some(manifest_epoch) = set.epoch_id else {
+        return Ok(supplied_epoch);
+    };
+    if manifest_epoch < supplied_epoch {
+        return Err(format!(
+            "height-scoped validator set epoch {manifest_epoch} would regress current epoch {supplied_epoch} at height {height}"
+        ));
+    }
+    Ok(manifest_epoch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1346,6 +2324,16 @@ mod tests {
         self, ConsensusForkMigration, ForkValidatorConsensusKey,
     };
     use base64::{engine::general_purpose, Engine as _};
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, MutexGuard};
+
+    static VALIDATOR_TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn validator_test_env_lock() -> MutexGuard<'static, ()> {
+        VALIDATOR_TEST_ENV_LOCK
+            .lock()
+            .expect("validator test env mutex should lock")
+    }
 
     fn pending_registration(index: usize) -> ValidatorRegistration {
         ValidatorRegistration {
@@ -1356,6 +2344,16 @@ mod tests {
             submitted_at: 0,
             registration_tx_hash: format!("registration-{}", index),
         }
+    }
+
+    #[test]
+    fn burn_address_cannot_register_as_validator() {
+        let mut registry = ValidatorRegistry::new();
+        let mut registration = pending_registration(1);
+        registration.address = crate::address::NETWORK_BURN_ADDRESS.to_string();
+
+        let err = registry.register_validator(registration).unwrap_err();
+        assert_eq!(err, "Network burn address cannot register as a validator");
     }
 
     fn active_registry(count: usize) -> ValidatorRegistry {
@@ -1369,6 +2367,8 @@ mod tests {
             );
             validator.status = ValidatorStatus::Active;
             validator.synergy_score = INITIAL_VALIDATOR_SYNERGY_SCORE - index as f64;
+            validator.finalized_synergy_score_bps =
+                INITIAL_VALIDATOR_SYNERGY_SCORE_BPS.saturating_sub(index as u64);
             registry
                 .validators
                 .insert(validator.address.clone(), validator);
@@ -1437,6 +2437,45 @@ mod tests {
         }
     }
 
+    fn unique_test_dir(slug: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("synergy-{slug}-{unique}"))
+    }
+
+    fn write_epoch_validator_sets(path: &Path, sets: serde_json::Value) {
+        std::fs::write(
+            path,
+            serde_json::json!({
+                "epoch_validator_sets": sets
+            })
+            .to_string(),
+        )
+        .expect("epoch validator set snapshot should be written");
+    }
+
+    fn validator_addresses(start: usize, end_inclusive: usize) -> Vec<String> {
+        (start..=end_inclusive)
+            .map(|index| format!("validator-{index}"))
+            .collect()
+    }
+
+    fn active_validators_from_addresses(addresses: &[String]) -> Vec<Validator> {
+        addresses
+            .iter()
+            .map(|address| active_validator(address))
+            .collect()
+    }
+
+    fn membership_addresses(validators: &[Validator]) -> Vec<String> {
+        validators
+            .iter()
+            .map(|validator| validator.address.clone())
+            .collect()
+    }
+
     fn funded_test_address(required_nwei: u64) -> String {
         crate::genesis::canonical_genesis()
             .ok()
@@ -1485,6 +2524,7 @@ mod tests {
 
     #[test]
     fn validator_manager_resolves_legacy_registry_path_to_runtime_data_root() {
+        let _env_lock = validator_test_env_lock();
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1579,6 +2619,7 @@ mod tests {
 
     #[test]
     fn activated_validator_expands_consensus_membership_when_allowlist_disabled() {
+        let _env_lock = validator_test_env_lock();
         let previous_strict = std::env::var("SYNERGY_STRICT_VALIDATOR_ALLOWLIST").ok();
         std::env::set_var("SYNERGY_STRICT_VALIDATOR_ALLOWLIST", "0");
 
@@ -1628,6 +2669,7 @@ mod tests {
 
     #[test]
     fn consensus_membership_does_not_truncate_active_validators_with_stale_max_config() {
+        let _env_lock = validator_test_env_lock();
         let active = active_registry(6)
             .validators
             .into_values()
@@ -1651,6 +2693,7 @@ mod tests {
 
     #[test]
     fn consensus_membership_ignores_stale_strict_allowlist_config() {
+        let _env_lock = validator_test_env_lock();
         let active = active_registry(6)
             .validators
             .into_values()
@@ -1680,7 +2723,326 @@ mod tests {
     }
 
     #[test]
+    fn epoch_validator_set_for_height_overrides_current_registry_membership() {
+        let _env_lock = validator_test_env_lock();
+        let active = (1..=7)
+            .map(|index| active_validator(&format!("validator-{index}")))
+            .collect::<Vec<_>>();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("synergy-epoch-validator-set-{unique}"));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        std::fs::write(
+            &snapshot_path,
+            serde_json::json!({
+                "epoch_validator_sets": [{
+                    "chain_id": 1264,
+                    "epoch_id": 7,
+                    "validator_set_version": 3,
+                    "effective_from_height": 100,
+                    "effective_to_height": 199,
+                    "active_validators": [
+                        "validator-1",
+                        "validator-2",
+                        "validator-3",
+                        "validator-4",
+                        "validator-5",
+                        "validator-6"
+                    ],
+                    "pending_validators": ["validator-7"],
+                    "quorum_threshold": 4,
+                    "validator_set_hash": "test-epoch-set-hash"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let historical = consensus_membership_validators_for_height(active.clone(), 150)
+            .expect("historical epoch validator set should resolve");
+        let historical_addresses = historical
+            .iter()
+            .map(|validator| validator.address.as_str())
+            .collect::<Vec<_>>();
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        assert_eq!(historical_addresses, validator_addresses(1, 7));
+    }
+
+    #[test]
+    fn unsupported_epoch_validator_set_format_blocks_consensus_membership() {
+        let _env_lock = validator_test_env_lock();
+        let active = active_validators_from_addresses(&validator_addresses(1, 6));
+        let temp_dir = unique_test_dir("epoch-unsupported-format");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([{
+                "snapshot_format_version": SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION + 1,
+                "chain_id": 1264,
+                "epoch_id": 7,
+                "validator_set_version": 3,
+                "effective_from_height": 100,
+                "active_validators": validator_addresses(1, 6),
+                "quorum_threshold": 4,
+                "validator_set_hash": "future-format-set"
+            }]),
+        );
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let error = consensus_membership_validators_for_height(active, 150)
+            .expect_err("future snapshot format must fail closed");
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        assert!(
+            error.contains("newer than supported version"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn incompatible_epoch_validator_set_binary_version_blocks_consensus_membership() {
+        let _env_lock = validator_test_env_lock();
+        let active = active_validators_from_addresses(&validator_addresses(1, 6));
+        let temp_dir = unique_test_dir("epoch-wrong-binary");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([{
+                "snapshot_format_version": SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION,
+                "chain_id": 1264,
+                "epoch_id": 7,
+                "validator_set_version": 3,
+                "effective_from_height": 100,
+                "active_validators": validator_addresses(1, 6),
+                "quorum_threshold": 4,
+                "validator_set_hash": "wrong-binary-set",
+                "required_binary_version": "0.0.0-incompatible"
+            }]),
+        );
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let error = consensus_membership_validators_for_height(active, 150)
+            .expect_err("wrong binary version must fail closed");
+        let compatibility = epoch_validator_set_compatibility_for_height(150)
+            .expect("compatibility diagnostics should load")
+            .expect("height should have an epoch validator set");
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        assert!(
+            error.contains("requires binary version 0.0.0-incompatible"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            compatibility.validator_set_hash.as_deref(),
+            Some("wrong-binary-set")
+        );
+        assert_eq!(
+            compatibility.local_binary_version,
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+
+    #[test]
+    fn epoch_validator_set_ignores_config_peers_vpn_and_registry_drift() {
+        let _env_lock = validator_test_env_lock();
+        let all_addresses = validator_addresses(1, 7);
+        let active = active_validators_from_addresses(&all_addresses);
+        let temp_dir = unique_test_dir("epoch-drift-sources");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let config_path = temp_dir.join("node.toml");
+        let peers_path = temp_dir.join("peers.toml");
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+
+        let mut config = crate::config::NodeConfig::default();
+        config.node.strict_validator_allowlist = true;
+        config.node.allowed_validator_addresses = all_addresses.clone();
+        config.network.persistent_peers = vec!["validator-7".to_string()];
+        config.network.validator_vpn_transports =
+            vec![crate::config::ValidatorVpnTransportConfig {
+                validator_address: "validator-7".to_string(),
+                dial_address: "10.69.10.7:5622".to_string(),
+            }];
+        std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+        std::fs::write(
+            &peers_path,
+            r#"
+[global]
+persistent_peers = ["validator-7", "10.69.10.7:5622"]
+additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
+"#,
+        )
+        .unwrap();
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([{
+                "chain_id": 1264,
+                "epoch_id": 7,
+                "validator_set_version": 3,
+                "effective_from_height": 100,
+                "effective_to_height": 199,
+                "active_validators": validator_addresses(1, 6),
+                "pending_validators": ["validator-7"],
+                "quorum_threshold": 4,
+                "validator_set_hash": "dynamic-validator-set-a"
+            }]),
+        );
+
+        let _config_path = EnvVarGuard::set("SYNERGY_CONFIG_PATH", &config_path.to_string_lossy());
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let loaded_config =
+            crate::config::load_node_config(None).expect("test config should load with peers.toml");
+        assert!(loaded_config
+            .node
+            .allowed_validator_addresses
+            .contains(&"validator-7".to_string()));
+        assert!(loaded_config
+            .network
+            .persistent_peers
+            .contains(&"10.69.10.7:5622".to_string()));
+        assert!(loaded_config
+            .network
+            .validator_vpn_transports
+            .iter()
+            .any(|transport| transport.validator_address == "validator-7"));
+
+        let membership = consensus_membership_validators_for_height(active, 150)
+            .expect("epoch validator set should resolve despite drift sources");
+        let addresses = membership_addresses(&membership);
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        assert_eq!(addresses, all_addresses);
+        assert_eq!(
+            crate::consensus::dual_quorum::required_validator_quorum(membership.len()),
+            5,
+            "peer/config/VPN drift must not remove replayed active validators"
+        );
+    }
+
+    #[test]
+    fn epoch_validator_set_keeps_added_validator_pending_until_boundary() {
+        let _env_lock = validator_test_env_lock();
+        let all_addresses = validator_addresses(1, 7);
+        let active = active_validators_from_addresses(&all_addresses);
+        let temp_dir = unique_test_dir("epoch-pending-boundary");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([
+                {
+                    "chain_id": 1264,
+                    "epoch_id": 7,
+                    "validator_set_version": 3,
+                    "effective_from_height": 100,
+                    "effective_to_height": 199,
+                    "active_validators": validator_addresses(1, 6),
+                    "pending_validators": ["validator-7"],
+                    "quorum_threshold": 4,
+                    "validator_set_hash": "dynamic-validator-set-a"
+                },
+                {
+                    "chain_id": 1264,
+                    "epoch_id": 8,
+                    "validator_set_version": 4,
+                    "effective_from_height": 200,
+                    "active_validators": all_addresses,
+                    "pending_validators": [],
+                    "quorum_threshold": 5,
+                    "previous_set_hash": "dynamic-validator-set-a",
+                    "validator_set_hash": "seven-validator-set"
+                }
+            ]),
+        );
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let before_boundary = consensus_membership_validators_for_height(active.clone(), 199)
+            .expect("pre-boundary epoch set should resolve");
+        let at_boundary = consensus_membership_validators_for_height(active, 200)
+            .expect("boundary epoch set should resolve");
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        let before_addresses = membership_addresses(&before_boundary);
+        let boundary_addresses = membership_addresses(&at_boundary);
+        assert_eq!(before_addresses, all_addresses);
+        assert_eq!(boundary_addresses, all_addresses);
+        assert_eq!(
+            crate::consensus::dual_quorum::required_validator_quorum(before_boundary.len()),
+            5
+        );
+        assert_eq!(
+            crate::consensus::dual_quorum::required_validator_quorum(at_boundary.len()),
+            5
+        );
+    }
+
+    #[test]
+    fn jailed_validator_changes_membership_only_through_next_epoch_set() {
+        let _env_lock = validator_test_env_lock();
+        let all_addresses = validator_addresses(1, 6);
+        let active = active_validators_from_addresses(&all_addresses);
+        let temp_dir = unique_test_dir("epoch-jail-boundary");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([
+                {
+                    "chain_id": 1264,
+                    "epoch_id": 7,
+                    "validator_set_version": 3,
+                    "effective_from_height": 100,
+                    "effective_to_height": 199,
+                    "active_validators": all_addresses,
+                    "jailed_validators": [],
+                    "quorum_threshold": 4,
+                    "validator_set_hash": "dynamic-validator-set-a"
+                },
+                {
+                    "chain_id": 1264,
+                    "epoch_id": 8,
+                    "validator_set_version": 4,
+                    "effective_from_height": 200,
+                    "active_validators": validator_addresses(1, 5),
+                    "jailed_validators": ["validator-6"],
+                    "quorum_threshold": 4,
+                    "previous_set_hash": "dynamic-validator-set-a",
+                    "validator_set_hash": "jailed-validator-set"
+                }
+            ]),
+        );
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let before_boundary = consensus_membership_validators_for_height(active.clone(), 199)
+            .expect("pre-jail epoch set should resolve");
+        let at_boundary = consensus_membership_validators_for_height(active, 200)
+            .expect("post-jail epoch set should resolve");
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        let before_addresses = membership_addresses(&before_boundary);
+        let boundary_addresses = membership_addresses(&at_boundary);
+        assert_eq!(before_addresses, validator_addresses(1, 6));
+        assert!(before_addresses.contains(&"validator-6".to_string()));
+        assert_eq!(boundary_addresses, validator_addresses(1, 6));
+        assert!(boundary_addresses.contains(&"validator-6".to_string()));
+    }
+
+    #[test]
     fn consensus_membership_prefers_active_fork_and_defers_non_fork_validator() {
+        let _env_lock = validator_test_env_lock();
         let canonical = [
             "synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs",
             "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt",
@@ -1723,8 +3085,9 @@ mod tests {
             .collect::<Vec<_>>();
 
         std::fs::remove_dir_all(temp_dir).ok();
-        assert_eq!(membership_addresses, canonical);
-        assert!(!membership_addresses.contains(&"synv11wsfus6ghzgjvm4glpatuy8tnyacrwealyjv"));
+        assert_eq!(&membership_addresses[..canonical.len()], canonical);
+        assert_eq!(membership_addresses.len(), canonical.len() + 1);
+        assert!(membership_addresses.contains(&"synv11wsfus6ghzgjvm4glpatuy8tnyacrwealyjv"));
     }
 
     #[test]
@@ -1739,6 +3102,20 @@ mod tests {
 
         assert_eq!(registry.clusters.len(), 1);
         assert_eq!(cluster_sizes, vec![6]);
+    }
+
+    #[test]
+    fn reorganize_clusters_keeps_nine_validators_in_one_cluster() {
+        let registry = active_registry(9);
+        let mut cluster_sizes: Vec<usize> = registry
+            .clusters
+            .values()
+            .map(|cluster| cluster.validators.len())
+            .collect();
+        cluster_sizes.sort_unstable();
+
+        assert_eq!(registry.clusters.len(), 1);
+        assert_eq!(cluster_sizes, vec![9]);
     }
 
     #[test]
@@ -2250,6 +3627,525 @@ mod tests {
     }
 
     #[test]
+    fn tenth_validator_activation_at_h_plus_1001_produces_exact_two_five_validator_clusters() {
+        let _env_lock = validator_test_env_lock();
+        let activation_height = 50_000;
+        let effective_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS + 1;
+        let temp_dir = unique_test_dir("activation-cluster-boundary");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([
+                {
+                    "epoch_id": 12,
+                    "validator_set_version": 1,
+                    "effective_from_height": 0,
+                    "effective_to_height": effective_height - 1,
+                    "active_validators": validator_addresses(0, 8),
+                    "validator_set_hash": "nine-validator-set"
+                },
+                {
+                    "epoch_id": 13,
+                    "validator_set_version": 2,
+                    "effective_from_height": effective_height,
+                    "active_validators": validator_addresses(0, 9),
+                    "previous_set_hash": "nine-validator-set",
+                    "validator_set_hash": "ten-validator-set"
+                }
+            ]),
+        );
+        let _snapshot_env =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+        let mut registry = active_registry(9);
+        registry.reorganize_clusters_for_epoch(12);
+        let registration = pending_registration(9);
+        let tenth_address = registration.address.clone();
+        registry
+            .register_validator(registration)
+            .expect("tenth validator registration should be pending");
+        registry
+            .start_shadow_activation(&tenth_address, activation_height)
+            .expect("tenth validator should enter shadow activation");
+
+        assert!(registry
+            .apply_pending_shadow_activations(effective_height - 1)
+            .is_empty());
+        assert_eq!(registry.current_epoch, 12);
+
+        assert_eq!(
+            epoch_validator_set_hash_for_height(effective_height)
+                .expect("boundary set hash should resolve")
+                .as_deref(),
+            Some("ten-validator-set")
+        );
+        assert_eq!(
+            effective_cluster_epoch_for_height(12, effective_height)
+                .expect("boundary epoch should resolve from the authoritative set"),
+            13
+        );
+        assert_eq!(
+            registry.apply_pending_shadow_activations(effective_height),
+            vec![tenth_address.clone()]
+        );
+        assert_eq!(
+            registry.current_epoch, 13,
+            "shadow promotion must advance the registry from the applicable set epoch"
+        );
+
+        let mut actual = registry
+            .clusters
+            .iter()
+            .map(|(cluster_id, cluster)| {
+                (
+                    *cluster_id,
+                    cluster.validators.iter().cloned().collect::<Vec<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for members in actual.values_mut() {
+            members.sort();
+        }
+        let active = registry
+            .get_active_validators()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let expected = canonical_validator_clusters_for_height(
+            active.clone(),
+            registry.current_epoch,
+            effective_height,
+        )
+        .expect("boundary set should be the ten-validator set")
+        .into_iter()
+        .map(|(cluster_id, members)| {
+            (
+                cluster_id,
+                members
+                    .into_iter()
+                    .map(|validator| validator.address)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+        let mut expected = expected;
+        for members in expected.values_mut() {
+            members.sort();
+        }
+
+        assert_eq!(
+            actual, expected,
+            "activation must publish the exact canonical map"
+        );
+        assert_eq!(actual.len(), 2);
+        assert_eq!(
+            actual.values().map(Vec::len).collect::<Vec<_>>(),
+            vec![5, 5]
+        );
+        assert_eq!(
+            actual
+                .values()
+                .flatten()
+                .cloned()
+                .collect::<HashSet<_>>()
+                .len(),
+            10
+        );
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn independently_ordered_validator_registries_have_identical_membership_and_digest() {
+        let addresses = validator_addresses(0, 9);
+        let ordered = active_validators_from_addresses(&addresses);
+        let mut reversed = ordered.clone();
+        reversed.reverse();
+        reversed.rotate_left(3);
+
+        let canonical = canonical_validator_clusters_for_epoch(&ordered, 12);
+        let independently_ordered = canonical_validator_clusters_for_epoch(&reversed, 12);
+        let membership = |clusters: Vec<(u64, Vec<Validator>)>| {
+            clusters
+                .into_iter()
+                .map(|(cluster_id, members)| {
+                    (
+                        cluster_id,
+                        members
+                            .into_iter()
+                            .map(|validator| validator.address)
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+
+        assert_eq!(membership(canonical), membership(independently_ordered));
+        assert_eq!(
+            canonical_validator_clusters_digest(&ordered, 12),
+            canonical_validator_clusters_digest(&reversed, 12)
+        );
+        assert_eq!(
+            canonical_active_validator_set_hash(&ordered),
+            canonical_active_validator_set_hash(&reversed)
+        );
+        assert_eq!(
+            canonical_validator_cluster_address(0, &ordered),
+            canonical_validator_cluster_address(0, &reversed),
+            "cluster identity must not depend on epoch-only member ordering"
+        );
+    }
+
+    #[test]
+    fn active_validator_set_hash_is_live_and_changes_after_shadow_promotion() {
+        let _env_lock = validator_test_env_lock();
+        let mut registry = active_registry(6);
+        let genesis_hash = canonical_genesis()
+            .expect("canonical genesis should load")
+            .value()
+            .get("integrity")
+            .and_then(|integrity| integrity.get("validator_set_hash"))
+            .and_then(|hash| hash.as_str())
+            .expect("canonical genesis should contain a validator set hash")
+            .to_string();
+        let six_node_hash = registry.canonical_active_validator_set_hash();
+
+        assert_ne!(six_node_hash, genesis_hash);
+
+        let temp_dir = unique_test_dir("live-hash-stale-epoch-json");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([{
+                "effective_from_height": 0,
+                "validator_set_hash": "stale-static-validator-set"
+            }]),
+        );
+        let _snapshot_env =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+        assert_eq!(
+            registry.canonical_active_validator_set_hash(),
+            six_node_hash
+        );
+
+        let registration = pending_registration(6);
+        registry
+            .register_validator(registration)
+            .expect("validator should register before shadow activation");
+        registry
+            .start_shadow_activation("validator-6", 10)
+            .expect("validator should enter shadow activation");
+        assert_eq!(
+            registry.canonical_active_validator_set_hash(),
+            six_node_hash
+        );
+
+        assert_eq!(
+            registry.apply_pending_shadow_activations(1_011),
+            vec!["validator-6"]
+        );
+        let seven_node_hash = registry.canonical_active_validator_set_hash();
+        assert_ne!(seven_node_hash, six_node_hash);
+        assert_eq!(registry.get_active_validators().len(), 7);
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn replayed_tenth_activation_enters_membership_despite_stale_height_manifest() {
+        let _env_lock = validator_test_env_lock();
+        let activation_height = 42;
+        let effective_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS + 1;
+        let temp_dir = unique_test_dir("stale-manifest-tenth-activation");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([{
+                "effective_from_height": 0,
+                "active_validators": validator_addresses(0, 8),
+                "validator_set_hash": "stale-nine-validator-set"
+            }]),
+        );
+        let _snapshot_env =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let public_key = "replay-tenth-public-key";
+        let (token_manager, tenth_address, activation_tx) =
+            funded_activation_fixture(public_key, vec![31, 32, 33]);
+        let validator_manager = Arc::new(ValidatorManager::new());
+        {
+            let mut registry = validator_manager.registry.lock().unwrap();
+            for index in 0..9 {
+                let validator = active_validator(&format!("validator-{index}"));
+                registry
+                    .validators
+                    .insert(validator.address.clone(), validator);
+            }
+        }
+
+        let mut chain = BlockChain::new();
+        chain.add_block(Block::new_with_timestamp(
+            activation_height,
+            vec![activation_tx],
+            "genesis".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            1,
+        ));
+        chain.add_block(Block::new_with_timestamp(
+            activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS,
+            Vec::new(),
+            "activation-record-block".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            2,
+        ));
+        chain.add_block(Block::new_with_timestamp(
+            effective_height,
+            Vec::new(),
+            "activation-effective-block".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            3,
+        ));
+
+        let (applied, failed) =
+            replay_validator_activation_transactions(&chain, &token_manager, &validator_manager);
+        assert_eq!((applied, failed), (1, 0));
+        assert_eq!(
+            validator_manager
+                .get_validator(&tenth_address)
+                .expect("replayed tenth validator should exist")
+                .status,
+            ValidatorStatus::Active
+        );
+
+        let membership = consensus_membership_validators_for_height(
+            validator_manager.get_active_validators(),
+            effective_height,
+        )
+        .expect("stale manifest must not block live membership");
+        assert!(membership
+            .iter()
+            .any(|validator| validator.address == tenth_address));
+        assert_eq!(membership.len(), 10);
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn height_scoped_validator_set_boundary_allows_the_split_at_h_plus_1001() {
+        let _env_lock = validator_test_env_lock();
+        let activation_height = 70_000;
+        let recorded_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS;
+        let effective_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS + 1;
+        let all_addresses = validator_addresses(0, 9);
+        let old_addresses = validator_addresses(0, 8);
+        let temp_dir = unique_test_dir("cluster-height-boundary");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([
+                {
+                    "epoch_id": 12,
+                    "validator_set_version": 1,
+                    "effective_from_height": 0,
+                    "effective_to_height": effective_height - 1,
+                    "active_validators": old_addresses,
+                    "validator_set_hash": "nine-validator-set"
+                },
+                {
+                    "epoch_id": 13,
+                    "validator_set_version": 2,
+                    "effective_from_height": effective_height,
+                    "active_validators": all_addresses,
+                    "previous_set_hash": "nine-validator-set",
+                    "validator_set_hash": "ten-validator-set"
+                }
+            ]),
+        );
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let mut registry = active_registry(9);
+        registry
+            .register_validator(pending_registration(9))
+            .expect("tenth validator should register");
+        registry
+            .start_shadow_activation("validator-9", activation_height)
+            .expect("tenth validator should enter the shadow window");
+
+        for (height, expected_count) in [
+            (activation_height, 9),
+            (recorded_height, 9),
+            (effective_height, 10),
+            (effective_height + 1, 10),
+        ] {
+            let membership = consensus_membership_validators_for_height(
+                registry.validators.values().cloned().collect(),
+                height,
+            )
+            .expect("height-scoped membership should resolve");
+            assert_eq!(
+                membership.len(),
+                expected_count,
+                "unexpected validator count at height {height}"
+            );
+        }
+
+        registry
+            .reorganize_clusters_for_height(12, effective_height - 1)
+            .expect("old validator set should be usable before activation boundary");
+        assert_eq!(
+            registry
+                .clusters
+                .values()
+                .map(|cluster| cluster.validators.len())
+                .collect::<Vec<_>>(),
+            vec![9]
+        );
+        assert!(registry
+            .get_validator_by_address("validator-9")
+            .expect("tenth validator should remain in local registry")
+            .cluster_id
+            .is_none());
+
+        registry
+            .reorganize_clusters_for_height(12, effective_height)
+            .expect("new validator set should be usable at activation boundary");
+        assert_eq!(registry.current_epoch, 13);
+        let mut cluster_sizes = registry
+            .clusters
+            .values()
+            .map(|cluster| cluster.validators.len())
+            .collect::<Vec<_>>();
+        cluster_sizes.sort_unstable();
+        assert_eq!(cluster_sizes, vec![5, 5]);
+        assert_eq!(
+            registry
+                .get_validator_by_address("validator-9")
+                .expect("tenth validator should remain in local registry")
+                .status,
+            ValidatorStatus::Shadow,
+            "computing the effective-height cluster must not finalize activation early"
+        );
+
+        assert_eq!(
+            registry.apply_pending_shadow_activations(effective_height),
+            vec!["validator-9"]
+        );
+        let historical = consensus_membership_validators_for_height(
+            registry.validators.values().cloned().collect(),
+            recorded_height,
+        )
+        .expect("historical membership should remain resolvable after promotion");
+        assert_eq!(historical.len(), 9);
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn older_height_scoped_epoch_cannot_regress_current_epoch() {
+        let _env_lock = validator_test_env_lock();
+        let height = 80_000;
+        let temp_dir = unique_test_dir("cluster-epoch-regression");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        write_epoch_validator_sets(
+            &snapshot_path,
+            serde_json::json!([{
+                "epoch_id": 12,
+                "validator_set_version": 1,
+                "effective_from_height": 0,
+                "effective_to_height": height,
+                "active_validators": validator_addresses(0, 9),
+                "validator_set_hash": "older-validator-set"
+            }]),
+        );
+        let _snapshot_env =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let mut registry = active_registry(10);
+        registry.reorganize_clusters_for_epoch(13);
+        let error = registry
+            .reorganize_clusters_for_height(12, height)
+            .expect_err("an older manifest epoch must fail closed");
+
+        assert!(error.contains("would regress current epoch 13"));
+        assert_eq!(registry.current_epoch, 13);
+        assert!(
+            registry.clusters.is_empty(),
+            "fail-closed reconciliation must not retain stale cluster assignments"
+        );
+
+        std::fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn cluster_assignments_survive_registry_save_load_and_epoch_replay() {
+        let registry = active_registry(10);
+        let assignments = registry
+            .validators
+            .iter()
+            .map(|(address, validator)| (address.clone(), validator.cluster_id))
+            .collect::<HashMap<_, _>>();
+        let clusters = registry
+            .clusters
+            .iter()
+            .map(|(cluster_id, cluster)| {
+                let mut members = cluster.validators.clone();
+                members.sort();
+                (*cluster_id, members)
+            })
+            .collect::<HashMap<_, _>>();
+        let path = std::env::temp_dir().join(format!(
+            "synergy-validator-registry-clusters-{}-{}.json",
+            std::process::id(),
+            Validator::current_timestamp()
+        ));
+
+        registry
+            .save_to_file(&path)
+            .expect("validator registry should save");
+        let mut restarted = ValidatorRegistry::load_from_file(&path)
+            .expect("validator registry should load after restart");
+        assert_eq!(
+            restarted
+                .validators
+                .iter()
+                .map(|(address, validator)| (address.clone(), validator.cluster_id))
+                .collect::<HashMap<_, _>>(),
+            assignments
+        );
+        assert_eq!(
+            restarted
+                .clusters
+                .iter()
+                .map(|(cluster_id, cluster)| {
+                    let mut members = cluster.validators.clone();
+                    members.sort();
+                    (*cluster_id, members)
+                })
+                .collect::<HashMap<_, _>>(),
+            clusters
+        );
+
+        restarted.reorganize_clusters_for_epoch(0);
+        assert_eq!(
+            restarted
+                .validators
+                .iter()
+                .map(|(address, validator)| (address.clone(), validator.cluster_id))
+                .collect::<HashMap<_, _>>(),
+            assignments,
+            "replaying the same epoch must preserve canonical cluster assignments"
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn reorganize_clusters_keeps_fourteen_validators_in_two_balanced_clusters() {
         let registry = active_registry(14);
         let mut cluster_sizes: Vec<usize> = registry
@@ -2264,7 +4160,7 @@ mod tests {
     }
 
     #[test]
-    fn reorganize_clusters_adds_third_cluster_at_fifteen_validators() {
+    fn reorganize_clusters_keeps_fifteen_validators_in_two_balanced_clusters() {
         let registry = active_registry(15);
         let mut cluster_sizes: Vec<usize> = registry
             .clusters
@@ -2273,12 +4169,12 @@ mod tests {
             .collect();
         cluster_sizes.sort_unstable();
 
-        assert_eq!(registry.clusters.len(), 3);
-        assert_eq!(cluster_sizes, vec![5, 5, 5]);
+        assert_eq!(registry.clusters.len(), 2);
+        assert_eq!(cluster_sizes, vec![7, 8]);
     }
 
     #[test]
-    fn reorganize_clusters_shuffles_assignments_by_epoch() {
+    fn reorganize_clusters_does_not_rotate_before_three_clusters() {
         let mut registry = active_registry(12);
         let epoch_zero_assignments: HashMap<String, Option<u64>> = registry
             .validators
@@ -2292,10 +4188,156 @@ mod tests {
             epoch_zero_assignments.get(address).copied().flatten() != validator.cluster_id
         });
 
-        assert!(
-            moved,
-            "at least one validator should move clusters after an epoch shuffle"
+        assert!(!moved, "two-cluster networks must not run epoch rotations");
+    }
+
+    #[test]
+    fn target_cluster_count_matches_protocol_boundaries() {
+        for (validator_count, expected_clusters) in [
+            (0, 0),
+            (1, 1),
+            (9, 1),
+            (10, 2),
+            (20, 2),
+            (21, 3),
+            (27, 3),
+            (28, 4),
+            (34, 4),
+            (35, 5),
+        ] {
+            assert_eq!(
+                target_validator_cluster_count(validator_count),
+                expected_clusters,
+                "unexpected cluster count for {validator_count} validators"
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_expansion_points_are_evenly_balanced() {
+        for (validator_count, expected_sizes) in [
+            (10, vec![5, 5]),
+            (20, vec![10, 10]),
+            (21, vec![7, 7, 7]),
+            (27, vec![9, 9, 9]),
+            (28, vec![7, 7, 7, 7]),
+            (35, vec![7, 7, 7, 7, 7]),
+        ] {
+            let registry = active_registry(validator_count);
+            let mut sizes = registry
+                .clusters
+                .values()
+                .map(|cluster| cluster.validators.len())
+                .collect::<Vec<_>>();
+            sizes.sort_unstable();
+            assert_eq!(sizes, expected_sizes);
+        }
+    }
+
+    #[test]
+    fn incremental_validator_joins_the_least_populated_cluster_without_moving_existing_members() {
+        let mut registry = active_registry(10);
+        let original_assignments = registry
+            .validators
+            .iter()
+            .map(|(address, validator)| (address.clone(), validator.cluster_id))
+            .collect::<HashMap<_, _>>();
+        let mut validator = active_validator("validator-10");
+        validator.stake_amount = 1_000;
+        validator.min_stake_required = 1_000;
+        registry
+            .validators
+            .insert(validator.address.clone(), validator);
+
+        registry.reorganize_clusters_for_epoch(0);
+
+        for (address, original_cluster) in original_assignments {
+            assert_eq!(registry.validators[&address].cluster_id, original_cluster);
+        }
+        let mut sizes = registry
+            .clusters
+            .values()
+            .map(|cluster| cluster.validators.len())
+            .collect::<Vec<_>>();
+        sizes.sort_unstable();
+        assert_eq!(sizes, vec![5, 6]);
+    }
+
+    #[test]
+    fn epoch_rotation_moves_exactly_two_lowest_scores_per_cluster_once() {
+        let mut registry = active_registry(21);
+        let original_assignments = registry
+            .validators
+            .iter()
+            .map(|(address, validator)| (address.clone(), validator.cluster_id.unwrap()))
+            .collect::<HashMap<_, _>>();
+        let selected = registry
+            .clusters
+            .values()
+            .flat_map(|cluster| {
+                let mut members = cluster
+                    .validators
+                    .iter()
+                    .map(|address| registry.validators[address].clone())
+                    .collect::<Vec<_>>();
+                members.sort_by(|left, right| {
+                    left.finalized_synergy_score_bps
+                        .cmp(&right.finalized_synergy_score_bps)
+                        .then_with(|| left.address.cmp(&right.address))
+                });
+                members
+                    .into_iter()
+                    .take(TESTNET_LOW_SCORE_ROTATION_COUNT)
+                    .map(|validator| validator.address)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<HashSet<_>>();
+
+        registry.reorganize_clusters_for_epoch(1);
+
+        let moved = registry
+            .validators
+            .iter()
+            .filter_map(|(address, validator)| {
+                (original_assignments[address] != validator.cluster_id.unwrap())
+                    .then_some(address.clone())
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(moved, selected);
+        assert!(registry
+            .validators
+            .values()
+            .all(|validator| validator.cluster_assignment_epoch == Some(1)));
+
+        let once = registry
+            .validators
+            .iter()
+            .map(|(address, validator)| (address.clone(), validator.cluster_id))
+            .collect::<HashMap<_, _>>();
+        registry.reorganize_clusters_for_epoch(1);
+        assert!(registry
+            .validators
+            .iter()
+            .all(|(address, validator)| once[address] == validator.cluster_id));
+    }
+
+    #[test]
+    fn every_tenth_epoch_uses_a_full_qc_seeded_reshuffle() {
+        let mut registry = active_registry(21);
+        registry.reorganize_clusters_for_epoch(9);
+        let active = registry
+            .get_active_validators()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let plan = canonical_validator_cluster_plan_for_epoch_with_seed(
+            &active,
+            10,
+            "finalized-boundary-qc-seed",
         );
+
+        assert!(plan.full_reshuffle);
+        assert_eq!(plan.rotation, CanonicalValidatorClusterRotation::FullEpoch);
     }
 
     #[test]

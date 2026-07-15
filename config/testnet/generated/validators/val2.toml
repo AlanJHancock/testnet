@@ -14,30 +14,33 @@ id = 1264
 name = "synergy-testnet"
 chain_id = 1264
 p2p_port = 5622
-bootnodes = ["bootnode1.synergynode.xyz:5620", "bootnode2.synergynode.xyz:5620", "bootnode3.synergynode.xyz:5620"]
-seed_servers = ["http://seed1.synergynode.xyz:5621", "http://seed2.synergynode.xyz:5621", "http://seed3.synergynode.xyz:5621"]
-bootstrap_dns_records = ["_dnsaddr.bootstrap.synergynode.xyz"]
-additional_dial_targets = ["62.146.182.207:5622", "62.146.182.209:5622", "73.79.66.255:5622", "194.163.183.166:5622", "157.173.192.45:5622", "relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622"]
-persistent_peers = ["62.146.182.207:5622", "62.146.182.209:5622", "73.79.66.255:5622", "194.163.183.166:5622", "157.173.192.45:5622", "relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622"]
-public_p2p_address = "62.146.182.208:5622"
+bootnodes = []
+seed_servers = []
+bootstrap_dns_records = []
+additional_dial_targets = ["relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622", "relay3.synergynode.xyz:5622"]
+persistent_peers = ["relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622", "relay3.synergynode.xyz:5622"]
 public_rpc_endpoint = "https://testnet-core-rpc.synergy-network.io"
+validator_vpn_transports = []
 
 [p2p]
-listen_address = "0.0.0.0:5622"
-public_address = "62.146.182.208:5622"
+listen_address = "127.0.0.1:5622"
+public_address = ""
 node_name = "validator-node-02"
-enable_discovery = true
-enable_peer_exchange = true
+enable_discovery = false
+enable_peer_exchange = false
+discovery_port = 5680
+discovery_listen_address = "127.0.0.1:5680"
+discovery_public_address = ""
 reject_private_advertise_addrs = true
 
 [node]
 strict_validator_allowlist = false
 allowed_validator_addresses = ["synv11qen9x0g9p0f2pqznpqzfrwkrgnsussdwmvs", "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt", "synv11e3ephsarcw6mey0fx5xtnygg2ewegnum4re", "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5", "synv11kguave5fpdpm9hru4acfvw0hcp4fcc7zv9f", "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx"]
 validator_address = "synv11s4wc6l4kg4jr0k5meg42cyzxa03cf863srt"
-active_consensus_validator = true
+active_consensus_validator = false
 
 [seed_registration]
-enabled = true
-register_endpoints = ["http://seed1.synergynode.xyz:5621", "http://seed2.synergynode.xyz:5621", "http://seed3.synergynode.xyz:5621"]
-heartbeat_endpoints = ["http://seed1.synergynode.xyz:5621", "http://seed2.synergynode.xyz:5621", "http://seed3.synergynode.xyz:5621"]
+enabled = false
+register_endpoints = []
+heartbeat_endpoints = []
 dialback_required = true

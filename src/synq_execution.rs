@@ -1,4 +1,5 @@
 use crate::gas::GasSchedule;
+use crate::sts::{CredentialRecord, CredentialStatus, StsState};
 use crate::synergy_types::{Hash, Transaction, TxId};
 use crate::synq_admission::{
     decode_synq_admission_carrier, SynQAdmissionEnvelope, SynQAdmissionKind,
@@ -6,7 +7,7 @@ use crate::synq_admission::{
 };
 use aivm_core::execution::{
     AivmSecurityPolicyRef, ContractArtifact, ContractFormat, ExecutionContext, ExecutionRequest,
-    ExecutionStatus,
+    ExecutionStatus, StsHostContext, StsHostCredential, StsHostFungibleToken, StsHostNft,
 };
 use aivm_core::state::ContractState;
 use aivm_core::synq_runtime::{
@@ -89,9 +90,13 @@ impl SynQContractArtifact {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SynQExecutionContext {
     pub runtime_block_height: u64,
+    #[serde(default)]
+    pub runtime_block_timestamp_unix: u64,
+    #[serde(default)]
+    pub sts_host: Option<StsHostContext>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +151,116 @@ pub fn execute_synq_transaction(
         deployments,
         SynQExecutionContext::default(),
     )
+}
+
+pub fn sts_host_context_from_sts_state(
+    sts_state: &StsState,
+    runtime_timestamp_unix: u64,
+) -> StsHostContext {
+    let mut host = StsHostContext::default();
+
+    for (token_id, token) in &sts_state.token_registry {
+        host.object_classes
+            .insert(token_id.clone(), token.class.discriminant());
+        host.fungible_tokens.insert(
+            token_id.clone(),
+            StsHostFungibleToken {
+                class: token.class.discriminant(),
+                total_supply: token.total_supply,
+            },
+        );
+    }
+    for balance in sts_state.fungible_balances.values() {
+        host.fungible_balances.insert(
+            StsHostContext::fungible_balance_key(&balance.token_id, &balance.owner),
+            balance.balance,
+        );
+    }
+    for (collection_id, collection) in &sts_state.nft_collections {
+        host.object_classes
+            .insert(collection_id.clone(), collection.class.discriminant());
+    }
+    for (nft_id, nft) in &sts_state.nft_instances {
+        host.object_classes
+            .insert(nft_id.clone(), nft.class.discriminant());
+        host.nfts.insert(
+            nft_id.clone(),
+            StsHostNft {
+                class: nft.class.discriminant(),
+                owner: nft.owner.clone(),
+                burned: nft.burned,
+                revoked: nft.revoked,
+            },
+        );
+    }
+    for collection_id in sts_state.multi_asset_collections.keys() {
+        host.object_classes.insert(
+            collection_id.clone(),
+            crate::sts::TokenClass::MAMultiAsset.discriminant(),
+        );
+    }
+    for balance in sts_state.multi_asset_balances.values() {
+        host.multi_asset_balances.insert(
+            StsHostContext::multi_asset_balance_key(
+                &balance.collection_id,
+                balance.item_id,
+                &balance.owner,
+            ),
+            balance.amount,
+        );
+    }
+    for (credential_id, credential) in &sts_state.credential_records {
+        host.object_classes.insert(
+            credential_id.clone(),
+            crate::sts::TokenClass::IDCredential.discriminant(),
+        );
+        let status = effective_credential_status(credential, runtime_timestamp_unix);
+        host.credentials.insert(
+            credential_id.clone(),
+            StsHostCredential {
+                status: status as u8,
+                issuer: credential.issuer.clone(),
+                subject: credential.subject.clone(),
+                subject_commitment: credential.subject_commitment.clone(),
+                schema_id: credential.schema_id.clone(),
+                expires_at: credential.expires_at,
+            },
+        );
+        if let Some(subject) = credential.subject.as_deref() {
+            host.credential_lookup.insert(
+                StsHostContext::credential_lookup_key(
+                    subject,
+                    &credential.schema_id,
+                    &credential.issuer,
+                ),
+                credential_id.clone(),
+            );
+        }
+        host.credential_lookup.insert(
+            StsHostContext::credential_lookup_key(
+                &credential.subject_commitment,
+                &credential.schema_id,
+                &credential.issuer,
+            ),
+            credential_id.clone(),
+        );
+    }
+
+    host
+}
+
+fn effective_credential_status(
+    credential: &CredentialRecord,
+    runtime_timestamp_unix: u64,
+) -> CredentialStatus {
+    if credential.status == CredentialStatus::Active {
+        if let Some(expires_at) = credential.expires_at {
+            if runtime_timestamp_unix > 0 && expires_at <= runtime_timestamp_unix {
+                return CredentialStatus::Expired;
+            }
+        }
+    }
+    credential.status
 }
 
 pub fn execute_synq_transaction_at(
@@ -437,7 +552,7 @@ fn aivm_context(
         chain_id: tx.chain_id.0,
         network_id: tx.network_id.0.clone(),
         block_height: 0,
-        block_timestamp_unix: 0,
+        block_timestamp_unix: execution_context.runtime_block_timestamp_unix,
         tx_hash: tx.canonical_tx_bytes_hash()?.0,
         caller: tx.sender_uma_or_account.as_bytes().to_vec(),
         contract_address: contract_address.as_bytes().to_vec(),
@@ -447,6 +562,7 @@ fn aivm_context(
             policy_id: "synq-testnet-1264-v1".to_string(),
             required_signature_policy: "ml-dsa-65".to_string(),
         },
+        sts_host: execution_context.sts_host.clone(),
     })
 }
 
@@ -527,4 +643,56 @@ pub fn deploy_envelope_from_carrier(
 ) -> Result<ContractDeployEnvelope, String> {
     serde_json::from_slice(&envelope.encoded_pqsynq_envelope)
         .map_err(|error| format!("SynQ deploy envelope decode failed after admission: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sts::{CreateFungibleParams, FungibleControlFlags, FungiblePolicy, TokenClass};
+
+    #[test]
+    fn sts_host_context_exports_native_fungible_balances() {
+        let creator = "synw1jmtpyjw62nxgattrcjc2tx2hezwj6rka5war";
+        let mut state = StsState::new();
+        let token_id = state
+            .create_fungible(CreateFungibleParams {
+                class: TokenClass::B1BasicFungible,
+                creator: creator.to_string(),
+                creator_nonce: 7,
+                name: "Host Token".to_string(),
+                symbol: "HOST".to_string(),
+                decimals: 9,
+                initial_supply: 42_000,
+                max_supply: Some(42_000),
+                mint_authority: None,
+                metadata_authority: None,
+                metadata_uri: None,
+                metadata_hash: None,
+                metadata_mutable: false,
+                image_uri: None,
+                image_hash: None,
+                flags: FungibleControlFlags::default(),
+                policies: Vec::<FungiblePolicy>::new(),
+                created_at: 1_783_200_000,
+            })
+            .expect("create native STS token");
+
+        let host = sts_host_context_from_sts_state(&state, 1_783_200_000);
+        assert_eq!(
+            host.object_classes.get(&token_id),
+            Some(&(TokenClass::B1BasicFungible.discriminant()))
+        );
+        assert_eq!(
+            host.fungible_tokens
+                .get(&token_id)
+                .map(|token| token.total_supply),
+            Some(42_000)
+        );
+        assert_eq!(
+            host.fungible_balances
+                .get(&StsHostContext::fungible_balance_key(&token_id, creator))
+                .copied(),
+            Some(42_000)
+        );
+    }
 }

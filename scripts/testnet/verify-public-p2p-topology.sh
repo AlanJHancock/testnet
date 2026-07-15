@@ -325,12 +325,6 @@ if [[ "${SKIP_TCP}" -eq 0 ]]; then
     "relay2|relay2.synergynode.xyz|5622"
     "rpc-gateway-p2p|rpc.synergynode.xyz|5623"
     "archive|archive.synergynode.xyz|5615"
-    "val1|62.146.182.207|5622"
-    "val2|62.146.182.208|5622"
-    "val3|62.146.182.209|5622"
-    "val4|73.79.66.255|5622"
-    "val5|194.163.183.166|5622"
-    "val6|157.173.192.45|5622"
     "observer|209.145.50.9|5622"
   )
   if [[ -n "${EXPLORER_PORT}" ]]; then

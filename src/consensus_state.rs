@@ -452,7 +452,19 @@ pub fn migrate_state(
     state_root: &Path,
     options: ConsensusStateMigrationOptions,
 ) -> Result<ConsensusStateMigrationReport, String> {
-    let verification = verify_state(state_root);
+    migrate_state_with_verification_options(
+        state_root,
+        options,
+        ConsensusStateVerificationOptions::default(),
+    )
+}
+
+pub fn migrate_state_with_verification_options(
+    state_root: &Path,
+    options: ConsensusStateMigrationOptions,
+    verification_options: ConsensusStateVerificationOptions,
+) -> Result<ConsensusStateMigrationReport, String> {
+    let verification = verify_state_with_options(state_root, verification_options);
     let data_dir = PathBuf::from(&verification.data_dir);
     let target_store_dir = data_dir.join(DURABLE_STORE_DIR);
     let mut actions = vec![
@@ -562,7 +574,19 @@ pub fn rebuild_derived_indexes(
     state_root: &Path,
     options: DerivedIndexRebuildOptions,
 ) -> Result<DerivedIndexRebuildReport, String> {
-    let verification = verify_state(state_root);
+    rebuild_derived_indexes_with_verification_options(
+        state_root,
+        options,
+        ConsensusStateVerificationOptions::default(),
+    )
+}
+
+pub fn rebuild_derived_indexes_with_verification_options(
+    state_root: &Path,
+    options: DerivedIndexRebuildOptions,
+    verification_options: ConsensusStateVerificationOptions,
+) -> Result<DerivedIndexRebuildReport, String> {
+    let verification = verify_state_with_options(state_root, verification_options);
     let data_dir = PathBuf::from(&verification.data_dir);
     let store_dir = data_dir.join(DURABLE_STORE_DIR);
     let output_path = if store_dir.is_dir() {
@@ -3236,6 +3260,58 @@ mod tests {
         write_checkpoint(&data, 10, "hash-10");
     }
 
+    fn write_validator_pruned_append_log_state(root: &Path) {
+        let data = root.join("data");
+        fs::write(
+            data.join("chain.json"),
+            format!(
+                r#"[
+                  {{"block_index":{},"hash":"{}"}},
+                  {{"block_index":670736,"hash":"hash-670736"}},
+                  {{"block_index":670737,"hash":"hash-670737"}},
+                  {{"block_index":670739,"hash":"hash-670739"}}
+                ]"#,
+                TESTNET_RECOVERY_BOUNDARY_HEIGHT, TESTNET_RECOVERY_BOUNDARY_HASH
+            ),
+        )
+        .unwrap();
+        fs::write(
+            data.join("canonical_locks.json"),
+            format!(
+                r#"{{
+                  "{}":{{"height":{},"hash":"{}","block_hash":"{}"}},
+                  "670739":{{"height":670739,"hash":"hash-670739","block_hash":"hash-670739"}}
+                }}"#,
+                TESTNET_RECOVERY_BOUNDARY_HEIGHT,
+                TESTNET_RECOVERY_BOUNDARY_HEIGHT,
+                TESTNET_RECOVERY_BOUNDARY_HASH,
+                TESTNET_RECOVERY_BOUNDARY_HASH
+            ),
+        )
+        .unwrap();
+        fs::write(
+            data.join("committed_blocks.jsonl"),
+            [
+                r#"{"height":670737,"block_hash":"hash-670737"}"#,
+                r#"{"height":670739,"block_hash":"hash-670739"}"#,
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+        fs::write(
+            data.join("committed_qcs.jsonl"),
+            [
+                r#"{"height":670737,"block_hash":"hash-670737"}"#,
+                r#"{"height":670738,"block_hash":"hash-670738"}"#,
+                r#"{"height":670739,"block_hash":"hash-670739"}"#,
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+    }
+
     fn write_testnet_recovery_source_state(root: &Path) {
         let data = root.join("data");
         let mut chain = String::from("[\n");
@@ -3426,55 +3502,7 @@ mod tests {
     #[test]
     fn verify_accepts_validator_pruned_append_log_snapshot_shape() {
         let root = temp_root("validator-pruned-append-log");
-        let data = root.join("data");
-        fs::write(
-            data.join("chain.json"),
-            format!(
-                r#"[
-                  {{"block_index":{},"hash":"{}"}},
-                  {{"block_index":670736,"hash":"hash-670736"}},
-                  {{"block_index":670737,"hash":"hash-670737"}},
-                  {{"block_index":670739,"hash":"hash-670739"}}
-                ]"#,
-                TESTNET_RECOVERY_BOUNDARY_HEIGHT, TESTNET_RECOVERY_BOUNDARY_HASH
-            ),
-        )
-        .unwrap();
-        fs::write(
-            data.join("canonical_locks.json"),
-            format!(
-                r#"{{
-                  "{}":{{"height":{},"hash":"{}","block_hash":"{}"}},
-                  "670739":{{"height":670739,"hash":"hash-670739","block_hash":"hash-670739"}}
-                }}"#,
-                TESTNET_RECOVERY_BOUNDARY_HEIGHT,
-                TESTNET_RECOVERY_BOUNDARY_HEIGHT,
-                TESTNET_RECOVERY_BOUNDARY_HASH,
-                TESTNET_RECOVERY_BOUNDARY_HASH
-            ),
-        )
-        .unwrap();
-        fs::write(
-            data.join("committed_blocks.jsonl"),
-            [
-                r#"{"height":670737,"block_hash":"hash-670737"}"#,
-                r#"{"height":670739,"block_hash":"hash-670739"}"#,
-            ]
-            .join("\n")
-                + "\n",
-        )
-        .unwrap();
-        fs::write(
-            data.join("committed_qcs.jsonl"),
-            [
-                r#"{"height":670737,"block_hash":"hash-670737"}"#,
-                r#"{"height":670738,"block_hash":"hash-670738"}"#,
-                r#"{"height":670739,"block_hash":"hash-670739"}"#,
-            ]
-            .join("\n")
-                + "\n",
-        )
-        .unwrap();
+        write_validator_pruned_append_log_state(&root);
 
         let strict = verify_state(&root);
         assert!(!strict.ok);
@@ -3491,6 +3519,90 @@ mod tests {
         );
         assert!(allowed.ok, "{:?}", allowed.findings);
         assert!(finding_codes(&allowed).contains(&"compact_append_log_state_accepted".to_string()));
+    }
+
+    #[test]
+    fn migration_and_rebuild_require_explicit_compact_state_allowance() {
+        let root = temp_root("compact-migration-explicit-opt-in");
+        write_validator_pruned_append_log_state(&root);
+
+        let strict_migration = migrate_state(
+            &root,
+            ConsensusStateMigrationOptions {
+                dry_run: true,
+                force: false,
+            },
+        )
+        .unwrap();
+        assert!(!strict_migration.ok);
+
+        let allowed_migration = migrate_state_with_verification_options(
+            &root,
+            ConsensusStateMigrationOptions {
+                dry_run: true,
+                force: false,
+            },
+            ConsensusStateVerificationOptions {
+                allow_testnet_recovery_checkpoint: true,
+            },
+        )
+        .unwrap();
+        assert!(allowed_migration.ok, "{:?}", allowed_migration.findings);
+        assert_eq!(allowed_migration.decision, "DRY_RUN_GO");
+        assert!(finding_codes(&allowed_migration.verification)
+            .contains(&"compact_append_log_state_accepted".to_string()));
+
+        let strict_rebuild =
+            rebuild_derived_indexes(&root, DerivedIndexRebuildOptions { dry_run: true }).unwrap();
+        assert!(!strict_rebuild.ok);
+
+        let allowed_rebuild = rebuild_derived_indexes_with_verification_options(
+            &root,
+            DerivedIndexRebuildOptions { dry_run: true },
+            ConsensusStateVerificationOptions {
+                allow_testnet_recovery_checkpoint: true,
+            },
+        )
+        .unwrap();
+        assert!(allowed_rebuild.ok, "{:?}", allowed_rebuild.findings);
+        assert_eq!(allowed_rebuild.decision, "DRY_RUN_GO");
+        assert!(finding_codes(&allowed_rebuild.verification)
+            .contains(&"compact_append_log_state_accepted".to_string()));
+    }
+
+    #[test]
+    fn compact_state_allowance_still_rejects_corrupted_qcs() {
+        let root = temp_root("compact-migration-corrupted-qcs");
+        write_validator_pruned_append_log_state(&root);
+        fs::write(root.join("data/committed_qcs.jsonl"), "{not-json}\n").unwrap();
+
+        let migration = migrate_state_with_verification_options(
+            &root,
+            ConsensusStateMigrationOptions {
+                dry_run: true,
+                force: false,
+            },
+            ConsensusStateVerificationOptions {
+                allow_testnet_recovery_checkpoint: true,
+            },
+        )
+        .unwrap();
+        assert!(!migration.ok);
+        assert!(finding_codes(&migration.verification)
+            .contains(&"committed_qcs_unreadable".to_string()));
+
+        let rebuild = rebuild_derived_indexes_with_verification_options(
+            &root,
+            DerivedIndexRebuildOptions { dry_run: true },
+            ConsensusStateVerificationOptions {
+                allow_testnet_recovery_checkpoint: true,
+            },
+        )
+        .unwrap();
+        assert!(!rebuild.ok);
+        assert!(
+            finding_codes(&rebuild.verification).contains(&"committed_qcs_unreadable".to_string())
+        );
     }
 
     #[test]

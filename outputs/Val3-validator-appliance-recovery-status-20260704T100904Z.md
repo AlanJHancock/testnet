@@ -38,10 +38,10 @@ show=731466|active|running|
 ### Listeners
 
 ~~~text
-LISTEN 0      128          0.0.0.0:6030      0.0.0.0:*    users:(("synergy-validat",pid=731466,fd=100))            
-LISTEN 0      128          0.0.0.0:5640      0.0.0.0:*    users:(("synergy-validat",pid=731466,fd=11))             
-LISTEN 0      128          0.0.0.0:5660      0.0.0.0:*    users:(("synergy-validat",pid=731466,fd=106))            
-LISTEN 0      128          0.0.0.0:5622      0.0.0.0:*    users:(("synergy-validat",pid=731466,fd=4))              
+LISTEN 0      128          0.0.0.0:6030      0.0.0.0:*    users:(("synergy-validat",pid=731466,fd=100))
+LISTEN 0      128          0.0.0.0:5640      0.0.0.0:*    users:(("synergy-validat",pid=731466,fd=11))
+LISTEN 0      128          0.0.0.0:5660      0.0.0.0:*    users:(("synergy-validat",pid=731466,fd=106))
+LISTEN 0      128          0.0.0.0:5622      0.0.0.0:*    users:(("synergy-validat",pid=731466,fd=4))
 ~~~
 
 ### Process

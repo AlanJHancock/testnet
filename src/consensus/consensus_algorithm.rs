@@ -12,15 +12,20 @@ use super::validator_keys::{consensus_algorithm_label, load_local_validator_keyp
 use super::vrf::{VRFConsensus, VRFSeed};
 use crate::block::{Block, BlockChain};
 use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPublicKey};
+use crate::epoch::{
+    block_position_in_epoch, epoch_end_height, epoch_for_block_height, epoch_start_height,
+};
 use crate::genesis::canonical_genesis;
 use crate::p2p::networking::P2PNetwork;
 use crate::rpc::rpc_server::{
-    prune_transaction_hashes_from_pool, transaction_hashes, SHARED_CHAIN, SYNC_MANAGER, TX_POOL,
+    cache_last_known_good_chain_tip, prune_transaction_hashes_from_pool, transaction_hashes,
+    SHARED_CHAIN, SYNC_MANAGER, TX_POOL,
 };
 use crate::token::TOKEN_MANAGER;
 use crate::validator::{
     apply_validator_activation_transaction, consensus_membership_validators,
-    is_validator_activation_transaction, replay_validator_activation_transactions, Validator,
+    consensus_membership_validators_for_height, is_validator_activation_transaction,
+    replay_validator_activation_transactions, validate_validator_activation_transaction, Validator,
     ValidatorManager, TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
 };
 use crate::wallet::WALLET_MANAGER;
@@ -51,6 +56,11 @@ const POST_COMMIT_PARENT_PROPAGATION_GRACE_MILLIS: u64 = 250;
 const SAFE_HEAD_CATCHUP_WITHOUT_MESH_RESET_BLOCKS: u64 = 1;
 const DEFAULT_MAX_CHAIN_SNAPSHOT_CLONE_HEIGHT: u64 = 50_000;
 const PROPOSAL_TRANSACTION_MAX_AGE_SECS: u64 = 3_600;
+// v19.0.15 used height / 1000 in committed QC metadata at every exact epoch
+// boundary. The QC remains hash-bound and dual-quorum finalized; normalize only
+// that metadata through this frozen cutover window. Later off-by-one QCs fail closed.
+const CANONICAL_TESTNET_EPOCH_LENGTH: u64 = 1_000;
+const ONE_BASED_EPOCH_MIGRATION_CUTOFF_HEIGHT: u64 = 1_052_000;
 
 macro_rules! consensus_log {
     ($($arg:tt)*) => {
@@ -80,16 +90,19 @@ fn staking_amount_nwei(tx: &crate::transaction::Transaction) -> Option<u64> {
 }
 
 fn snrg_balance_required_for_transaction(tx: &crate::transaction::Transaction) -> u64 {
+    let fee = tx.get_total_network_fee_u64().unwrap_or(u64::MAX);
     if tx
         .data
         .as_deref()
         .map(|data| data.starts_with("stake:"))
         .unwrap_or(false)
     {
-        return staking_amount_nwei(tx).unwrap_or(tx.amount);
+        return staking_amount_nwei(tx)
+            .unwrap_or(tx.amount)
+            .saturating_add(fee);
     }
 
-    tx.amount.saturating_add(tx.get_fee())
+    tx.amount.saturating_add(fee)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,6 +226,18 @@ lazy_static::lazy_static! {
     static ref TEST_PROPOSAL_CACHE_DIR: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
 }
 
+pub(crate) fn reconcile_validator_registry_clusters_for_height(
+    validator_manager: &Arc<ValidatorManager>,
+    height: u64,
+) -> Result<bool, String> {
+    let mut registry = validator_manager
+        .registry
+        .lock()
+        .map_err(|_| "failed to lock validator registry for cluster reconciliation".to_string())?;
+    let epoch = epoch_for_block_height(height, registry.epoch_length.max(1));
+    registry.reconcile_clusters_for_height(epoch, height)
+}
+
 impl ProofOfSynergy {
     pub fn proposal_cache_discard_count() -> u64 {
         PROPOSAL_CACHE_DISCARD_COUNT.load(Ordering::Relaxed)
@@ -322,6 +347,32 @@ impl ProofOfSynergy {
                     "consensus",
                     "Failed to persist replayed validator activations",
                     "error" => error.to_string()
+                );
+            }
+        }
+
+        let chain_height = chain_snapshot
+            .last()
+            .map(|block| block.block_index)
+            .unwrap_or(0);
+        match reconcile_validator_registry_clusters_for_height(&validator_manager, chain_height) {
+            Ok(true) => {
+                if let Err(error) = validator_manager.save_registry(VALIDATOR_REGISTRY_PATH) {
+                    warn!(
+                        "consensus",
+                        "Failed to persist startup validator cluster reconciliation",
+                        "height" => chain_height,
+                        "error" => error.to_string()
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    "consensus",
+                    "Failed to reconcile validator clusters at startup",
+                    "height" => chain_height,
+                    "error" => error
                 );
             }
         }
@@ -638,11 +689,66 @@ impl ProofOfSynergy {
                                 "target_epoch" => target_epoch,
                                 "latest_height" => latest_block.block_index
                             );
-                            let previous_qc = Self::get_previous_quorum_certificate(
+                            let previous_qc = match Self::get_previous_quorum_certificate(
                                 &chain_guard,
                                 next_epoch,
                                 epoch_length,
-                            );
+                                &validator_manager,
+                            ) {
+                                Ok(qc) => qc,
+                                Err(error) => {
+                                    warn!(
+                                        "consensus",
+                                        "Refusing epoch transition without the finalized boundary QC",
+                                        "current_epoch" => current_epoch,
+                                        "next_epoch" => next_epoch,
+                                        "latest_height" => latest_block.block_index,
+                                        "error" => error
+                                    );
+                                    drop(chain_guard);
+                                    drop(pool);
+                                    thread::sleep(Duration::from_millis(250));
+                                    continue;
+                                }
+                            };
+                            let closing_epoch_validators = validator_manager.get_active_validators();
+                            let finalized_scores = match Self::finalized_synergy_scores_for_epoch(
+                                &chain_guard,
+                                current_epoch,
+                                epoch_length,
+                                &closing_epoch_validators,
+                            ) {
+                                Ok(scores) => scores,
+                                Err(error) => {
+                                    warn!(
+                                        "consensus",
+                                        "Refusing epoch transition without a complete finalized Synergy score snapshot",
+                                        "current_epoch" => current_epoch,
+                                        "next_epoch" => next_epoch,
+                                        "latest_height" => latest_block.block_index,
+                                        "error" => error
+                                    );
+                                    drop(chain_guard);
+                                    drop(pool);
+                                    thread::sleep(Duration::from_millis(250));
+                                    continue;
+                                }
+                            };
+                            if let Err(error) = validator_manager
+                                .apply_finalized_synergy_scores(&finalized_scores)
+                            {
+                                warn!(
+                                    "consensus",
+                                    "Refusing epoch transition because finalized Synergy scores could not be applied",
+                                    "current_epoch" => current_epoch,
+                                    "next_epoch" => next_epoch,
+                                    "error" => error
+                                );
+                                drop(chain_guard);
+                                drop(pool);
+                                thread::sleep(Duration::from_millis(250));
+                                continue;
+                            }
                             info!(
                                 "consensus",
                                 "Applying pending epoch transition before block production",
@@ -656,10 +762,19 @@ impl ProofOfSynergy {
                             drop(chain_guard);
                             drop(pool);
                             if Self::emergency_stable_committee_mode_enabled() {
+                                let closing_epoch = current_epoch;
+                                let closing_epoch_validators =
+                                    validator_manager.get_active_validators();
                                 current_epoch = next_epoch;
                                 if let Ok(mut consensus) = dual_quorum_consensus.lock() {
                                     consensus.current_epoch = current_epoch;
                                 }
+                                Self::run_epoch_reward_lifecycle_for_boundary(
+                                    closing_epoch,
+                                    current_epoch,
+                                    latest_height,
+                                    &closing_epoch_validators,
+                                );
                                 info!(
                                     "consensus",
                                     "Emergency stable committee mode held validator set fixed across epoch boundary",
@@ -678,18 +793,37 @@ impl ProofOfSynergy {
                                     &validator_rotation,
                                     &dao_governance,
                                     &cartel_detection,
+                                    latest_height,
                                 );
                             }
                             thread::sleep(Duration::from_millis(100));
                             continue;
                         }
 
-                        // Get active validators, then reduce them to the shared consensus
-                        // membership before leader or quorum math uses the set.
-                        let registry_active_validators = validator_manager.get_active_validators();
-                        let registry_active_count = registry_active_validators.len();
-                        let active_validators =
-                            consensus_membership_validators(registry_active_validators);
+                        let next_block_index = latest_block.block_index.saturating_add(1);
+
+                        // Get active validators, then reduce them to the authoritative
+                        // height-specific consensus membership before leader or quorum
+                        // math uses the set.
+                        let registry_active_count = validator_manager.get_active_validators().len();
+                        let active_validators = match Self::consensus_membership_for_next_block(
+                            validator_manager.get_all_validators(),
+                            latest_block.block_index,
+                        ) {
+                            Ok(validators) => validators,
+                            Err(error) => {
+                                warn!(
+                                    "consensus",
+                                    "Refusing block production because authoritative validator set for next height is unavailable",
+                                    "next_block_height" => next_block_index,
+                                    "error" => error
+                                );
+                                drop(chain_guard);
+                                drop(pool);
+                                thread::sleep(Duration::from_millis(250));
+                                continue;
+                            }
+                        };
                         let consensus_active_count = active_validators.len();
                         let live_validator_addresses =
                             Self::collect_live_validator_addresses(&validator_manager);
@@ -735,7 +869,7 @@ impl ProofOfSynergy {
                         }
 
                         if let Some(network) = crate::p2p::get_p2p_network() {
-                            let status_ready_validators = live_validator_addresses.len();
+                            let status_ready_validators = live_active_validators.len();
                             if status_ready_gate_enabled {
                                 let is_genesis_height = latest_block.block_index == 0;
                                 if !is_genesis_height {
@@ -961,15 +1095,29 @@ impl ProofOfSynergy {
 
                         // Phase 1: Leader selection using entropy beacon and synergy scores
                         // Use next block index for leader selection (current block + 1)
-                        let next_block_index = latest_block_clone.block_index + 1;
                         // Rebuild leader rotation from the shared duty-active set. Quarantined
                         // and shadow validators remain registered/history-known, but they must
                         // not be scheduled as live proposers while their duties are disabled.
-                        let epoch_randomness = Self::deterministic_epoch_randomness(
+                        let epoch_randomness = match Self::deterministic_epoch_randomness(
                             &chain_guard,
                             next_block_index,
                             epoch_length,
-                        );
+                            &validator_manager,
+                        ) {
+                            Ok(randomness) => randomness,
+                            Err(error) => {
+                                warn!(
+                                    "consensus",
+                                    "Refusing leader selection without finalized epoch randomness",
+                                    "next_block_height" => next_block_index,
+                                    "error" => error
+                                );
+                                drop(chain_guard);
+                                drop(pool);
+                                thread::sleep(Duration::from_millis(250));
+                                continue;
+                            }
+                        };
                         let local_validator_address = Self::resolve_local_validator_address();
                         // Leader scheduling must use the canonical consensus membership, not
                         // each node's locally visible peer subset. The live subset is still
@@ -1419,6 +1567,35 @@ impl ProofOfSynergy {
                                     );
                                     continue;
                                 }
+                                if let Err(error) =
+                                    Self::validate_finalized_validator_activations(
+                                        &new_block,
+                                        TOKEN_MANAGER.as_ref(),
+                                        &validator_manager,
+                                    )
+                                {
+                                    timing_trace::emit(
+                                        "rejected_proposal",
+                                        serde_json::json!({
+                                            "height": new_block.block_index,
+                                            "block_hash": new_block.hash.clone(),
+                                            "previous_hash": new_block.previous_hash.clone(),
+                                            "chosen_proposer": selected_validator.address.clone(),
+                                            "local_validator": local_validator_address.clone(),
+                                            "local_view_round": view_offset,
+                                            "reason": error.clone(),
+                                            "validator_activation_preflight": true
+                                        }),
+                                    );
+                                    warn!(
+                                        "consensus",
+                                        "Rejecting committed block before durable finalization because validator activation preflight failed",
+                                        "height" => new_block.block_index,
+                                        "hash" => new_block.hash.clone(),
+                                        "error" => error
+                                    );
+                                    continue;
+                                }
 
                                 // Block committed - update chain.
                                 // Reset view-change state: the chain has advanced, so the next
@@ -1487,6 +1664,7 @@ impl ProofOfSynergy {
                                                 );
                                                 process::exit(1);
                                             }
+                                            cache_last_known_good_chain_tip(&new_block);
                                             block_appended_to_local_tip = true;
                                         }
                                         Ok(false) => {
@@ -1556,10 +1734,13 @@ impl ProofOfSynergy {
                                 let token_manager = TOKEN_MANAGER.clone();
                                 let mut applied_txs = 0u64;
                                 let mut failed_txs = 0u64;
-                                let mut applied_validator_activations = 0u64;
                                 for tx in &new_block.transactions {
                                     match token_manager
-                                        .process_transaction_in_block(tx, new_block.block_index)
+                                        .process_transaction_in_finalized_block(
+                                            tx,
+                                            new_block.block_index,
+                                            &new_block.hash,
+                                        )
                                     {
                                         Ok(_) => applied_txs += 1,
                                         Err(e) => {
@@ -1572,30 +1753,66 @@ impl ProofOfSynergy {
                                             );
                                         }
                                     }
-                                    if is_validator_activation_transaction(tx) {
-                                        match apply_validator_activation_transaction(
-                                            tx,
-                                            &token_manager,
-                                            &validator_manager,
-                                            new_block.block_index,
-                                        ) {
-                                            Ok(message) => {
-                                                applied_validator_activations += 1;
+                                }
+
+                                let applied_validator_activations =
+                                    match Self::apply_finalized_validator_activations(
+                                        &new_block,
+                                        &token_manager,
+                                        &validator_manager,
+                                    ) {
+                                        Ok(activations) => {
+                                            for (tx_hash, message) in &activations {
                                                 info!(
                                                     "consensus",
                                                     "Applied validator activation",
-                                                    "tx_hash" => tx.hash(),
-                                                    "message" => message
+                                                    "tx_hash" => tx_hash.clone(),
+                                                    "message" => message.clone()
                                                 );
                                             }
-                                            Err(error) => warn!(
-                                                "consensus",
-                                                "Failed to apply validator activation",
-                                                "tx_hash" => tx.hash(),
-                                                "error" => error
-                                            ),
+                                            activations.len() as u64
                                         }
-                                    }
+                                        Err(error) => {
+                                            let quarantine_reason = format!(
+                                                "fail-closed validator activation application: {error}"
+                                            );
+                                            match crate::consensus::anti_divergence::
+                                                record_self_quarantine_for_canonical_lock_conflict(
+                                                    new_block.block_index,
+                                                    Some(new_block.hash.clone()),
+                                                    &new_block.hash,
+                                                    &quarantine_reason,
+                                                ) {
+                                                Ok(record) => {
+                                                    warn!(
+                                                        "consensus",
+                                                        "Validator activation application failed after finalization; self-quarantined and terminating",
+                                                        "height" => new_block.block_index,
+                                                        "tx_hash" => new_block.hash.clone(),
+                                                        "quarantine_height" => record.divergence_height.0,
+                                                        "error" => error
+                                                    );
+                                                    process::exit(1);
+                                                }
+                                                Err(quarantine_error) => {
+                                                    warn!(
+                                                        "consensus",
+                                                        "Validator activation failure could not be persisted as quarantine; terminating",
+                                                        "height" => new_block.block_index,
+                                                        "error" => error,
+                                                        "quarantine_error" => quarantine_error
+                                                    );
+                                                    process::exit(1);
+                                                }
+                                            }
+                                        }
+                                    };
+
+                                if let Err(e) = crate::sts::note_finalized_sts_block(
+                                    new_block.block_index,
+                                    &new_block.hash,
+                                ) {
+                                    warn!("consensus", "Failed to persist finalized STS state", "error" => e.to_string());
                                 }
 
                                 // Persist token state for explorer continuity across restarts (best-effort).
@@ -1610,11 +1827,41 @@ impl ProofOfSynergy {
                                     if let Err(e) =
                                         validator_manager.save_registry(VALIDATOR_REGISTRY_PATH)
                                     {
-                                        warn!(
-                                            "consensus",
-                                            "Failed to persist validator registry after activation",
-                                            "error" => e.to_string()
+                                        let error = format!(
+                                            "validator registry persistence failed after finalized activation at height {}: {}",
+                                            new_block.block_index,
+                                            e
                                         );
+                                        let quarantine_reason =
+                                            format!("fail-closed validator state persistence: {error}");
+                                        match crate::consensus::anti_divergence::
+                                            record_self_quarantine_for_canonical_lock_conflict(
+                                                new_block.block_index,
+                                                Some(new_block.hash.clone()),
+                                                &new_block.hash,
+                                                &quarantine_reason,
+                                            ) {
+                                            Ok(record) => {
+                                                warn!(
+                                                    "consensus",
+                                                    "Validator registry persistence failed after finalization; self-quarantined and terminating",
+                                                    "height" => new_block.block_index,
+                                                    "quarantine_height" => record.divergence_height.0,
+                                                    "error" => error
+                                                );
+                                                process::exit(1);
+                                            }
+                                            Err(quarantine_error) => {
+                                                warn!(
+                                                    "consensus",
+                                                    "Validator registry persistence failure could not be quarantined; terminating",
+                                                    "height" => new_block.block_index,
+                                                    "error" => error,
+                                                    "quarantine_error" => quarantine_error
+                                                );
+                                                process::exit(1);
+                                            }
+                                        }
                                     }
                                     if !activated_validators.is_empty() {
                                         info!(
@@ -1743,7 +1990,7 @@ impl ProofOfSynergy {
                                     "previous_hash" => new_block.previous_hash.clone(),
                                     "timestamp" => new_block.timestamp,
                                     "epoch" => current_epoch,
-                                    "block_in_epoch" => new_block.block_index % epoch_length,
+                                    "block_in_epoch" => block_position_in_epoch(new_block.block_index, epoch_length),
                                     "validator" => selected_validator.address.clone(),
                                     "validator_name" => selected_validator.name.clone(),
                                     "synergy_score" => format!("{:.2}", selected_validator.synergy_score),
@@ -2024,6 +2271,16 @@ impl ProofOfSynergy {
 
     fn resolve_local_validator_address() -> Option<String> {
         crate::config::resolve_runtime_validator_address()
+    }
+
+    fn consensus_membership_for_next_block(
+        registry_active_validators: Vec<Validator>,
+        latest_block_height: u64,
+    ) -> Result<Vec<Validator>, String> {
+        consensus_membership_validators_for_height(
+            registry_active_validators,
+            latest_block_height.saturating_add(1),
+        )
     }
 
     fn collect_live_validator_addresses(validator_manager: &Arc<ValidatorManager>) -> Vec<String> {
@@ -2385,7 +2642,7 @@ impl ProofOfSynergy {
     // New PoSy Helper Methods
 
     fn epoch_for_block(block_index: u64, epoch_length: u64) -> u64 {
-        block_index / epoch_length.max(1)
+        epoch_for_block_height(block_index, epoch_length)
     }
 
     fn epoch_for_next_block(last_block_index: u64, epoch_length: u64) -> u64 {
@@ -2430,33 +2687,74 @@ impl ProofOfSynergy {
         (elapsed_secs / timeout_secs) as usize
     }
 
+    fn run_epoch_reward_lifecycle_for_boundary(
+        closing_epoch: u64,
+        next_epoch: u64,
+        transition_block_height: u64,
+        closing_epoch_validators: &[Validator],
+    ) {
+        match TOKEN_MANAGER.run_epoch_reward_lifecycle(
+            closing_epoch,
+            next_epoch,
+            transition_block_height,
+            closing_epoch_validators,
+        ) {
+            Ok(summary) => {
+                info!(
+                    "consensus",
+                    "Epoch rewards lifecycle completed",
+                    "closing_epoch" => summary.closing_epoch,
+                    "next_epoch" => summary.next_epoch,
+                    "settled_unlock_epoch" => summary.settled_unlock_epoch,
+                    "transition_block_height" => summary.transition_block_height,
+                    "total_fees_collected_nwei" => summary.total_fees_collected_nwei.to_string(),
+                    "reward_allocation_recorded" => summary.reward_allocation.is_some(),
+                    "settlement_count" => summary.settlements.len() as u64,
+                    "skipped_reasons" => summary.skipped_reasons.join("; ")
+                );
+            }
+            Err(error) => {
+                warn!(
+                    "consensus",
+                    "Epoch rewards lifecycle failed",
+                    "closing_epoch" => closing_epoch,
+                    "next_epoch" => next_epoch,
+                    "transition_block_height" => transition_block_height,
+                    "error" => error
+                );
+            }
+        }
+    }
+
     fn handle_epoch_transition(
         current_epoch: &mut u64,
         previous_qc: QuorumCertificate,
         validator_manager: &Arc<ValidatorManager>,
-        synergy_calculator: &Arc<SynergyScoreCalculator>,
+        _synergy_calculator: &Arc<SynergyScoreCalculator>,
         dual_quorum_consensus: &Arc<Mutex<DualQuorumConsensus>>,
         entropy_beacon: &Arc<Mutex<EntropyBeacon>>,
-        validator_rotation: &Arc<ValidatorRotation>,
+        _validator_rotation: &Arc<ValidatorRotation>,
         dao_governance: &Arc<Mutex<DAOGovernance>>,
         cartel_detection: &Arc<Mutex<CartelDetectionEngine>>,
+        transition_block_height: u64,
     ) {
-        *current_epoch += 1;
+        let closing_epoch = *current_epoch;
+        let closing_epoch_validators = validator_manager.get_active_validators();
+        *current_epoch = current_epoch.saturating_add(1);
         println!("🔄 Epoch Transition: Starting epoch {}", current_epoch);
 
         // 1. Generate new epoch randomness
         let mut beacon = entropy_beacon.lock().unwrap();
-        let _epoch_randomness = beacon.generate_epoch_randomness(&previous_qc);
+        let epoch_randomness = beacon.generate_epoch_randomness(&previous_qc);
         drop(beacon);
 
-        // 2. Rotate validators using new entropy
-        validator_rotation.rotate_validators();
-
-        // 3. Recalculate synergy scores
-        Self::recalculate_all_synergy_scores(validator_manager, synergy_calculator);
-
-        // 4. Rebalance validator clusters deterministically for this epoch.
-        validator_manager.reorganize_clusters_for_epoch(*current_epoch);
+        // 2. Rebalance validator clusters from the finalized boundary-QC seed.
+        let cluster_randomness_source = hex::encode(epoch_randomness);
+        validator_manager.reorganize_clusters_for_epoch_with_seed(
+            *current_epoch,
+            &cluster_randomness_source,
+            transition_block_height.saturating_add(1),
+        );
         if let Err(error) = validator_manager.save_registry(VALIDATOR_REGISTRY_PATH) {
             warn!(
                 "consensus",
@@ -2465,6 +2763,13 @@ impl ProofOfSynergy {
                 "error" => error.to_string()
             );
         }
+
+        Self::run_epoch_reward_lifecycle_for_boundary(
+            closing_epoch,
+            *current_epoch,
+            transition_block_height,
+            &closing_epoch_validators,
+        );
 
         // 5. Detect cartels and apply penalties
         let mut cartel_engine = cartel_detection.lock().unwrap();
@@ -2486,57 +2791,224 @@ impl ProofOfSynergy {
         chain: &BlockChain,
         current_epoch: u64,
         epoch_length: u64,
-    ) -> QuorumCertificate {
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<QuorumCertificate, String> {
         let epoch_length = epoch_length.max(1);
-        let boundary_height = current_epoch.saturating_mul(epoch_length).saturating_sub(1);
+        let boundary_height = current_epoch
+            .checked_sub(1)
+            .map(|closing_epoch| epoch_end_height(closing_epoch, epoch_length))
+            .unwrap_or(0);
 
-        // Reconstruct the epoch seed from the block immediately before the
-        // epoch boundary. Falling back to the chain tip is only a safeguard for
-        // truncated history; normal operation should always find the boundary block.
-        if let Some(block) = chain
+        let block = chain
             .chain
             .iter()
             .rev()
             .find(|block| block.block_index == boundary_height)
-            .or_else(|| chain.last())
+            .ok_or_else(|| {
+                format!("epoch {current_epoch} boundary block {boundary_height} is unavailable")
+            })?;
+        let mut qc = DualQuorumConsensus::committed_qcs_for_block_hashes([block.hash.as_str()])
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                format!(
+                    "finalized QC for epoch {current_epoch} boundary block {boundary_height} ({}) is unavailable",
+                    block.hash
+                )
+            })?;
+        let expected_epoch = epoch_for_block_height(block.block_index, epoch_length);
+        let normalize_legacy_epoch = qc.epoch_number != expected_epoch;
+        if normalize_legacy_epoch
+            && !Self::is_migratable_legacy_boundary_epoch(
+                block.block_index,
+                epoch_length,
+                qc.epoch_number,
+            )
         {
-            QuorumCertificate {
-                block_hash: block.hash.clone(),
-                epoch_number: block.block_index / epoch_length,
-                round_number: 1,
-                aggregate_signature: block.block_signature.clone(),
-                participant_bitmap: Vec::new(),
-                cumulative_weight: 0.0,
-                validation_quorum_met: false,
-                cooperation_quorum_met: false,
-                timestamp: Self::current_timestamp(),
-                votes: Vec::new(),
-            }
-        } else {
-            QuorumCertificate {
-                block_hash: "genesis_block".to_string(),
-                epoch_number: 0,
-                round_number: 0,
-                aggregate_signature: Vec::new(),
-                participant_bitmap: Vec::new(),
-                cumulative_weight: 0.0,
-                validation_quorum_met: false,
-                cooperation_quorum_met: false,
-                timestamp: Self::current_timestamp(),
-                votes: Vec::new(),
+            return Err(format!(
+                "boundary QC epoch {} does not match block {} epoch {expected_epoch}",
+                qc.epoch_number, block.block_index
+            ));
+        }
+
+        DualQuorumConsensus::verify_commit_certificate_for_block_static(
+            block,
+            &qc,
+            validator_manager,
+        )
+        .map_err(|error| {
+            format!(
+                "boundary QC for block {} failed Aegis dual-quorum verification: {error}",
+                block.block_index
+            )
+        })?;
+
+        if normalize_legacy_epoch {
+            qc.epoch_number = expected_epoch;
+        }
+        Ok(qc)
+    }
+
+    fn is_migratable_legacy_boundary_epoch(
+        block_height: u64,
+        epoch_length: u64,
+        qc_epoch: u64,
+    ) -> bool {
+        let expected_epoch = epoch_for_block_height(block_height, epoch_length);
+        block_height > 0
+            && epoch_length == CANONICAL_TESTNET_EPOCH_LENGTH
+            && block_height <= ONE_BASED_EPOCH_MIGRATION_CUTOFF_HEIGHT
+            && block_height % CANONICAL_TESTNET_EPOCH_LENGTH == 0
+            && qc_epoch == expected_epoch.saturating_add(1)
+    }
+
+    fn finalized_synergy_scores_for_epoch(
+        chain: &BlockChain,
+        epoch: u64,
+        epoch_length: u64,
+        validators: &[Validator],
+    ) -> Result<HashMap<String, u64>, String> {
+        if validators.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let epoch_length = epoch_length.max(1);
+        let epoch_start = epoch_start_height(epoch, epoch_length);
+        let epoch_end = epoch_end_height(epoch, epoch_length);
+        let assignment_start = validators
+            .iter()
+            .filter_map(|validator| validator.cluster_assignment_effective_height)
+            .max()
+            .unwrap_or(epoch_start)
+            .max(epoch_start);
+        if assignment_start > epoch_end {
+            return Err(format!(
+                "cluster assignment window begins at {assignment_start}, after epoch {epoch} ends at {epoch_end}"
+            ));
+        }
+
+        let mut blocks = chain
+            .chain
+            .iter()
+            .filter(|block| block.block_index >= assignment_start && block.block_index <= epoch_end)
+            .collect::<Vec<_>>();
+        blocks.sort_by_key(|block| block.block_index);
+        let expected_block_count = epoch_end.saturating_sub(assignment_start).saturating_add(1);
+        if blocks.len() as u64 != expected_block_count {
+            return Err(format!(
+                "finalized score window {assignment_start}..={epoch_end} has {} block(s), expected {expected_block_count}",
+                blocks.len()
+            ));
+        }
+        for (offset, block) in blocks.iter().enumerate() {
+            let expected_height = assignment_start.saturating_add(offset as u64);
+            if block.block_index != expected_height {
+                return Err(format!(
+                    "finalized score window is missing block {expected_height}"
+                ));
             }
         }
+
+        let qcs = DualQuorumConsensus::committed_qcs_for_block_hashes(
+            blocks.iter().map(|block| block.hash.as_str()),
+        )
+        .into_iter()
+        .map(|qc| (qc.block_hash.clone(), qc))
+        .collect::<HashMap<_, _>>();
+        let mut opportunities = validators
+            .iter()
+            .map(|validator| (validator.address.clone(), 0u64))
+            .collect::<HashMap<_, _>>();
+        let mut participation = opportunities.clone();
+
+        for block in blocks {
+            let qc = qcs.get(&block.hash).ok_or_else(|| {
+                format!(
+                    "finalized score window is missing the committed QC for block {} ({})",
+                    block.block_index, block.hash
+                )
+            })?;
+            if !qc.validation_quorum_met || !qc.cooperation_quorum_met {
+                return Err(format!(
+                    "block {} QC is not a finalized dual-quorum certificate",
+                    block.block_index
+                ));
+            }
+            let eligible = validators
+                .iter()
+                .filter(|validator| {
+                    qc.cluster_id
+                        .is_none_or(|cluster_id| validator.cluster_id == Some(cluster_id))
+                })
+                .map(|validator| validator.address.as_str())
+                .collect::<HashSet<_>>();
+            if eligible.is_empty() {
+                return Err(format!(
+                    "block {} QC references cluster {:?} with no eligible validators",
+                    block.block_index, qc.cluster_id
+                ));
+            }
+            for address in &eligible {
+                *opportunities.entry((*address).to_string()).or_default() += 1;
+            }
+            let mut seen = HashSet::new();
+            for vote in &qc.votes {
+                if !eligible.contains(vote.validator_address.as_str()) {
+                    return Err(format!(
+                        "block {} QC includes validator {} outside cluster {:?}",
+                        block.block_index, vote.validator_address, qc.cluster_id
+                    ));
+                }
+                if !seen.insert(vote.validator_address.as_str()) {
+                    return Err(format!(
+                        "block {} QC contains duplicate validator vote {}",
+                        block.block_index, vote.validator_address
+                    ));
+                }
+                *participation
+                    .entry(vote.validator_address.clone())
+                    .or_default() += 1;
+            }
+        }
+
+        validators
+            .iter()
+            .map(|validator| {
+                let eligible = opportunities[&validator.address];
+                let score_bps = if eligible == 0 {
+                    validator.finalized_synergy_score_bps
+                } else {
+                    participation[&validator.address]
+                        .saturating_mul(10_000)
+                        .checked_div(eligible)
+                        .unwrap_or(0)
+                };
+                Ok((validator.address.clone(), score_bps))
+            })
+            .collect()
     }
 
     fn deterministic_epoch_randomness(
         chain: &BlockChain,
         block_height: u64,
         epoch_length: u64,
-    ) -> Vec<u8> {
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<Vec<u8>, String> {
         let epoch_length = epoch_length.max(1);
-        let current_epoch = block_height / epoch_length;
-        let previous_qc = Self::get_previous_quorum_certificate(chain, current_epoch, epoch_length);
-        Self::deterministic_epoch_randomness_from_qc(&previous_qc)
+        let current_epoch = epoch_for_block_height(block_height, epoch_length);
+        if current_epoch == 0 {
+            let genesis_hash = canonical_genesis()?.hash().to_string();
+            let mut hasher = Sha3_512::new();
+            hasher.update(b"synergy-epoch-zero-randomness-v2");
+            hasher.update(genesis_hash.as_bytes());
+            return Ok(hasher.finalize().to_vec());
+        }
+        let previous_qc = Self::get_previous_quorum_certificate(
+            chain,
+            current_epoch,
+            epoch_length,
+            validator_manager,
+        )?;
+        Ok(Self::deterministic_epoch_randomness_from_qc(&previous_qc))
     }
 
     fn deterministic_epoch_randomness_from_qc(previous_qc: &QuorumCertificate) -> Vec<u8> {
@@ -2589,8 +3061,8 @@ impl ProofOfSynergy {
         }
 
         // Calculate current epoch from configured epoch length.
-        let current_epoch = block_height / epoch_length;
-        let block_in_epoch = block_height % epoch_length;
+        let current_epoch = epoch_for_block_height(block_height, epoch_length);
+        let block_in_epoch = block_height.saturating_sub(1) % epoch_length;
         let mut candidate_addresses = validators
             .iter()
             .map(|validator| validator.address.clone())
@@ -3295,6 +3767,56 @@ impl ProofOfSynergy {
             .expect("test proposal cache lock should succeed") = path;
     }
 
+    fn validate_finalized_validator_activations(
+        block: &Block,
+        token_manager: &crate::token::TokenManager,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<(), String> {
+        for tx in &block.transactions {
+            if !is_validator_activation_transaction(tx) {
+                continue;
+            }
+            validate_validator_activation_transaction(tx, token_manager, validator_manager)
+                .map_err(|error| {
+                    format!(
+                        "validator activation preflight failed at height {} for transaction {}: {error}",
+                        block.block_index,
+                        tx.hash()
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    fn apply_finalized_validator_activations(
+        block: &Block,
+        token_manager: &crate::token::TokenManager,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let mut applied = Vec::new();
+        for tx in &block.transactions {
+            if !is_validator_activation_transaction(tx) {
+                continue;
+            }
+
+            let message = apply_validator_activation_transaction(
+                tx,
+                token_manager,
+                validator_manager,
+                block.block_index,
+            )
+            .map_err(|error| {
+                format!(
+                    "validator activation application failed at finalized height {} for transaction {}: {error}",
+                    block.block_index,
+                    tx.hash()
+                )
+            })?;
+            applied.push((tx.hash(), message));
+        }
+        Ok(applied)
+    }
+
     fn execute_dual_quorum_consensus(
         block: &Block,
         _validator_manager: &Arc<ValidatorManager>,
@@ -3521,7 +4043,7 @@ impl ProofOfSynergy {
         epoch_length: u64,
     ) {
         let mut engine = cartel_detection.lock().unwrap();
-        let current_epoch = block_height / epoch_length.max(1);
+        let current_epoch = epoch_for_block_height(block_height, epoch_length);
 
         let vote_record = VoteRecord {
             validator_address: validator_address.to_string(),
@@ -3717,7 +4239,7 @@ mod tests {
         consensus_algorithm_label, register_test_validator_signing_key,
     };
     use crate::transaction::Transaction;
-    use crate::validator::ValidatorStatus;
+    use crate::validator::{ValidatorStatus, EPOCH_VALIDATOR_SETS_ENV};
     use base64::engine::general_purpose;
     use std::sync::OnceLock;
 
@@ -3751,6 +4273,528 @@ mod tests {
             ))
             .join("data")
             .join("consensus_vote_locks.json")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    fn epoch_set_env_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn test_validator(address: &str) -> Validator {
+        let mut validator = Validator::new(
+            address.to_string(),
+            format!("{address}-public-key"),
+            "Validator".to_string(),
+            50_000_000_000_000,
+        );
+        validator.status = ValidatorStatus::Active;
+        validator
+    }
+
+    fn test_validator_addresses(start: usize, end_inclusive: usize) -> Vec<String> {
+        (start..=end_inclusive)
+            .map(|index| format!("validator-{index}"))
+            .collect()
+    }
+
+    fn test_validators(start: usize, end_inclusive: usize) -> Vec<Validator> {
+        test_validator_addresses(start, end_inclusive)
+            .iter()
+            .map(|address| test_validator(address))
+            .collect()
+    }
+
+    #[test]
+    fn startup_cluster_reconciliation_repairs_six_validator_registry_and_is_idempotent() {
+        let manager = Arc::new(ValidatorManager::new());
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            for mut validator in test_validators(0, 5) {
+                validator.cluster_id = Some(99);
+                validator.cluster_address = Some("stale-cluster-address".to_string());
+                validator.cluster_assignment_epoch = Some(99);
+                validator.cluster_assignment_seed = Some("stale-cluster-seed".to_string());
+                validator.cluster_assignment_effective_height = Some(1);
+                registry
+                    .validators
+                    .insert(validator.address.clone(), validator);
+            }
+            registry.clusters.clear();
+        }
+
+        assert!(
+            reconcile_validator_registry_clusters_for_height(&manager, 42)
+                .expect("startup cluster reconciliation should repair stale metadata")
+        );
+
+        {
+            let registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            let cluster = registry
+                .clusters
+                .get(&0)
+                .expect("six validators should have one canonical cluster");
+            assert_eq!(registry.clusters.len(), 1);
+            assert_eq!(cluster.validators.len(), 6);
+            assert!(registry.validators.values().all(|validator| {
+                validator.cluster_id == Some(0)
+                    && validator.cluster_address.as_deref() == Some(cluster.address.as_str())
+                    && validator.cluster_assignment_epoch == Some(0)
+                    && validator
+                        .cluster_assignment_seed
+                        .as_deref()
+                        .is_some_and(|seed| !seed.is_empty())
+                    && validator.cluster_assignment_effective_height == Some(42)
+            }));
+        }
+
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            let cluster = registry
+                .clusters
+                .get_mut(&0)
+                .expect("canonical cluster should exist");
+            cluster.created_at = 11;
+            cluster.last_rotation = 29;
+        }
+        let stable_before_reconcile = {
+            let registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            serde_json::to_string_pretty(&*registry).expect("timestamped registry should serialize")
+        };
+        assert!(
+            !reconcile_validator_registry_clusters_for_height(&manager, 99)
+                .expect("canonical startup reconciliation should succeed")
+        );
+        let stable_after_reconcile = {
+            let registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            serde_json::to_string_pretty(&*registry).expect("timestamped registry should serialize")
+        };
+        assert_eq!(stable_after_reconcile, stable_before_reconcile);
+
+        let state_dir = unique_proposal_cache_dir("startup-cluster-reconciliation");
+        let registry_path = state_dir.join("validator_registry.json");
+        manager
+            .registry
+            .lock()
+            .expect("validator registry lock should succeed")
+            .save_to_file(&registry_path)
+            .expect("repaired validator registry should persist");
+
+        let restarted = Arc::new(ValidatorManager::new());
+        restarted
+            .load_registry(
+                registry_path
+                    .to_str()
+                    .expect("registry path should be UTF-8"),
+            )
+            .expect("restarted validator registry should load");
+        assert!(
+            !reconcile_validator_registry_clusters_for_height(&restarted, 99)
+                .expect("restart reconciliation should succeed")
+        );
+        let after_restart = {
+            let registry = restarted
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            serde_json::to_value(&*registry).expect("restarted registry should serialize")
+        };
+
+        assert_eq!(
+            after_restart,
+            serde_json::from_str::<serde_json::Value>(&stable_before_reconcile)
+                .expect("timestamped registry snapshot should parse")
+        );
+        std::fs::remove_dir_all(state_dir).ok();
+    }
+
+    #[test]
+    fn startup_cluster_reconciliation_repairs_mixed_and_future_effective_heights() {
+        let manager = Arc::new(ValidatorManager::new());
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            for validator in test_validators(0, 5) {
+                registry
+                    .validators
+                    .insert(validator.address.clone(), validator);
+            }
+        }
+
+        assert!(
+            reconcile_validator_registry_clusters_for_height(&manager, 42)
+                .expect("initial cluster reconciliation should succeed")
+        );
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            registry
+                .validators
+                .get_mut("validator-0")
+                .expect("validator-0 should exist")
+                .cluster_assignment_effective_height = Some(43);
+        }
+        assert!(
+            reconcile_validator_registry_clusters_for_height(&manager, 99)
+                .expect("mixed effective heights should be repaired")
+        );
+        {
+            let registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            assert!(registry
+                .validators
+                .values()
+                .all(|validator| validator.cluster_assignment_effective_height == Some(99)));
+        }
+
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            registry
+                .validators
+                .get_mut("validator-1")
+                .expect("validator-1 should exist")
+                .cluster_assignment_effective_height = Some(100);
+        }
+        assert!(
+            reconcile_validator_registry_clusters_for_height(&manager, 99)
+                .expect("future effective height should be repaired")
+        );
+        let registry = manager
+            .registry
+            .lock()
+            .expect("validator registry lock should succeed");
+        assert!(registry
+            .validators
+            .values()
+            .all(|validator| validator.cluster_assignment_effective_height == Some(99)));
+    }
+
+    #[test]
+    fn startup_cluster_reconciliation_preserves_shadow_activation_boundary() {
+        let _env_lock = epoch_set_env_test_lock().lock().unwrap();
+        let manager = Arc::new(ValidatorManager::new());
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            for mut validator in test_validators(0, 5) {
+                if validator.address == "validator-5" {
+                    validator.status = ValidatorStatus::Shadow;
+                    validator.activation_recorded_height = Some(1_000);
+                    validator.activation_effective_height = Some(1_001);
+                }
+                registry
+                    .validators
+                    .insert(validator.address.clone(), validator);
+            }
+        }
+
+        assert!(
+            reconcile_validator_registry_clusters_for_height(&manager, 1_000)
+                .expect("pre-activation reconciliation should succeed"),
+            "pre-activation reconciliation should repair the height-scoped membership"
+        );
+        {
+            let registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            assert_eq!(registry.clusters.len(), 1);
+            assert_eq!(registry.clusters[&0].validators.len(), 5);
+            assert_eq!(registry.validators["validator-5"].cluster_id, None);
+        }
+
+        assert!(
+            reconcile_validator_registry_clusters_for_height(&manager, 1_001)
+                .expect("effective-height reconciliation should succeed")
+        );
+        let registry = manager
+            .registry
+            .lock()
+            .expect("validator registry lock should succeed");
+        assert_eq!(registry.clusters[&0].validators.len(), 6);
+        assert_eq!(registry.validators["validator-5"].cluster_id, Some(0));
+        assert_eq!(
+            registry.validators["validator-5"].status,
+            ValidatorStatus::Shadow
+        );
+    }
+
+    fn finalized_score_vote(address: &str, block_hash: &str, block_index: u64) -> Vote {
+        Vote {
+            validator_address: address.to_string(),
+            block_hash: block_hash.to_string(),
+            block_index,
+            epoch_number: 0,
+            round_number: 1,
+            signature: crate::crypto::pqc::PQCSignature {
+                algorithm: PQCAlgorithm::FNDSA,
+                signature_data: Vec::new(),
+                message_hash: Vec::new(),
+                public_key_id: String::new(),
+                created_at: block_index,
+            },
+            signer_public_key: Vec::new(),
+            timestamp: block_index,
+        }
+    }
+
+    #[test]
+    fn finalized_synergy_scores_use_only_committed_qc_participation() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let mut chain = BlockChain::new();
+        let mut validators = test_validators(1, 3);
+        for validator in &mut validators {
+            validator.cluster_id = Some(0);
+            validator.cluster_assignment_effective_height = Some(1);
+        }
+
+        for (height, voters) in [
+            (1, vec!["validator-1", "validator-2", "validator-3"]),
+            (2, vec!["validator-1", "validator-2"]),
+            (3, vec!["validator-1"]),
+        ] {
+            let block_hash = format!("score-block-{height}");
+            chain.add_block(Block {
+                block_index: height,
+                timestamp: height,
+                transactions: Vec::new(),
+                previous_hash: format!("score-block-{}", height.saturating_sub(1)),
+                validator_id: "validator-1".to_string(),
+                nonce: height,
+                hash: block_hash.clone(),
+                transactions_root: String::new(),
+                proposer_public_key: Vec::new(),
+                block_signature: Vec::new(),
+                block_signature_algorithm: "fndsa".to_string(),
+            });
+            DualQuorumConsensus::record_committed_qc_checked(QuorumCertificate {
+                block_hash: block_hash.clone(),
+                cluster_id: Some(0),
+                epoch_number: 0,
+                round_number: 1,
+                aggregate_signature: Vec::new(),
+                participant_bitmap: Vec::new(),
+                cumulative_weight: voters.len() as f64,
+                validation_quorum_met: true,
+                cooperation_quorum_met: true,
+                timestamp: height,
+                votes: voters
+                    .into_iter()
+                    .map(|address| finalized_score_vote(address, &block_hash, height))
+                    .collect(),
+            })
+            .unwrap();
+        }
+
+        let scores =
+            ProofOfSynergy::finalized_synergy_scores_for_epoch(&chain, 0, 3, &validators).unwrap();
+
+        assert_eq!(scores["validator-1"], 10_000);
+        assert_eq!(scores["validator-2"], 6_666);
+        assert_eq!(scores["validator-3"], 3_333);
+    }
+
+    fn validator_membership_addresses(validators: &[Validator]) -> Vec<String> {
+        validators
+            .iter()
+            .map(|validator| validator.address.clone())
+            .collect()
+    }
+
+    #[test]
+    fn next_block_membership_uses_replayed_registry_over_stale_manifest() {
+        let _env_lock = epoch_set_env_test_lock()
+            .lock()
+            .expect("epoch set env test lock should succeed");
+        let temp_dir = unique_proposal_cache_dir("next-block-epoch-validator-set");
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        std::fs::write(
+            &snapshot_path,
+            serde_json::json!({
+                "epoch_validator_sets": [
+                    {
+                        "chain_id": 1264,
+                        "epoch_id": 7,
+                        "validator_set_version": 3,
+                        "effective_from_height": 100,
+                        "effective_to_height": 199,
+                        "active_validators": test_validator_addresses(1, 6),
+                        "pending_validators": ["validator-7"],
+                        "quorum_threshold": 4,
+                        "validator_set_hash": "dynamic-validator-set-a"
+                    },
+                    {
+                        "chain_id": 1264,
+                        "epoch_id": 8,
+                        "validator_set_version": 4,
+                        "effective_from_height": 200,
+                        "active_validators": test_validator_addresses(1, 7),
+                        "pending_validators": [],
+                        "quorum_threshold": 5,
+                        "previous_set_hash": "dynamic-validator-set-a",
+                        "validator_set_hash": "seven-validator-set"
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("epoch validator set snapshot should be written");
+        let _snapshot_guard =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let before_boundary =
+            ProofOfSynergy::consensus_membership_for_next_block(test_validators(1, 7), 198)
+                .expect("next height 199 should resolve to first epoch validator set");
+        let at_boundary =
+            ProofOfSynergy::consensus_membership_for_next_block(test_validators(1, 7), 199)
+                .expect("next height 200 should resolve to seven-validator set");
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        assert_eq!(
+            validator_membership_addresses(&before_boundary),
+            test_validator_addresses(1, 7),
+            "replayed active registry membership must not be reduced by stale manifest evidence"
+        );
+        assert_eq!(
+            validator_membership_addresses(&at_boundary),
+            test_validator_addresses(1, 7),
+            "replayed active registry membership must remain authoritative at the boundary"
+        );
+        assert_eq!(required_validator_quorum(before_boundary.len()), 5);
+        assert_eq!(required_validator_quorum(at_boundary.len()), 5);
+    }
+
+    #[test]
+    fn finalized_activation_application_fails_closed_without_fabricating_success() {
+        let validator_manager = Arc::new(ValidatorManager::new());
+        let token_manager = crate::token::TokenManager::new();
+        let tx = Transaction::new(
+            "validator-activation-failure".to_string(),
+            "validator-activation-failure".to_string(),
+            0,
+            0,
+            Vec::new(),
+            1,
+            21_000,
+            Some(
+                "validator_activation:{\"validator\":\"validator-activation-failure\"}".to_string(),
+            ),
+            "fndsa".to_string(),
+        );
+        let tx_hash = tx.hash();
+        let block = Block::new(
+            42,
+            vec![tx],
+            "parent-hash".to_string(),
+            "validator-1".to_string(),
+            1,
+        );
+
+        let error = ProofOfSynergy::apply_finalized_validator_activations(
+            &block,
+            &token_manager,
+            &validator_manager,
+        )
+        .expect_err("malformed activation must fail closed");
+
+        assert_eq!(
+            error,
+            format!(
+                "validator activation application failed at finalized height 42 for transaction {tx_hash}: Validator activation is missing public key."
+            )
+        );
+        assert!(
+            validator_manager
+                .get_validator("validator-activation-failure")
+                .is_none(),
+            "failed activation must not fabricate a registry entry"
+        );
+    }
+
+    #[test]
+    fn proposer_membership_fails_closed_for_incompatible_height_manifest() {
+        let _env_lock = epoch_set_env_test_lock()
+            .lock()
+            .expect("epoch validator set env test lock should succeed");
+        let temp_dir = unique_proposal_cache_dir("incompatible-proposer-membership");
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        std::fs::write(
+            &snapshot_path,
+            serde_json::json!({
+                "epoch_validator_sets": [{
+                    "chain_id": 1264,
+                    "epoch_id": 9,
+                    "validator_set_version": 1,
+                    "effective_from_height": 100,
+                    "active_validators": ["validator-1"],
+                    "quorum_threshold": 1,
+                    "validator_set_hash": "incompatible-proposer-set",
+                    "required_binary_version": "0.0.0-incompatible"
+                }]
+            })
+            .to_string(),
+        )
+        .expect("incompatible epoch validator set should be written");
+        let _snapshot_guard =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let error = ProofOfSynergy::consensus_membership_for_next_block(test_validators(1, 1), 99)
+            .expect_err("incompatible height manifest must block proposer membership");
+
+        std::fs::remove_dir_all(temp_dir).ok();
+        assert!(
+            error.contains("requires binary version 0.0.0-incompatible"),
+            "unexpected error: {error}"
+        );
     }
 
     fn catchup_decision(
@@ -3887,6 +4931,58 @@ mod tests {
                 .insert(address.to_string(), manager.get_validator(address).unwrap());
         }
         manager
+    }
+
+    fn signed_boundary_fixture(
+        block_height: u64,
+        qc_epoch: u64,
+    ) -> (Arc<ValidatorManager>, Block, QuorumCertificate) {
+        let validator_address = format!("validator-boundary-{block_height}-{qc_epoch}");
+        let manager = active_validator_manager(&validator_address);
+        let mut block = Block::new_with_timestamp(
+            block_height,
+            Vec::new(),
+            format!("parent-{block_height}"),
+            validator_address.clone(),
+            block_height,
+            1_784_000_000u64.saturating_add(block_height),
+        );
+        let (public_key, private_key) =
+            load_local_validator_keypair_for_height(block_height, &validator_address, &manager)
+                .expect("test proposer key should load");
+        let signature = PQCManager::new()
+            .sign(&private_key, block.hash.as_bytes())
+            .expect("test proposer signature should be created");
+        block.proposer_public_key = public_key.key_data;
+        block.block_signature = signature.signature_data;
+        block.block_signature_algorithm =
+            consensus_algorithm_label(&public_key.algorithm).to_string();
+
+        let vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            &validator_address,
+            &block,
+            qc_epoch,
+            1,
+            &manager,
+        )
+        .expect("test boundary vote should be created");
+        let qc = QuorumCertificate {
+            block_hash: block.hash.clone(),
+            cluster_id: None,
+            epoch_number: qc_epoch,
+            round_number: 1,
+            aggregate_signature: vec![1],
+            participant_bitmap: vec![1],
+            cumulative_weight: 1.0,
+            validation_quorum_met: true,
+            cooperation_quorum_met: true,
+            timestamp: block.timestamp,
+            votes: vec![vote],
+        };
+        DualQuorumConsensus::verify_commit_certificate_for_block_static(&block, &qc, &manager)
+            .expect("test boundary QC should pass full Aegis verification");
+
+        (manager, block, qc)
     }
 
     #[test]
@@ -4083,17 +5179,17 @@ mod tests {
     #[test]
     fn next_block_epoch_transitions_at_boundary_only_once() {
         assert_eq!(ProofOfSynergy::epoch_for_next_block(998, 1000), 0);
-        assert_eq!(ProofOfSynergy::epoch_for_next_block(999, 1000), 1);
+        assert_eq!(ProofOfSynergy::epoch_for_next_block(999, 1000), 0);
         assert_eq!(ProofOfSynergy::epoch_for_next_block(1000, 1000), 1);
 
         let mut current_epoch = 0;
-        let target_epoch = ProofOfSynergy::epoch_for_next_block(999, 1000);
+        let target_epoch = ProofOfSynergy::epoch_for_next_block(1000, 1000);
         while current_epoch < target_epoch {
             current_epoch += 1;
         }
         assert_eq!(current_epoch, 1);
 
-        let same_boundary_epoch = ProofOfSynergy::epoch_for_next_block(1000, 1000);
+        let same_boundary_epoch = ProofOfSynergy::epoch_for_next_block(1001, 1000);
         while current_epoch < same_boundary_epoch {
             current_epoch += 1;
         }
@@ -4285,20 +5381,13 @@ mod tests {
 
     #[test]
     fn previous_qc_uses_epoch_boundary_block_on_mid_epoch_restart() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
         let mut chain = BlockChain::new();
-        chain.add_block(Block {
-            block_index: 999,
-            timestamp: 999,
-            transactions: Vec::new(),
-            previous_hash: "998".to_string(),
-            validator_id: "validator-a".to_string(),
-            nonce: 999,
-            hash: "boundary-999".to_string(),
-            transactions_root: String::new(),
-            proposer_public_key: Vec::new(),
-            block_signature: vec![9, 9, 9],
-            block_signature_algorithm: "fndsa".to_string(),
-        });
+        let (manager, boundary_block, qc) = signed_boundary_fixture(1_000, 0);
+        let boundary_hash = boundary_block.hash.clone();
+        chain.add_block(boundary_block);
+        DualQuorumConsensus::record_committed_qc_checked(qc).unwrap();
         chain.add_block(Block {
             block_index: 1026,
             timestamp: 1026,
@@ -4313,29 +5402,141 @@ mod tests {
             block_signature_algorithm: "fndsa".to_string(),
         });
 
-        let previous_qc = ProofOfSynergy::get_previous_quorum_certificate(&chain, 1, 1000);
+        let previous_qc =
+            ProofOfSynergy::get_previous_quorum_certificate(&chain, 1, 1000, &manager).unwrap();
 
-        assert_eq!(previous_qc.block_hash, "boundary-999");
+        assert_eq!(previous_qc.block_hash, boundary_hash);
         assert_eq!(previous_qc.epoch_number, 0);
-        assert_eq!(previous_qc.aggregate_signature, vec![9, 9, 9]);
+        assert_eq!(previous_qc.aggregate_signature, vec![1]);
+    }
+
+    #[test]
+    fn previous_qc_loads_epoch_boundary_from_archive_after_hot_retention() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let _retention = EnvVarGuard::set("SYNERGY_COMMITTED_QC_HOT_RETENTION_BLOCKS", "3");
+        let mut chain = BlockChain::new();
+        let (manager, boundary_block, boundary_qc) = signed_boundary_fixture(1_000, 0);
+        let boundary_hash = boundary_block.hash.clone();
+        chain.add_block(boundary_block);
+        DualQuorumConsensus::record_committed_qc_checked(boundary_qc.clone()).unwrap();
+
+        for height in 1_001..=1_004 {
+            let mut later_qc = boundary_qc.clone();
+            let later_hash = format!("post-boundary-{height}");
+            later_qc.block_hash = later_hash.clone();
+            later_qc.votes[0].block_hash = later_hash;
+            later_qc.votes[0].block_index = height;
+            DualQuorumConsensus::record_committed_qc_checked(later_qc).unwrap();
+        }
+
+        assert!(
+            DualQuorumConsensus::committed_qc_for_block_hash(&boundary_hash).is_none(),
+            "fixture must evict the boundary QC from the hot store"
+        );
+
+        let previous_qc =
+            ProofOfSynergy::get_previous_quorum_certificate(&chain, 1, 1_000, &manager).unwrap();
+
+        assert_eq!(previous_qc.block_hash, boundary_hash);
+        assert_eq!(previous_qc.epoch_number, 0);
+    }
+
+    #[test]
+    fn previous_qc_normalizes_historical_legacy_epoch_boundaries_through_cutoff() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let mut chain = BlockChain::new();
+        let boundary_height = 1_048_000;
+        let (manager, boundary_block, qc) = signed_boundary_fixture(boundary_height, 1_048);
+        let boundary_hash = boundary_block.hash.clone();
+        chain.add_block(boundary_block);
+        DualQuorumConsensus::record_committed_qc_checked(qc).unwrap();
+
+        let previous_qc =
+            ProofOfSynergy::get_previous_quorum_certificate(&chain, 1_048, 1_000, &manager)
+                .unwrap();
+
+        assert_eq!(previous_qc.block_hash, boundary_hash.as_str());
+        assert_eq!(previous_qc.epoch_number, 1_047);
+    }
+
+    #[test]
+    fn legacy_epoch_migration_accepts_only_positive_canonical_boundaries_through_cutoff() {
+        assert!(!ProofOfSynergy::is_migratable_legacy_boundary_epoch(
+            0, 1_000, 1
+        ));
+        assert!(!ProofOfSynergy::is_migratable_legacy_boundary_epoch(
+            999, 1_000, 1
+        ));
+        assert!(ProofOfSynergy::is_migratable_legacy_boundary_epoch(
+            1_000, 1_000, 1
+        ));
+        assert!(ProofOfSynergy::is_migratable_legacy_boundary_epoch(
+            ONE_BASED_EPOCH_MIGRATION_CUTOFF_HEIGHT,
+            1_000,
+            1_052,
+        ));
+        assert!(!ProofOfSynergy::is_migratable_legacy_boundary_epoch(
+            ONE_BASED_EPOCH_MIGRATION_CUTOFF_HEIGHT + 1_000,
+            1_000,
+            1_053,
+        ));
+        assert!(!ProofOfSynergy::is_migratable_legacy_boundary_epoch(
+            1_000, 500, 2
+        ));
+    }
+
+    #[test]
+    fn previous_qc_rejects_future_legacy_epoch_boundary_labels() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let manager = active_validator_manager("validator-future-boundary");
+        let mut chain = BlockChain::new();
+        let future_boundary_height = ONE_BASED_EPOCH_MIGRATION_CUTOFF_HEIGHT + 1_000;
+        chain.add_block(Block {
+            block_index: future_boundary_height,
+            timestamp: 1_784_030_631,
+            transactions: Vec::new(),
+            previous_hash: "future-parent".to_string(),
+            validator_id: "validator-a".to_string(),
+            nonce: future_boundary_height,
+            hash: "future-boundary-after-cutoff".to_string(),
+            transactions_root: String::new(),
+            proposer_public_key: Vec::new(),
+            block_signature: vec![9, 9, 9],
+            block_signature_algorithm: "fndsa".to_string(),
+        });
+        DualQuorumConsensus::record_committed_qc_checked(QuorumCertificate {
+            block_hash: "future-boundary-after-cutoff".to_string(),
+            cluster_id: None,
+            epoch_number: 1_053,
+            round_number: 1,
+            aggregate_signature: vec![9, 9, 9],
+            participant_bitmap: Vec::new(),
+            cumulative_weight: 4.0,
+            validation_quorum_met: true,
+            cooperation_quorum_met: true,
+            timestamp: 1_784_030_631,
+            votes: Vec::new(),
+        })
+        .unwrap();
+
+        let error = ProofOfSynergy::get_previous_quorum_certificate(&chain, 1_053, 1_000, &manager)
+            .expect_err("future off-by-one boundary QC must fail closed");
+
+        assert!(error.contains("boundary QC epoch 1053"));
+        assert!(error.contains("block 1053000 epoch 1052"));
     }
 
     #[test]
     fn deterministic_epoch_randomness_uses_boundary_qc_only() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
         let mut chain = BlockChain::new();
-        chain.add_block(Block {
-            block_index: 999,
-            timestamp: 999,
-            transactions: Vec::new(),
-            previous_hash: "998".to_string(),
-            validator_id: "validator-a".to_string(),
-            nonce: 999,
-            hash: "boundary-999".to_string(),
-            transactions_root: String::new(),
-            proposer_public_key: Vec::new(),
-            block_signature: vec![9, 9, 9],
-            block_signature_algorithm: "fndsa".to_string(),
-        });
+        let (manager, boundary_block, qc) = signed_boundary_fixture(1_000, 0);
+        chain.add_block(boundary_block);
+        DualQuorumConsensus::record_committed_qc_checked(qc).unwrap();
         chain.add_block(Block {
             block_index: 1026,
             timestamp: 1026,
@@ -4350,11 +5551,30 @@ mod tests {
             block_signature_algorithm: "fndsa".to_string(),
         });
 
-        let direct_qc = ProofOfSynergy::get_previous_quorum_certificate(&chain, 1, 1000);
+        let direct_qc =
+            ProofOfSynergy::get_previous_quorum_certificate(&chain, 1, 1000, &manager).unwrap();
         let expected = ProofOfSynergy::deterministic_epoch_randomness_from_qc(&direct_qc);
-        let actual = ProofOfSynergy::deterministic_epoch_randomness(&chain, 1_026, 1_000);
+        let actual =
+            ProofOfSynergy::deterministic_epoch_randomness(&chain, 1_026, 1_000, &manager).unwrap();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn previous_qc_revalidates_persisted_aegis_vote_evidence() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let (manager, boundary_block, mut qc) = signed_boundary_fixture(2_000, 1);
+        qc.votes.clear();
+        let mut chain = BlockChain::new();
+        chain.add_block(boundary_block);
+        DualQuorumConsensus::record_committed_qc_checked(qc).unwrap();
+
+        let error = ProofOfSynergy::get_previous_quorum_certificate(&chain, 2, 1_000, &manager)
+            .expect_err("persisted QC without Aegis vote evidence must fail closed");
+
+        assert!(error.contains("failed Aegis dual-quorum verification"));
+        assert!(error.contains("individually verifiable Aegis PQC votes"));
     }
 
     #[test]
@@ -5182,7 +6402,7 @@ mod tests {
     }
 
     #[test]
-    fn leader_selection_preserves_stale_live_local_vote_lock_without_auto_recovery() {
+    fn leader_selection_supersedes_stale_live_local_vote_lock_at_recovery_age() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
 
@@ -5237,10 +6457,10 @@ mod tests {
             1,
         );
 
-        assert_eq!(selected.address, locked.address);
+        assert_eq!(selected.address, scheduled.address);
         let lock = DualQuorumConsensus::local_locked_vote_for_height("validator-local", 55, 810)
             .expect("vote lock lookup should succeed");
-        assert!(lock.is_some());
+        assert!(lock.is_none());
 
         DualQuorumConsensus::set_test_local_vote_lock_path(None);
         if let Some(root) = path.parent().and_then(|data| data.parent()) {

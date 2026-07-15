@@ -317,7 +317,10 @@ impl Transaction {
     fn is_zero_value_protocol_transaction(&self) -> bool {
         self.data
             .as_deref()
-            .map(|data| data.starts_with("validator_activation:"))
+            .map(|data| {
+                data.starts_with("validator_activation:")
+                    || crate::sts::transaction_data_may_contain_sts_payload(data)
+            })
             .unwrap_or(false)
     }
 
@@ -335,14 +338,16 @@ impl Transaction {
         serde_json::from_str(json).map_err(|e| format!("Failed to deserialize from JSON: {}", e))
     }
 
-    /// Actual fee charged for inclusion, using deterministic activity gas.
+    /// Gas/execution fee charged for inclusion, using deterministic activity gas.
     /// This is intentionally not `gas_limit * gas_price`; unused gas is refundable.
+    /// Protocol/amount fees are exposed separately by `get_network_fee_breakdown`.
     pub fn get_fee(&self) -> u64 {
         u64::try_from(self.calculate_gas_fee()).unwrap_or(u64::MAX)
     }
 
     pub fn get_total_value(&self) -> u64 {
-        self.amount.saturating_add(self.get_fee())
+        self.amount
+            .saturating_add(u64::try_from(self.get_total_network_fee_nwei()).unwrap_or(u64::MAX))
     }
 
     pub fn is_contract_call(&self) -> bool {
@@ -414,16 +419,184 @@ impl Transaction {
         self.get_gas_fee_nwei().format_snrg()
     }
 
-    /// Get total cost (amount + gas fee) in nWei
+    /// Get total cost (amount + total network fee) in nWei
     pub fn get_total_cost_nwei(&self) -> u128 {
-        (self.amount as u128) + self.calculate_gas_fee()
+        (self.amount as u128).saturating_add(self.get_total_network_fee_nwei())
     }
 
     /// Check if sender has sufficient balance for transaction
     /// balance should be in nWei
     pub fn has_sufficient_balance(&self, sender_balance: u128) -> bool {
         sender_balance
-            >= (self.amount as u128).saturating_add(self.calculate_max_fee_reserve_nwei())
+            >= (self.amount as u128).saturating_add(self.get_max_network_fee_reserve_nwei())
+    }
+
+    pub fn get_network_fee_breakdown(&self) -> Result<crate::gas::NetworkFeeBreakdown, String> {
+        self.network_fee_breakdown_with_gas(self.minimum_required_gas(), self.gas_price)
+    }
+
+    pub fn get_total_network_fee_nwei(&self) -> u128 {
+        self.get_network_fee_breakdown()
+            .map(|breakdown| breakdown.total_network_fee_nwei)
+            .unwrap_or_else(|_| self.calculate_gas_fee())
+    }
+
+    pub fn get_total_network_fee_u64(&self) -> Result<u64, String> {
+        u64::try_from(self.get_total_network_fee_nwei())
+            .map_err(|_| "total network fee exceeds u64".to_string())
+    }
+
+    pub fn get_max_network_fee_reserve_nwei(&self) -> u128 {
+        self.network_fee_breakdown_with_gas(self.gas_limit, self.gas_price)
+            .map(|breakdown| breakdown.total_network_fee_nwei)
+            .unwrap_or_else(|_| self.calculate_max_fee_reserve_nwei())
+    }
+
+    pub fn network_fee_breakdown_with_gas(
+        &self,
+        gas_used: u64,
+        base_fee_per_gas_nwei: u64,
+    ) -> Result<crate::gas::NetworkFeeBreakdown, String> {
+        use crate::gas::{calculate_network_fee, FeeSchedule, NetworkFeeInput, TransactionFeeType};
+
+        let gas_fee_nwei = crate::gas::calculate_total_fee_nwei(gas_used, base_fee_per_gas_nwei)?;
+        let (tx_type, asset_id, amount_raw, amount_snrgequivalent_nwei, valuation_status) =
+            self.fee_value_context();
+        let valuation_source = valuation_status.as_str().to_string();
+        let tx_type = if tx_type == TransactionFeeType::Unknown && self.is_contract_call() {
+            TransactionFeeType::ContractCall
+        } else {
+            tx_type
+        };
+
+        calculate_network_fee(
+            NetworkFeeInput {
+                tx_type,
+                asset_id,
+                amount_raw,
+                amount_snrgequivalent_nwei,
+                valuation_source,
+                valuation_status,
+                gas_used,
+                base_fee_per_gas_nwei,
+                gas_fee_nwei,
+                storage_fee_nwei: 0,
+                priority_fee_nwei: 0,
+            },
+            &FeeSchedule::default(),
+        )
+    }
+
+    fn fee_value_context(
+        &self,
+    ) -> (
+        crate::gas::TransactionFeeType,
+        String,
+        u128,
+        u128,
+        crate::gas::ValuationStatus,
+    ) {
+        use crate::gas::{TransactionFeeType, ValuationStatus};
+
+        let data = self.data.as_deref().unwrap_or_default();
+        if crate::address::is_network_burn_address(&self.receiver) || data.starts_with("burn:") {
+            let (asset, amount) = parse_asset_amount_payload(data.strip_prefix("burn:"));
+            let amount = amount.unwrap_or(self.amount as u128);
+            let asset = asset.unwrap_or_else(|| "SNRG".to_string());
+            let equivalent = if asset == "SNRG" { amount } else { 0 };
+            let status = if asset == "SNRG" {
+                ValuationStatus::NativeSnrg
+            } else {
+                ValuationStatus::Unavailable
+            };
+            return (TransactionFeeType::Burn, asset, amount, equivalent, status);
+        }
+
+        if data.starts_with("token_transfer:") {
+            let (asset, amount) = parse_asset_amount_payload(data.strip_prefix("token_transfer:"));
+            let amount = amount.unwrap_or(self.amount as u128);
+            let asset = asset.unwrap_or_else(|| "UNKNOWN".to_string());
+            let equivalent = if asset == "SNRG" { amount } else { 0 };
+            let status = if asset == "SNRG" {
+                ValuationStatus::NativeSnrg
+            } else {
+                ValuationStatus::Unavailable
+            };
+            return (
+                TransactionFeeType::TokenSend,
+                asset,
+                amount,
+                equivalent,
+                status,
+            );
+        }
+
+        if data.starts_with("stake:") {
+            return (
+                TransactionFeeType::Stake,
+                "SNRG".to_string(),
+                self.amount as u128,
+                self.amount as u128,
+                ValuationStatus::NotRequired,
+            );
+        }
+
+        if data.starts_with("unstake:") || data.starts_with("withdrawal_request:") {
+            return (
+                TransactionFeeType::Unstake,
+                "SNRG".to_string(),
+                self.amount as u128,
+                self.amount as u128,
+                ValuationStatus::NotRequired,
+            );
+        }
+
+        if data.starts_with("swap:") {
+            let (_, amount) = parse_asset_amount_payload(data.strip_prefix("swap:"));
+            return (
+                TransactionFeeType::Swap,
+                "UNKNOWN".to_string(),
+                amount.unwrap_or(self.amount as u128),
+                0,
+                ValuationStatus::Unavailable,
+            );
+        }
+
+        if self.receiver.is_empty() || self.receiver == "0x0" || data.starts_with("deploy:") {
+            return (
+                TransactionFeeType::ContractDeploy,
+                "SNRG".to_string(),
+                self.amount as u128,
+                self.amount as u128,
+                if self.amount > 0 {
+                    ValuationStatus::NativeSnrg
+                } else {
+                    ValuationStatus::NotRequired
+                },
+            );
+        }
+
+        if self.amount > 0 && data.is_empty() {
+            return (
+                TransactionFeeType::NativeSnrgSend,
+                "SNRG".to_string(),
+                self.amount as u128,
+                self.amount as u128,
+                ValuationStatus::NativeSnrg,
+            );
+        }
+
+        (
+            TransactionFeeType::ContractCall,
+            "SNRG".to_string(),
+            self.amount as u128,
+            self.amount as u128,
+            if self.amount > 0 {
+                ValuationStatus::NativeSnrg
+            } else {
+                ValuationStatus::NotRequired
+            },
+        )
     }
 
     /// Set gas price (in nWei per gas unit)
@@ -549,6 +722,38 @@ pub fn parse_algorithm_name(name: &str) -> Result<PQCAlgorithm, String> {
             name
         )),
     }
+}
+
+fn parse_asset_amount_payload(payload: Option<&str>) -> (Option<String>, Option<u128>) {
+    let Some(payload) = payload else {
+        return (None, None);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return (None, None);
+    };
+    let asset = value
+        .get("asset")
+        .or_else(|| value.get("asset_id"))
+        .or_else(|| value.get("token"))
+        .or_else(|| value.get("token_symbol"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    let amount = value
+        .get("amount")
+        .or_else(|| value.get("amount_raw"))
+        .or_else(|| value.get("amount_nwei"))
+        .or_else(|| value.get("amount_in"))
+        .or_else(|| value.get("input_amount"))
+        .or_else(|| value.get("payment_amount"))
+        .and_then(json_u128);
+    (asset, amount)
+}
+
+fn json_u128(value: &serde_json::Value) -> Option<u128> {
+    if let Some(number) = value.as_u64() {
+        return Some(number as u128);
+    }
+    value.as_str()?.trim().parse::<u128>().ok()
 }
 
 #[cfg(test)]
@@ -739,6 +944,59 @@ mod tests {
     }
 
     #[test]
+    fn admission_allows_signed_zero_value_sts_payload() {
+        let mut manager = PQCManager::new();
+        let (public_key, private_key) = manager
+            .generate_keypair(PQCAlgorithm::FNDSA)
+            .expect("test keypair should generate");
+        let sender = crate::address::generate_wallet_address(&hex::encode(&public_key.key_data));
+        let payload = crate::sts::StsSignedPayload::new(crate::sts::StsTx::CreateFungible(
+            crate::sts::CreateFungibleParams {
+                class: crate::sts::TokenClass::B1BasicFungible,
+                creator: sender.clone(),
+                creator_nonce: 42,
+                name: "CLI Submit Test".to_string(),
+                symbol: "CLISUB".to_string(),
+                decimals: 9,
+                initial_supply: 1_000_000_000,
+                max_supply: Some(1_000_000_000),
+                mint_authority: Some(sender.clone()),
+                metadata_authority: None,
+                metadata_uri: None,
+                metadata_hash: None,
+                metadata_mutable: false,
+                image_uri: None,
+                image_hash: None,
+                flags: crate::sts::FungibleControlFlags::default(),
+                policies: Vec::new(),
+                created_at: 1_700_000_000,
+            },
+        ));
+        let data = hex::encode(crate::sts::encode_sts_payload(&payload).expect("payload encodes"));
+        let mut tx = Transaction::new(
+            sender.clone(),
+            sender,
+            0,
+            1,
+            Vec::new(),
+            100,
+            150_000,
+            Some(data),
+            "fndsa".to_string(),
+        );
+        tx.sign_with_public_key(&public_key, &private_key, &mut manager)
+            .expect("test transaction should sign");
+
+        let validation = tx.validate_for_admission();
+
+        assert!(
+            validation.is_valid,
+            "STS carrier admission failed: {:?}",
+            validation.error_message
+        );
+    }
+
+    #[test]
     fn admission_still_rejects_unsigned_zero_value_transfer() {
         let tx = Transaction::new(
             "sender123".to_string(),
@@ -846,6 +1104,74 @@ mod tests {
 
         assert_eq!(tx.get_fee(), 100 * 38500);
         assert_eq!(tx.get_total_value(), 1000 + (100 * 38500));
+    }
+
+    #[test]
+    fn native_send_amount_changes_total_network_fee_without_changing_gas_fee() {
+        let one_snrg = Transaction::new(
+            "sender123".to_string(),
+            "receiver456".to_string(),
+            1_000_000_000,
+            1,
+            vec![0x01],
+            100,
+            50_000,
+            None,
+            "fndsa".to_string(),
+        );
+        let hundred_snrg = Transaction::new(
+            "sender123".to_string(),
+            "receiver456".to_string(),
+            100_000_000_000,
+            2,
+            vec![0x01],
+            100,
+            50_000,
+            None,
+            "fndsa".to_string(),
+        );
+
+        assert_eq!(one_snrg.get_fee(), hundred_snrg.get_fee());
+        let one_breakdown = one_snrg.get_network_fee_breakdown().unwrap();
+        let hundred_breakdown = hundred_snrg.get_network_fee_breakdown().unwrap();
+        assert_eq!(one_breakdown.amount_protocol_fee_nwei, 200_000);
+        assert_eq!(hundred_breakdown.amount_protocol_fee_nwei, 20_000_000);
+        assert_eq!(
+            one_breakdown.total_network_fee_nwei,
+            one_snrg.get_fee() as u128 + 200_000
+        );
+        assert_eq!(
+            hundred_breakdown.total_network_fee_nwei,
+            hundred_snrg.get_fee() as u128 + 20_000_000
+        );
+    }
+
+    #[test]
+    fn token_transfer_without_native_valuation_is_gas_only() {
+        let tx = Transaction::new(
+            "sender123".to_string(),
+            "receiver456".to_string(),
+            0,
+            1,
+            vec![0x01],
+            100,
+            50_000,
+            Some(
+                "token_transfer:{\"to\":\"receiver456\",\"token\":\"TEST\",\"amount\":500000000}"
+                    .to_string(),
+            ),
+            "fndsa".to_string(),
+        );
+
+        let breakdown = tx.get_network_fee_breakdown().unwrap();
+        assert_eq!(breakdown.tx_type, crate::gas::TransactionFeeType::TokenSend);
+        assert_eq!(breakdown.asset_id, "TEST");
+        assert_eq!(breakdown.amount_protocol_fee_nwei, 0);
+        assert_eq!(breakdown.total_network_fee_nwei, breakdown.gas_fee_nwei);
+        assert_eq!(
+            breakdown.valuation_status,
+            crate::gas::ValuationStatus::Unavailable
+        );
     }
 
     #[test]

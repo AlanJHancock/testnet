@@ -165,14 +165,7 @@ contains_required_peer() {
 EXPECTED_PEERS=(
   "relay1.synergynode.xyz:5622"
   "relay2.synergynode.xyz:5622"
-  "rpc.synergynode.xyz:5623"
-  "archive.synergynode.xyz:5615"
-  "62.146.182.207:5622"
-  "62.146.182.208:5622"
-  "62.146.182.209:5622"
-  "73.79.66.255:5622"
-  "194.163.183.166:5622"
-  "157.173.192.45:5622"
+  "relay3.synergynode.xyz:5622"
 )
 
 cat <<EOF
