@@ -40,6 +40,7 @@ DEFAULT_ROOT = Path("/Users/Shared/Synergy/archive-validator")
 DEFAULT_PUBLISH_ROOT = Path("/Volumes/Synergy_Archive/archive-validator/snapshots")
 DEFAULT_RUNTIME = Path("/usr/local/synergy/bin/synergy-archive-validator-node")
 DEFAULT_AEGIS = Path("/usr/local/synergy/bin/aegis-pqvm")
+DEFAULT_STORAGE_VOLUME = Path("/Volumes/Synergy_Archive")
 DEFAULT_FORK_METADATA = DEFAULT_ROOT / "config" / "consensus-fork-migration.json"
 FORK_PARENT_HEIGHT = 204_215
 FORK_HEIGHT = 204_216
@@ -1159,6 +1160,50 @@ def proof_marker_ok(path: Path) -> dict[str, Any]:
     return value
 
 
+def require_current_majority_proof(
+    marker: dict[str, Any], local_record: dict[str, Any]
+) -> None:
+    local_hash = str(local_record.get("hash") or "").strip()
+    if not local_hash:
+        raise RuntimeError(
+            "snapshot publication refused: archive workspace canonical lock has no block hash"
+        )
+    if (
+        int(marker["height"]) != int(local_record["height"])
+        or str(marker["hash"]).lower() != local_hash.lower()
+    ):
+        raise RuntimeError(
+            "snapshot publication refused: majority/public proof marker is stale for the "
+            f"latest archive canonical lock h{local_record['height']} {local_hash}"
+        )
+
+
+def require_publish_storage(publish_root: Path, storage_volume: Path | None) -> None:
+    if storage_volume is None:
+        return
+    try:
+        publish_root.resolve().relative_to(storage_volume.resolve())
+    except ValueError as error:
+        raise RuntimeError(
+            f"snapshot publication refused: publish root is outside storage volume: {publish_root}"
+        ) from error
+    if not storage_volume.is_dir():
+        raise RuntimeError(f"snapshot publication refused: storage volume is unavailable: {storage_volume}")
+    if sys.platform == "darwin":
+        mounted = False
+        try:
+            mount_output = subprocess.run(
+                ["/sbin/mount"], check=False, text=True, capture_output=True
+            )
+            mounted = mount_output.returncode == 0 and f" on {storage_volume} " in mount_output.stdout
+        except OSError:
+            mounted = False
+        if not mounted and not os.path.ismount(storage_volume):
+            raise RuntimeError(
+                f"snapshot publication refused: storage volume is not mounted: {storage_volume}"
+            )
+
+
 def enforce_snapshot_publication_gate(args: argparse.Namespace, report: dict[str, Any]) -> dict[str, Any] | None:
     snapshot_height = int(report["snapshot_height"])
     snapshot_hash = str(report["snapshot_hash"])
@@ -1184,6 +1229,7 @@ def enforce_snapshot_publication_gate(args: argparse.Namespace, report: dict[str
 
 def create_snapshot(args: argparse.Namespace) -> dict[str, Any]:
     if not args.fixture_mode:
+        require_publish_storage(args.publish_root, args.storage_volume)
         proof_marker_ok(args.majority_proof_marker)
     command = [
         str(require_executable(args.runtime)),
@@ -1224,6 +1270,7 @@ def cleanup_generated_source_snapshot(workspace: Path, snapshot_root: Path) -> N
 
 def publish_existing_snapshot(args: argparse.Namespace) -> dict[str, Any]:
     if not args.fixture_mode:
+        require_publish_storage(args.publish_root, args.storage_volume)
         proof_marker_ok(args.majority_proof_marker)
     signed = json_load(args.manifest)
     manifest = signed.get("manifest", signed)
@@ -1309,12 +1356,14 @@ def archive_canonical_status(workspace: Path) -> dict[str, Any]:
 def worker(args: argparse.Namespace) -> None:
     while True:
         try:
-            proof_marker_ok(args.majority_proof_marker)
+            require_publish_storage(args.publish_root, args.storage_volume)
+            marker = proof_marker_ok(args.majority_proof_marker)
             local_record = latest_local_canonical_record(args.workspace)
             if local_record is None:
                 raise RuntimeError("archive workspace has no canonical lock height")
             local_height = int(local_record["height"])
             reject_known_noncanonical_archive_state(local_height, str(local_record.get("hash") or ""))
+            require_current_majority_proof(marker, local_record)
             catalog = read_catalog(args.publish_root)
             snapshot_classes = args.snapshot_class or DEFAULT_WORKER_CLASSES
             for snapshot_class in snapshot_classes:
@@ -1638,7 +1687,16 @@ def record_majority_proof(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def add_common(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--root", type=Path, default=Path(os.environ.get("SYNERGY_ARCHIVE_ROOT", DEFAULT_ROOT)))
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path(
+            os.environ.get(
+                "SYNERGY_ARCHIVE_APP_ROOT",
+                os.environ.get("SYNERGY_ARCHIVE_ROOT", DEFAULT_ROOT),
+            )
+        ),
+    )
     parser.add_argument(
         "--publish-root",
         type=Path,
@@ -1646,6 +1704,11 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--runtime", type=Path, default=Path(os.environ.get("SYNERGY_ARCHIVE_RUNTIME", DEFAULT_RUNTIME)))
     parser.add_argument("--aegis", type=Path, default=Path(os.environ.get("SYNERGY_AEGIS_CLI", DEFAULT_AEGIS)))
+    parser.add_argument(
+        "--storage-volume",
+        type=Path,
+        default=Path(os.environ.get("SYNERGY_ARCHIVE_STORAGE_VOLUME", DEFAULT_STORAGE_VOLUME)),
+    )
 
 
 def parser() -> argparse.ArgumentParser:

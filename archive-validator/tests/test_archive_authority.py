@@ -247,6 +247,30 @@ class ArchiveAuthorityPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "archive-contained"):
             archive_authority.enforce_snapshot_publication_gate(args, report)
 
+    def test_worker_requires_proof_marker_to_match_latest_archive_lock(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "proof marker is stale"):
+            archive_authority.require_current_majority_proof(
+                {"height": 100, "hash": "public-hash"},
+                {"height": 101, "hash": "local-hash"},
+            )
+        with self.assertRaisesRegex(RuntimeError, "has no block hash"):
+            archive_authority.require_current_majority_proof(
+                {"height": 100, "hash": "public-hash"},
+                {"height": 100, "hash": None},
+            )
+        archive_authority.require_current_majority_proof(
+            {"height": 100, "hash": "Public-Hash"},
+            {"height": 100, "hash": "public-hash"},
+        )
+
+    def test_worker_rejects_publish_root_outside_storage_volume(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            storage = root / "storage"
+            storage.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "outside storage volume"):
+                archive_authority.require_publish_storage(root / "local-publish", storage)
+
     def test_record_majority_proof_refuses_known_noncanonical_archive_branch(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)

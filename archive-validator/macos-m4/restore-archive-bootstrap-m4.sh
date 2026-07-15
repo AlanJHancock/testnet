@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PACKAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${PACKAGE_ROOT}/archive-paths.sh"
+
 SNAPSHOT=""
 EXPECTED_SHA256=""
 BOOTSTRAP_MANIFEST=""
@@ -8,10 +11,7 @@ TEST_ROOT=""
 YES="false"
 ALLOW_VALIDATOR_PRUNED_BOOTSTRAP="false"
 SERVICE_TIMEOUT_SECS="${ARCHIVE_VALIDATOR_RESTORE_TIMEOUT_SECS:-180}"
-STORAGE_VOLUME_REL="/Volumes/Synergy_Archive"
-LOCAL_ROOT_REL="/Users/Shared/Synergy/archive-validator"
-SMB_ROOT_REL="${STORAGE_VOLUME_REL}/archive-validator"
-INCOMING_BOOTSTRAP_REL="${SMB_ROOT_REL}/incoming/bootstrap"
+archive_paths_load_defaults
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -19,12 +19,17 @@ while [[ $# -gt 0 ]]; do
     --sha256) EXPECTED_SHA256="$2"; shift 2 ;;
     --manifest) BOOTSTRAP_MANIFEST="$2"; shift 2 ;;
     --test-root) TEST_ROOT="$2"; shift 2 ;;
+    --app-root) ARCHIVE_APP_ROOT="$2"; shift 2 ;;
+    --publish-root) ARCHIVE_PUBLISH_ROOT="$2"; shift 2 ;;
+    --storage-volume) ARCHIVE_STORAGE_VOLUME="$2"; shift 2 ;;
     --service-timeout) SERVICE_TIMEOUT_SECS="$2"; shift 2 ;;
     --allow-validator-pruned-bootstrap) ALLOW_VALIDATOR_PRUNED_BOOTSTRAP="true"; shift ;;
     --yes) YES="true"; shift ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+archive_paths_validate
 
 [[ "$(uname -s)" == "Darwin" ]] || { echo "Archive bootstrap restore requires macOS." >&2; exit 1; }
 [[ -n "${SNAPSHOT}" && -f "${SNAPSHOT}" ]] || { echo "--snapshot must point to a bootstrap .tar.zst or .tar file." >&2; exit 1; }
@@ -42,7 +47,7 @@ prefix_path() {
   fi
 }
 
-STORAGE_VOLUME="$(prefix_path "${STORAGE_VOLUME_REL}")"
+STORAGE_VOLUME="$(archive_paths_prefix "${TEST_ROOT}" "${ARCHIVE_STORAGE_VOLUME}")"
 if [[ -n "${TEST_ROOT}" ]]; then
   [[ -d "${STORAGE_VOLUME}" ]] || {
     echo "archive storage volume missing in test root: ${STORAGE_VOLUME}" >&2
@@ -60,13 +65,13 @@ else
   [[ "$(id -u)" == "0" ]] || { echo "Run production restore with sudo." >&2; exit 1; }
 fi
 
-APP_ROOT="$(prefix_path "${LOCAL_ROOT_REL}")"
+APP_ROOT="$(archive_paths_prefix "${TEST_ROOT}" "${ARCHIVE_APP_ROOT}")"
 WORKSPACE="${APP_ROOT}/workspace"
 DATA_DIR="${WORKSPACE}/data"
 BACKUP_ROOT="${APP_ROOT}/backups"
 LOG_ROOT="${APP_ROOT}/logs"
-SMB_ROOT="$(prefix_path "${SMB_ROOT_REL}")"
-INCOMING_BOOTSTRAP="$(prefix_path "${INCOMING_BOOTSTRAP_REL}")"
+SMB_ROOT="$(archive_paths_prefix "${TEST_ROOT}" "${ARCHIVE_STORAGE_VOLUME}/archive-validator")"
+INCOMING_BOOTSTRAP="${SMB_ROOT}/incoming/bootstrap"
 LAUNCHD_ROOT="$(prefix_path /Library/LaunchDaemons)"
 MANAGE_LAUNCHD="true"
 if [[ -n "${TEST_ROOT}" || "${SKIP_LAUNCHD_STOP:-false}" == "true" ]]; then

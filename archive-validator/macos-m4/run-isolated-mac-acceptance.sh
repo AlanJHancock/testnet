@@ -2,12 +2,15 @@
 set -euo pipefail
 
 PACKAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${PACKAGE_ROOT}/archive-paths.sh"
+archive_paths_load_defaults
+archive_paths_validate
 TEST_ROOT="${1:-/Volumes/xcode/synergy-archive-mac-acceptance-$(date -u +%Y%m%dT%H%M%SZ)}"
 BIN_ROOT="${TEST_ROOT}/usr/local/synergy/bin"
-STORAGE_VOLUME="${TEST_ROOT}/Volumes/Synergy_Archive"
+STORAGE_VOLUME="${TEST_ROOT}${ARCHIVE_STORAGE_VOLUME}"
 SMB_ROOT="${STORAGE_VOLUME}/archive-validator"
-APP_ROOT="${TEST_ROOT}/Users/Shared/Synergy/archive-validator"
-PUBLISH_ROOT="${SMB_ROOT}/snapshots"
+APP_ROOT="${TEST_ROOT}${ARCHIVE_APP_ROOT}"
+PUBLISH_ROOT="${TEST_ROOT}${ARCHIVE_PUBLISH_ROOT}"
 INCOMING_BOOTSTRAP="${SMB_ROOT}/incoming/bootstrap"
 WORKSPACE="${APP_ROOT}/workspace"
 EVIDENCE="${APP_ROOT}/evidence/isolated-acceptance"

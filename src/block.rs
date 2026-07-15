@@ -1,5 +1,7 @@
 use crate::transaction::Transaction;
-use serde::{Deserialize, Serialize};
+use serde::de::{SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::fmt;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
@@ -425,6 +427,36 @@ impl BlockChain {
         }
         None
     }
+
+    pub fn load_last_from_file(path: &str) -> Option<Block> {
+        struct LastBlockVisitor;
+
+        impl<'de> Visitor<'de> for LastBlockVisitor {
+            type Value = Option<Block>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON array of blocks")
+            }
+
+            fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut last = None;
+                while let Some(block) = sequence.next_element::<Block>()? {
+                    last = Some(block);
+                }
+                Ok(last)
+            }
+        }
+
+        let file = File::open(path).ok()?;
+        let reader = BufReader::new(file);
+        let mut deserializer = serde_json::Deserializer::from_reader(reader);
+        let last = deserializer.deserialize_seq(LastBlockVisitor).ok()?;
+        deserializer.end().ok()?;
+        last
+    }
 }
 
 pub fn configured_hot_chain_retention_blocks() -> Option<u64> {
@@ -494,6 +526,31 @@ mod tests {
         fs::write(&path, bytes).unwrap();
 
         assert!(BlockChain::load_from_file(path.to_str().unwrap()).is_none());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn load_last_from_file_returns_only_tip() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "synergy-chain-load-tip-{}-{nonce}.json",
+            std::process::id()
+        ));
+        let genesis = block(0, "genesis".to_string(), "validator-1");
+        let child = block(1, genesis.hash.clone(), "validator-2");
+        fs::write(
+            &path,
+            serde_json::to_vec(&vec![genesis, child.clone()]).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            BlockChain::load_last_from_file(path.to_str().unwrap()).map(|block| block.hash),
+            Some(child.hash)
+        );
         fs::remove_file(path).unwrap();
     }
 
