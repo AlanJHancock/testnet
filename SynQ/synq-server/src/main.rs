@@ -26,7 +26,10 @@ use synq_compiler::{PQCCompiler, PQCSecurityLevel};
 use ruint::aliases::U256;
 use synq_vm::{QuantumVM, Value};
 
-const SIGNING_ALGORITHM: &str = "dilithium";
+/// NIST FIPS 204 canonical name for the ephemeral signing algorithm.
+/// Legacy names ("ML-DSA-65", "dilithium3") are accepted by pqc_integration
+/// as aliases but all *output* uses this canonical form.
+const SIGNING_ALGORITHM: &str = "ML-DSA-65";
 /// Sessions idle longer than this are evicted on the next request.
 const SESSION_TTL: Duration = Duration::from_secs(30 * 60); // 30 min
 

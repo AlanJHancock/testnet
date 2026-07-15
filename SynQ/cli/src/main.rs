@@ -59,9 +59,12 @@ fn main() {
     }
 }
 
-/// Signature algorithm used for compiled bytecode. Dilithium (ML-DSA-65) is
+/// Signature algorithm used for compiled bytecode.
+/// ML-DSA-65 is the NIST FIPS 204 standardised name for Dilithium3.
+/// Legacy sidecar files using "dilithium" or "dilithium3" are still
+/// verified correctly via the alias table in pqc_integration::canonical_name().
 /// the default "Enhanced" security-level signer in PQCCompiler.
-const SIGNING_ALGORITHM: &str = "dilithium";
+const SIGNING_ALGORITHM: &str = "ML-DSA-65";
 
 fn sig_sidecar_path(bytecode_path: &Path) -> PathBuf {
     // e.g. "counter.synq_bytecode" -> "counter.synq_bytecode.sig.json"
@@ -103,26 +106,26 @@ fn compile(path: &PathBuf) {
 
     // Generate bytecode
     let codegen = synq_compiler::codegen::CodeGenerator::new();
-    let bytecode = codegen.generate(&ast).expect("Failed to generate bytecode");
+    let result = codegen.generate(&ast).expect("Failed to generate bytecode");
+    let bytecode = result.0; // (Vec<u8>, Vec<(String, u32)>) — take bytecode only
 
     // Real PQC signing over the compiled bytecode using a fresh, EPHEMERAL
-    // ML-DSA-65 (Dilithium) keypair generated for this compile only. The
-    // private key is used once to sign and then dropped -- it is never
-    // written to disk. This replaces the old fake
-    // "PQC_SIGNATURE_<timestamp>" placeholder string with a real signature
-    // that can actually be verified (see the `verify` subcommand).
+    // ML-DSA-65 (FIPS 204) keypair generated for this compile only.
+    // ML-DSA-65 is the NIST standardised name for Dilithium3.
+    // The private key is used once to sign and then dropped — never written
+    // to disk.  The .sig.json sidecar uses the canonical NIST name so that
+    // verifiers know exactly which parameter set was used.
     //
-    // Ephemeral (vs persistent/wallet-derived) was chosen as the starting
-    // point: it proves the real signing path end-to-end without requiring
-    // a key-management/storage design yet. Revisit once persistent identity
-    // keys are needed (e.g. tied to a wallet address).
+    // Ephemeral keys were chosen as the starting point: they prove the real
+    // signing path end-to-end without requiring wallet-key-management yet.
+    // Revisit for persistent identity keys once tied to a wallet address.
     let pqc = PQCCompiler::new(PQCSecurityLevel::Enhanced);
     let keypair = pqc
         .generate_keypair(SIGNING_ALGORITHM)
-        .expect("Failed to generate ephemeral signing keypair");
+        .expect("Failed to generate ephemeral ML-DSA-65 signing keypair");
     let signature = pqc
         .sign_message(&keypair.private_key, &bytecode, SIGNING_ALGORITHM)
-        .expect("Failed to sign bytecode");
+        .expect("Failed to sign bytecode with ML-DSA-65");
 
     let output_path = path.with_extension("synq_bytecode");
     fs::write(&output_path, &bytecode).expect("Failed to write bytecode file");
@@ -140,7 +143,7 @@ fn compile(path: &PathBuf) {
     println!("✅ Successfully compiled SynQ with PQC to {}", output_path.display());
     println!("🔒 PQC Security Level: Enhanced");
     println!(
-        "🔏 Signed with real {} (ephemeral keypair) -- signature + public key written to {}",
+        "🔏 Signed with {} (FIPS 204, ephemeral keypair) — sidecar written to {}",
         signature.algorithm,
         sig_path.display()
     );

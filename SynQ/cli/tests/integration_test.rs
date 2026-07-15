@@ -47,7 +47,7 @@ fn test_compile_produces_real_verifiable_signature() {
     Command::cargo_bin("synq-cli").unwrap()
         .arg("compile").arg("--path").arg(file.path())
         .assert().success()
-        .stdout(predicate::str::contains("Signed with real dilithium"));
+        .stdout(predicate::str::contains("Signed with ML-DSA-65"));
 
     let bytecode_path = file.path().with_extension("synq_bytecode");
     let sig_path_str = format!("{}.sig.json", bytecode_path.display());
@@ -56,7 +56,7 @@ fn test_compile_produces_real_verifiable_signature() {
 
     let sig_content = std::fs::read_to_string(&sig_path).unwrap();
     let sig_json: serde_json::Value = serde_json::from_str(&sig_content).unwrap();
-    assert_eq!(sig_json["algorithm"], "dilithium");
+    assert_eq!(sig_json["algorithm"], "ML-DSA-65");
     assert!(sig_json["public_key"].as_str().unwrap().len() > 0);
     assert!(sig_json["signature"].as_str().unwrap().len() > 0);
 

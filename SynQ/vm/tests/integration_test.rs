@@ -154,10 +154,12 @@ fn test_u128_add() {
 
 #[test]
 fn test_u128_overflow() {
-    // u128::MAX + 1 must return a RuntimeError containing "overflow", not wrap silently.
+    // With real U256 support, u128::MAX + 1 is a valid U256 value (no overflow).
+    // This test now uses U256::MAX + 1, which MUST overflow and return RuntimeError.
+    // U256::MAX is emitted as LoadImm256 with 32 bytes of 0xFF.
     let mut assembler = Assembler::new();
-    assembler.emit_op(OpCode::LoadImm128);
-    assembler.emit_u128(u128::MAX);
+    assembler.emit_op(OpCode::LoadImm256);
+    assembler.emit_u256_bytes(&[0xFFu8; 32]); // U256::MAX
     assembler.emit_op(OpCode::LoadImm128);
     assembler.emit_u128(1u128);
     assembler.emit_op(OpCode::Add);
