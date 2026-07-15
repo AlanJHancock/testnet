@@ -199,19 +199,41 @@ fn check_call_graph(contract: &ContractDefinition) -> Result<(), String> {
     Ok(())
 }
 
+// Maximum static call-chain depth enforced at compile time.
+//
+// Rationale for 64:
+//   - Recursion (cycles) is banned entirely by the DFS cycle check above,
+//     independent of this limit.
+//   - This limit guards against pathologically deep *non-recursive* call chains
+//     that would exhaust the QVM's call stack at runtime.
+//   - Comparison with other runtimes:
+//       EVM (Ethereum)  1 024  — hard consensus rule, one frame per CALL opcode
+//       Solana BPF         64  — explicit VM-level call depth limit
+//       WASM (browsers) ~10k+  — bounded by host OS stack
+//       Move / Cairo        0  — recursion banned by type system (no limit needed)
+//   - 64 matches Solana BPF, a well-studied non-EVM smart-contract VM with
+//     similar resource-constraint goals to QVM.
+//   - The QVM does not yet have per-call stack frames (that work lands in PR-B).
+//     Once PR-B ships, the *runtime* will enforce its own depth limit naturally;
+//     this static check then becomes a fast-fail for obviously degenerate
+//     contracts rather than an absolute ceiling.
+//   - 8 (the previous value) was too conservative: a normal contract with
+//     init → validate → checkOwner → resolveAddress already consumes 4 hops,
+//     leaving only 4 hops of headroom for real business logic.
+const MAX_CALL_DEPTH: usize = 64;
+
 fn dfs_check<'a>(
     node: &'a str,
     adj: &'a HashMap<&'a str, Vec<String>>,
     path: &mut Vec<&'a str>,
 ) -> Result<(), String> {
-    const MAX_DEPTH: usize = 8;
     if path.contains(&node) {
         let cycle_start = path.iter().position(|&n| n == node).unwrap();
         let cycle: Vec<&str> = path[cycle_start..].iter().copied().chain(std::iter::once(node)).collect();
         return Err(format!("recursive call detected: {}", cycle.join(" -> ")));
     }
-    if path.len() >= MAX_DEPTH {
-        return Err(format!("call chain exceeds maximum depth ({}) starting from '{}'", MAX_DEPTH, path[0]));
+    if path.len() >= MAX_CALL_DEPTH {
+        return Err(format!("call chain exceeds maximum depth ({}) starting from '{}'", MAX_CALL_DEPTH, path[0]));
     }
     path.push(node);
     if let Some(callees) = adj.get(node) {
