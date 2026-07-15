@@ -9,7 +9,9 @@ pub struct SynQParser;
 pub fn parse(source: &str) -> Result<Vec<SourceUnit>, String> {
     let pairs = SynQParser::parse(Rule::source_file, source)
         .map_err(|e| format!("{}", e))?;
+    use std::collections::HashSet;
     let mut ast = vec![];
+    let mut contract_names: HashSet<String> = HashSet::new();
     for pair in pairs.into_iter().next().unwrap().into_inner() {
         match pair.as_rule() {
             Rule::top_level_item => {
@@ -18,7 +20,13 @@ pub fn parse(source: &str) -> Result<Vec<SourceUnit>, String> {
                     Rule::pragma_directive => {} // standard pragma -- consumed silently
                     Rule::synq_pragma      => {} // `pragma synq ^x.y;` -- consumed silently
                     Rule::struct_definition   => ast.push(SourceUnit::Struct(parse_struct(inner))),
-                    Rule::contract_definition => ast.push(SourceUnit::Contract(parse_contract(inner))),
+                    Rule::contract_definition => {
+                        let c = parse_contract(inner)?;
+                        if !contract_names.insert(c.name.clone()) {
+                            return Err(format!("duplicate contract '{}'", c.name));
+                        }
+                        ast.push(SourceUnit::Contract(c));
+                    }
                     _ => {}
                 }
             }
@@ -41,10 +49,13 @@ fn parse_struct(pair: Pair<Rule>) -> StructDefinition {
     StructDefinition { name, fields }
 }
 
-fn parse_contract(pair: Pair<Rule>) -> ContractDefinition {
+fn parse_contract(pair: Pair<Rule>) -> Result<ContractDefinition, String> {
+    use std::collections::HashSet;
     let mut inner = pair.into_inner();
     let name = inner.next().unwrap().as_str().to_string();
     let mut parts = vec![];
+    let mut fn_names: HashSet<String> = HashSet::new();
+    let mut sv_names: HashSet<String> = HashSet::new();
     for p in inner {
         match p.as_rule() {
             Rule::contract_part => {
@@ -54,12 +65,19 @@ fn parse_contract(pair: Pair<Rule>) -> ContractDefinition {
                         let mut si = inner2.into_inner();
                         let n = si.next().unwrap().as_str().to_string();
                         let t = parse_type(si.next().unwrap());
+                        if !sv_names.insert(n.clone()) {
+                            return Err(format!("duplicate state variable '{}' in contract '{}'", n, name));
+                        }
                         parts.push(ContractPart::StateVariable(StateVariableDeclaration {
                             name: n, ty: t, is_public: false
                         }));
                     }
                     Rule::function_definition => {
-                        parts.push(ContractPart::Function(parse_function(inner2)));
+                        let f = parse_function(inner2)?;
+                        if !fn_names.insert(f.name.clone()) {
+                            return Err(format!("duplicate function '{}' in contract '{}'", f.name, name));
+                        }
+                        parts.push(ContractPart::Function(f));
                     }
                     _ => {}
                 }
@@ -67,15 +85,17 @@ fn parse_contract(pair: Pair<Rule>) -> ContractDefinition {
             _ => {}
         }
     }
-    ContractDefinition { name, parts }
+    Ok(ContractDefinition { name, parts })
 }
 
-fn parse_function(pair: Pair<Rule>) -> FunctionDefinition {
+fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
+    use std::collections::HashSet;
     let mut inner = pair.into_inner();
     let name = inner.next().unwrap().as_str().to_string();
     let mut params = vec![];
     let mut returns: Option<Type> = None;
     let mut body_stmts = vec![];
+    let mut param_names: HashSet<String> = HashSet::new();
 
     for p in inner {
         match p.as_rule() {
@@ -85,6 +105,9 @@ fn parse_function(pair: Pair<Rule>) -> FunctionDefinition {
                         let mut pi = param.into_inner();
                         let pn = pi.next().unwrap().as_str().to_string();
                         let pt = parse_type(pi.next().unwrap());
+                        if !param_names.insert(pn.clone()) {
+                            return Err(format!("duplicate parameter '{}' in function '{}'", pn, name));
+                        }
                         params.push(Parameter { name: pn, ty: pt, is_indexed: false });
                     }
                 }
@@ -103,13 +126,13 @@ fn parse_function(pair: Pair<Rule>) -> FunctionDefinition {
         }
     }
 
-    FunctionDefinition {
+    Ok(FunctionDefinition {
         name,
         params,
         returns,
         body: Block { statements: body_stmts },
         is_public: false,
-    }
+    })
 }
 
 fn parse_statement(pair: Pair<Rule>) -> Statement {
@@ -207,6 +230,7 @@ fn parse_binop(pair: &Pair<Rule>) -> BinaryOperator {
         "<=" => BinaryOperator::Le,
         ">"  => BinaryOperator::Gt,
         ">=" => BinaryOperator::Ge,
+        "%"  => BinaryOperator::Mod,
         _    => BinaryOperator::Add,
     }
 }

@@ -95,6 +95,7 @@ pub enum BinaryOperator {
     Le,
     Gt,
     Ge,
+    Mod,
 }
 
 #[derive(Debug, PartialEq, Clone)]

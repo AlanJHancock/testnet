@@ -45,6 +45,7 @@ pub enum OpCode {
     Sub = 0x11,
     Mul = 0x12,
     Div = 0x13,
+    Rem = 0x14,
 
     // Comparison operations
     Eq = 0x20,

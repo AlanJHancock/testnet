@@ -362,6 +362,19 @@ impl QuantumVM {
                 }
             }
 
+            OpCode::Rem => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    let av = a.as_u256()?;
+                    let bv = b.as_u256()?;
+                    if bv == U256::ZERO { return Err(VMError::RuntimeError("Modulo by zero".to_string())); }
+                    self.push(Value::from_u256_shrink(av % bv))?;
+                } else {
+                    return Err(VMError::RuntimeError("Rem: expected numeric value".to_string()));
+                }
+            }
+
             // ── Comparisons — handles I32, U128, U256 and mixed ───────────
             OpCode::Eq => {
                 let b = self.pop()?;
