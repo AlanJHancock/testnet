@@ -12,17 +12,18 @@ for source in "${aegis_utils}" "${pqrust_internals}"; do
   fi
 done
 
-if rg -n 'fn PQRUST_RUST_randombytes' "${aegis_utils}"; then
+if grep -nE 'fn PQRUST_RUST_randombytes' "${aegis_utils}"; then
   echo "Aegis-PQVM must not export PQRUST_RUST_randombytes; pqrust-internals owns that process-wide symbol." >&2
   exit 1
 fi
 
-if [[ "$(rg -c 'fn PQRUST_RUST_randombytes' "${pqrust_internals}")" != "1" ]]; then
+compat_export_count="$(grep -Ec 'fn PQRUST_RUST_randombytes' "${pqrust_internals}" || true)"
+if [[ "${compat_export_count}" != "1" ]]; then
   echo "pqrust-internals must export exactly one PQRUST_RUST_randombytes implementation." >&2
   exit 1
 fi
 
-if ! rg -q 'pqrust_internals::PQRUST_RUST_randombytes' "${aegis_utils}"; then
+if ! grep -qE 'pqrust_internals::PQRUST_RUST_randombytes' "${aegis_utils}"; then
   echo "Aegis-PQVM randombytes must delegate to the pqrust-internals symbol owner." >&2
   exit 1
 fi
