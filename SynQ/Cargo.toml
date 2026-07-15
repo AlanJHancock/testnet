@@ -9,6 +9,8 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
+governor      = { version = "0.6", features = ["std"] }
+dashmap       = "5"
 k256 = { version = "0.13", features = ["ecdsa"] }
 sha3 = "0.10"
 ruint = { version = "1", features = ["std"] }

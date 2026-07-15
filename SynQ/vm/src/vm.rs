@@ -216,7 +216,9 @@ struct CallFrame {
 // The main VM struct
 pub struct QuantumVM {
     pub stack: Vec<Value>,
-    pub memory: HashMap<usize, Value>,
+    pub memory:             HashMap<usize, Value>,
+    /// Maximum distinct memory addresses per session (PR-F Item 3). Default: 1024.
+    pub max_memory_entries: usize,
     code: Vec<u8>,
     data: Vec<u8>,
     pc: usize,
@@ -243,7 +245,8 @@ impl QuantumVM {
     pub fn new() -> Self {
         QuantumVM {
             stack: Vec::new(),
-            memory: HashMap::new(),
+            memory:             HashMap::new(),
+            max_memory_entries: 1024,
             code: Vec::new(),
             data: Vec::new(),
             pc: 0,
@@ -577,8 +580,15 @@ impl QuantumVM {
                 self.push(value)?;
             }
             OpCode::Store => {
-                let addr = self.pop()?.as_i32()? as usize;
+                let addr  = self.pop()?.as_i32()? as usize;
                 let value = self.pop()?;
+                // PR-F Item 3: enforce per-session memory cap
+                if !self.memory.contains_key(&addr) && self.memory.len() >= self.max_memory_entries {
+                    return Err(VMError::RuntimeError(format!(
+                        "memory cap exceeded: max {} distinct addresses per session",
+                        self.max_memory_entries
+                    )));
+                }
                 self.memory.insert(addr, value);
             }
             OpCode::LoadImm => {

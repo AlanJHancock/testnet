@@ -11,7 +11,14 @@
 //!   • CSPRNG session IDs, session cap, body size limit, source size limit,
 //!     mutex released before VM execution, configurable CORS
 //!
-//! PR-D cryptographic correctness (this commit):
+//! PR-F operational hardening (this commit):
+//!   Item 1 — GET /health/ready: separate readiness endpoint (503 when near cap).
+//!   Item 2 — Per-IP rate limiting: governor token-bucket, 30 req/min sustained,
+//!             burst of 10. Returns 429 with Retry-After header on breach.
+//!   Item 3 — VM memory cap: max 1024 distinct addresses per session (enforced
+//!             in vm.rs Store opcode; configurable via QuantumVM::max_memory_entries).
+//!
+//! PR-D cryptographic correctness (previous):
 //!   Item 1 — Strict hex decoding: hex_decode_strict() returns Result, rejects
 //!             odd-length / invalid-char / empty inputs.
 //!   Item 2 — EIP-191 server-side EVM signature verification in /attest:
@@ -23,12 +30,22 @@
 //!             binary structure; PQC signs this instead of ad-hoc concatenation.
 
 use axum::{
-    extract::{Json, Path, State},
-    http::{Method, StatusCode},
+    extract::{ConnectInfo, Json, Path, State},
+    http::{Method, StatusCode, HeaderValue},
     response::Json as RespJson,
     routing::{delete, get, post},
     Router,
 };
+use dashmap::DashMap;
+use governor::{
+    clock::DefaultClock,
+    middleware::NoOpMiddleware,
+    state::{InMemoryState, NotKeyed},
+    Quota, RateLimiter,
+};
+use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroU32;
+use std::sync::Arc as StdArc;
 use serde::Deserialize;
 use serde_json::json;
 use std::{
@@ -48,6 +65,24 @@ use synq_vm::{QuantumVM, Value};
 // ─── Security constants ───────────────────────────────────────────────────────
 
 const SIGNING_ALGORITHM: &str  = "ML-DSA-65";
+
+// ─── PR-F Item 2: Per-IP rate limiting ───────────────────────────────────────
+// Token-bucket: 10 burst, refill 1 token/2s → 30 req/min sustained.
+// Configurable via SYNQ_RATE_BURST and SYNQ_RATE_PER_SECOND env vars.
+type IpLimiter = RateLimiter<IpAddr, dashmap::DashMap<IpAddr, InMemoryState>, DefaultClock, NoOpMiddleware>;
+
+fn build_rate_limiter() -> StdArc<IpLimiter> {
+    let burst = std::env::var("SYNQ_RATE_BURST")
+        .ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(10);
+    let per_sec_x2 = std::env::var("SYNQ_RATE_PER_SECOND_X2")
+        .ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(2); // token per N seconds
+    let burst    = NonZeroU32::new(burst).unwrap_or(NonZeroU32::new(10).unwrap());
+    let refill   = NonZeroU32::new(per_sec_x2).unwrap_or(NonZeroU32::new(2).unwrap());
+    let quota    = Quota::with_period(std::time::Duration::from_secs(refill.get() as u64))
+        .unwrap()
+        .allow_burst(burst);
+    StdArc::new(RateLimiter::dashmap(quota))
+}
 const SESSION_TTL: Duration    = Duration::from_secs(30 * 60);
 const MAX_SESSIONS: usize      = 100;
 const MAX_SOURCE_BYTES: usize  = 64 * 1024;
@@ -62,6 +97,27 @@ struct Session {
 }
 
 type SessionStore = Arc<Mutex<HashMap<String, Session>>>;
+
+#[derive(Clone)]
+struct AppState {
+    sessions:     SessionStore,
+    rate_limiter: StdArc<IpLimiter>,
+}
+
+/// PR-F Item 2: check the per-IP rate limit.
+/// Returns Ok(()) if the request is within quota, Err(Response) with 429 + Retry-After otherwise.
+/// Returns Ok(()) if within quota, Err(wait_secs) if rate-limited.
+fn check_rate_limit(limiter: &IpLimiter, ip: IpAddr) -> Result<(), u64> {
+    match limiter.check_key(&ip) {
+        Ok(_)  => Ok(()),
+        Err(not_until) => {
+            let wait = not_until.wait_time_from(
+                governor::clock::Clock::now(&DefaultClock::default())
+            ).as_secs() + 1;
+            Err(wait)
+        }
+    }
+}
 
 fn new_session_id() -> String {
     let mut buf = [0u8; 32];
@@ -249,8 +305,16 @@ struct CompileResponse {
 }
 
 async fn compile_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
     Json(req): Json<CompileRequest>,
 ) -> (StatusCode, RespJson<CompileResponse>) {
+    if let Err(wait) = check_rate_limit(&state.rate_limiter, addr.ip()) {
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(CompileResponse {
+            success: false, bytecode: None, signature_sidecar: None, state_vars: vec![],
+            errors: vec![format!("rate limit exceeded — retry in {}s", wait)], warnings: vec![],
+        }));
+    }
     if req.source.len() > MAX_SOURCE_BYTES {
         return (StatusCode::PAYLOAD_TOO_LARGE, RespJson(CompileResponse {
             success: false, bytecode: None, signature_sidecar: None, state_vars: vec![],
@@ -337,8 +401,13 @@ struct AttestResponse {
 }
 
 async fn attest_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
     Json(req): Json<AttestRequest>,
 ) -> (StatusCode, RespJson<AttestResponse>) {
+    if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(AttestResponse { success: false, hybrid_sidecar: None, error: Some("rate limit exceeded — retry later".into()) }));
+    }
     // Item 1: strict hex decode
     let raw_bytecode = match hex_decode_strict(&req.bytecode) {
         Ok(b)  => b,
@@ -483,9 +552,13 @@ struct NewSessionResponse {
 }
 
 async fn session_new_handler(
-    State(store): State<SessionStore>,
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<NewSessionRequest>,
 ) -> (StatusCode, RespJson<NewSessionResponse>) {
+    if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, error: Some("rate limit exceeded — retry later".into()) }));
+    }
     let raw = match hex_decode_strict(&req.bytecode) {
         Ok(b) if !b.is_empty() => b,
         Ok(_) => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
@@ -505,7 +578,7 @@ async fn session_new_handler(
 
     let id = new_session_id();
     {
-        let mut map = store.lock().unwrap();
+        let mut map = state.sessions.lock().unwrap();
         evict_stale(&mut map);
         evict_oldest_if_full(&mut map);
         map.insert(id.clone(), Session { vm, last_used: Instant::now(), state_vars: req.state_vars });
@@ -532,9 +605,13 @@ struct RunResponse {
 }
 
 async fn session_run_handler(
-    State(store): State<SessionStore>,
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<SessionRunRequest>,
 ) -> (StatusCode, RespJson<RunResponse>) {
+    if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), error: Some("rate limit exceeded — retry later".into()) }));
+    }
     let mut vm_args: Vec<Value> = Vec::new();
     for (i, raw) in req.args.unwrap_or_default().iter().enumerate() {
         match parse_arg(raw) {
@@ -547,7 +624,7 @@ async fn session_run_handler(
     }
 
     let mut session = {
-        let mut map = store.lock().unwrap();
+        let mut map = state.sessions.lock().unwrap();
         match map.remove(&req.session_id) {
             Some(s) => s,
             None    => return (StatusCode::OK, RespJson(RunResponse {
@@ -559,7 +636,7 @@ async fn session_run_handler(
 
     let call_result = session.vm.call_function(&req.function, &vm_args);
     session.last_used = Instant::now();
-    { store.lock().unwrap().insert(req.session_id, session); }
+    { state.sessions.lock().unwrap().insert(req.session_id, session); }
 
     match call_result {
         Ok(maybe_val) => {
@@ -583,20 +660,20 @@ async fn session_run_handler(
 // ─── DELETE /session/:id ──────────────────────────────────────────────────────
 
 async fn session_delete_handler(
-    State(store): State<SessionStore>,
+    State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> (StatusCode, RespJson<serde_json::Value>) {
-    let removed = store.lock().unwrap().remove(&id).is_some();
+    let removed = state.sessions.lock().unwrap().remove(&id).is_some();
     (StatusCode::OK, RespJson(json!({ "success": removed })))
 }
 
 // ─── GET /session/:id/state ───────────────────────────────────────────────────
 
 async fn session_state_handler(
-    State(store): State<SessionStore>,
+    State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> (StatusCode, RespJson<serde_json::Value>) {
-    let map = store.lock().unwrap();
+    let map = state.sessions.lock().unwrap();
     let session = match map.get(&session_id) {
         Some(s) => s,
         None    => return (StatusCode::OK, RespJson(json!({ "success": false, "error": "Session not found" }))),
@@ -617,8 +694,8 @@ async fn session_state_handler(
 
 // ─── GET /health ──────────────────────────────────────────────────────────────
 
-async fn health(State(store): State<SessionStore>) -> RespJson<serde_json::Value> {
-    let count = store.lock().unwrap().len();
+async fn health(State(state): State<AppState>) -> RespJson<serde_json::Value> {
+    let count = state.sessions.lock().unwrap().len();
     RespJson(json!({
         "status":            "ok",
         "service":           "synq-compiler",
@@ -633,9 +710,30 @@ async fn health(State(store): State<SessionStore>) -> RespJson<serde_json::Value
 
 // ─── main ─────────────────────────────────────────────────────────────────────
 
+// ─── GET /health/ready ───────────────────────────────────────────────────────
+//
+// PR-F Item 1: Separate readiness endpoint for dependency / load-balancer checks.
+// Returns 200 OK when the service is fully operational (sessions below cap).
+// Returns 503 Service Unavailable when session store is at capacity.
+// Liveness (/health) always returns 200; readiness may return 503.
+
+async fn health_ready(State(state): State<AppState>) -> (StatusCode, RespJson<serde_json::Value>) {
+    let count = state.sessions.lock().unwrap().len();
+    let ready = count < MAX_SESSIONS;
+    let status = if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    (status, RespJson(json!({
+        "ready":           ready,
+        "active_sessions": count,
+        "max_sessions":    MAX_SESSIONS,
+        "reason":          if ready { "ok" } else { "session store at capacity" },
+    })))
+}
+
 #[tokio::main]
 async fn main() {
-    let store: SessionStore = Arc::new(Mutex::new(HashMap::new()));
+    let sessions: SessionStore = Arc::new(Mutex::new(HashMap::new()));
+    let rate_limiter = build_rate_limiter();
+    let store = AppState { sessions, rate_limiter };
 
     let cors_origin = std::env::var("SYNQ_CORS_ORIGIN").unwrap_or_else(|_| "*".to_string());
     let cors = if cors_origin == "*" {
@@ -654,6 +752,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/health",            get(health))
+        .route("/health/ready",      get(health_ready))
         .route("/compile",           post(compile_handler))
         .route("/attest",            post(attest_handler))
         .route("/session/new",       post(session_new_handler))
@@ -675,5 +774,5 @@ async fn main() {
     println!("  Max source:      {} KB", MAX_SOURCE_BYTES / 1024);
     println!("  Signing:         {} (ephemeral, SynQAttestationV1)", SIGNING_ALGORITHM);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 }
