@@ -81,11 +81,6 @@ impl Value {
         matches!(self, Value::U256(_) | Value::U128(_) | Value::I32(_))
     }
 
-    /// True if this value is a U128 or can be promoted to one (no U256).
-    fn is_u128_compat(&self) -> bool {
-        matches!(self, Value::U128(_) | Value::I32(_))
-    }
-
     /// Convert to a canonical Value: shrink U256→U128→I32 when it fits.
     fn from_u256_shrink(v: U256) -> Value {
         let u128_max = U256::from(u128::MAX);
