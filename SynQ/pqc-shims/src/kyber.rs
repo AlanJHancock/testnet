@@ -4,6 +4,7 @@
 //! Provides key encapsulation mechanism for quantum-resistant security.
 
 use pqcrypto::kem::mlkem768;
+use pqcrypto_traits::kem::{Ciphertext, PublicKey, SecretKey, SharedSecret};
 
 /// Kyber-768 public key size in bytes
 pub const KYBER_PUBLIC_KEY_BYTES: usize = 1184;
@@ -17,10 +18,7 @@ pub const KYBER_SHARED_SECRET_BYTES: usize = 32;
 /// Generate a Kyber-768 keypair for key encapsulation
 pub fn keygen() -> Result<(Vec<u8>, Vec<u8>), String> {
     let (pk, sk) = mlkem768::keypair();
-    Ok((
-        pk.as_bytes().to_vec(),
-        sk.as_bytes().to_vec(),
-    ))
+    Ok((pk.as_bytes().to_vec(), sk.as_bytes().to_vec()))
 }
 
 /// Encapsulate a shared secret using the recipient's public key

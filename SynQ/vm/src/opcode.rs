@@ -10,6 +10,7 @@ pub enum VMError {
     InvalidAddress(usize),
     CryptoError(String),
     RuntimeError(String),
+    Reverted(String), // require() failure — carries the require message
 }
 
 impl fmt::Display for VMError {
@@ -22,6 +23,7 @@ impl fmt::Display for VMError {
             VMError::InvalidAddress(addr) => write!(f, "Invalid address: {}", addr),
             VMError::CryptoError(msg) => write!(f, "Crypto error: {}", msg),
             VMError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
+            VMError::Reverted(msg) => write!(f, "require failed: {}", msg),
         }
     }
 }
@@ -57,11 +59,14 @@ pub enum OpCode {
     JumpIf = 0x31,
     Call = 0x32,
     Return = 0x33,
+    Revert = 0x34, // require() failure — followed by 4-byte LE len + message bytes
 
     // Memory operations
     Load = 0x40,
     Store = 0x41,
-    LoadImm = 0x42,
+    LoadImm = 0x42,    // push raw bytes (strings / PQC keys)
+    LoadImm128 = 0x43, // push a 16-byte big-endian u128 (UInt256 values)
+    LoadImm256 = 0x44, // push a 32-byte big-endian U256 (full Ethereum address / real UInt256)
 
     // PQC operations
     DilithiumVerify = 0x80,
@@ -97,9 +102,12 @@ impl TryFrom<u8> for OpCode {
             0x31 => Ok(OpCode::JumpIf),
             0x32 => Ok(OpCode::Call),
             0x33 => Ok(OpCode::Return),
+            0x34 => Ok(OpCode::Revert),
             0x40 => Ok(OpCode::Load),
             0x41 => Ok(OpCode::Store),
             0x42 => Ok(OpCode::LoadImm),
+            0x43 => Ok(OpCode::LoadImm128),
+            0x44 => Ok(OpCode::LoadImm256),
             0x80 => Ok(OpCode::DilithiumVerify),
             0x81 => Ok(OpCode::KyberKeyExchange),
             0x82 => Ok(OpCode::FalconVerify),

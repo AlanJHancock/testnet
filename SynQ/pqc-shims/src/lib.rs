@@ -6,12 +6,12 @@
 //! All implementations use the actual cryptographic algorithms from pqcrypto
 //! and are suitable for production use.
 
-pub mod kyber;
 pub mod dilithium;
 pub mod falcon;
-pub mod sphincs;
-pub mod mceliece;
 pub mod hqc;
+pub mod kyber;
+pub mod mceliece;
+pub mod sphincs;
 
 // Re-export common PQC types - using specific algorithm implementations
 // Note: The pqcrypto API has changed and these generic types are no longer available
