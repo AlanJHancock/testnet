@@ -12,3 +12,4 @@ tower-http = { version = "0.5", features = ["cors"] }
 synq-compiler = { path = "../compiler" }
 synq-vm       = { path = "../vm" }
 hex = { workspace = true }
+ruint = { workspace = true }

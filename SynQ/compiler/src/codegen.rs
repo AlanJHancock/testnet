@@ -1,5 +1,6 @@
 use crate::ast::*;
 use quantumvm::{Assembler, OpCode};
+use ruint::aliases::U256;
 use std::collections::HashMap;
 
 // Memory layout: state variables get fixed contract-wide addresses (0..N).
@@ -250,10 +251,6 @@ impl CodeGenerator {
     fn gen_expression(&mut self, expr: &Expression, scope: &mut FunctionScope) -> Result<(), String> {
         match expr {
             Expression::Literal(Literal::Number(n)) => {
-                // If the literal exceeds i32::MAX, emit as a 16-byte u128
-                // via LoadImm128 so UInt256 state variables are not silently
-                // truncated. Small values stay as Push/i32 for backward compat.
-                // TODO: promote to LoadImm256 when primitive-types crate is added.
                 if *n > i32::MAX as u128 {
                     self.assembler.emit_op(OpCode::LoadImm128);
                     self.assembler.emit_u128(*n as u128);
@@ -261,6 +258,13 @@ impl CodeGenerator {
                     self.assembler.emit_op(OpCode::Push);
                     self.assembler.emit_i32(*n as i32);
                 }
+                Ok(())
+            }
+            Expression::Literal(Literal::BigNumber(s)) => {
+                // Full UInt256 literal (> u128::MAX) — 32 big-endian bytes via LoadImm256.
+                let v: U256 = s.parse().map_err(|_| format!("Invalid UInt256 literal: {}", s))?;
+                self.assembler.emit_op(OpCode::LoadImm256);
+                self.assembler.emit_u256_bytes(&v.to_be_bytes::<32>());
                 Ok(())
             }
             Expression::Literal(Literal::Bool(b)) => {

@@ -34,6 +34,11 @@ impl Assembler {
         self.code.extend_from_slice(&v.to_be_bytes());
     }
 
+    /// Emit a 32-byte big-endian U256 literal (for LoadImm256 / full UInt256).
+    pub fn emit_u256_bytes(&mut self, bytes: &[u8; 32]) {
+        self.code.extend_from_slice(bytes);
+    }
+
     pub fn emit_bytes(&mut self, bytes: &[u8]) {
         self.emit_u32(bytes.len() as u32);
         self.code.extend_from_slice(bytes);

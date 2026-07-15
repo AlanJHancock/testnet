@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use super::opcode::{OpCode, VMError};
+use ruint::aliases::U256;
 use pqc_shims::{dilithium, kyber, falcon, sphincs};
 
 // Value types that can be stored on the stack
@@ -8,8 +9,9 @@ pub enum Value {
     I32(i32),
     I64(i64),
     /// UInt256 values — covers up to 2^128 (full realistic token supply range).
-    /// TODO: promote to U256([u8; 32]) when primitive-types crate is added.
     U128(u128),
+    /// Full 256-bit unsigned integer (Ethereum address, real UInt256).
+    U256(U256),
     Bytes(Vec<u8>),
     Bool(bool),
 }
@@ -35,8 +37,25 @@ impl Value {
     pub fn as_u128(&self) -> Result<u128, VMError> {
         match self {
             Value::U128(v) => Ok(*v),
+            Value::U256(v) => {
+                let u128_max = U256::from(u128::MAX);
+                if *v > u128_max {
+                    return Err(VMError::RuntimeError(
+                        "Value too large for u128 operation".to_string()));
+                }
+                Ok(v.wrapping_to::<u128>())
+            }
             Value::I32(v) if *v >= 0 => Ok(*v as u128),
             _ => Err(VMError::RuntimeError("Expected UInt256 (u128)".to_string())),
+        }
+    }
+
+    pub fn as_u256(&self) -> Result<U256, VMError> {
+        match self {
+            Value::U256(v) => Ok(*v),
+            Value::U128(v) => Ok(U256::from(*v)),
+            Value::I32(v) if *v >= 0 => Ok(U256::from(*v as u128)),
+            _ => Err(VMError::RuntimeError("Expected UInt256".to_string())),
         }
     }
 
@@ -52,13 +71,32 @@ impl Value {
             Value::Bool(v) => Ok(*v),
             Value::I32(v)  => Ok(*v != 0),
             Value::U128(v) => Ok(*v != 0),
+            Value::U256(v) => Ok(*v != U256::ZERO),
             _ => Err(VMError::RuntimeError("Expected bool".to_string())),
         }
     }
 
-    /// True if this value is a U128 or can be promoted to one.
+    /// True if this value is a large uint or can be promoted to one.
+    fn is_uint_compat(&self) -> bool {
+        matches!(self, Value::U256(_) | Value::U128(_) | Value::I32(_))
+    }
+
+    /// True if this value is a U128 or can be promoted to one (no U256).
     fn is_u128_compat(&self) -> bool {
         matches!(self, Value::U128(_) | Value::I32(_))
+    }
+
+    /// Convert to a canonical Value: shrink U256→U128→I32 when it fits.
+    fn from_u256_shrink(v: U256) -> Value {
+        let u128_max = U256::from(u128::MAX);
+        let i32_max  = U256::from(i32::MAX as u64);
+        if v <= i32_max {
+            Value::I32(v.wrapping_to::<u128>() as i32)
+        } else if v <= u128_max {
+            Value::U128(v.wrapping_to::<u128>())
+        } else {
+            Value::U256(v)
+        }
     }
 }
 
@@ -274,161 +312,103 @@ impl QuantumVM {
             OpCode::Add => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                let av = match &a {
-                    Value::U128(v) => *v,
-                    Value::I32(v)  => {
-                        if *v < 0 { return Err(VMError::RuntimeError(
-                            format!("UInt256 value {} is negative; UInt256 cannot be negative", v))); }
-                        *v as u128
-                    }
-                    _ => return Err(VMError::RuntimeError("Add: expected numeric value".to_string())),
-                };
-                let bv = match &b {
-                    Value::U128(v) => *v,
-                    Value::I32(v)  => {
-                        if *v < 0 { return Err(VMError::RuntimeError(
-                            format!("UInt256 value {} is negative; UInt256 cannot be negative", v))); }
-                        *v as u128
-                    }
-                    _ => return Err(VMError::RuntimeError("Add: expected numeric value".to_string())),
-                };
-                let result = av.checked_add(bv)
-                    .ok_or_else(|| VMError::RuntimeError("UInt256 overflow on Add".to_string()))?;
-                if result <= i32::MAX as u128 {
-                    self.push(Value::I32(result as i32))?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    let av = a.as_u256()?;
+                    let bv = b.as_u256()?;
+                    let result = av.checked_add(bv)
+                        .ok_or_else(|| VMError::RuntimeError("UInt256 overflow on Add".to_string()))?;
+                    self.push(Value::from_u256_shrink(result))?;
                 } else {
-                    self.push(Value::U128(result))?;
+                    return Err(VMError::RuntimeError("Add: expected numeric value".to_string()));
                 }
             }
             OpCode::Sub => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                // All numeric values in SynQ are UInt256 — treat I32 as unsigned.
-                // Promote both operands to u128, check for underflow, shrink result
-                // back to I32 if it fits (avoids unnecessary U128 inflation).
-                let av = match &a {
-                    Value::U128(v) => *v,
-                    Value::I32(v)  => {
-                        if *v < 0 { return Err(VMError::RuntimeError(
-                            format!("UInt256 underflow: left operand {} is negative", v))); }
-                        *v as u128
-                    }
-                    _ => return Err(VMError::RuntimeError("Sub: expected numeric value".to_string())),
-                };
-                let bv = match &b {
-                    Value::U128(v) => *v,
-                    Value::I32(v)  => {
-                        if *v < 0 { return Err(VMError::RuntimeError(
-                            format!("UInt256 underflow: right operand {} is negative", v))); }
-                        *v as u128
-                    }
-                    _ => return Err(VMError::RuntimeError("Sub: expected numeric value".to_string())),
-                };
-                let result = av.checked_sub(bv)
-                    .ok_or_else(|| VMError::RuntimeError(
-                        format!("UInt256 underflow on Sub: {} - {} would be negative", av, bv)))?;
-                if result <= i32::MAX as u128 {
-                    self.push(Value::I32(result as i32))?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    let av = a.as_u256()?;
+                    let bv = b.as_u256()?;
+                    let result = av.checked_sub(bv)
+                        .ok_or_else(|| VMError::RuntimeError(
+                            format!("UInt256 underflow on Sub: {} - {} would be negative", av, bv)))?;
+                    self.push(Value::from_u256_shrink(result))?;
                 } else {
-                    self.push(Value::U128(result))?;
+                    return Err(VMError::RuntimeError("Sub: expected numeric value".to_string()));
                 }
             }
             OpCode::Mul => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                if a.is_u128_compat() && b.is_u128_compat() && (matches!(a, Value::U128(_)) || matches!(b, Value::U128(_))) {
-                    let av = a.as_u128()?;
-                    let bv = b.as_u128()?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    let av = a.as_u256()?;
+                    let bv = b.as_u256()?;
                     let result = av.checked_mul(bv)
                         .ok_or_else(|| VMError::RuntimeError("UInt256 overflow on Mul".to_string()))?;
-                    self.push(Value::U128(result))?;
+                    self.push(Value::from_u256_shrink(result))?;
                 } else {
-                    let av = a.as_i32()?;
-                    let bv = b.as_i32()?;
-                    self.push(Value::I32(av.wrapping_mul(bv)))?;
+                    return Err(VMError::RuntimeError("Mul: expected numeric value".to_string()));
                 }
             }
             OpCode::Div => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                if a.is_u128_compat() && b.is_u128_compat() && (matches!(a, Value::U128(_)) || matches!(b, Value::U128(_))) {
-                    let av = a.as_u128()?;
-                    let bv = b.as_u128()?;
-                    if bv == 0 { return Err(VMError::RuntimeError("Division by zero".to_string())); }
-                    self.push(Value::U128(av / bv))?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    let av = a.as_u256()?;
+                    let bv = b.as_u256()?;
+                    if bv == U256::ZERO { return Err(VMError::RuntimeError("Division by zero".to_string())); }
+                    self.push(Value::from_u256_shrink(av / bv))?;
                 } else {
-                    let av = a.as_i32()?;
-                    let bv = b.as_i32()?;
-                    if bv == 0 { return Err(VMError::RuntimeError("Division by zero".to_string())); }
-                    self.push(Value::I32(av / bv))?;
+                    return Err(VMError::RuntimeError("Div: expected numeric value".to_string()));
                 }
             }
 
-            // ── Comparisons — handles I32, U128, and mixed ─────────────────
+            // ── Comparisons — handles I32, U128, U256 and mixed ───────────
             OpCode::Eq => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                let result = match (&a, &b) {
-                    (Value::U128(av), Value::U128(bv)) => av == bv,
-                    (Value::U128(av), Value::I32(bv))  => *bv >= 0 && *av == (*bv as u128),
-                    (Value::I32(av),  Value::U128(bv)) => *av >= 0 && (*av as u128) == *bv,
-                    _ => a.as_i32()? == b.as_i32()?,
-                };
+                let result = if a.is_uint_compat() && b.is_uint_compat() {
+                    a.as_u256()? == b.as_u256()?
+                } else { a.as_i32()? == b.as_i32()? };
                 self.push(Value::Bool(result))?;
             }
             OpCode::Ne => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                let result = match (&a, &b) {
-                    (Value::U128(av), Value::U128(bv)) => av != bv,
-                    (Value::U128(av), Value::I32(bv))  => *bv < 0 || *av != (*bv as u128),
-                    (Value::I32(av),  Value::U128(bv)) => *av < 0 || (*av as u128) != *bv,
-                    _ => a.as_i32()? != b.as_i32()?,
-                };
+                let result = if a.is_uint_compat() && b.is_uint_compat() {
+                    a.as_u256()? != b.as_u256()?
+                } else { a.as_i32()? != b.as_i32()? };
                 self.push(Value::Bool(result))?;
             }
             OpCode::Lt => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                let result = match (&a, &b) {
-                    (Value::U128(av), Value::U128(bv)) => av < bv,
-                    (Value::U128(av), Value::I32(bv))  => if *bv < 0 { false } else { *av < (*bv as u128) },
-                    (Value::I32(av),  Value::U128(bv))  => if *av < 0 { true  } else { (*av as u128) < *bv },
-                    _ => a.as_i32()? < b.as_i32()?,
-                };
+                let result = if a.is_uint_compat() && b.is_uint_compat() {
+                    a.as_u256()? < b.as_u256()?
+                } else { a.as_i32()? < b.as_i32()? };
                 self.push(Value::Bool(result))?;
             }
             OpCode::Le => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                let result = match (&a, &b) {
-                    (Value::U128(av), Value::U128(bv)) => av <= bv,
-                    (Value::U128(av), Value::I32(bv))  => if *bv < 0 { false } else { *av <= (*bv as u128) },
-                    (Value::I32(av),  Value::U128(bv))  => if *av < 0 { true  } else { (*av as u128) <= *bv },
-                    _ => a.as_i32()? <= b.as_i32()?,
-                };
+                let result = if a.is_uint_compat() && b.is_uint_compat() {
+                    a.as_u256()? <= b.as_u256()?
+                } else { a.as_i32()? <= b.as_i32()? };
                 self.push(Value::Bool(result))?;
             }
             OpCode::Gt => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                let result = match (&a, &b) {
-                    (Value::U128(av), Value::U128(bv)) => av > bv,
-                    (Value::U128(av), Value::I32(bv))  => if *bv < 0 { true  } else { *av > (*bv as u128) },
-                    (Value::I32(av),  Value::U128(bv))  => if *av < 0 { false } else { (*av as u128) > *bv },
-                    _ => a.as_i32()? > b.as_i32()?,
-                };
+                let result = if a.is_uint_compat() && b.is_uint_compat() {
+                    a.as_u256()? > b.as_u256()?
+                } else { a.as_i32()? > b.as_i32()? };
                 self.push(Value::Bool(result))?;
             }
             OpCode::Ge => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                let result = match (&a, &b) {
-                    (Value::U128(av), Value::U128(bv)) => av >= bv,
-                    (Value::U128(av), Value::I32(bv))  => if *bv < 0 { true  } else { *av >= (*bv as u128) },
-                    (Value::I32(av),  Value::U128(bv))  => if *av < 0 { false } else { (*av as u128) >= *bv },
-                    _ => a.as_i32()? >= b.as_i32()?,
-                };
+                let result = if a.is_uint_compat() && b.is_uint_compat() {
+                    a.as_u256()? >= b.as_u256()?
+                } else { a.as_i32()? >= b.as_i32()? };
                 self.push(Value::Bool(result))?;
             }
 
@@ -484,10 +464,16 @@ impl QuantumVM {
                 self.push(Value::Bytes(bytes))?;
             }
             OpCode::LoadImm128 => {
-                // 16 big-endian bytes → Value::U128  (UInt256 literals)
+                // 16 big-endian bytes → Value::U128  (UInt256 literals ≤ 2^128)
                 let bytes = self.read_bytes(16)?;
                 let v = u128::from_be_bytes(bytes.try_into().unwrap());
                 self.push(Value::U128(v))?;
+            }
+            OpCode::LoadImm256 => {
+                // 32 big-endian bytes → Value::U256  (full Ethereum address / real UInt256)
+                let bytes = self.read_bytes(32)?;
+                let v = U256::from_be_bytes::<32>(bytes.try_into().unwrap());
+                self.push(Value::from_u256_shrink(v))?;
             }
 
             // ── PQC ────────────────────────────────────────────────────────

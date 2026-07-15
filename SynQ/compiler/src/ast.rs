@@ -114,6 +114,7 @@ pub enum Type {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Literal {
     String(String),
-    Number(u128),  // u128 so literals up to UInt256 range parse correctly
+    Number(u128),      // fits in u128 (≤ 2^128-1)
+    BigNumber(String), // decimal string for values > u128::MAX (full UInt256)
     Bool(bool),
 }

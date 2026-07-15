@@ -23,6 +23,7 @@ use std::{
 };
 use tower_http::cors::{Any, CorsLayer};
 use synq_compiler::{PQCCompiler, PQCSecurityLevel};
+use ruint::aliases::U256;
 use synq_vm::{QuantumVM, Value};
 
 const SIGNING_ALGORITHM: &str = "dilithium";
@@ -70,6 +71,7 @@ fn value_to_json(v: &Value) -> serde_json::Value {
         Value::I32(n)   => json!({"type": "I32",  "value": n}),
         Value::I64(n)   => json!({"type": "I64",  "value": n.to_string()}),
         Value::U128(n)  => json!({"type": "U128", "value": n.to_string()}),
+        Value::U256(n)  => json!({"type": "U256", "value": n.to_string()}),
         Value::Bool(b)  => json!({"type": "Bool", "value": b}),
         Value::Bytes(b) => json!({"type": "Bytes","value": hex_encode(b)}),
     }
@@ -80,6 +82,7 @@ fn value_display(v: &Value) -> String {
         Value::I32(n)   => n.to_string(),
         Value::I64(n)   => n.to_string(),
         Value::U128(n)  => n.to_string(),
+        Value::U256(n)  => n.to_string(),
         Value::Bool(b)  => b.to_string(),
         Value::Bytes(b) => format!("0x{}", hex_encode(b)),
     }
@@ -104,17 +107,26 @@ fn parse_arg(v: &serde_json::Value) -> Result<Value, String> {
             if let Some(u) = n.as_u64() {
                 return Ok(Value::U128(u as u128));
             }
-            Err(format!("Cannot represent {} as an integer", n))
+            // For values > u64::MAX (e.g. full Ethereum addresses as UInt256),
+            // serde_json preserves the raw decimal string — parse it directly.
+            match n.to_string().parse::<u128>() {
+                Ok(u) => Ok(Value::U128(u)),
+                Err(_) => Err(format!("Cannot represent {} as a UInt256 (max 2^128-1)", n)),
+            }
         }
         serde_json::Value::String(s) => {
             let s = s.trim();
-            // Reject explicit negative strings
             if s.starts_with('-') {
                 return Err(format!("UInt256 arguments must be non-negative, got {}", s));
             }
-            match s.parse::<u128>() {
-                Ok(u) => Ok(if u <= i32::MAX as u128 { Value::I32(u as i32) } else { Value::U128(u) }),
-                Err(_) => Err(format!("Cannot parse {:?} as a non-negative integer", s)),
+            // Try u128 first (fast path), fall back to full U256 for Ethereum addresses.
+            if let Ok(u) = s.parse::<u128>() {
+                return Ok(if u <= i32::MAX as u128 { Value::I32(u as i32) } else { Value::U128(u) });
+            }
+            // Full UInt256 path (e.g. 160-bit Ethereum address as decimal)
+            match s.parse::<U256>() {
+                Ok(v)  => Ok(Value::U256(v)),
+                Err(_) => Err(format!("Cannot parse {:?} as a UInt256 integer", s)),
             }
         }
         other => Err(format!("Expected number or string, got {}", other)),
@@ -380,6 +392,7 @@ async fn session_state_handler(
         let json_val = match val {
             Some(synq_vm::Value::I32(v))  => serde_json::json!(v),
             Some(synq_vm::Value::U128(v)) => serde_json::json!(v.to_string()),
+            Some(synq_vm::Value::U256(v)) => serde_json::json!(v.to_string()),
             None => serde_json::json!(0),
             _ => serde_json::json!(null),
         };

@@ -66,6 +66,7 @@ pub enum OpCode {
     Store     = 0x41,
     LoadImm   = 0x42,  // push raw bytes (strings / PQC keys)
     LoadImm128 = 0x43, // push a 16-byte big-endian u128 (UInt256 values)
+    LoadImm256 = 0x44, // push a 32-byte big-endian U256 (full Ethereum address / real UInt256)
 
     // PQC operations
     DilithiumVerify  = 0x80,
@@ -106,6 +107,7 @@ impl TryFrom<u8> for OpCode {
             0x41 => Ok(OpCode::Store),
             0x42 => Ok(OpCode::LoadImm),
             0x43 => Ok(OpCode::LoadImm128),
+            0x44 => Ok(OpCode::LoadImm256),
             0x80 => Ok(OpCode::DilithiumVerify),
             0x81 => Ok(OpCode::KyberKeyExchange),
             0x82 => Ok(OpCode::FalconVerify),

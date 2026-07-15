@@ -178,9 +178,14 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
             Expression::Call(name, args)
         }
         Rule::literal         => parse_expression(pair.into_inner().next().unwrap()),
-        Rule::number_literal  => Expression::Literal(Literal::Number(
-            pair.as_str().parse::<u128>().unwrap_or(0)
-        )),
+        Rule::number_literal  => {
+            let s = pair.as_str();
+            // Try u128 first; if it overflows, keep as BigNumber string for full U256.
+            match s.parse::<u128>() {
+                Ok(n)  => Expression::Literal(Literal::Number(n)),
+                Err(_) => Expression::Literal(Literal::BigNumber(s.to_string())),
+            }
+        }
         Rule::string_literal  => Expression::Literal(Literal::String(
             pair.as_str().trim_matches('"').to_string()
         )),
