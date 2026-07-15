@@ -32,6 +32,10 @@ CHUNK_SIZE = 512 * 1024 * 1024
 GRACE_SECS = 0
 CATALOG_DOMAIN = "SYNERGY_ARCHIVE_SNAPSHOT_CATALOG_V1"
 DISTRIBUTION_DOMAIN = "SYNERGY_ARCHIVE_SNAPSHOT_DISTRIBUTION_V1"
+CATALOG_SCHEMA = "synergy-archive-snapshot-catalog-v1"
+DISTRIBUTION_SCHEMA = "synergy-archive-snapshot-distribution-v1"
+BINARY_COMPATIBILITY = "synergy-testnet-v2-validator-pruned-v1"
+PRODUCER_NODE_KIND = "archive-validator"
 DEFAULT_ROOT = Path("/Users/Shared/Synergy/archive-validator")
 DEFAULT_PUBLISH_ROOT = Path("/Volumes/Synergy_Archive/archive-validator/snapshots")
 DEFAULT_RUNTIME = Path("/usr/local/synergy/bin/synergy-archive-validator-node")
@@ -361,7 +365,8 @@ def layout(root: Path, publish_root: Path) -> None:
 
 
 def identity_path(root: Path) -> Path:
-    return root / "keys" / "archive-authority-identity.json"
+    configured = os.environ.get("SYNERGY_AEGIS_ARCHIVE_IDENTITY", "").strip()
+    return Path(configured) if configured else root / "keys" / "archive-authority-identity.json"
 
 
 def init_identity(aegis: Path, root: Path, uma_id: str) -> dict[str, Any]:
@@ -384,6 +389,8 @@ def init_identity(aegis: Path, root: Path, uma_id: str) -> dict[str, Any]:
 
 
 def sign_json(aegis: Path, root: Path, domain: str, payload: Path, signature: Path) -> dict[str, Any]:
+    signature.parent.mkdir(parents=True, exist_ok=True)
+    signature.unlink(missing_ok=True)
     output = run(
         [
             str(require_executable(aegis)),
@@ -418,6 +425,9 @@ def verify_json(
         "--signature",
         str(signature),
     ]
+    expected_signer_sha256 = expected_signer_sha256 or os.environ.get(
+        "SYNERGY_AEGIS_ARCHIVE_SIGNER_SHA256", ""
+    ).strip()
     if expected_signer_sha256:
         command += ["--expected-signer-sha256", expected_signer_sha256]
     return json.loads(run(command))
@@ -709,7 +719,7 @@ def read_catalog(publish_root: Path) -> dict[str, Any]:
     catalog_path, _ = catalog_paths(publish_root)
     if not catalog_path.exists():
         return {
-            "schema": "synergy-archive-snapshot-catalog-v1",
+            "schema": CATALOG_SCHEMA,
             "chain_id": CHAIN_ID,
             "network_id": NETWORK_ID,
             "genesis_hash": GENESIS_HASH,
@@ -722,6 +732,39 @@ def read_catalog(publish_root: Path) -> dict[str, Any]:
     if catalog.get("genesis_hash") != GENESIS_HASH:
         raise RuntimeError("catalog genesis hash mismatch")
     return catalog
+
+
+def catalog_content_root(snapshots: list[dict[str, Any]]) -> str:
+    digest = hashlib.sha256()
+    for snapshot in snapshots:
+        digest.update(
+            json.dumps(
+                snapshot,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        )
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def enrich_public_catalog_entry(entry: dict[str, Any]) -> None:
+    entry["producer_role"] = "archive_validator"
+    entry["producer_node_kind"] = PRODUCER_NODE_KIND
+    entry["catalog_schema"] = CATALOG_SCHEMA
+    entry["distribution_schema"] = DISTRIBUTION_SCHEMA
+    entry["binary_compatibility"] = BINARY_COMPATIBILITY
+    entry["compressed_size_bytes"] = int(entry.get("size_compressed", 0))
+    mirrors = entry.get("mirror_urls") or []
+    if not mirrors:
+        return
+    base_url = str(mirrors[0]).rstrip("/")
+    prefix = f"{base_url}/snapshots/{int(entry['height'])}"
+    entry["snapshot_url"] = f"{prefix}/snapshot.tar.zst"
+    entry["manifest_url"] = f"{prefix}/distribution-manifest.json"
+    entry["manifest_signature_url"] = f"{prefix}/signature.sig"
+    entry["checksums_url"] = f"{prefix}/checksums.sha256"
 
 
 def write_signed_catalog(aegis: Path, root: Path, publish_root: Path, catalog: dict[str, Any]) -> None:
@@ -749,6 +792,16 @@ def write_signed_catalog(aegis: Path, root: Path, publish_root: Path, catalog: d
             validate_consensus_fork_metadata(entry_fork)
         if consensus_fork is not None and entry_fork is not None and entry_fork != consensus_fork:
             raise RuntimeError("snapshot catalog consensus fork metadata mismatch")
+        enrich_public_catalog_entry(entry)
+    catalog["catalog_schema"] = CATALOG_SCHEMA
+    catalog["distribution_schema"] = DISTRIBUTION_SCHEMA
+    catalog["binary_compatibility"] = BINARY_COMPATIBILITY
+    catalog["producer_role"] = "archive_validator"
+    catalog["producer_node_kind"] = PRODUCER_NODE_KIND
+    catalog["catalog_signature_status"] = "AEGIS_PQC_VERIFIED"
+    catalog["signature_scheme"] = "aegis-pqc"
+    catalog["signature_domain"] = CATALOG_DOMAIN
+    catalog["catalog_content_root"] = catalog_content_root(catalog.get("snapshots", []))
     catalog_path, sig_path = catalog_paths(publish_root)
     json_dump(catalog_path, catalog)
     sign_json(aegis, root, CATALOG_DOMAIN, catalog_path, sig_path)
@@ -1598,7 +1651,7 @@ def add_common(parser: argparse.ArgumentParser) -> None:
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser()
     sub = command.add_subparsers(dest="command", required=True)
-    for name in ["init", "status", "catalog", "prune", "pin", "unpin", "create-snapshot", "publish-snapshot", "verify-distribution", "serve", "worker", "record-majority-proof"]:
+    for name in ["init", "status", "catalog", "refresh-catalog", "prune", "pin", "unpin", "create-snapshot", "publish-snapshot", "verify-distribution", "serve", "worker", "record-majority-proof"]:
         add_common(sub.add_parser(name))
     sub.choices["init"].add_argument("--uma-id", default="archive-validator-01")
     sub.choices["prune"].add_argument("--apply", action="store_true")
@@ -1662,6 +1715,10 @@ def main() -> int:
     elif args.command == "status":
         print(json.dumps(status(args), indent=2, sort_keys=True))
     elif args.command == "catalog":
+        print(json.dumps(read_catalog(args.publish_root), indent=2, sort_keys=True))
+    elif args.command == "refresh-catalog":
+        catalog = read_catalog(args.publish_root)
+        write_signed_catalog(args.aegis, args.root, args.publish_root, catalog)
         print(json.dumps(read_catalog(args.publish_root), indent=2, sort_keys=True))
     elif args.command == "create-snapshot":
         if not args.fixture_mode and args.majority_proof_marker is None:

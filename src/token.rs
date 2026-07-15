@@ -2196,12 +2196,21 @@ impl TokenManager {
                         .as_deref()
                         .map(|data| data.starts_with("stake:"))
                         .unwrap_or(false);
+                let is_stake_transaction = tx
+                    .data
+                    .as_deref()
+                    .map(|data| data.starts_with("stake:"))
+                    .unwrap_or(false);
                 let is_validator_activation = tx
                     .data
                     .as_deref()
                     .map(|data| data.starts_with("validator_activation:"))
                     .unwrap_or(false);
-                if !is_token_transfer && !is_native_transfer && !is_validator_activation {
+                if !is_token_transfer
+                    && !is_native_transfer
+                    && !is_stake_transaction
+                    && !is_validator_activation
+                {
                     continue;
                 }
 
@@ -3315,6 +3324,44 @@ mod tests {
         assert_eq!(manager.get_balance(&staker, "SNRG"), 7_000);
         assert_eq!(manager.get_balance(&validator, "SNRG"), 0);
         assert_eq!(manager.get_staked_balance(&staker, "SNRG"), 3_000);
+    }
+
+    #[test]
+    fn replay_chain_transactions_restores_staking_state() {
+        let manager = TokenManager::new();
+        let staker = crate::address::generate_wallet_address("staking-replay-staker");
+        let validator = crate::address::generate_validator_address("staking-replay-validator", 1);
+        let tx = Transaction::new(
+            staker.clone(),
+            validator.clone(),
+            50_000,
+            0,
+            vec![1, 2, 3],
+            2,
+            10,
+            Some(format!(
+                "stake:{{\"validator\":\"{}\",\"token\":\"SNRG\",\"amount\":50000}}",
+                validator
+            )),
+            "fndsa".to_string(),
+        );
+        let fee = tx
+            .get_total_network_fee_u64()
+            .expect("staking replay transaction fee should be valid");
+        seed_snrg_balance(&manager, &staker, 50_000 + fee);
+
+        let mut chain = crate::block::BlockChain::new();
+        chain.add_block(crate::block::Block::new(
+            1,
+            vec![tx],
+            "replay-parent".to_string(),
+            "replay-validator".to_string(),
+            0,
+        ));
+
+        assert_eq!(manager.replay_chain_transactions(&chain), (1, 0));
+        assert_eq!(manager.get_staked_balance(&staker, "SNRG"), 50_000);
+        assert_eq!(manager.get_balance(&validator, "SNRG"), 0);
     }
 
     #[test]

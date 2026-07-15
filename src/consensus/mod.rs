@@ -19,6 +19,7 @@ pub mod synergy_score;
 pub mod tests;
 pub mod timing_trace;
 pub mod validator_keys;
+pub mod validator_scoring_params;
 pub mod vrf;
 
 use self::consensus_algorithm::ProofOfSynergy;
