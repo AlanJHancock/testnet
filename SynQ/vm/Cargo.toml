@@ -15,3 +15,6 @@ pqc_shims = { package = "synq-pqc-shims", path = "../pqc-shims" }
 # PQC libraries
 pqcrypto = { workspace = true }
 ruint = { workspace = true }
+
+[dev-dependencies]
+synq-compiler = { path = "../compiler" }

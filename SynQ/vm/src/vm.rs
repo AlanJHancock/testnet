@@ -3,6 +3,19 @@ use super::opcode::{OpCode, VMError};
 use ruint::aliases::U256;
 use pqc_shims::{dilithium, kyber, falcon, sphincs};
 
+// ── PR-B constants ──────────────────────────────────────────────────────────
+
+/// Default maximum execution steps per call_function() invocation.
+/// 1,000,000 steps is generous for any real contract but terminates
+/// infinite loops in bounded time (milliseconds at native speed).
+pub const DEFAULT_MAX_STEPS: usize = 1_000_000;
+
+/// Default maximum call-stack depth enforced at runtime.
+/// Matches the compile-time MAX_CALL_DEPTH = 64 in compiler/src/lib.rs —
+/// belt-and-suspenders: the compiler rejects obvious infinite recursion
+/// statically; this catches anything that slips through at runtime.
+pub const DEFAULT_MAX_CALL_DEPTH: usize = 64;
+
 // Value types that can be stored on the stack
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -59,20 +72,18 @@ impl Value {
         }
     }
 
-    pub fn as_bytes(&self) -> Result<&[u8], VMError> {
+    pub fn as_bool(&self) -> Result<bool, VMError> {
         match self {
-            Value::Bytes(v) => Ok(v),
-            _ => Err(VMError::RuntimeError("Expected bytes".to_string())),
+            Value::Bool(b) => Ok(*b),
+            Value::I32(v)  => Ok(*v != 0),
+            _ => Err(VMError::RuntimeError("Expected bool".to_string())),
         }
     }
 
-    pub fn as_bool(&self) -> Result<bool, VMError> {
+    pub fn as_bytes(&self) -> Result<&[u8], VMError> {
         match self {
-            Value::Bool(v) => Ok(*v),
-            Value::I32(v)  => Ok(*v != 0),
-            Value::U128(v) => Ok(*v != 0),
-            Value::U256(v) => Ok(*v != U256::ZERO),
-            _ => Err(VMError::RuntimeError("Expected bool".to_string())),
+            Value::Bytes(b) => Ok(b),
+            _ => Err(VMError::RuntimeError("Expected bytes".to_string())),
         }
     }
 
@@ -184,6 +195,24 @@ fn parse_function_table(data: &[u8]) -> Result<HashMap<String, FunctionEntry>, V
     Ok(table)
 }
 
+// ── PR-B Item 1: Per-call stack frame ───────────────────────────────────────
+//
+// Each Call opcode pushes a CallFrame onto call_stack. Return pops it and
+// restores pc. The frame carries no cloned memory — the compiler already
+// assigns disjoint address blocks per function (state vars at low addresses,
+// each function's locals/params at a unique higher range) so there is no
+// aliasing between frames. This is the simplest correct design given the
+// existing compiler address layout.
+//
+// call_function() (the external API) uses a separate snapshot/rollback
+// mechanism (PR-B Item 2) on the full memory, which subsumes any frame
+// isolation concern for the top-level call.
+#[derive(Debug, Clone)]
+struct CallFrame {
+    /// The PC to return to when this frame's Return opcode fires.
+    return_pc: usize,
+}
+
 // The main VM struct
 pub struct QuantumVM {
     pub stack: Vec<Value>,
@@ -191,9 +220,23 @@ pub struct QuantumVM {
     code: Vec<u8>,
     data: Vec<u8>,
     pc: usize,
-    call_stack: Vec<usize>,
+    /// PR-B Item 1: call stack now carries full CallFrame structs, not bare PCs.
+    call_stack: Vec<CallFrame>,
     halted: bool,
     functions: HashMap<String, FunctionEntry>,
+
+    // ── PR-B Item 3: step limit ─────────────────────────────────────────────
+    /// Steps executed in the current call_function() invocation.
+    /// Reset to 0 at the start of each call_function() call.
+    steps: usize,
+    /// Hard limit on steps per invocation.  Default: DEFAULT_MAX_STEPS.
+    /// Set this before calling call_function() to override.
+    pub max_steps: usize,
+
+    // ── PR-B Item 4: runtime call depth guard ──────────────────────────────
+    /// Hard limit on call_stack depth enforced at the Call opcode.
+    /// Default: DEFAULT_MAX_CALL_DEPTH.
+    pub max_call_depth: usize,
 }
 
 impl QuantumVM {
@@ -207,6 +250,9 @@ impl QuantumVM {
             call_stack: Vec::new(),
             halted: false,
             functions: HashMap::new(),
+            steps: 0,
+            max_steps: DEFAULT_MAX_STEPS,
+            max_call_depth: DEFAULT_MAX_CALL_DEPTH,
         }
     }
 
@@ -225,6 +271,7 @@ impl QuantumVM {
         self.data  = bytecode[code_end..data_end].to_vec();
         self.pc    = 0;
         self.halted = false;
+        self.steps  = 0;  // reset step counter on fresh load
         self.functions = parse_function_table(&self.data)?;
 
         Ok(())
@@ -248,32 +295,68 @@ impl QuantumVM {
             )));
         }
 
+        // ── PR-B Item 2: snapshot memory before any mutations ───────────────
+        // On ANY error (Revert, RuntimeError, overflow, etc.) we restore the
+        // snapshot so partial state changes from a failed call never persist.
+        // This matches EVM atomicity: a reverted transaction leaves no trace.
+        let snapshot = self.memory.clone();
+
+        // Write params into memory
         for (addr, value) in entry.param_addresses.iter().zip(args.iter()) {
             self.memory.insert(*addr as usize, value.clone());
         }
 
         let sentinel = self.code.len();
-        self.call_stack.push(sentinel);
+        self.call_stack.push(CallFrame { return_pc: sentinel });
         self.pc = entry.address as usize;
         self.halted = false;
+        // ── PR-B Item 3: reset step counter for this invocation ─────────────
+        self.steps = 0;
 
-        while !self.halted {
+        let result = loop {
+            if self.halted {
+                break Ok(());
+            }
             if self.pc == sentinel {
                 self.halted = true;
-                break;
+                break Ok(());
             }
             if self.pc >= self.code.len() {
-                return Err(VMError::InvalidAddress(self.pc));
+                break Err(VMError::InvalidAddress(self.pc));
             }
-            self.execute_instruction()?;
-        }
+            match self.execute_instruction() {
+                Ok(()) => {}
+                Err(e) => break Err(e),
+            }
+        };
 
-        Ok(self.stack.pop())
+        match result {
+            Ok(()) => Ok(self.stack.pop()),
+            Err(e) => {
+                // ── PR-B Item 2: rollback on any error ──────────────────────
+                self.memory = snapshot;
+                // Clean up any dangling call frames from this invocation
+                self.call_stack.clear();
+                self.stack.clear();
+                Err(e)
+            }
+        }
     }
 
     pub fn execute(&mut self) -> Result<(), VMError> {
-        while !self.halted && self.pc < self.code.len() {
-            self.execute_instruction()?;
+        self.steps = 0;
+        let snapshot = self.memory.clone();
+        loop {
+            if self.halted || self.pc >= self.code.len() {
+                break;
+            }
+            match self.execute_instruction() {
+                Ok(()) => {}
+                Err(e) => {
+                    self.memory = snapshot;
+                    return Err(e);
+                }
+            }
         }
         Ok(())
     }
@@ -281,6 +364,12 @@ impl QuantumVM {
     fn execute_instruction(&mut self) -> Result<(), VMError> {
         if self.pc >= self.code.len() {
             return Err(VMError::InvalidAddress(self.pc));
+        }
+
+        // ── PR-B Item 3: step counter / gas analogue ────────────────────────
+        self.steps += 1;
+        if self.steps > self.max_steps {
+            return Err(VMError::StepLimitExceeded(self.max_steps));
         }
 
         let opcode = OpCode::try_from(self.code[self.pc])?;
@@ -303,7 +392,7 @@ impl QuantumVM {
                 self.push(b)?;
             }
 
-            // ── Arithmetic — handles I32, U128, and mixed ──────────────────
+            // ── Arithmetic — handles I32, U128, and U256 ───────────────────
             OpCode::Add => {
                 let b = self.pop()?;
                 let a = self.pop()?;
@@ -350,33 +439,42 @@ impl QuantumVM {
                 if a.is_uint_compat() && b.is_uint_compat() {
                     let av = a.as_u256()?;
                     let bv = b.as_u256()?;
-                    if bv == U256::ZERO { return Err(VMError::RuntimeError("Division by zero".to_string())); }
-                    self.push(Value::from_u256_shrink(av / bv))?;
+                    if bv == U256::ZERO {
+                        return Err(VMError::RuntimeError("Division by zero".to_string()));
+                    }
+                    let result = av.checked_div(bv)
+                        .ok_or_else(|| VMError::RuntimeError("UInt256 Div error".to_string()))?;
+                    self.push(Value::from_u256_shrink(result))?;
                 } else {
                     return Err(VMError::RuntimeError("Div: expected numeric value".to_string()));
                 }
             }
-
             OpCode::Rem => {
                 let b = self.pop()?;
                 let a = self.pop()?;
                 if a.is_uint_compat() && b.is_uint_compat() {
                     let av = a.as_u256()?;
                     let bv = b.as_u256()?;
-                    if bv == U256::ZERO { return Err(VMError::RuntimeError("Modulo by zero".to_string())); }
-                    self.push(Value::from_u256_shrink(av % bv))?;
+                    if bv == U256::ZERO {
+                        return Err(VMError::RuntimeError("Remainder by zero".to_string()));
+                    }
+                    let result = av.checked_rem(bv)
+                        .ok_or_else(|| VMError::RuntimeError("UInt256 Rem error".to_string()))?;
+                    self.push(Value::from_u256_shrink(result))?;
                 } else {
                     return Err(VMError::RuntimeError("Rem: expected numeric value".to_string()));
                 }
             }
 
-            // ── Comparisons — handles I32, U128, U256 and mixed ───────────
+            // ── Comparison ─────────────────────────────────────────────────
             OpCode::Eq => {
                 let b = self.pop()?;
                 let a = self.pop()?;
                 let result = if a.is_uint_compat() && b.is_uint_compat() {
                     a.as_u256()? == b.as_u256()?
-                } else { a.as_i32()? == b.as_i32()? };
+                } else {
+                    matches!((&a, &b), (Value::Bool(x), Value::Bool(y)) if x == y)
+                };
                 self.push(Value::Bool(result))?;
             }
             OpCode::Ne => {
@@ -384,40 +482,46 @@ impl QuantumVM {
                 let a = self.pop()?;
                 let result = if a.is_uint_compat() && b.is_uint_compat() {
                     a.as_u256()? != b.as_u256()?
-                } else { a.as_i32()? != b.as_i32()? };
+                } else {
+                    !matches!((&a, &b), (Value::Bool(x), Value::Bool(y)) if x == y)
+                };
                 self.push(Value::Bool(result))?;
             }
             OpCode::Lt => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                let result = if a.is_uint_compat() && b.is_uint_compat() {
-                    a.as_u256()? < b.as_u256()?
-                } else { a.as_i32()? < b.as_i32()? };
-                self.push(Value::Bool(result))?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    self.push(Value::Bool(a.as_u256()? < b.as_u256()?))?;
+                } else {
+                    return Err(VMError::RuntimeError("Lt: expected numeric value".to_string()));
+                }
             }
             OpCode::Le => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                let result = if a.is_uint_compat() && b.is_uint_compat() {
-                    a.as_u256()? <= b.as_u256()?
-                } else { a.as_i32()? <= b.as_i32()? };
-                self.push(Value::Bool(result))?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    self.push(Value::Bool(a.as_u256()? <= b.as_u256()?))?;
+                } else {
+                    return Err(VMError::RuntimeError("Le: expected numeric value".to_string()));
+                }
             }
             OpCode::Gt => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                let result = if a.is_uint_compat() && b.is_uint_compat() {
-                    a.as_u256()? > b.as_u256()?
-                } else { a.as_i32()? > b.as_i32()? };
-                self.push(Value::Bool(result))?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    self.push(Value::Bool(a.as_u256()? > b.as_u256()?))?;
+                } else {
+                    return Err(VMError::RuntimeError("Gt: expected numeric value".to_string()));
+                }
             }
             OpCode::Ge => {
                 let b = self.pop()?;
                 let a = self.pop()?;
-                let result = if a.is_uint_compat() && b.is_uint_compat() {
-                    a.as_u256()? >= b.as_u256()?
-                } else { a.as_i32()? >= b.as_i32()? };
-                self.push(Value::Bool(result))?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    self.push(Value::Bool(a.as_u256()? >= b.as_u256()?))?;
+                } else {
+                    return Err(VMError::RuntimeError("Ge: expected numeric value".to_string()));
+                }
             }
 
             // ── Control flow ───────────────────────────────────────────────
@@ -443,12 +547,24 @@ impl QuantumVM {
                 if addr >= self.code.len() {
                     return Err(VMError::InvalidAddress(addr));
                 }
-                self.call_stack.push(self.pc);
+                // ── PR-B Item 4: runtime call depth guard ───────────────────
+                // Belt-and-suspenders over the compile-time MAX_CALL_DEPTH = 64.
+                // The compiler rejects obvious infinite recursion statically;
+                // this catches anything that slips through at runtime.
+                if self.call_stack.len() >= self.max_call_depth {
+                    return Err(VMError::RuntimeError(format!(
+                        "call depth limit exceeded ({} frames): possible unbounded recursion",
+                        self.max_call_depth
+                    )));
+                }
+                // ── PR-B Item 1: push a proper CallFrame ────────────────────
+                self.call_stack.push(CallFrame { return_pc: self.pc });
                 self.pc = addr;
             }
             OpCode::Return => {
-                if let Some(return_addr) = self.call_stack.pop() {
-                    self.pc = return_addr;
+                // ── PR-B Item 1: pop the CallFrame, restore pc ──────────────
+                if let Some(frame) = self.call_stack.pop() {
+                    self.pc = frame.return_pc;
                 } else {
                     self.halted = true;
                 }
@@ -522,6 +638,7 @@ impl QuantumVM {
             }
             OpCode::Revert => {
                 // Followed by: 4-byte LE message length + message bytes
+                // Rollback is handled by the call_function() wrapper (PR-B Item 2).
                 let msg_len = self.read_u32()? as usize;
                 let msg_bytes = self.read_bytes(msg_len)?;
                 let msg = String::from_utf8_lossy(&msg_bytes).into_owned();

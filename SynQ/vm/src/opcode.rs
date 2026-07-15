@@ -10,20 +10,22 @@ pub enum VMError {
     InvalidAddress(usize),
     CryptoError(String),
     RuntimeError(String),
-    Reverted(String),   // require() failure — carries the require message
+    Reverted(String),          // require() failure — carries the require message
+    StepLimitExceeded(usize),  // PR-B: infinite-loop / gas guard
 }
 
 impl fmt::Display for VMError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            VMError::InvalidBytecode(msg)   => write!(f, "Invalid bytecode: {}", msg),
-            VMError::StackUnderflow         => write!(f, "Stack underflow"),
-            VMError::StackOverflow          => write!(f, "Stack overflow"),
-            VMError::InvalidInstruction(op) => write!(f, "Invalid instruction: 0x{:02x}", op),
-            VMError::InvalidAddress(addr)   => write!(f, "Invalid address: {}", addr),
-            VMError::CryptoError(msg)       => write!(f, "Crypto error: {}", msg),
-            VMError::RuntimeError(msg)      => write!(f, "Runtime error: {}", msg),
-            VMError::Reverted(msg)          => write!(f, "require failed: {}", msg),
+            VMError::InvalidBytecode(msg)    => write!(f, "Invalid bytecode: {}", msg),
+            VMError::StackUnderflow          => write!(f, "Stack underflow"),
+            VMError::StackOverflow           => write!(f, "Stack overflow"),
+            VMError::InvalidInstruction(op)  => write!(f, "Invalid instruction: 0x{:02x}", op),
+            VMError::InvalidAddress(addr)    => write!(f, "Invalid address: {}", addr),
+            VMError::CryptoError(msg)        => write!(f, "Crypto error: {}", msg),
+            VMError::RuntimeError(msg)       => write!(f, "Runtime error: {}", msg),
+            VMError::Reverted(msg)           => write!(f, "require failed: {}", msg),
+            VMError::StepLimitExceeded(n)    => write!(f, "step limit exceeded ({} steps): possible infinite loop", n),
         }
     }
 }
@@ -63,11 +65,11 @@ pub enum OpCode {
     Revert = 0x34,  // require() failure — followed by 4-byte LE len + message bytes
 
     // Memory operations
-    Load      = 0x40,
-    Store     = 0x41,
-    LoadImm   = 0x42,  // push raw bytes (strings / PQC keys)
-    LoadImm128 = 0x43, // push a 16-byte big-endian u128 (UInt256 values)
-    LoadImm256 = 0x44, // push a 32-byte big-endian U256 (full Ethereum address / real UInt256)
+    Load       = 0x40,
+    Store      = 0x41,
+    LoadImm    = 0x42,   // push raw bytes (strings / PQC keys)
+    LoadImm128 = 0x43,   // push a 16-byte big-endian u128 (UInt256 values ≤ 2^128)
+    LoadImm256 = 0x44,   // push a 32-byte big-endian U256 (full Ethereum address / real UInt256)
 
     // PQC operations
     DilithiumVerify  = 0x80,
