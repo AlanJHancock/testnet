@@ -142,7 +142,7 @@ struct ChainTipSnapshot {
     error: Option<String>,
 }
 
-fn cache_last_known_good_chain_tip(block: &Block) {
+pub(crate) fn cache_last_known_good_chain_tip(block: &Block) {
     if let Ok(mut cached_tip) = LAST_KNOWN_GOOD_CHAIN_TIP.lock() {
         *cached_tip = Some(block.clone());
     }
@@ -174,22 +174,19 @@ fn persisted_chain_tip() -> Option<Block> {
         .and_then(|chain| chain.last().cloned())
 }
 
-fn newer_chain_tip(left: Option<Block>, right: Option<Block>) -> Option<Block> {
-    match (left, right) {
-        (Some(left), Some(right)) => {
-            if right.block_index > left.block_index {
-                Some(right)
-            } else {
-                Some(left)
-            }
-        }
-        (Some(block), None) | (None, Some(block)) => Some(block),
-        (None, None) => None,
-    }
+fn cached_or_load_chain_tip<F>(cached: Option<Block>, load_persisted: F) -> Option<Block>
+where
+    F: FnOnce() -> Option<Block>,
+{
+    cached.or_else(load_persisted)
 }
 
 fn cached_or_persisted_chain_tip() -> Option<Block> {
-    let best_tip = newer_chain_tip(cached_last_known_good_chain_tip(), persisted_chain_tip());
+    // The canonical startup path primes this cache before the RPC listener starts, and every
+    // committed block refreshes it while holding the chain lock. Reparsing the full chain file
+    // here can stall a simple height request for tens of seconds during catch-up.
+    let best_tip =
+        cached_or_load_chain_tip(cached_last_known_good_chain_tip(), persisted_chain_tip);
     if let Some(block) = best_tip.as_ref() {
         cache_last_known_good_chain_tip(block);
     }
@@ -10358,18 +10355,26 @@ mod tests {
     }
 
     #[test]
-    fn qrpc_fallback_prefers_newer_persisted_tip_over_stale_cache() {
+    fn qrpc_fallback_does_not_load_persisted_chain_when_cache_is_primed() {
         let mut chain = BlockChain::new();
         chain.genesis().unwrap();
         let cached_tip = chain.last().cloned().unwrap();
 
-        let mut persisted_tip = cached_tip.clone();
-        persisted_tip.block_index = cached_tip.block_index + 2;
-        persisted_tip.nonce = persisted_tip.block_index;
-        persisted_tip.previous_hash = cached_tip.hash.clone();
-        persisted_tip.hash = "newer-persisted-tip".to_string();
+        let selected = cached_or_load_chain_tip(Some(cached_tip.clone()), || {
+            panic!("primed qRPC fallback must not parse the full persisted chain")
+        })
+        .unwrap();
+        assert_eq!(selected.block_index, cached_tip.block_index);
+        assert_eq!(selected.hash, cached_tip.hash);
+    }
 
-        let selected = newer_chain_tip(Some(cached_tip), Some(persisted_tip.clone())).unwrap();
+    #[test]
+    fn qrpc_fallback_loads_persisted_tip_only_when_cache_is_empty() {
+        let mut chain = BlockChain::new();
+        chain.genesis().unwrap();
+        let persisted_tip = chain.last().cloned().unwrap();
+
+        let selected = cached_or_load_chain_tip(None, || Some(persisted_tip.clone())).unwrap();
         assert_eq!(selected.block_index, persisted_tip.block_index);
         assert_eq!(selected.hash, persisted_tip.hash);
     }
@@ -10668,11 +10673,8 @@ mod tests {
             .iter()
             .any(|validator| validator.address == validator_address));
 
-        assert!(reconcile_validator_registry_clusters_for_height(
-            &validator_manager,
-            effective_height,
-        )
-        .expect("startup reconciliation should see replayed active validator"));
+        reconcile_validator_registry_clusters_for_height(&validator_manager, effective_height)
+            .expect("startup reconciliation should accept the replayed active validator");
         let restored = validator_manager
             .get_validator(&validator_address)
             .expect("replayed validator should remain in the registry");

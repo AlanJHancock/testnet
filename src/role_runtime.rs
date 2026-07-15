@@ -831,10 +831,6 @@ fn is_validator_profile(profile: Option<&RoleProfile>) -> bool {
 
 fn local_validator_is_consensus_authorized(config: &NodeConfig) -> bool {
     let validator_address = resolve_local_validator_address(config);
-    if config.node.strict_validator_allowlist && !is_validator_allowed(config, &validator_address) {
-        return false;
-    }
-
     consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
         .iter()
         .any(|validator| validator.address == validator_address)
@@ -3497,7 +3493,7 @@ mod tests {
     }
 
     #[test]
-    fn active_validator_not_on_strict_allowlist_does_not_start_consensus() {
+    fn active_validator_not_on_stale_strict_allowlist_starts_consensus() {
         let address = "synv1activebutnotallowlisted";
         let _ = VALIDATOR_MANAGER.register_validator(ValidatorRegistration {
             address: address.to_string(),
@@ -3516,11 +3512,11 @@ mod tests {
         config.node.allowed_validator_addresses = vec!["synv1canonicalactive".to_string()];
         config.validator.state_sync_before_join = true;
 
-        assert!(!should_start_consensus(
+        assert!(should_start_consensus(
             &config,
             Some(NodeRole::Validator.profile())
         ));
-        assert!(should_require_state_sync_before_join(
+        assert!(!should_require_state_sync_before_join(
             &config,
             Some(NodeRole::Validator.profile())
         ));

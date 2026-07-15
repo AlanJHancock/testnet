@@ -18,7 +18,8 @@ use crate::epoch::{
 use crate::genesis::canonical_genesis;
 use crate::p2p::networking::P2PNetwork;
 use crate::rpc::rpc_server::{
-    prune_transaction_hashes_from_pool, transaction_hashes, SHARED_CHAIN, SYNC_MANAGER, TX_POOL,
+    cache_last_known_good_chain_tip, prune_transaction_hashes_from_pool, transaction_hashes,
+    SHARED_CHAIN, SYNC_MANAGER, TX_POOL,
 };
 use crate::token::TOKEN_MANAGER;
 use crate::validator::{
@@ -1663,6 +1664,7 @@ impl ProofOfSynergy {
                                                 );
                                                 process::exit(1);
                                             }
+                                            cache_last_known_good_chain_tip(&new_block);
                                             block_appended_to_local_tip = true;
                                         }
                                         Ok(false) => {

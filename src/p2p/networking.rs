@@ -19,8 +19,14 @@ use crate::crypto::aegis_pqvm::{
 use crate::crypto::pqc::{PQCAlgorithm, PQCPublicKey};
 use crate::genesis::canonical_genesis;
 use crate::p2p::messages::NetworkMessage;
+#[cfg(not(test))]
+use crate::p2p::validator_transport_registry::refresh_validator_transports;
+use crate::p2p::validator_transport_registry::{
+    current_validator_transports, has_validator_transports, validator_transport_for,
+};
 use crate::rpc::rpc_server::{
-    prune_transaction_hashes_from_pool, transaction_hashes, SYNC_MANAGER, TX_POOL,
+    cache_last_known_good_chain_tip, prune_transaction_hashes_from_pool, transaction_hashes,
+    SYNC_MANAGER, TX_POOL,
 };
 use crate::sync::SyncState;
 use crate::synergy_types::{AegisPqKeyId, AegisPqKeyRole, Epoch};
@@ -72,6 +78,7 @@ type PeerMessage = (String, u64, NetworkMessage);
 #[cfg(test)]
 const DEFAULT_BOOTSTRAP_REFRESH_SECS: u64 = 10;
 const NORMAL_BOOTSTRAP_REFRESH_SECS: u64 = 120;
+const VALIDATOR_TRANSPORT_REFRESH_SECS: u64 = 30;
 const TCP_KEEPALIVE_IDLE_SECS: u64 = 300;
 const TCP_KEEPALIVE_INTERVAL_SECS: u64 = 60;
 const IMMEDIATE_STATUS_SYNC_BATCH: u32 = 32;
@@ -216,6 +223,9 @@ lazy_static! {
     static ref STATUS_RESPONSE_LAST_SENT: Mutex<HashMap<String, (u64, u64)>> =
         Mutex::new(HashMap::new());
 }
+
+#[cfg(not(test))]
+static VALIDATOR_TRANSPORT_REFRESH_WORKER_RUNNING: AtomicBool = AtomicBool::new(false);
 
 static BLOCK_SYNC_WORKERS_INIT: Once = Once::new();
 static BLOCK_SYNC_SERVE_WORKERS_STARTED: AtomicUsize = AtomicUsize::new(0);
@@ -1290,9 +1300,19 @@ fn configured_vote_target_validator_addresses(
         }
     }
 
+    configured.extend(
+        current_validator_transports()
+            .into_keys()
+            .filter(|address| {
+                active_validator_addresses.is_empty()
+                    || active_validator_addresses.contains(address)
+            }),
+    );
+
     configured.retain(|address| {
         active_validator_addresses.is_empty() || active_validator_addresses.contains(address)
     });
+    configured.sort();
     configured.dedup();
     configured
 }
@@ -1360,6 +1380,13 @@ fn configured_validator_public_address_map(
                     .entry(validator.clone())
                     .or_insert_with(|| validator);
             }
+        }
+    }
+    for validator in current_validator_transports().into_keys() {
+        if active_filter.contains(&validator) {
+            stable_validator_targets
+                .entry(validator.clone())
+                .or_insert(validator);
         }
     }
     if !stable_validator_targets.is_empty() {
@@ -3160,6 +3187,47 @@ where
     }
 }
 
+#[cfg(not(test))]
+fn start_validator_transport_refresh_worker(is_running: Arc<Mutex<bool>>) {
+    if VALIDATOR_TRANSPORT_REFRESH_WORKER_RUNNING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    if !spawn_named_thread("validator-transport-refresh", move || {
+        loop {
+            if !is_running.lock().map(|running| *running).unwrap_or(false) {
+                break;
+            }
+
+            match refresh_validator_transports() {
+                Ok(refresh) if refresh.changed => info!(
+                    "p2p",
+                    "Installed coordinator-signed validator transport registry",
+                    "generation" => refresh.generation
+                ),
+                Ok(_) => {}
+                Err(error) => warn!(
+                    "p2p",
+                    "Validator transport registry refresh failed; retaining last verified state",
+                    "error" => error
+                ),
+            }
+
+            for _ in 0..VALIDATOR_TRANSPORT_REFRESH_SECS {
+                thread::sleep(Duration::from_secs(1));
+                if !is_running.lock().map(|running| *running).unwrap_or(false) {
+                    break;
+                }
+            }
+        }
+        VALIDATOR_TRANSPORT_REFRESH_WORKER_RUNNING.store(false, Ordering::SeqCst);
+    }) {
+        VALIDATOR_TRANSPORT_REFRESH_WORKER_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
 fn process_block_serve_job(job: BlockServeJob) {
     handle_get_blocks_message(
         &job.blockchain,
@@ -3806,6 +3874,12 @@ fn resolve_bootstrap_dial_targets(config: &NodeConfig) -> Vec<String> {
         }
     }
 
+    for validator in consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators()) {
+        if validator_vpn_transport_for_target(config, &validator.address).is_some() {
+            targets.insert(validator.address);
+        }
+    }
+
     let self_aliases = self_dial_aliases(config);
     if !self_aliases.is_empty() {
         targets.retain(|target| !self_aliases.contains(target));
@@ -4097,6 +4171,39 @@ fn connected_endpoint_matches_configured_address(
         .unwrap_or(false)
 }
 
+fn validator_transport_endpoint_matches_peer(
+    peer: &PeerConnection,
+    configured_address: &str,
+) -> bool {
+    let Some(endpoint) = peer_connected_endpoint(peer) else {
+        return false;
+    };
+    let Some((connected_host, _connected_port)) = endpoint_host_port(&endpoint) else {
+        return false;
+    };
+    let Some((configured_host, configured_port)) = endpoint_host_port(configured_address) else {
+        return false;
+    };
+    if configured_port != VALIDATOR_P2P_PORT {
+        return false;
+    }
+
+    match peer.direction {
+        ConnectionDirection::Outgoing => {
+            connected_endpoint_matches_configured_address(&endpoint, configured_address)
+        }
+        ConnectionDirection::Incoming => {
+            let Ok(connected_ip) = connected_host.parse::<std::net::IpAddr>() else {
+                return false;
+            };
+            let Ok(configured_ip) = configured_host.parse::<std::net::IpAddr>() else {
+                return false;
+            };
+            connected_ip == configured_ip
+        }
+    }
+}
+
 fn endpoint_host_port(address: &str) -> Option<(String, u16)> {
     let normalized = parse_bootnode_dial_address(address)?;
     if let Some(stripped) = normalized.strip_prefix('[') {
@@ -4335,10 +4442,15 @@ fn current_bootstrap_refresh_interval(config: &NodeConfig, connected_peers: &Pee
     let discovered_validators = status_ready_validator_participants(config, connected_peers);
     let bootstrap_refresh_secs = config.p2p.bootstrap_refresh_secs.max(1);
 
-    if discovered_validators < required_validators {
+    let interval = if discovered_validators < required_validators {
         Duration::from_secs(bootstrap_refresh_secs)
     } else {
         Duration::from_secs(NORMAL_BOOTSTRAP_REFRESH_SECS)
+    };
+    if local_node_uses_signed_validator_transports(config) {
+        interval.min(Duration::from_secs(VALIDATOR_TRANSPORT_REFRESH_SECS))
+    } else {
+        interval
     }
 }
 
@@ -4870,6 +4982,23 @@ impl P2PNetwork {
 
         // Set running flag
         *is_running.lock().unwrap() = true;
+
+        #[cfg(not(test))]
+        if local_node_uses_signed_validator_transports(&self.config) {
+            match refresh_validator_transports() {
+                Ok(refresh) => info!(
+                    "p2p",
+                    "Loaded coordinator-signed validator transport registry before network start",
+                    "generation" => refresh.generation
+                ),
+                Err(error) => warn!(
+                    "p2p",
+                    "Validator transport registry was unavailable at network start; validator peer admission remains closed",
+                    "error" => error
+                ),
+            }
+            start_validator_transport_refresh_worker(Arc::clone(&is_running));
+        }
 
         // Start listener thread
         let _ = spawn_named_thread("p2p-listener", move || {
@@ -5931,12 +6060,12 @@ fn configured_public_address_for_validator(
         return None;
     }
 
-    let active_validator_addresses = if config.node.allowed_validator_addresses.is_empty() {
+    let canonical_active =
         consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
             .into_iter()
             .map(|validator| validator.address)
-            .collect::<HashSet<_>>()
-    } else {
+            .collect::<HashSet<_>>();
+    let active_validator_addresses = if canonical_active.is_empty() {
         config
             .node
             .allowed_validator_addresses
@@ -5944,9 +6073,23 @@ fn configured_public_address_for_validator(
             .map(|address| address.trim().to_string())
             .filter(|address| !address.is_empty())
             .collect::<HashSet<_>>()
+    } else {
+        canonical_active
     };
 
-    configured_validator_public_address_map(config, &active_validator_addresses)
+    configured_public_address_for_validator_in_set(
+        config,
+        validator_address,
+        &active_validator_addresses,
+    )
+}
+
+fn configured_public_address_for_validator_in_set(
+    config: &NodeConfig,
+    validator_address: &str,
+    active_validator_addresses: &HashSet<String>,
+) -> Option<String> {
+    configured_validator_public_address_map(config, active_validator_addresses)
         .into_iter()
         .find_map(|(public_address, mapped_validator)| {
             (mapped_validator == validator_address).then_some(public_address)
@@ -6831,14 +6974,6 @@ fn local_sync_requires_support_sources_authoritatively(config: &NodeConfig) -> b
     }
 
     let local_validator = announced_validator_address(config);
-    let allowlisted = !config.node.strict_validator_allowlist
-        || local_validator.as_deref().is_some_and(|address| {
-            config
-                .node
-                .allowed_validator_addresses
-                .iter()
-                .any(|allowed| allowed.trim() == address)
-        });
     let consensus_authorized = local_validator.as_deref().is_some_and(|address| {
         consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
             .into_iter()
@@ -6847,7 +6982,9 @@ fn local_sync_requires_support_sources_authoritatively(config: &NodeConfig) -> b
     let onboarding = config.validator.state_sync_before_join && !consensus_authorized;
     let quarantined =
         current_validator_quarantine_duty_block().is_some() && !local_vote_only_rejoin_active();
-    let consensus_duties_disabled = !allowlisted || !consensus_authorized;
+    // The finalized on-chain validator set is authoritative. Installer-era
+    // allowlists may lag newly activated validators and must not suppress duty.
+    let consensus_duties_disabled = !consensus_authorized;
 
     consensus_duties_disabled || onboarding || quarantined
 }
@@ -6905,23 +7042,8 @@ fn configured_validator_transport_matches_peer(
     peer: &PeerConnection,
     validator_address: &str,
 ) -> bool {
-    let Some(endpoint) = peer_connected_endpoint(peer) else {
-        return false;
-    };
-    let Some(transport) = config
-        .network
-        .validator_vpn_transports
-        .iter()
-        .find(|transport| {
-            normalize_validator_address_target(&transport.validator_address)
-                .is_some_and(|configured| configured == validator_address)
-        })
-    else {
-        return false;
-    };
-    parse_bootnode_dial_address(&transport.dial_address).is_some_and(|configured| {
-        connected_endpoint_matches_configured_address(&endpoint, &configured)
-    })
+    validator_vpn_transport_for_target(config, validator_address)
+        .is_some_and(|configured| validator_transport_endpoint_matches_peer(peer, &configured))
 }
 
 fn configured_validator_identity_matches_peer(
@@ -6978,9 +7100,15 @@ fn peer_is_active_consensus_validator(config: &NodeConfig, peer: &PeerConnection
     let active = consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
         .into_iter()
         .any(|validator| validator.address == peer_validator_address);
-    active
-        && (configured_validator_transport_matches_peer(config, peer, peer_validator_address)
-            || configured_validator_identity_matches_peer(config, peer, peer_validator_address))
+    if !active {
+        return false;
+    }
+
+    if validator_vpn_transport_for_target(config, peer_validator_address).is_some() {
+        configured_validator_transport_matches_peer(config, peer, peer_validator_address)
+    } else {
+        configured_validator_identity_matches_peer(config, peer, peer_validator_address)
+    }
 }
 
 fn block_sync_response_policy(
@@ -8856,7 +8984,27 @@ fn validator_vpn_transport_for_target(
     config: &NodeConfig,
     validator_address: &str,
 ) -> Option<String> {
+    validator_vpn_transport_for_target_with_static_fallback(config, validator_address, cfg!(test))
+}
+
+fn validator_vpn_transport_for_target_with_static_fallback(
+    config: &NodeConfig,
+    validator_address: &str,
+    allow_static_fallback: bool,
+) -> Option<String> {
     let validator_address = normalize_validator_address_target(validator_address)?;
+    if let Some(dial_address) = validator_transport_for(&validator_address) {
+        let dial_address = parse_bootnode_dial_address(&dial_address)?;
+        if is_validator_vpn_dial_address(&dial_address) {
+            return Some(dial_address);
+        }
+    }
+    if has_validator_transports() {
+        return None;
+    }
+    if !allow_static_fallback {
+        return None;
+    }
     config
         .network
         .validator_vpn_transports
@@ -8878,6 +9026,11 @@ fn resolve_peer_transport_address(config: &NodeConfig, target: &str) -> Option<S
         validator_vpn_transport_for_target(config, &validator_address)
     } else {
         let parsed = parse_bootnode_dial_address(target)?;
+        if local_node_uses_signed_validator_transports(config)
+            && is_validator_vpn_dial_address(&parsed)
+        {
+            return None;
+        }
         peer_target_allowed_by_local_scope(config, &parsed).then_some(parsed)
     }
 }
@@ -8896,7 +9049,8 @@ fn normalize_peer_target(config: &NodeConfig, value: &str) -> Option<String> {
     }
 
     let parsed = parse_bootnode_dial_address(value)?;
-    if local_validator_vpn_peer_scope(config) && is_validator_vpn_dial_address(&parsed) {
+    if local_node_uses_signed_validator_transports(config) && is_validator_vpn_dial_address(&parsed)
+    {
         return None;
     }
     peer_target_allowed_by_local_scope(config, &parsed).then_some(parsed)
@@ -8989,7 +9143,10 @@ fn is_assigned_or_validator_vpn_dial_address(value: &str) -> bool {
 
 fn local_validator_vpn_peer_scope(config: &NodeConfig) -> bool {
     local_node_runs_validator_consensus(config)
-        && !config.network.validator_vpn_transports.is_empty()
+}
+
+fn local_node_uses_signed_validator_transports(config: &NodeConfig) -> bool {
+    local_validator_vpn_peer_scope(config) || local_p2p_role(config).eq_ignore_ascii_case("relayer")
 }
 
 fn local_node_uses_relayer_only_topology(config: &NodeConfig) -> bool {
@@ -9009,8 +9166,11 @@ fn is_public_relayer_dial_address(value: &str) -> bool {
 fn peer_target_allowed_by_local_scope(config: &NodeConfig, value: &str) -> bool {
     if local_validator_vpn_peer_scope(config) {
         normalize_validator_address_target(value).is_some()
-            || is_validator_vpn_dial_address(value)
             || is_validator_vpn_relayer_dial_address(value)
+    } else if local_p2p_role(config).eq_ignore_ascii_case("relayer") {
+        normalize_validator_address_target(value).is_some()
+            || is_validator_vpn_relayer_dial_address(value)
+            || is_assigned_synergy_dial_address(value)
     } else if local_node_uses_relayer_only_topology(config) {
         is_public_relayer_dial_address(value)
     } else {
@@ -9543,6 +9703,9 @@ fn apply_block_if_new(
             candidate = next_tip.as_ref().and_then(take_pending_block_extending_tip);
         }
 
+        if let Some(tip) = chain.last() {
+            cache_last_known_good_chain_tip(tip);
+        }
         compact_hot_chain_state_from_env(&mut chain, "p2p_apply_block_if_new");
         let snapshot = if !applied_blocks.is_empty() && should_persist_chain_tip(final_tip_height) {
             note_chain_persist(final_tip_height);
@@ -9852,6 +10015,9 @@ fn apply_block_batch_batched_durability(
 
         *chain = staged_chain;
         compact_hot_chain_state_from_env(&mut chain, "p2p_apply_block_batch_service");
+        if let Some(tip) = chain.last() {
+            cache_last_known_good_chain_tip(tip);
+        }
         let tip_height = chain.last().map(|entry| entry.block_index).unwrap_or(0);
         let should_snapshot = rollback_height.is_some() || should_persist_chain_tip(tip_height);
         let snapshot = if should_snapshot {
@@ -10113,6 +10279,9 @@ fn apply_block_batch_legacy(
         }
 
         compact_hot_chain_state_from_env(&mut chain, "p2p_apply_block_batch");
+        if let Some(tip) = chain.last() {
+            cache_last_known_good_chain_tip(tip);
+        }
         let tip_height = chain.last().map(|entry| entry.block_index).unwrap_or(0);
         let should_snapshot = rollback_height.is_some() || should_persist_chain_tip(tip_height);
         let snapshot = if should_snapshot {
@@ -10506,7 +10675,7 @@ mod tests {
         bypasses_shared_message_queue, cache_peer_state, cache_pending_block,
         canonical_genesis_hash, canonical_validator_public_address, chain_has_block_sync_overlap,
         chain_snapshot_clone_allowed, claim_status_rate_limit, collect_known_peer_addresses,
-        configured_public_address_for_validator, configured_seed_server_dial_targets,
+        configured_public_address_for_validator_in_set, configured_seed_server_dial_targets,
         configured_validator_p2p_dials, configured_validator_public_address_map,
         connected_endpoint_matches_configured_address, connected_peer_key_for_address,
         connected_validator_participants, current_bootstrap_refresh_interval, current_timestamp,
@@ -11624,7 +11793,7 @@ mod tests {
 
         assert_eq!(
             resolve_peer_transport_address(&config, "10.70.10.1:5622"),
-            Some("10.70.10.1:5622".to_string())
+            None
         );
         assert_eq!(normalize_peer_target(&config, "10.70.10.1:5622"), None);
         assert_eq!(
@@ -11634,6 +11803,25 @@ mod tests {
         assert_eq!(
             resolve_peer_transport_address(&config, "10.69.10.1:5622"),
             None
+        );
+    }
+
+    #[test]
+    fn relayer_rejects_raw_validator_vpn_targets_and_resolves_validator_identity() {
+        let mut config = NodeConfig::default();
+        config.identity.role = "relayer".to_string();
+        config.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
+            validator_address: "synv1validator1".to_string(),
+            dial_address: "10.70.10.1:5622".to_string(),
+        }];
+
+        assert_eq!(
+            resolve_peer_transport_address(&config, "10.70.10.1:5622"),
+            None
+        );
+        assert_eq!(
+            resolve_peer_transport_address(&config, "synv1validator1"),
+            Some("10.70.10.1:5622".to_string())
         );
     }
 
@@ -12023,16 +12211,18 @@ mod tests {
             Some(&"synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx".to_string())
         );
         assert_eq!(
-            configured_public_address_for_validator(
+            configured_public_address_for_validator_in_set(
                 &active_subset_config,
-                "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx"
+                "synv11zghr6nsm3ajl57ywxasw9mr5f844slq4mwx",
+                &active_without_val4_val5,
             ),
             Some("157.173.192.45:5622".to_string())
         );
         assert_eq!(
-            configured_public_address_for_validator(
+            configured_public_address_for_validator_in_set(
                 &active_subset_config,
-                "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5"
+                "synv11mka64uz049aekwhdvfrq6dvh75d0k7kmdp5",
+                &active_without_val4_val5,
             ),
             None
         );
@@ -12126,7 +12316,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_bootstrap_dial_targets_includes_persistent_peers() {
+    fn validator_bootstrap_rejects_unsigned_public_validator_peers() {
         let mut config = NodeConfig::default();
         config.identity.role = "validator".to_string();
         config.node.validator_address = "synv1validator1".to_string();
@@ -12139,8 +12329,7 @@ mod tests {
 
         let targets = resolve_bootstrap_dial_targets(&config);
 
-        assert!(targets.contains(&"genesisval2.synergy-network.io:5622".to_string()));
-        assert!(targets.contains(&"62.146.182.208:5622".to_string()));
+        assert!(targets.is_empty());
     }
 
     #[test]
@@ -12272,7 +12461,7 @@ mod tests {
         let targets = resolve_bootstrap_dial_targets(&config);
 
         assert!(!targets.contains(&"genesisval1.synergy-network.io:5622".to_string()));
-        assert!(targets.contains(&"genesisval5.synergy-network.io:5622".to_string()));
+        assert!(!targets.contains(&"genesisval5.synergy-network.io:5622".to_string()));
 
         let _ = fs::remove_dir_all(&temp);
     }
@@ -14207,6 +14396,97 @@ mod tests {
     }
 
     #[test]
+    fn active_validator_from_signed_transport_ip_is_authorized_on_incoming_ephemeral_port() {
+        configure_canonical_genesis_path_for_tests();
+        let active_validator = "synv1incomingtransportxxxxxxxxxxxxxxxxxx";
+        ensure_test_validator_key(active_validator);
+
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+        config.node.allowed_validator_addresses = vec![active_validator.to_string()];
+        config.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
+            validator_address: active_validator.to_string(),
+            dial_address: "10.70.10.8:5622".to_string(),
+        }];
+
+        let mut peer = test_peer_with_validator_address(Some(active_validator));
+        peer.connected_endpoint = Some("10.70.10.8:49152".to_string());
+        peer.direction = ConnectionDirection::Incoming;
+
+        assert!(super::configured_validator_transport_matches_peer(
+            &config,
+            &peer,
+            active_validator
+        ));
+        assert!(super::peer_is_active_consensus_validator(&config, &peer));
+    }
+
+    #[test]
+    fn validator_transport_binding_rejects_wrong_ip_and_wrong_outgoing_port() {
+        let validator = "synv1endpointbindingxxxxxxxxxxxxxxxxxxxx";
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+        config.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
+            validator_address: validator.to_string(),
+            dial_address: "10.70.10.8:5622".to_string(),
+        }];
+
+        let mut peer = test_peer_with_validator_address(Some(validator));
+        peer.direction = ConnectionDirection::Incoming;
+        peer.connected_endpoint = Some("10.70.10.9:49152".to_string());
+        assert!(!super::configured_validator_transport_matches_peer(
+            &config, &peer, validator
+        ));
+
+        peer.direction = ConnectionDirection::Outgoing;
+        peer.connected_endpoint = Some("10.70.10.8:49152".to_string());
+        assert!(!super::configured_validator_transport_matches_peer(
+            &config, &peer, validator
+        ));
+    }
+
+    #[test]
+    fn production_transport_resolution_rejects_unsigned_static_fallback() {
+        let validator = "synv1unsignedstaticxxxxxxxxxxxxxxxxxxxxxx";
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+        config.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
+            validator_address: validator.to_string(),
+            dial_address: "10.70.10.8:5622".to_string(),
+        }];
+
+        assert_eq!(
+            super::validator_vpn_transport_for_target_with_static_fallback(
+                &config, validator, false,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn transport_enrollment_does_not_activate_an_unbonded_validator() {
+        configure_canonical_genesis_path_for_tests();
+        let unactivated_validator = "synv1transportonlyxxxxxxxxxxxxxxxxxxxxx";
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+        config.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
+            validator_address: unactivated_validator.to_string(),
+            dial_address: "10.70.10.8:5622".to_string(),
+        }];
+
+        let mut peer = test_peer_with_validator_address(Some(unactivated_validator));
+        peer.connected_endpoint = Some("10.70.10.8:49152".to_string());
+        peer.direction = ConnectionDirection::Incoming;
+
+        assert!(super::configured_validator_transport_matches_peer(
+            &config,
+            &peer,
+            unactivated_validator
+        ));
+        assert!(!super::peer_is_active_consensus_validator(&config, &peer));
+    }
+
+    #[test]
     fn configured_support_endpoint_matches_dns_and_ip_only_at_exact_port() {
         assert!(connected_endpoint_matches_configured_address(
             "127.0.0.1:5623",
@@ -14284,6 +14564,23 @@ mod tests {
         config.validator.state_sync_before_join = false;
 
         assert!(super::local_sync_requires_support_sources_authoritatively(
+            &config
+        ));
+    }
+
+    #[test]
+    fn active_consensus_membership_overrides_stale_static_allowlist() {
+        let active_validator = "synv1activewithoutlegacyallowlistxxxxxxxxx";
+        ensure_test_validator_key(active_validator);
+
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+        config.node.validator_address = active_validator.to_string();
+        config.node.strict_validator_allowlist = true;
+        config.node.allowed_validator_addresses = vec!["synv1legacyvalidator".to_string()];
+        config.validator.state_sync_before_join = false;
+
+        assert!(!super::local_sync_requires_support_sources_authoritatively(
             &config
         ));
     }
