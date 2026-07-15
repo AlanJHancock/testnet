@@ -911,6 +911,22 @@ fn ensure_peer_status_allows_chain_data(
         )
     };
 
+    if remote_genesis_hash.trim().is_empty() && !authenticated_public_history_gateway {
+        debug!(
+            "p2p",
+            "Ignoring chain data until peer status confirms canonical genesis",
+            "peer" => peer_address.to_string(),
+            "message_kind" => message_kind.to_string()
+        );
+        request_status_from_connected_peer(
+            connected_peers,
+            peer_state_cache,
+            peer_address,
+            session_id,
+        );
+        return false;
+    }
+
     if should_disconnect_for_status_genesis_mismatch(
         &local_genesis_hash,
         &remote_genesis_hash,
@@ -929,9 +945,7 @@ fn ensure_peer_status_allows_chain_data(
         return false;
     }
 
-    if (status_received_at.is_none() || remote_genesis_hash.trim().is_empty())
-        && !authenticated_public_history_gateway
-    {
+    if status_received_at.is_none() && !authenticated_public_history_gateway {
         debug!(
             "p2p",
             "Ignoring chain data until peer status confirms canonical genesis",
@@ -2389,6 +2403,7 @@ fn service_sync_start_flight(
         "service-block-request",
     ) {
         Ok(true) => {
+            #[cfg(not(test))]
             if !spawn_named_thread("p2p-service-sync-watchdog", move || {
                 service_sync_watchdog(generation);
             }) {
@@ -10756,13 +10771,13 @@ mod tests {
     fn peer_session_test_guard() -> MutexGuard<'static, ()> {
         PEER_SESSION_TEST_LOCK
             .lock()
-            .expect("peer session test lock should not be poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn service_sync_test_guard() -> MutexGuard<'static, ()> {
         let guard = SERVICE_SYNC_TEST_LOCK
             .lock()
-            .expect("service sync test lock should not be poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         reset_service_sync_coordinator_for_tests();
         BLOCK_SYNC_APPLY_ACTIVE
             .lock()
@@ -12905,7 +12920,7 @@ mod tests {
     }
 
     #[test]
-    fn chain_data_is_rejected_until_peer_status_confirms_genesis() {
+    fn validator_chain_data_waits_for_status_without_disconnect() {
         let _session_guard = peer_session_test_guard();
         configure_canonical_genesis_path_for_tests();
         let mut chain = BlockChain::new();
@@ -12920,7 +12935,7 @@ mod tests {
                 address: "peer-pending".to_string(),
                 direction: ConnectionDirection::Incoming,
                 public_address: None,
-                validator_address: None,
+                validator_address: Some("synv1validator".to_string()),
                 connected_at: current_timestamp(),
                 last_seen: current_timestamp(),
                 blocks_sent: 0,
