@@ -13,9 +13,11 @@ serde_json    = { workspace = true }
 tower-http    = { version = "0.5", features = ["cors", "limit"] }
 tower         = { version = "0.4" }
 synq-compiler = { path = "../compiler" }
+synq-pqc-shims = { path = "../pqc-shims" }
 synq-vm       = { path = "../vm" }
 hex           = { workspace = true }
 ruint         = { workspace = true }
 getrandom     = "0.2"
 governor      = { workspace = true }
 dashmap       = { workspace = true }
+

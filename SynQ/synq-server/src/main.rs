@@ -11,7 +11,17 @@
 //!   • CSPRNG session IDs, session cap, body size limit, source size limit,
 //!     mutex released before VM execution, configurable CORS
 //!
-//! PR-F operational hardening (this commit):
+//! PR-G: persistent ML-DSA-65 compiler-attestation key (this commit):
+//!   - CompilerKey enum: Persistent { private_key, public_key, key_id } | Ephemeral
+//!   - SYNQ_COMPILER_KEY_PATH env var: path to private key hex file on disk
+//!   - SYNQ_COMPILER_PUBKEY env var: public key hex
+//!   - key_id: first 8 bytes of SHA3-256(pubkey) as 16-char hex fingerprint
+//!   - GET /pubkey: serves current compiler public key for independent verification
+//!   - Persistent mode: trust_model = "compiler-attested", links to /pubkey
+//!   - Ephemeral fallback: WARNING logged at startup, trust_model unchanged
+//!   - Testnet key generated at /etc/synq/compiler.key (600 root:root)
+//!
+//! PR-F operational hardening (previous):
 //!   Item 1 — GET /health/ready: separate readiness endpoint (503 when near cap).
 //!   Item 2 — Per-IP rate limiting: governor token-bucket, 30 req/min sustained,
 //!             burst of 10. Returns 429 with Retry-After header on breach.
@@ -96,12 +106,75 @@ struct Session {
     state_vars: Vec<(String, u32)>,
 }
 
+// ─── PR-G: Persistent compiler-attestation key ───────────────────────────────
+
+/// Compiler signing key. Loaded once at startup; never regenerated per-request.
+#[derive(Clone)]
+enum CompilerKey {
+    /// Loaded from SYNQ_COMPILER_KEY_PATH + SYNQ_COMPILER_PUBKEY.
+    /// Proves artifacts came from *this* compiler service.
+    Persistent {
+        private_key: Vec<u8>,
+        public_key:  Vec<u8>,
+        key_id:      String,   // first 8 bytes of SHA3-256(pubkey), hex
+    },
+    /// Fallback: fresh keypair per compilation. Proves integrity only.
+    Ephemeral,
+}
+
+/// Derive a short key fingerprint: hex(SHA3-256(pubkey)[0..8]).
+fn key_fingerprint(pubkey: &[u8]) -> String {
+    use sha3::{Digest, Keccak256};
+    let hash = Keccak256::digest(pubkey);
+    hex::encode(&hash[..8])
+}
+
+/// Load the persistent compiler key from env vars, or return Ephemeral.
+fn load_compiler_key() -> CompilerKey {
+    let key_path = std::env::var("SYNQ_COMPILER_KEY_PATH").ok();
+    let pub_hex  = std::env::var("SYNQ_COMPILER_PUBKEY").ok();
+
+    match (key_path, pub_hex) {
+        (Some(path), Some(pub_h)) => {
+            let priv_hex = match std::fs::read_to_string(&path) {
+                Ok(s)  => s.trim().to_string(),
+                Err(e) => {
+                    eprintln!("WARNING: SYNQ_COMPILER_KEY_PATH={} unreadable: {} — falling back to ephemeral signing", path, e);
+                    return CompilerKey::Ephemeral;
+                }
+            };
+            let private_key = match hex::decode(&priv_hex) {
+                Ok(b)  => b,
+                Err(e) => {
+                    eprintln!("WARNING: private key hex decode failed: {} — ephemeral fallback", e);
+                    return CompilerKey::Ephemeral;
+                }
+            };
+            let public_key = match hex::decode(&pub_h) {
+                Ok(b)  => b,
+                Err(e) => {
+                    eprintln!("WARNING: public key hex decode failed: {} — ephemeral fallback", e);
+                    return CompilerKey::Ephemeral;
+                }
+            };
+            let key_id = key_fingerprint(&public_key);
+            println!("  Compiler key:    persistent (key_id={})", key_id);
+            CompilerKey::Persistent { private_key, public_key, key_id }
+        }
+        _ => {
+            eprintln!("WARNING: SYNQ_COMPILER_KEY_PATH / SYNQ_COMPILER_PUBKEY not set — using ephemeral per-compilation key. Artifacts cannot be independently verified as originating from this service.");
+            CompilerKey::Ephemeral
+        }
+    }
+}
+
 type SessionStore = Arc<Mutex<HashMap<String, Session>>>;
 
 #[derive(Clone)]
 struct AppState {
-    sessions:     SessionStore,
-    rate_limiter: StdArc<IpLimiter>,
+    sessions:      SessionStore,
+    rate_limiter:  StdArc<IpLimiter>,
+    compiler_key:  Arc<CompilerKey>,
 }
 
 /// PR-F Item 2: check the per-IP rate limit.
@@ -339,32 +412,54 @@ async fn compile_handler(
         })),
     };
 
+    // PR-G: use persistent compiler key when available, ephemeral otherwise
     let pqc = PQCCompiler::new(PQCSecurityLevel::Enhanced);
-    let keypair = match pqc.generate_keypair(SIGNING_ALGORITHM) {
-        Ok(k)  => k,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(CompileResponse {
-            success: false, bytecode: None, signature_sidecar: None, state_vars: vec![],
-            errors: vec![format!("PQC keygen failed: {}", e)], warnings: vec![],
-        })),
+    let sidecar = match state.compiler_key.as_ref() {
+        CompilerKey::Persistent { private_key, public_key, key_id } => {
+            let sig = match pqc.sign_message(private_key, &bytecode, SIGNING_ALGORITHM) {
+                Ok(s)  => s,
+                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(CompileResponse {
+                    success: false, bytecode: None, signature_sidecar: None, state_vars: vec![],
+                    errors: vec![format!("PQC signing failed: {}", e)], warnings: vec![],
+                })),
+            };
+            json!({
+                "mode":          "persistent",
+                "algorithm":     sig.algorithm,
+                "security_level": format!("{:?}", sig.security_level),
+                "key_id":        key_id,
+                "public_key":    hex_encode(public_key),
+                "signature":     hex_encode(&sig.signature),
+                "trust_model":   "compiler-attested",
+                "note":          "Persistent testnet compiler key. Verify independently at /pubkey.",
+            })
+        }
+        CompilerKey::Ephemeral => {
+            let keypair = match pqc.generate_keypair(SIGNING_ALGORITHM) {
+                Ok(k)  => k,
+                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(CompileResponse {
+                    success: false, bytecode: None, signature_sidecar: None, state_vars: vec![],
+                    errors: vec![format!("PQC keygen failed: {}", e)], warnings: vec![],
+                })),
+            };
+            let sig = match pqc.sign_message(&keypair.private_key, &bytecode, SIGNING_ALGORITHM) {
+                Ok(s)  => s,
+                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(CompileResponse {
+                    success: false, bytecode: None, signature_sidecar: None, state_vars: vec![],
+                    errors: vec![format!("PQC signing failed: {}", e)], warnings: vec![],
+                })),
+            };
+            json!({
+                "mode":          "ephemeral",
+                "algorithm":     sig.algorithm,
+                "security_level": format!("{:?}", sig.security_level),
+                "public_key":    hex_encode(&keypair.public_key),
+                "signature":     hex_encode(&sig.signature),
+                "trust_model":   "ephemeral-self-signed",
+                "note":          "Ephemeral keypair: proves bytecode integrity but does not establish compiler identity.",
+            })
+        }
     };
-    let sig = match pqc.sign_message(&keypair.private_key, &bytecode, SIGNING_ALGORITHM) {
-        Ok(s)  => s,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(CompileResponse {
-            success: false, bytecode: None, signature_sidecar: None, state_vars: vec![],
-            errors: vec![format!("PQC signing failed: {}", e)], warnings: vec![],
-        })),
-    };
-
-    // PR-D Item 3: honest labelling — sidecar documents the trust model
-    let sidecar = json!({
-        "mode":         "ephemeral",
-        "algorithm":    sig.algorithm,
-        "security_level": format!("{:?}", sig.security_level),
-        "public_key":   hex_encode(&keypair.public_key),
-        "signature":    hex_encode(&sig.signature),
-        "trust_model":  "ephemeral-self-signed",
-        "note":         "Ephemeral keypair: proves bytecode integrity but does not establish compiler identity. Signer trust has not been independently established.",
-    });
 
     (StatusCode::OK, RespJson(CompileResponse {
         success: true,
@@ -496,24 +591,50 @@ async fn attest_handler(
         &raw_bytecode,
     );
 
-    // PQC sign the canonical payload (not a raw concatenation)
+    // PR-G: PQC sign the canonical payload with persistent key when available
     let pqc = PQCCompiler::new(PQCSecurityLevel::Enhanced);
-    let keypair = match pqc.generate_keypair(SIGNING_ALGORITHM) {
-        Ok(k)  => k,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(AttestResponse {
-            success: false, hybrid_sidecar: None,
-            error: Some(format!("PQC keygen: {}", e)),
-        })),
-    };
-    let pqc_sig = match pqc.sign_message(&keypair.private_key, &attestation_payload, SIGNING_ALGORITHM) {
-        Ok(s)  => s,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(AttestResponse {
-            success: false, hybrid_sidecar: None,
-            error: Some(format!("PQC sign: {}", e)),
-        })),
+    let (pqc_pub_hex, pqc_sig, pqc_trust, pqc_note, pqc_key_id) = match state.compiler_key.as_ref() {
+        CompilerKey::Persistent { private_key, public_key, key_id } => {
+            let sig = match pqc.sign_message(private_key, &attestation_payload, SIGNING_ALGORITHM) {
+                Ok(s)  => s,
+                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(AttestResponse {
+                    success: false, hybrid_sidecar: None, error: Some(format!("PQC sign: {}", e)),
+                })),
+            };
+            (hex_encode(public_key), sig, "compiler-attested",
+             "Persistent testnet compiler key. Verify at /pubkey.",
+             Some(key_id.clone()))
+        }
+        CompilerKey::Ephemeral => {
+            let keypair = match pqc.generate_keypair(SIGNING_ALGORITHM) {
+                Ok(k)  => k,
+                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(AttestResponse {
+                    success: false, hybrid_sidecar: None, error: Some(format!("PQC keygen: {}", e)),
+                })),
+            };
+            let sig = match pqc.sign_message(&keypair.private_key, &attestation_payload, SIGNING_ALGORITHM) {
+                Ok(s)  => s,
+                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(AttestResponse {
+                    success: false, hybrid_sidecar: None, error: Some(format!("PQC sign: {}", e)),
+                })),
+            };
+            (hex_encode(&keypair.public_key), sig, "ephemeral-self-signed",
+             "Ephemeral keypair: proves integrity but does not establish compiler identity.",
+             None)
+        }
     };
 
-    // Item 3: honest labelling
+    let mut pqc_obj = json!({
+        "algorithm":       pqc_sig.algorithm,
+        "security_level":  format!("{:?}", pqc_sig.security_level),
+        "public_key":      pqc_pub_hex,
+        "signature":       hex_encode(&pqc_sig.signature),
+        "signed_payload":  "SynQAttestationV1: magic(16) || scheme(1) || keccak256_bytecode(32) || evm_signer(20) || issued_at_u32be(4) || raw_bytecode",
+    });
+    if let Some(kid) = pqc_key_id {
+        pqc_obj["key_id"] = json!(kid);
+    }
+
     (StatusCode::OK, RespJson(AttestResponse {
         success: true, error: None,
         hybrid_sidecar: Some(json!({
@@ -523,15 +644,9 @@ async fn attest_handler(
             "bytecode_hash":       format!("0x{}", hex_encode(&bytecode_hash)),
             "evm_address":         format!("0x{}", hex_encode(&recovered_addr)),
             "issued_at":           issued_at,
-            "pqc": {
-                "algorithm":       pqc_sig.algorithm,
-                "security_level":  format!("{:?}", pqc_sig.security_level),
-                "public_key":      hex_encode(&keypair.public_key),
-                "signature":       hex_encode(&pqc_sig.signature),
-                "signed_payload":  "SynQAttestationV1: magic(16) || scheme(1) || keccak256_bytecode(32) || evm_signer(20) || issued_at_u32be(4) || raw_bytecode",
-            },
-            "trust_model": "ephemeral-self-signed",
-            "note": "Ephemeral keypair: proves integrity of this attestation bundle but does not establish compiler identity. EVM signer address was independently recovered via ecrecover.",
+            "pqc":                 pqc_obj,
+            "trust_model":         pqc_trust,
+            "note":                pqc_note,
         })),
     }))
 }
@@ -692,6 +807,31 @@ async fn session_state_handler(
     (StatusCode::OK, RespJson(json!({ "success": true, "state": serde_json::Value::Object(state_map) })))
 }
 
+// ─── GET /pubkey ─────────────────────────────────────────────────────────────
+//
+// PR-G: Returns the current compiler public key so verifiers can independently
+// confirm that a sidecar signature came from this service.
+
+async fn pubkey_handler(State(state): State<AppState>) -> RespJson<serde_json::Value> {
+    match state.compiler_key.as_ref() {
+        CompilerKey::Persistent { public_key, key_id, .. } => {
+            RespJson(json!({
+                "trust_model": "compiler-attested",
+                "algorithm":   SIGNING_ALGORITHM,
+                "key_id":      key_id,
+                "public_key":  hex_encode(public_key),
+                "note":        "Use this public key to verify ML-DSA-65 signatures in /compile and /attest sidecars.",
+            }))
+        }
+        CompilerKey::Ephemeral => {
+            RespJson(json!({
+                "trust_model": "ephemeral",
+                "note":        "No persistent compiler key configured. Each /compile call uses a fresh ephemeral keypair — the public key is embedded in the sidecar but cannot be pre-verified.",
+            }))
+        }
+    }
+}
+
 // ─── GET /health ──────────────────────────────────────────────────────────────
 
 async fn health(State(state): State<AppState>) -> RespJson<serde_json::Value> {
@@ -732,8 +872,9 @@ async fn health_ready(State(state): State<AppState>) -> (StatusCode, RespJson<se
 #[tokio::main]
 async fn main() {
     let sessions: SessionStore = Arc::new(Mutex::new(HashMap::new()));
-    let rate_limiter = build_rate_limiter();
-    let store = AppState { sessions, rate_limiter };
+    let rate_limiter  = build_rate_limiter();
+    let compiler_key  = Arc::new(load_compiler_key());
+    let store = AppState { sessions, rate_limiter, compiler_key };
 
     let cors_origin = std::env::var("SYNQ_CORS_ORIGIN").unwrap_or_else(|_| "*".to_string());
     let cors = if cors_origin == "*" {
@@ -753,13 +894,14 @@ async fn main() {
     let app = Router::new()
         .route("/health",            get(health))
         .route("/health/ready",      get(health_ready))
+        .route("/pubkey",            get(pubkey_handler))
         .route("/compile",           post(compile_handler))
         .route("/attest",            post(attest_handler))
         .route("/session/new",       post(session_new_handler))
         .route("/session/run",       post(session_run_handler))
         .route("/session/:id",       delete(session_delete_handler))
         .route("/session/:id/state", get(session_state_handler))
-        .with_state(store)
+        .with_state(store.clone())
         .layer(
             ServiceBuilder::new()
                 .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
@@ -772,7 +914,11 @@ async fn main() {
     println!("  Max sessions:    {}", MAX_SESSIONS);
     println!("  Max body:        {} KB", MAX_BODY_BYTES / 1024);
     println!("  Max source:      {} KB", MAX_SOURCE_BYTES / 1024);
-    println!("  Signing:         {} (ephemeral, SynQAttestationV1)", SIGNING_ALGORITHM);
+    let key_mode = match store.compiler_key.as_ref() {
+        CompilerKey::Persistent { key_id, .. } => format!("{} (persistent, key_id={})", SIGNING_ALGORITHM, key_id),
+        CompilerKey::Ephemeral                 => format!("{} (ephemeral — set SYNQ_COMPILER_KEY_PATH)", SIGNING_ALGORITHM),
+    };
+    println!("  Signing:         {}", key_mode);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 }
