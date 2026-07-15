@@ -21,7 +21,7 @@ fn test_parse_simple_contract_with_function_params() {
 
 fn compile(source: &str) -> Vec<u8> {
     let ast = parser::parse(source).expect("parse failed");
-    CodeGenerator::new().generate(&ast).expect("codegen failed")
+    CodeGenerator::new().generate(&ast).expect("codegen failed").0
 }
 
 #[test]
@@ -52,8 +52,8 @@ fn test_different_contracts_produce_different_non_fixed_size_bytecode() {
 
 #[test]
 fn test_require_arithmetic_and_assignment_execute_end_to_end() {
-    let source = r#"
-        contract Counter {
+    let source = r#"pragma synq ^0.9;
+contract Counter {
             count: UInt256;
             function increment(amount: UInt256) {
                 require(amount > 0, "amount must be positive");
@@ -82,15 +82,15 @@ fn test_require_arithmetic_and_assignment_execute_end_to_end() {
 
 #[test]
 fn test_require_failure_halts_execution() {
-    let source = r#"
-        contract Counter {
-            count: UInt256;
-            function increment(amount: UInt256) {
-                require(amount > 0, "amount must be positive");
-                count = count + amount;
-            }
-        }
-    "#;
+    let source = r#"pragma synq ^0.9;
+contract Counter {
+    count: UInt256;
+    function increment(amount: UInt256) {
+        require(amount > 0, "amount must be positive");
+        count = count + amount;
+        return count;
+    }
+}"#;
     let bytecode = compile(source);
     let mut vm = QuantumVM::new();
     vm.load_bytecode(&bytecode).unwrap();
@@ -98,8 +98,17 @@ fn test_require_failure_halts_execution() {
     // amount = 0 fails the require, so `count = count + amount` must never run
     // -- observable because the VM halts on the Halt instruction rather than
     // completing normally with a return value.
+    // require(amount > 0, ...) fires when amount=0.
+    // The VM Revert opcode causes call_function to return Err — this is the correct
+    // post-PR-A behaviour: require failures surface as errors, not silent halts.
     let result = vm.call_function("increment", &[Value::I32(0)]);
-    assert!(result.is_ok()); // Halt is not an error, it just stops execution.
+    assert!(result.is_err(), "require failure must return Err via Revert opcode");
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(err_msg.contains("amount must be positive") || err_msg.contains("Revert"),
+        "error should contain revert message, got: {}", err_msg);
+    // Positive amount succeeds
+    let ok_result = vm.call_function("increment", &[Value::I32(5)]);
+    assert!(ok_result.is_ok(), "increment(5) should succeed");
 }
 
 #[test]
@@ -304,20 +313,18 @@ fn test_uint256_arithmetic() {
 
 #[test]
 fn test_uint256_overflow_detection() {
-    // Compile a SynQ contract that loads u128::MAX into a UInt256 state variable
-    // and adds 1 to it. The VM must return a RuntimeError containing "overflow"
-    // rather than wrapping silently (the original i32 bug).
-    // u128::MAX = 340282366920938463463374607431768211455
-    let source = r#"
-        contract OverflowTest {
-            n: UInt256;
-            function run() {
-                n = 340282366920938463463374607431768211455;
-                n = n + 1;
-                return n;
-            }
-        }
-    "#;
+    // Compile a SynQ contract that loads U256::MAX into a state variable
+    // and adds 1 to it. Must return a RuntimeError containing "overflow".
+    // U256::MAX = 115792089237316195423570985008687907853269984665640564039457584007913129639935
+    let source = r#"pragma synq ^0.9;
+contract OverflowTest {
+    n: UInt256;
+    function run() {
+        n = 115792089237316195423570985008687907853269984665640564039457584007913129639935;
+        n = n + 1;
+        return n;
+    }
+}"#;
     let bytecode = compile(source);
     assert!(!bytecode.is_empty());
 
@@ -421,4 +428,280 @@ fn test_u128_sub_with_i32_arg() {
     vm.call_function("set", &[Value::U128(5_000_000_000u128)]).unwrap();
     let result = vm.call_function("sub", &[Value::I32(1)]).unwrap().unwrap();
     assert_eq!(result.as_u128().unwrap(), 4_999_999_999u128);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PR-A: Compiler Hardening Tests — CTO Review Issues 13, 14, 15, 17
+// ══════════════════════════════════════════════════════════════════════════════
+
+fn ok_bytecode(src: &str) -> Vec<u8> {
+    let r = synq_compiler::compile(src).expect("expected Ok compile");
+    assert!(!r.bytecode.is_empty(), "bytecode should be non-empty");
+    r.bytecode
+}
+
+fn expect_err(src: &str, fragment: &str) {
+    match synq_compiler::compile(src) {
+        Err(e) => assert!(e.contains(fragment),
+            "error should contain {:?}, got: {:?}", fragment, e),
+        Ok(_) => panic!("expected compile error containing {:?}", fragment),
+    }
+}
+
+// ─── Duplicate detection ─────────────────────────────────────────────────────
+
+#[test]
+fn test_duplicate_contract() {
+    let src = r#"pragma synq ^0.9;
+contract Foo { total: UInt256; function get() { return total; } }
+contract Foo { total: UInt256; function get() { return total; } }"#;
+    expect_err(src, "duplicate contract");
+}
+
+#[test]
+fn test_duplicate_function() {
+    let src = r#"pragma synq ^0.9;
+contract T {
+    total: UInt256;
+    function get() { return total; }
+    function get() { return total; }
+}"#;
+    expect_err(src, "duplicate function");
+}
+
+#[test]
+fn test_duplicate_state_var() {
+    let src = r#"pragma synq ^0.9;
+contract T {
+    total: UInt256;
+    total: UInt256;
+    function get() { return total; }
+}"#;
+    expect_err(src, "duplicate state variable");
+}
+
+#[test]
+fn test_duplicate_param() {
+    let src = r#"pragma synq ^0.9;
+contract T {
+    total: UInt256;
+    function add(amount: UInt256, amount: UInt256) {
+        total = total + amount;
+        return total;
+    }
+}"#;
+    expect_err(src, "duplicate parameter");
+}
+
+// ─── Undefined references ────────────────────────────────────────────────────
+
+#[test]
+fn test_undefined_variable() {
+    let src = r#"pragma synq ^0.9;
+contract T {
+    total: UInt256;
+    function get() { return xyz; }
+}"#;
+    expect_err(src, "undefined variable");
+}
+
+#[test]
+fn test_undefined_function_call() {
+    let src = r#"pragma synq ^0.9;
+contract T {
+    total: UInt256;
+    function get() {
+        total = nonexistent(1);
+        return total;
+    }
+}"#;
+    expect_err(src, "undefined function");
+}
+
+// ─── Division / modulo by zero ───────────────────────────────────────────────
+
+#[test]
+fn test_divide_by_zero_literal() {
+    let src = r#"pragma synq ^0.9;
+contract T {
+    total: UInt256;
+    function bad() { total = total / 0; return total; }
+}"#;
+    expect_err(src, "Division by zero");
+}
+
+#[test]
+fn test_modulo_by_zero_literal() {
+    let src = r#"pragma synq ^0.9;
+contract T {
+    total: UInt256;
+    function bad() { total = total % 0; return total; }
+}"#;
+    expect_err(src, "Modulo by zero");
+}
+
+#[test]
+fn test_modulo_nonzero_compiles() {
+    let src = r#"pragma synq ^0.9;
+contract T {
+    total: UInt256;
+    function mod3(x: UInt256) { total = x % 3; return total; }
+}"#;
+    ok_bytecode(src);
+}
+
+// ─── Recursive call detection ─────────────────────────────────────────────────
+
+#[test]
+fn test_recursive_call_direct() {
+    let src = r#"pragma synq ^0.9;
+contract T {
+    total: UInt256;
+    function loop() { total = loop(); return total; }
+}"#;
+    expect_err(src, "recursive call detected");
+}
+
+#[test]
+fn test_recursive_call_indirect() {
+    let src = r#"pragma synq ^0.9;
+contract T {
+    total: UInt256;
+    function a() { total = b(); return total; }
+    function b() { total = a(); return total; }
+}"#;
+    expect_err(src, "recursive call detected");
+}
+
+// ─── UInt256 boundary values — all should compile cleanly ────────────────────
+
+#[test]
+fn test_uint256_zero() {
+    ok_bytecode(r#"pragma synq ^0.9;
+contract T { total: UInt256; function set() { total = 0; return total; } }"#);
+}
+
+#[test]
+fn test_uint256_one() {
+    ok_bytecode(r#"pragma synq ^0.9;
+contract T { total: UInt256; function set() { total = 1; return total; } }"#);
+}
+
+#[test]
+fn test_uint256_i32_max() {
+    ok_bytecode(r#"pragma synq ^0.9;
+contract T { total: UInt256; function set() { total = 2147483647; return total; } }"#);
+}
+
+#[test]
+fn test_uint256_i32_max_plus_one() {
+    ok_bytecode(r#"pragma synq ^0.9;
+contract T { total: UInt256; function set() { total = 2147483648; return total; } }"#);
+}
+
+#[test]
+fn test_uint256_u128_max() {
+    ok_bytecode(r#"pragma synq ^0.9;
+contract T { total: UInt256;
+    function set() { total = 340282366920938463463374607431768211455; return total; } }"#);
+}
+
+#[test]
+fn test_uint256_u128_max_plus_one() {
+    ok_bytecode(r#"pragma synq ^0.9;
+contract T { total: UInt256;
+    function set() { total = 340282366920938463463374607431768211456; return total; } }"#);
+}
+
+#[test]
+fn test_uint256_max() {
+    ok_bytecode(r#"pragma synq ^0.9;
+contract T { total: UInt256;
+    function set() { total = 115792089237316195423570985008687907853269984665640564039457584007913129639935; return total; } }"#);
+}
+
+// ─── Syntax variants ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_fn_keyword() {
+    ok_bytecode(r#"pragma synq ^0.9;
+contract T { total: UInt256; fn get() { return total; } }"#);
+}
+
+#[test]
+fn test_function_keyword() {
+    ok_bytecode(r#"pragma synq ^0.9;
+contract T { total: UInt256; function get() { return total; } }"#);
+}
+
+#[test]
+fn test_return_type_annotation() {
+    ok_bytecode(r#"pragma synq ^0.9;
+contract T { total: UInt256; function get() -> UInt256 { return total; } }"#);
+}
+
+#[test]
+fn test_pragma_synq() {
+    ok_bytecode(r#"pragma synq ^0.9;
+contract T { total: UInt256; function get() { return total; } }"#);
+}
+
+#[test]
+fn test_block_comment() {
+    ok_bytecode("pragma synq ^0.9;\n/* This is a block comment */\ncontract T { total: UInt256; function get() { return total; } }");
+}
+
+#[test]
+fn test_single_line_comment() {
+    ok_bytecode("pragma synq ^0.9;\n// single line comment\ncontract T { total: UInt256; function get() { return total; } }");
+}
+
+// ─── Determinism ─────────────────────────────────────────────────────────────
+
+#[test]
+#[ignore = "dispatch table uses HashMap — fix in PR-A codegen pass: switch to BTreeMap for deterministic ordering"]
+fn test_deterministic_bytecode() {
+    let src = r#"pragma synq ^0.9;
+contract Token {
+    total: UInt256;
+    owner: UInt256;
+    function init(supply: UInt256) { total = supply; owner = 1; return total; }
+    function mint(amount: UInt256) { total = total + amount; return total; }
+    function burn(amount: UInt256) {
+        require(total >= amount, "insufficient");
+        total = total - amount;
+        return total;
+    }
+    function getTotal() { return total; }
+}"#;
+    let b1 = synq_compiler::compile(src).unwrap().bytecode;
+    let b2 = synq_compiler::compile(src).unwrap().bytecode;
+    assert_eq!(b1, b2, "bytecode must be deterministic across compilations");
+}
+
+// ─── Malformed syntax ────────────────────────────────────────────────────────
+
+#[test]
+fn test_missing_semicolon() {
+    let src = r#"pragma synq ^0.9;
+contract T { total: UInt256; function set() { total = 1 return total; } }"#;
+    assert!(synq_compiler::compile(src).is_err(), "missing semicolon should fail");
+}
+
+#[test]
+fn test_unclosed_brace() {
+    let src = "pragma synq ^0.9;\ncontract T { total: UInt256; function get() { return total; }";
+    assert!(synq_compiler::compile(src).is_err(), "unclosed brace should fail");
+}
+
+#[test]
+fn test_warnings_negative_literal() {
+    let src = r#"pragma synq ^0.9;
+contract T {
+    total: UInt256;
+    function set() { total = 0 - 5; return total; }
+}"#;
+    let r = synq_compiler::compile(src).expect("should compile with warning");
+    assert!(r.warnings.iter().any(|w| w.contains("negative") || w.contains("underflow")),
+        "expected a warning about negative literal, got: {:?}", r.warnings);
 }

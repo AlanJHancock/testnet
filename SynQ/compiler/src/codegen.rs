@@ -3,6 +3,36 @@ use quantumvm::{Assembler, OpCode};
 use ruint::aliases::U256;
 use std::collections::HashMap;
 
+// ## UInt256 Arithmetic Semantics
+//
+// All numeric values in SynQ are conceptually UInt256 (unsigned 256-bit integers).
+// The VM stores them as `Value::I32`, `Value::U128`, or `Value::U256` and promotes
+// automatically during arithmetic using `as_u256()`.
+//
+// **Overflow / underflow:**  All arithmetic uses checked operations via the `ruint`
+// crate. Overflow raises a `RuntimeError` — no silent wrapping.
+//   - Addition overflow → RuntimeError("UInt256 overflow on Add")
+//   - Subtraction underflow → RuntimeError (no negative wrapping)
+//   - Multiplication overflow → RuntimeError("UInt256 overflow on Mul")
+//
+// **Division / modulo by zero:**
+//   - Literal zero divisor → compile-time `Err` (caught here in codegen)
+//   - Runtime zero divisor → `RuntimeError("Division by zero")` / `RuntimeError("Modulo by zero")`
+//
+// **Mixed-width promotion:** I32 and U128 operands are promoted to U256 via
+// `as_u256()` before the operation. The result shrinks back via `from_u256_shrink()`
+// to I32 if it fits in i32, U128 if it fits in u128, otherwise stays U256.
+//
+// **Negative literals:** UInt256 has no sign. Negative number literals (e.g. `-1`)
+// are encoded at parse time as `(0 - N)` and will underflow at runtime →
+// RuntimeError. A future signed integer type will handle signed arithmetic.
+//
+// **Boundary values handled by ruint:**
+//   - 2^128 (u128::MAX + 1) — stored as U256, no truncation
+//   - 2^255 — stored as U256
+//   - 2^256 - 1 (U256::MAX) — maximum representable value
+//   - 2^256 — overflow, RuntimeError
+
 // Memory layout: state variables get fixed contract-wide addresses (0..N).
 // Each function gets its own disjoint address block so that parameters
 // with the same name across different functions never alias the same
@@ -285,6 +315,18 @@ impl CodeGenerator {
                 Ok(())
             }
             Expression::BinaryOp(lhs, op, rhs) => {
+                // Compile-time divide/modulo by zero detection
+                if matches!(op, BinaryOperator::Div | BinaryOperator::Mod) {
+                    match rhs.as_ref() {
+                        Expression::Literal(Literal::Number(0)) =>
+                            return Err(format!("{} by zero (compile-time literal)",
+                                if matches!(op, BinaryOperator::Div) { "Division" } else { "Modulo" })),
+                        Expression::Literal(Literal::BigNumber(s)) if s == "0" =>
+                            return Err(format!("{} by zero (compile-time literal)",
+                                if matches!(op, BinaryOperator::Div) { "Division" } else { "Modulo" })),
+                        _ => {}
+                    }
+                }
                 self.gen_expression(lhs, scope)?;
                 self.gen_expression(rhs, scope)?;
                 let opcode = match op {
@@ -292,6 +334,7 @@ impl CodeGenerator {
                     BinaryOperator::Sub => OpCode::Sub,
                     BinaryOperator::Mul => OpCode::Mul,
                     BinaryOperator::Div => OpCode::Div,
+                    BinaryOperator::Mod => OpCode::Rem,
                     BinaryOperator::Eq => OpCode::Eq,
                     BinaryOperator::Ne => OpCode::Ne,
                     BinaryOperator::Lt => OpCode::Lt,
