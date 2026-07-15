@@ -64,7 +64,7 @@ fn test_compile_produces_real_verifiable_signature() {
     Command::cargo_bin("synq-cli").unwrap()
         .arg("verify").arg("--path").arg(&bytecode_path)
         .assert().success()
-        .stdout(predicate::str::contains("Signature valid"));
+        .stdout(predicate::str::contains("Signature mathematically valid"));
 }
 
 #[test]

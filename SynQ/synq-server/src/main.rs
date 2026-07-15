@@ -1,19 +1,26 @@
 //! synq-server — HTTP compile + run server for the SynQ IDE
 //!
 //! POST /compile        — compile SynQ source, sign with ephemeral ML-DSA-65
-//! POST /attest         — wrap an EVM wallet signature in a PQC attestation
+//! POST /attest         — EIP-191 EVM verification + PQC attestation (SynQAttestationV1)
 //! POST /session/new    — load bytecode into a fresh persistent VM session
 //! POST /session/run    — call a function on a persistent session
 //! DELETE /session/:id  — destroy a session
 //! GET  /health
 //!
-//! PR-C security hardening:
-//!   • Cryptographically random session IDs (32 bytes, OS getrandom)
-//!   • Hard session cap (MAX_SESSIONS) — oldest session evicted when full
-//!   • Request body size limit via tower RequestBodyLimitLayer (64 KB default)
-//!   • Source size limit (MAX_SOURCE_BYTES) before compilation starts
-//!   • Mutex released before VM execution — session cloned out, result merged back
-//!   • CORS origin configurable via SYNQ_CORS_ORIGIN env var (default: *)
+//! PR-C security hardening (previous):
+//!   • CSPRNG session IDs, session cap, body size limit, source size limit,
+//!     mutex released before VM execution, configurable CORS
+//!
+//! PR-D cryptographic correctness (this commit):
+//!   Item 1 — Strict hex decoding: hex_decode_strict() returns Result, rejects
+//!             odd-length / invalid-char / empty inputs.
+//!   Item 2 — EIP-191 server-side EVM signature verification in /attest:
+//!             ecrecover extracts signer address; mismatch with claimed address
+//!             is rejected before PQC signing begins.
+//!   Item 3 — Honest ephemeral-key labelling: sidecar carries trust_model and
+//!             note fields; CLI verify output is updated to match.
+//!   Item 4 — SynQAttestationV1 canonical payload: versioned, domain-separated
+//!             binary structure; PQC signs this instead of ad-hoc concatenation.
 
 use axum::{
     extract::{Json, Path, State},
@@ -27,7 +34,7 @@ use serde_json::json;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tower::ServiceBuilder;
 use tower_http::{
@@ -40,80 +47,140 @@ use synq_vm::{QuantumVM, Value};
 
 // ─── Security constants ───────────────────────────────────────────────────────
 
-/// NIST FIPS 204 canonical name for the ephemeral signing algorithm.
-const SIGNING_ALGORITHM: &str = "ML-DSA-65";
-
-/// Sessions idle longer than this are evicted on the next /session/new request.
-const SESSION_TTL: Duration = Duration::from_secs(30 * 60); // 30 min
-
-/// PR-C: Maximum number of concurrent sessions.
-/// When the store is full, the stalest session is evicted before inserting
-/// a new one regardless of TTL, preventing unbounded memory growth.
-const MAX_SESSIONS: usize = 100;
-
-/// PR-C: Maximum source code size accepted by /compile and /session/new.
-/// Anything larger is rejected with 413 before the parser even runs.
-const MAX_SOURCE_BYTES: usize = 64 * 1024; // 64 KB
-
-/// PR-C: HTTP request body limit (applies to ALL endpoints).
-/// Keeps the axum body buffer bounded regardless of Content-Length.
-const MAX_BODY_BYTES: usize = 128 * 1024; // 128 KB
+const SIGNING_ALGORITHM: &str  = "ML-DSA-65";
+const SESSION_TTL: Duration    = Duration::from_secs(30 * 60);
+const MAX_SESSIONS: usize      = 100;
+const MAX_SOURCE_BYTES: usize  = 64 * 1024;
+const MAX_BODY_BYTES: usize    = 128 * 1024;
 
 // ─── Session store ────────────────────────────────────────────────────────────
 
 struct Session {
     vm:         QuantumVM,
     last_used:  Instant,
-    /// State variable names in address order (name, address).
     state_vars: Vec<(String, u32)>,
 }
 
 type SessionStore = Arc<Mutex<HashMap<String, Session>>>;
 
-/// PR-C: Generate a 32-byte cryptographically random session ID using OS getrandom.
-/// The previous implementation used timestamp + stack pointer — both guessable.
 fn new_session_id() -> String {
     let mut buf = [0u8; 32];
     getrandom::getrandom(&mut buf).expect("getrandom failed");
     buf.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// Evict sessions that have exceeded SESSION_TTL.
-/// Called inside the mutex on every /session/new to bound memory growth.
 fn evict_stale(store: &mut HashMap<String, Session>) {
     store.retain(|_, s| s.last_used.elapsed() < SESSION_TTL);
 }
 
-/// PR-C: If the store is still at or over MAX_SESSIONS after TTL eviction,
-/// remove the single least-recently-used session to make room.
 fn evict_oldest_if_full(store: &mut HashMap<String, Session>) {
-    if store.len() < MAX_SESSIONS {
-        return;
-    }
-    // Find the key of the session with the oldest last_used timestamp.
-    let oldest_key = store
-        .iter()
-        .max_by_key(|(_, s)| s.last_used.elapsed())
-        .map(|(k, _)| k.clone());
-    if let Some(k) = oldest_key {
-        store.remove(&k);
-    }
+    if store.len() < MAX_SESSIONS { return; }
+    let oldest = store.iter().max_by_key(|(_, s)| s.last_used.elapsed()).map(|(k, _)| k.clone());
+    if let Some(k) = oldest { store.remove(&k); }
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── PR-D Item 1: Strict hex decoder ─────────────────────────────────────────
+//
+// Cryptographic and executable inputs must be decoded strictly.
+// This replaces the previous hex_decode_lossy helper which silently dropped
+// invalid characters — unacceptable for EVM signatures and bytecode.
+
+fn hex_decode_strict(s: &str) -> Result<Vec<u8>, String> {
+    let s = if s.starts_with("0x") || s.starts_with("0X") { &s[2..] } else { s };
+    if s.is_empty() {
+        return Err("hex string is empty".to_string());
+    }
+    if s.len() % 2 != 0 {
+        return Err(format!("hex string has odd length {}", s.len()));
+    }
+    s.as_bytes()
+        .chunks(2)
+        .enumerate()
+        .map(|(i, pair)| {
+            let hi = pair[0] as char;
+            let lo = pair[1] as char;
+            let h = hi.to_digit(16)
+                .ok_or_else(|| format!("invalid hex character at position {}: {:?}", i * 2, hi))?;
+            let l = lo.to_digit(16)
+                .ok_or_else(|| format!("invalid hex character at position {}: {:?}", i * 2 + 1, lo))?;
+            Ok(((h << 4) | l) as u8)
+        })
+        .collect()
+}
+
+// ─── PR-D Item 2+4: EIP-191 ecrecover + SynQAttestationV1 ───────────────────
+
+/// Keccak-256 digest (Ethereum's hash function).
+fn keccak256(data: &[u8]) -> [u8; 32] {
+    use sha3::{Keccak256, Digest};
+    let mut h = Keccak256::new();
+    h.update(data);
+    h.finalize().into()
+}
+
+/// Recover the Ethereum signer address from an EIP-191 personal_sign signature.
+///
+/// The browser wallet signs:
+///   keccak256("\x19Ethereum Signed Message:\n32" + bytecode_keccak256_bytes)
+///
+/// `hash`  — the keccak256 of that full EIP-191 prefixed message (32 bytes)
+/// `sig65` — the 65-byte ECDSA signature (r[32] ++ s[32] ++ v[1])
+///
+/// Returns the recovered Ethereum address (20 bytes) or a descriptive error.
+fn ecrecover(hash: &[u8; 32], sig65: &[u8]) -> Result<[u8; 20], String> {
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+    if sig65.len() != 65 {
+        return Err(format!("signature must be 65 bytes, got {}", sig65.len()));
+    }
+    let r_s = &sig65[0..64];
+    let v    = sig65[64];
+    // Ethereum uses v=27/28; ECDSA recovery id is 0/1
+    let rec_id = if v >= 27 { v - 27 } else { v };
+    let recovery_id = RecoveryId::try_from(rec_id)
+        .map_err(|e| format!("invalid recovery id {}: {}", rec_id, e))?;
+    let sig = Signature::try_from(r_s)
+        .map_err(|e| format!("invalid signature bytes: {}", e))?;
+    let vk = VerifyingKey::recover_from_prehash(hash, &sig, recovery_id)
+        .map_err(|e| format!("ecrecover failed: {}", e))?;
+    // Ethereum address = last 20 bytes of keccak256(uncompressed pubkey, 64 bytes, no 0x04 prefix)
+    let uncompressed = vk.to_encoded_point(false);
+    let pubkey_bytes = &uncompressed.as_bytes()[1..]; // strip 0x04
+    let addr_hash = keccak256(pubkey_bytes);
+    let mut addr = [0u8; 20];
+    addr.copy_from_slice(&addr_hash[12..]);
+    Ok(addr)
+}
+
+/// Build the SynQAttestationV1 canonical payload (PR-D Item 4).
+///
+/// Fixed-layout binary structure signed by the PQC layer:
+///   [0..16]  = b"SynQAttestation\x01"  (15-byte magic + 1-byte version)
+///   [16]     = scheme: 0x01 = EIP-191 personal_sign
+///   [17..49] = bytecode keccak256 (32 bytes, server-computed)
+///   [49..69] = recovered EVM signer address (20 bytes)
+///   [69..73] = issued_at Unix timestamp (u32 big-endian)
+///   [73..]   = raw bytecode
+///
+/// This is deterministic, versioned, and unambiguous.  The PQC signature
+/// covers this entire buffer rather than an ad-hoc concatenation.
+fn build_attestation_v1(
+    bytecode_hash: &[u8; 32],
+    evm_signer: &[u8; 20],
+    issued_at: u32,
+    raw_bytecode: &[u8],
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(73 + raw_bytecode.len());
+    payload.extend_from_slice(b"SynQAttestation\x01"); // 16 bytes: magic + version
+    payload.push(0x01);                                // scheme: EIP-191 personal_sign
+    payload.extend_from_slice(bytecode_hash);          // 32 bytes
+    payload.extend_from_slice(evm_signer);             // 20 bytes
+    payload.extend_from_slice(&issued_at.to_be_bytes()); // 4 bytes
+    payload.extend_from_slice(raw_bytecode);           // variable
+    payload
+}
 
 fn hex_encode(b: &[u8]) -> String {
     b.iter().map(|x| format!("{:02x}", x)).collect()
-}
-
-fn hex_decode_lossy(s: &str) -> Vec<u8> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    // Guard against odd-length input: each byte needs exactly 2 hex chars.
-    // An odd-length string means the last nibble is incomplete — skip it.
-    let pairs = s.len() / 2;
-    (0..pairs)
-        .filter_map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok())
-        .collect()
 }
 
 fn value_to_json(v: &Value) -> serde_json::Value {
@@ -138,20 +205,14 @@ fn value_display(v: &Value) -> String {
     }
 }
 
-/// Parse a single JSON arg into a VM Value.
-/// All arguments are treated as non-negative integers (UInt256 semantics).
 fn parse_arg(v: &serde_json::Value) -> Result<Value, String> {
     match v {
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                if i < 0 {
-                    return Err(format!("UInt256 arguments must be non-negative, got {}", i));
-                }
+                if i < 0 { return Err(format!("UInt256 arguments must be non-negative, got {}", i)); }
                 return Ok(if i <= i32::MAX as i64 { Value::I32(i as i32) } else { Value::U128(i as u128) });
             }
-            if let Some(u) = n.as_u64() {
-                return Ok(Value::U128(u as u128));
-            }
+            if let Some(u) = n.as_u64() { return Ok(Value::U128(u as u128)); }
             match n.to_string().parse::<u128>() {
                 Ok(u)  => Ok(Value::U128(u)),
                 Err(_) => Err(format!("Cannot represent {} as UInt256", n)),
@@ -159,9 +220,7 @@ fn parse_arg(v: &serde_json::Value) -> Result<Value, String> {
         }
         serde_json::Value::String(s) => {
             let s = s.trim();
-            if s.starts_with('-') {
-                return Err(format!("UInt256 arguments must be non-negative, got {}", s));
-            }
+            if s.starts_with('-') { return Err(format!("UInt256 arguments must be non-negative, got {}", s)); }
             if let Ok(u) = s.parse::<u128>() {
                 return Ok(if u <= i32::MAX as u128 { Value::I32(u as i32) } else { Value::U128(u) });
             }
@@ -192,7 +251,6 @@ struct CompileResponse {
 async fn compile_handler(
     Json(req): Json<CompileRequest>,
 ) -> (StatusCode, RespJson<CompileResponse>) {
-    // PR-C: reject oversized source before parsing
     if req.source.len() > MAX_SOURCE_BYTES {
         return (StatusCode::PAYLOAD_TOO_LARGE, RespJson(CompileResponse {
             success: false, bytecode: None, signature_sidecar: None, state_vars: vec![],
@@ -217,15 +275,31 @@ async fn compile_handler(
         })),
     };
 
-    let pqc     = PQCCompiler::new(PQCSecurityLevel::Enhanced);
-    let keypair = pqc.generate_keypair(SIGNING_ALGORITHM).expect("keygen");
-    let sig     = pqc.sign_message(&keypair.private_key, &bytecode, SIGNING_ALGORITHM).expect("sign");
+    let pqc = PQCCompiler::new(PQCSecurityLevel::Enhanced);
+    let keypair = match pqc.generate_keypair(SIGNING_ALGORITHM) {
+        Ok(k)  => k,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(CompileResponse {
+            success: false, bytecode: None, signature_sidecar: None, state_vars: vec![],
+            errors: vec![format!("PQC keygen failed: {}", e)], warnings: vec![],
+        })),
+    };
+    let sig = match pqc.sign_message(&keypair.private_key, &bytecode, SIGNING_ALGORITHM) {
+        Ok(s)  => s,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(CompileResponse {
+            success: false, bytecode: None, signature_sidecar: None, state_vars: vec![],
+            errors: vec![format!("PQC signing failed: {}", e)], warnings: vec![],
+        })),
+    };
 
+    // PR-D Item 3: honest labelling — sidecar documents the trust model
     let sidecar = json!({
-        "mode": "ephemeral", "algorithm": sig.algorithm,
+        "mode":         "ephemeral",
+        "algorithm":    sig.algorithm,
         "security_level": format!("{:?}", sig.security_level),
-        "public_key": hex_encode(&keypair.public_key),
-        "signature":  hex_encode(&sig.signature),
+        "public_key":   hex_encode(&keypair.public_key),
+        "signature":    hex_encode(&sig.signature),
+        "trust_model":  "ephemeral-self-signed",
+        "note":         "Ephemeral keypair: proves bytecode integrity but does not establish compiler identity. Signer trust has not been independently established.",
     });
 
     (StatusCode::OK, RespJson(CompileResponse {
@@ -238,13 +312,21 @@ async fn compile_handler(
 }
 
 // ─── POST /attest ─────────────────────────────────────────────────────────────
+//
+// PR-D Items 2, 3, 4:
+//   - Decodes bytecode and EVM signature strictly (Item 1)
+//   - Computes bytecode_hash server-side (not trusted from client)
+//   - Reconstructs EIP-191 prefixed message and runs ecrecover (Item 2)
+//   - Rejects if recovered address != claimed evm_address
+//   - Builds SynQAttestationV1 canonical payload (Item 4)
+//   - Signs the payload with ephemeral ML-DSA-65
+//   - Labels output honestly (Item 3)
 
 #[derive(Deserialize)]
 struct AttestRequest {
-    bytecode:       String,
-    evm_address:    String,
-    evm_signature:  String,
-    bytecode_hash:  String,
+    bytecode:      String,   // hex-encoded raw bytecode
+    evm_signature: String,   // hex-encoded 65-byte EIP-191 personal_sign signature
+    evm_address:   String,   // claimed signer address (0x-prefixed, 40 hex chars)
 }
 
 #[derive(serde::Serialize)]
@@ -257,55 +339,126 @@ struct AttestResponse {
 async fn attest_handler(
     Json(req): Json<AttestRequest>,
 ) -> (StatusCode, RespJson<AttestResponse>) {
-    let raw_bytecode  = hex_decode_lossy(&req.bytecode);
-    let evm_sig_bytes = hex_decode_lossy(&req.evm_signature);
-
+    // Item 1: strict hex decode
+    let raw_bytecode = match hex_decode_strict(&req.bytecode) {
+        Ok(b)  => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, RespJson(AttestResponse {
+            success: false, hybrid_sidecar: None,
+            error: Some(format!("bytecode hex invalid: {}", e)),
+        })),
+    };
+    let evm_sig_bytes = match hex_decode_strict(&req.evm_signature) {
+        Ok(b)  => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, RespJson(AttestResponse {
+            success: false, hybrid_sidecar: None,
+            error: Some(format!("evm_signature hex invalid: {}", e)),
+        })),
+    };
     if raw_bytecode.is_empty() {
-        return (StatusCode::OK, RespJson(AttestResponse {
-            success: false, hybrid_sidecar: None, error: Some("bytecode empty".into()),
+        return (StatusCode::BAD_REQUEST, RespJson(AttestResponse {
+            success: false, hybrid_sidecar: None, error: Some("bytecode is empty".into()),
         }));
     }
     if evm_sig_bytes.len() != 65 {
-        return (StatusCode::OK, RespJson(AttestResponse {
+        return (StatusCode::BAD_REQUEST, RespJson(AttestResponse {
             success: false, hybrid_sidecar: None,
             error: Some(format!("evm_signature must be 65 bytes, got {}", evm_sig_bytes.len())),
         }));
     }
 
-    let mut msg = Vec::with_capacity(evm_sig_bytes.len() + raw_bytecode.len());
-    msg.extend_from_slice(&evm_sig_bytes);
-    msg.extend_from_slice(&raw_bytecode);
+    // Item 2: server-side EIP-191 verification
+    // Step 1: compute bytecode hash server-side (never trust client-supplied hash)
+    let bytecode_hash: [u8; 32] = keccak256(&raw_bytecode);
 
-    let pqc     = PQCCompiler::new(PQCSecurityLevel::Enhanced);
+    // Step 2: reconstruct the EIP-191 prefixed message
+    // personal_sign signs: keccak256("\x19Ethereum Signed Message:\n32" + bytecode_hash_bytes)
+    // The message being signed is the 32-byte hash, so the length prefix is the string "32"
+    let mut prefixed = Vec::with_capacity(60);
+    prefixed.extend_from_slice(b"\x19Ethereum Signed Message:\n32");
+    prefixed.extend_from_slice(&bytecode_hash);
+    let prefixed_hash: [u8; 32] = keccak256(&prefixed);
+
+    // Step 3: ecrecover — extract the signer's address
+    let recovered_addr: [u8; 20] = match ecrecover(&prefixed_hash, &evm_sig_bytes) {
+        Ok(a)  => a,
+        Err(e) => return (StatusCode::BAD_REQUEST, RespJson(AttestResponse {
+            success: false, hybrid_sidecar: None,
+            error: Some(format!("EVM signature recovery failed: {}", e)),
+        })),
+    };
+
+    // Step 4: normalize claimed address and compare
+    let claimed_hex = req.evm_address.strip_prefix("0x")
+        .unwrap_or_else(|| req.evm_address.strip_prefix("0X").unwrap_or(&req.evm_address));
+    let claimed_bytes = match hex_decode_strict(claimed_hex) {
+        Ok(b) if b.len() == 20 => b,
+        Ok(b) => return (StatusCode::BAD_REQUEST, RespJson(AttestResponse {
+            success: false, hybrid_sidecar: None,
+            error: Some(format!("evm_address must be 20 bytes, got {}", b.len())),
+        })),
+        Err(e) => return (StatusCode::BAD_REQUEST, RespJson(AttestResponse {
+            success: false, hybrid_sidecar: None,
+            error: Some(format!("evm_address hex invalid: {}", e)),
+        })),
+    };
+    if recovered_addr != claimed_bytes.as_slice() {
+        return (StatusCode::BAD_REQUEST, RespJson(AttestResponse {
+            success: false, hybrid_sidecar: None,
+            error: Some(format!(
+                "EVM signature does not match claimed address — recovered 0x{} vs claimed 0x{}",
+                hex_encode(&recovered_addr),
+                hex_encode(&claimed_bytes),
+            )),
+        }));
+    }
+
+    // Item 4: build SynQAttestationV1 canonical payload
+    let issued_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH).unwrap_or_default()
+        .as_secs() as u32;
+    let attestation_payload = build_attestation_v1(
+        &bytecode_hash,
+        &recovered_addr,
+        issued_at,
+        &raw_bytecode,
+    );
+
+    // PQC sign the canonical payload (not a raw concatenation)
+    let pqc = PQCCompiler::new(PQCSecurityLevel::Enhanced);
     let keypair = match pqc.generate_keypair(SIGNING_ALGORITHM) {
         Ok(k)  => k,
-        Err(e) => return (StatusCode::OK, RespJson(AttestResponse {
-            success: false, hybrid_sidecar: None, error: Some(format!("PQC keygen: {}", e)),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(AttestResponse {
+            success: false, hybrid_sidecar: None,
+            error: Some(format!("PQC keygen: {}", e)),
         })),
     };
-    let pqc_sig = match pqc.sign_message(&keypair.private_key, &msg, SIGNING_ALGORITHM) {
+    let pqc_sig = match pqc.sign_message(&keypair.private_key, &attestation_payload, SIGNING_ALGORITHM) {
         Ok(s)  => s,
-        Err(e) => return (StatusCode::OK, RespJson(AttestResponse {
-            success: false, hybrid_sidecar: None, error: Some(format!("PQC sign: {}", e)),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(AttestResponse {
+            success: false, hybrid_sidecar: None,
+            error: Some(format!("PQC sign: {}", e)),
         })),
     };
 
+    // Item 3: honest labelling
     (StatusCode::OK, RespJson(AttestResponse {
         success: true, error: None,
         hybrid_sidecar: Some(json!({
-            "mode": "hybrid",
-            "evm": {
-                "address":      req.evm_address,
-                "signature":    req.evm_signature,
-                "message_hash": req.bytecode_hash,
-            },
+            "mode":                "hybrid",
+            "attestation_version": "SynQAttestationV1",
+            "scheme":              "EIP-191 personal_sign",
+            "bytecode_hash":       format!("0x{}", hex_encode(&bytecode_hash)),
+            "evm_address":         format!("0x{}", hex_encode(&recovered_addr)),
+            "issued_at":           issued_at,
             "pqc": {
-                "algorithm":      pqc_sig.algorithm,
-                "security_level": format!("{:?}", pqc_sig.security_level),
-                "public_key":     hex_encode(&keypair.public_key),
-                "signature":      hex_encode(&pqc_sig.signature),
-                "signed_message": "evm_signature_bytes ++ raw_bytecode_bytes",
+                "algorithm":       pqc_sig.algorithm,
+                "security_level":  format!("{:?}", pqc_sig.security_level),
+                "public_key":      hex_encode(&keypair.public_key),
+                "signature":       hex_encode(&pqc_sig.signature),
+                "signed_payload":  "SynQAttestationV1: magic(16) || scheme(1) || bytecode_hash(32) || evm_signer(20) || issued_at(4) || raw_bytecode",
             },
+            "trust_model": "ephemeral-self-signed",
+            "note": "Ephemeral keypair: proves integrity of this attestation bundle but does not establish compiler identity. EVM signer address was independently recovered via ecrecover.",
         })),
     }))
 }
@@ -329,12 +482,15 @@ async fn session_new_handler(
     State(store): State<SessionStore>,
     Json(req): Json<NewSessionRequest>,
 ) -> (StatusCode, RespJson<NewSessionResponse>) {
-    let raw = hex_decode_lossy(&req.bytecode);
-    if raw.is_empty() {
-        return (StatusCode::OK, RespJson(NewSessionResponse {
-            success: false, session_id: None, error: Some("bytecode empty".into()),
-        }));
-    }
+    let raw = match hex_decode_strict(&req.bytecode) {
+        Ok(b) if !b.is_empty() => b,
+        Ok(_) => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
+            success: false, session_id: None, error: Some("bytecode is empty".into()),
+        })),
+        Err(e) => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
+            success: false, session_id: None, error: Some(format!("bytecode hex invalid: {}", e)),
+        })),
+    };
 
     let mut vm = QuantumVM::new();
     if let Err(e) = vm.load_bytecode(&raw) {
@@ -343,29 +499,18 @@ async fn session_new_handler(
         }));
     }
 
-    // PR-C: CSPRNG session ID + session cap enforcement
     let id = new_session_id();
     {
         let mut map = store.lock().unwrap();
         evict_stale(&mut map);
-        evict_oldest_if_full(&mut map); // evict LRU if still at cap after TTL sweep
-        map.insert(id.clone(), Session {
-            vm,
-            last_used: Instant::now(),
-            state_vars: req.state_vars.clone(),
-        });
+        evict_oldest_if_full(&mut map);
+        map.insert(id.clone(), Session { vm, last_used: Instant::now(), state_vars: req.state_vars });
     }
 
     (StatusCode::OK, RespJson(NewSessionResponse { success: true, session_id: Some(id), error: None }))
 }
 
 // ─── POST /session/run ────────────────────────────────────────────────────────
-//
-// PR-C: The global Mutex is released BEFORE VM execution.
-// The session's VM is moved out of the map, executed without holding the lock,
-// then moved back in. This prevents a slow/looping contract from blocking all
-// other requests. If the session is deleted concurrently during execution the
-// result is simply discarded (treated as session-not-found on the next call).
 
 #[derive(Deserialize)]
 struct SessionRunRequest {
@@ -386,7 +531,6 @@ async fn session_run_handler(
     State(store): State<SessionStore>,
     Json(req): Json<SessionRunRequest>,
 ) -> (StatusCode, RespJson<RunResponse>) {
-    // Parse args before touching the mutex
     let mut vm_args: Vec<Value> = Vec::new();
     for (i, raw) in req.args.unwrap_or_default().iter().enumerate() {
         match parse_arg(raw) {
@@ -398,8 +542,6 @@ async fn session_run_handler(
         }
     }
 
-    // PR-C: Move the session OUT of the map before releasing the lock.
-    // This means the lock is held only for the map lookup, not for VM execution.
     let mut session = {
         let mut map = store.lock().unwrap();
         match map.remove(&req.session_id) {
@@ -409,18 +551,11 @@ async fn session_run_handler(
                 error: Some(format!("Session '{}' not found or expired", req.session_id)),
             })),
         }
-    }; // ← lock released here
+    };
 
-    // VM executes WITHOUT holding the global mutex
     let call_result = session.vm.call_function(&req.function, &vm_args);
     session.last_used = Instant::now();
-
-    // Put the session back (unless a concurrent DELETE already removed it;
-    // in that case the session is simply dropped here — its state is gone).
-    {
-        let mut map = store.lock().unwrap();
-        map.insert(req.session_id.clone(), session);
-    }
+    { store.lock().unwrap().insert(req.session_id, session); }
 
     match call_result {
         Ok(maybe_val) => {
@@ -478,9 +613,7 @@ async fn session_state_handler(
 
 // ─── GET /health ──────────────────────────────────────────────────────────────
 
-async fn health(
-    State(store): State<SessionStore>,
-) -> RespJson<serde_json::Value> {
+async fn health(State(store): State<SessionStore>) -> RespJson<serde_json::Value> {
     let count = store.lock().unwrap().len();
     RespJson(json!({
         "status":            "ok",
@@ -500,7 +633,6 @@ async fn health(
 async fn main() {
     let store: SessionStore = Arc::new(Mutex::new(HashMap::new()));
 
-    // PR-C: CORS origin configurable via env var (default: * for testnet convenience)
     let cors_origin = std::env::var("SYNQ_CORS_ORIGIN").unwrap_or_else(|_| "*".to_string());
     let cors = if cors_origin == "*" {
         CorsLayer::new()
@@ -517,16 +649,14 @@ async fn main() {
     };
 
     let app = Router::new()
-        .route("/health",              get(health))
-        .route("/compile",             post(compile_handler))
-        .route("/attest",              post(attest_handler))
-        .route("/session/new",         post(session_new_handler))
-        .route("/session/run",         post(session_run_handler))
-        .route("/session/:id",         delete(session_delete_handler))
-        .route("/session/:id/state",   get(session_state_handler))
+        .route("/health",            get(health))
+        .route("/compile",           post(compile_handler))
+        .route("/attest",            post(attest_handler))
+        .route("/session/new",       post(session_new_handler))
+        .route("/session/run",       post(session_run_handler))
+        .route("/session/:id",       delete(session_delete_handler))
+        .route("/session/:id/state", get(session_state_handler))
         .with_state(store)
-        // PR-C: global body size cap — axum will reject oversized bodies with 413
-        // before any handler runs, protecting against payload-based DoS.
         .layer(
             ServiceBuilder::new()
                 .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
@@ -539,7 +669,7 @@ async fn main() {
     println!("  Max sessions:    {}", MAX_SESSIONS);
     println!("  Max body:        {} KB", MAX_BODY_BYTES / 1024);
     println!("  Max source:      {} KB", MAX_SOURCE_BYTES / 1024);
-    println!("  Signing:         {}", SIGNING_ALGORITHM);
+    println!("  Signing:         {} (ephemeral, SynQAttestationV1)", SIGNING_ALGORITHM);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }

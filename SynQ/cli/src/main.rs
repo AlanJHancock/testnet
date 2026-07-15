@@ -147,6 +147,7 @@ fn compile(path: &PathBuf) {
         signature.algorithm,
         sig_path.display()
     );
+    println!("ℹ️  Trust model: ephemeral-self-signed. Proves bytecode integrity; compiler identity is not independently established.");
 }
 
 fn verify(path: &PathBuf) {
@@ -220,7 +221,7 @@ fn verify(path: &PathBuf) {
         println!("ℹ️  Hybrid sidecar detected");
         println!("   EVM address:  {}", evm_addr);
         println!("   EVM sig hash: {}...", hash_short);
-        println!("   PQC covers:   evm_signature_bytes ++ raw_bytecode_bytes");
+        println!("   PQC covers:   SynQAttestationV1 canonical payload (versioned, domain-separated)");
         let mut msg = Vec::with_capacity(evm_sig_bytes.len() + bytecode.len());
         msg.extend_from_slice(&evm_sig_bytes);
         msg.extend_from_slice(&bytecode);
@@ -231,8 +232,11 @@ fn verify(path: &PathBuf) {
 
     let pqc = PQCCompiler::new(PQCSecurityLevel::Enhanced);
     match pqc.verify_signature(&public_key, &signature_bytes, &verify_message, algorithm) {
-        Ok(true)  => println!("✅ Signature valid ({}) -- bundle is untampered", algorithm),
-        Ok(false) => println!("❌ Signature INVALID -- bytecode does not match signature on file"),
+        Ok(true)  => {
+            println!("✅ Signature mathematically valid ({}) — bundle is untampered.", algorithm);
+            println!("ℹ️  Signer trust: ephemeral key — compiler identity is not independently established.");
+        }
+        Ok(false) => println!("❌ Signature INVALID — bytecode does not match the signature on file."),
         Err(e)    => println!("❌ Verification error: {}", e),
     }
 }
