@@ -5,7 +5,7 @@ use hex;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 pub const SNRG_SYMBOL: &str = "SNRG";
@@ -16,6 +16,10 @@ pub const VALIDATOR_REWARDS_POOL_ADDRESS: &str = "synw1at607x35rkmsmvgz069nx0j3q
 pub const RELIABILITY_BONUS_POOL_ADDRESS: &str = "synw1mct6a33g7hyt6jzkjdwrvxzf644lc4vytqcz";
 pub const BURN_SINK_ADDRESS: &str = "synb1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqjk5cn";
 pub const NETWORK_BURN_ADDRESS: &str = crate::address::NETWORK_BURN_ADDRESS;
+
+pub fn token_state_path() -> PathBuf {
+    crate::utils::resolve_data_path("data/token_state.json")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Token {
@@ -2310,7 +2314,8 @@ impl TokenManager {
         hex::encode(hasher.finalize())
     }
 
-    pub fn save_state(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_state<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
+        let path = path.as_ref();
         let reward_ledger = crate::rewards::REWARD_LEDGER
             .lock()
             .map(|ledger| ledger.to_persisted_state())
@@ -2330,39 +2335,46 @@ impl TokenManager {
         Ok(())
     }
 
-    pub fn load_state(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        if std::path::Path::new(path).exists() {
-            let content = std::fs::read_to_string(path)?;
-            let state: TokenState = serde_json::from_str(&content)?;
+    pub fn load_state<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
+        let path = path.as_ref();
+        if !path.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("token state file does not exist: {}", path.display()),
+            )
+            .into());
+        }
 
-            if let Ok(mut tokens) = self.tokens.lock() {
-                for mut token in state.tokens {
-                    token.normalize_identity();
-                    tokens.insert(token.symbol.clone(), token);
-                }
-            }
+        let content = std::fs::read_to_string(path)?;
+        let state: TokenState = serde_json::from_str(&content)?;
 
-            if let Ok(mut balances) = self.balances.lock() {
-                *balances = state.balances;
+        if let Ok(mut tokens) = self.tokens.lock() {
+            for mut token in state.tokens {
+                token.normalize_identity();
+                tokens.insert(token.symbol.clone(), token);
             }
+        }
 
-            if let Ok(mut transfers) = self.transfers.lock() {
-                *transfers = state.transfers;
-            }
+        if let Ok(mut balances) = self.balances.lock() {
+            *balances = state.balances;
+        }
 
-            if let Ok(mut stakes) = self.stakes.lock() {
-                *stakes = state.stakes;
-            }
-            if let Ok(mut burn_ledger) = self.burn_ledger.lock() {
-                *burn_ledger = state.burn_ledger;
-            }
-            if let Ok(mut burn_records) = self.burn_records.lock() {
-                *burn_records = state.burn_records;
-            }
-            if let Ok(mut reward_ledger) = crate::rewards::REWARD_LEDGER.lock() {
-                *reward_ledger =
-                    crate::rewards::RewardLedger::from_persisted_state(state.reward_ledger);
-            }
+        if let Ok(mut transfers) = self.transfers.lock() {
+            *transfers = state.transfers;
+        }
+
+        if let Ok(mut stakes) = self.stakes.lock() {
+            *stakes = state.stakes;
+        }
+        if let Ok(mut burn_ledger) = self.burn_ledger.lock() {
+            *burn_ledger = state.burn_ledger;
+        }
+        if let Ok(mut burn_records) = self.burn_records.lock() {
+            *burn_records = state.burn_records;
+        }
+        if let Ok(mut reward_ledger) = crate::rewards::REWARD_LEDGER.lock() {
+            *reward_ledger =
+                crate::rewards::RewardLedger::from_persisted_state(state.reward_ledger);
         }
 
         self.reconcile_testnet_profile_allocations();
@@ -3385,5 +3397,38 @@ mod tests {
 
         assert_eq!(manager.get_staked_balance(staker, "SNRG"), 50_000);
         assert_eq!(manager.get_staked_balance("*", "SNRG"), 50_000);
+    }
+
+    #[test]
+    fn token_state_path_uses_configured_data_root() {
+        let _lock = ENV_GUARD.lock().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "synergy-token-state-root-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _data_path = EnvVarGuard::set("SYNERGY_DATA_PATH", &root.to_string_lossy());
+
+        assert_eq!(token_state_path(), root.join("token_state.json"));
+    }
+
+    #[test]
+    fn missing_token_state_is_not_reported_as_loaded() {
+        let path = std::env::temp_dir().join(format!(
+            "synergy-missing-token-state-{}.json",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let manager = TokenManager::new();
+
+        let error = manager
+            .load_state(&path)
+            .expect_err("a missing token state must trigger replay or fail closed");
+
+        assert!(error.to_string().contains("does not exist"));
     }
 }

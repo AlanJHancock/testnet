@@ -1816,7 +1816,9 @@ impl ProofOfSynergy {
                                 }
 
                                 // Persist token state for explorer continuity across restarts (best-effort).
-                                if let Err(e) = token_manager.save_state("data/token_state.json") {
+                                if let Err(e) =
+                                    token_manager.save_state(crate::token::token_state_path())
+                                {
                                     warn!("consensus", "Failed to persist token state", "error" => e.to_string());
                                 }
                                 let activated_validators = validator_manager

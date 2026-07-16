@@ -2107,7 +2107,8 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
             wallet::init_testnet_wallets();
             {
                 let token_manager = TOKEN_MANAGER.clone();
-                let token_state_loaded = match token_manager.load_state("data/token_state.json") {
+                let token_state_path = crate::token::token_state_path();
+                let token_state_loaded = match token_manager.load_state(&token_state_path) {
                     Ok(_) => true,
                     Err(e) => {
                         info!(
@@ -2150,7 +2151,7 @@ pub fn run(binary_name: &'static str, expected_profile: Option<&'static RoleProf
                             "replayed" => replayed,
                             "failed" => replay_failed
                         );
-                        if let Err(e) = token_manager.save_state("data/token_state.json") {
+                        if let Err(e) = token_manager.save_state(&token_state_path) {
                             warn!(
                                 "main",
                                 "Failed to persist replayed token state",

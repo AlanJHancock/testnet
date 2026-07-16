@@ -10531,7 +10531,7 @@ fn apply_token_state_for_blocks(blocks: &[Block]) -> Result<(), String> {
     }
 
     if applied_txs > 0 {
-        if let Err(error) = token_manager.save_state("data/token_state.json") {
+        if let Err(error) = token_manager.save_state(crate::token::token_state_path()) {
             warn!(
                 "p2p",
                 "Failed to persist synced token state",

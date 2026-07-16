@@ -2683,7 +2683,7 @@ fn handle_json_rpc(
                 .map(|b| b.hash.clone())
                 .unwrap_or_default();
 
-            let token_state_hash = stable_json_file_digest("data/token_state.json");
+            let token_state_hash = stable_json_file_digest(crate::token::token_state_path());
             let sts_state_hash = stable_json_file_digest(crate::sts::STS_STATE_SNAPSHOT_PATH);
             let validator_registry_hash = stable_json_file_digest("data/validator_registry.json");
             let chain_state_hash =
@@ -9015,7 +9015,7 @@ fn canonical_value_digest(value: &Value) -> Option<String> {
     Some(hex::encode(blake3::hash(&bytes).as_bytes()))
 }
 
-fn stable_json_file_digest(path: &str) -> Option<String> {
+fn stable_json_file_digest<P: AsRef<Path>>(path: P) -> Option<String> {
     let content = fs::read_to_string(path).ok()?;
     let parsed: Value = serde_json::from_str(&content).ok()?;
     canonical_value_digest(&parsed)
