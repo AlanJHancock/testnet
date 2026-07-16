@@ -24,9 +24,10 @@ use crate::rpc::rpc_server::{
 use crate::token::TOKEN_MANAGER;
 use crate::validator::{
     apply_validator_activation_transaction, consensus_membership_validators,
-    consensus_membership_validators_for_height, is_validator_activation_transaction,
-    replay_validator_activation_transactions, validate_validator_activation_transaction, Validator,
-    ValidatorManager, TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
+    consensus_membership_validators_for_height, effective_cluster_epoch_for_height,
+    is_validator_activation_transaction, replay_validator_activation_transactions,
+    validate_validator_activation_transaction, Validator, ValidatorManager,
+    TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
 };
 use crate::wallet::WALLET_MANAGER;
 use crate::{debug, info, warn};
@@ -226,6 +227,7 @@ lazy_static::lazy_static! {
     static ref TEST_PROPOSAL_CACHE_DIR: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
 }
 
+#[cfg(test)]
 pub(crate) fn reconcile_validator_registry_clusters_for_height(
     validator_manager: &Arc<ValidatorManager>,
     height: u64,
@@ -236,6 +238,37 @@ pub(crate) fn reconcile_validator_registry_clusters_for_height(
         .map_err(|_| "failed to lock validator registry for cluster reconciliation".to_string())?;
     let epoch = epoch_for_block_height(height, registry.epoch_length.max(1));
     registry.reconcile_clusters_for_height(epoch, height)
+}
+
+pub(crate) fn reconcile_validator_registry_clusters_from_finalized_chain(
+    validator_manager: &Arc<ValidatorManager>,
+    chain: &BlockChain,
+    height: u64,
+) -> Result<bool, String> {
+    let (supplied_epoch, epoch_length) = {
+        let registry = validator_manager.registry.lock().map_err(|_| {
+            "failed to lock validator registry for cluster reconciliation".to_string()
+        })?;
+        (
+            registry
+                .current_epoch
+                .max(epoch_for_block_height(height, registry.epoch_length.max(1))),
+            registry.epoch_length.max(1),
+        )
+    };
+    let effective_epoch = effective_cluster_epoch_for_height(supplied_epoch, height)?;
+    let randomness = ProofOfSynergy::deterministic_epoch_randomness_for_epoch(
+        chain,
+        effective_epoch,
+        epoch_length,
+        validator_manager,
+    )?;
+    let randomness_source = hex::encode(randomness);
+    let mut registry = validator_manager
+        .registry
+        .lock()
+        .map_err(|_| "failed to lock validator registry for cluster reconciliation".to_string())?;
+    registry.reconcile_clusters_for_height_with_seed(effective_epoch, height, &randomness_source)
 }
 
 impl ProofOfSynergy {
@@ -355,7 +388,11 @@ impl ProofOfSynergy {
             .last()
             .map(|block| block.block_index)
             .unwrap_or(0);
-        match reconcile_validator_registry_clusters_for_height(&validator_manager, chain_height) {
+        match reconcile_validator_registry_clusters_from_finalized_chain(
+            &validator_manager,
+            &chain_snapshot,
+            chain_height,
+        ) {
             Ok(true) => {
                 if let Err(error) = validator_manager.save_registry(VALIDATOR_REGISTRY_PATH) {
                     warn!(
@@ -2997,6 +3034,20 @@ impl ProofOfSynergy {
     ) -> Result<Vec<u8>, String> {
         let epoch_length = epoch_length.max(1);
         let current_epoch = epoch_for_block_height(block_height, epoch_length);
+        Self::deterministic_epoch_randomness_for_epoch(
+            chain,
+            current_epoch,
+            epoch_length,
+            validator_manager,
+        )
+    }
+
+    fn deterministic_epoch_randomness_for_epoch(
+        chain: &BlockChain,
+        current_epoch: u64,
+        epoch_length: u64,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<Vec<u8>, String> {
         if current_epoch == 0 {
             let genesis_hash = canonical_genesis()?.hash().to_string();
             let mut hasher = Sha3_512::new();
@@ -5560,6 +5611,41 @@ mod tests {
             ProofOfSynergy::deterministic_epoch_randomness(&chain, 1_026, 1_000, &manager).unwrap();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn startup_cluster_reconciliation_recovers_boundary_qc_seed_and_is_idempotent() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let mut chain = BlockChain::new();
+        let (manager, boundary_block, qc) = signed_boundary_fixture(1_000, 0);
+        chain.add_block(boundary_block);
+        DualQuorumConsensus::record_committed_qc_checked(qc.clone()).unwrap();
+
+        let expected_seed =
+            hex::encode(ProofOfSynergy::deterministic_epoch_randomness_from_qc(&qc));
+        assert!(reconcile_validator_registry_clusters_from_finalized_chain(
+            &manager, &chain, 1_001
+        )
+        .expect("startup reconciliation should recover the finalized boundary-QC seed"));
+
+        {
+            let registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            assert_eq!(registry.current_epoch, 1);
+            assert!(registry.validators.values().all(|validator| {
+                validator.cluster_assignment_epoch == Some(1)
+                    && validator.cluster_assignment_seed.as_deref() == Some(expected_seed.as_str())
+                    && validator.cluster_assignment_effective_height == Some(1_001)
+            }));
+        }
+
+        assert!(!reconcile_validator_registry_clusters_from_finalized_chain(
+            &manager, &chain, 1_001
+        )
+        .expect("repeated startup reconciliation should preserve the recovered seed"));
     }
 
     #[test]

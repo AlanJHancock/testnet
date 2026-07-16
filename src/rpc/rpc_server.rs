@@ -11,8 +11,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::block::{Block, BlockChain, HOT_CHAIN_RETENTION_BLOCKS_ENV};
 use crate::cluster::{fault_tolerance_f, quorum_threshold, EpochClusterAssignmentSnapshot};
 use crate::consensus::chain_durability::recover_chain_and_validate_canonical;
+#[cfg(test)]
+use crate::consensus::consensus_algorithm::reconcile_validator_registry_clusters_for_height;
 use crate::consensus::consensus_algorithm::{
-    reconcile_validator_registry_clusters_for_height, ProofOfSynergy,
+    reconcile_validator_registry_clusters_from_finalized_chain, ProofOfSynergy,
 };
 use crate::consensus::consensus_fork;
 use crate::consensus::dual_quorum::{required_validator_quorum, DualQuorumConsensus};
@@ -640,7 +642,17 @@ pub fn start_rpc_server(
         "✅ Loaded {} validators from registry at startup",
         validators.len()
     );
-    match reconcile_validator_registry_clusters_for_height(&VALIDATOR_MANAGER, chain_height) {
+    let cluster_reconciliation = {
+        let canonical_chain = SHARED_CHAIN
+            .lock()
+            .expect("canonical startup chain lock should not be poisoned");
+        reconcile_validator_registry_clusters_from_finalized_chain(
+            &VALIDATOR_MANAGER,
+            &canonical_chain,
+            chain_height,
+        )
+    };
+    match cluster_reconciliation {
         Ok(changed) if changed || activation_replayed > 0 => {
             if let Err(error) = VALIDATOR_MANAGER.save_registry(validator_registry_path) {
                 println!(

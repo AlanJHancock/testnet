@@ -1144,12 +1144,51 @@ impl ValidatorRegistry {
                 }
             };
         let validator_candidates = self.validators.values().cloned().collect::<Vec<_>>();
+        let height_scoped_membership =
+            match consensus_membership_validators_for_height(validator_candidates, height) {
+                Ok(membership) => membership,
+                Err(error) => {
+                    self.clear_cluster_assignments();
+                    return Err(error);
+                }
+            };
         let randomness_source =
-            canonical_epoch_cluster_seed(&validator_candidates, effective_epoch);
-        let cluster_members = match canonical_validator_clusters_for_height(
+            canonical_epoch_cluster_seed(&height_scoped_membership, effective_epoch);
+        self.reconcile_clusters_for_height_with_seed(effective_epoch, height, &randomness_source)
+    }
+
+    pub fn reconcile_clusters_for_height_with_seed(
+        &mut self,
+        epoch: u64,
+        height: u64,
+        randomness_source: &str,
+    ) -> Result<bool, String> {
+        if randomness_source.trim().is_empty() {
+            self.clear_cluster_assignments();
+            return Err(
+                "validator cluster reconciliation requires a non-empty epoch seed".to_string(),
+            );
+        }
+        let effective_epoch =
+            match effective_cluster_epoch_for_height(self.current_epoch.max(epoch), height) {
+                Ok(effective_epoch) => effective_epoch,
+                Err(error) => {
+                    self.clear_cluster_assignments();
+                    return Err(error);
+                }
+            };
+        if effective_epoch != epoch {
+            self.clear_cluster_assignments();
+            return Err(format!(
+                "validator cluster seed epoch {epoch} does not match effective epoch {effective_epoch} at height {height}"
+            ));
+        }
+        let validator_candidates = self.validators.values().cloned().collect::<Vec<_>>();
+        let cluster_members = match canonical_validator_clusters_for_height_with_seed(
             validator_candidates,
             effective_epoch,
             height,
+            randomness_source,
         ) {
             Ok(cluster_members) => cluster_members,
             Err(error) => {
@@ -1160,17 +1199,12 @@ impl ValidatorRegistry {
         if self.cluster_memberships_are_canonical(
             &cluster_members,
             effective_epoch,
-            &randomness_source,
+            randomness_source,
             height,
         ) {
             return Ok(false);
         }
-        self.apply_cluster_memberships(
-            cluster_members,
-            effective_epoch,
-            &randomness_source,
-            height,
-        );
+        self.apply_cluster_memberships(cluster_members, effective_epoch, randomness_source, height);
         self.current_epoch = effective_epoch;
         Ok(true)
     }
@@ -2294,10 +2328,39 @@ pub fn canonical_validator_clusters_for_height(
     let effective_epoch = effective_cluster_epoch_for_height(epoch, height)?;
     let height_scoped_membership =
         consensus_membership_validators_for_height(active_validators, height)?;
-    Ok(canonical_validator_clusters_for_epoch(
+    let randomness_source =
+        canonical_epoch_cluster_seed(&height_scoped_membership, effective_epoch);
+    Ok(canonical_validator_cluster_plan_for_epoch_with_seed(
         &height_scoped_membership,
         effective_epoch,
-    ))
+        &randomness_source,
+    )
+    .clusters)
+}
+
+pub fn canonical_validator_clusters_for_height_with_seed(
+    active_validators: Vec<Validator>,
+    epoch: u64,
+    height: u64,
+    randomness_source: &str,
+) -> Result<Vec<(u64, Vec<Validator>)>, String> {
+    if randomness_source.trim().is_empty() {
+        return Err("validator cluster assignment requires a non-empty epoch seed".to_string());
+    }
+    let effective_epoch = effective_cluster_epoch_for_height(epoch, height)?;
+    if effective_epoch != epoch {
+        return Err(format!(
+            "validator cluster seed epoch {epoch} does not match effective epoch {effective_epoch} at height {height}"
+        ));
+    }
+    let height_scoped_membership =
+        consensus_membership_validators_for_height(active_validators, height)?;
+    Ok(canonical_validator_cluster_plan_for_epoch_with_seed(
+        &height_scoped_membership,
+        effective_epoch,
+        randomness_source,
+    )
+    .clusters)
 }
 
 pub fn effective_cluster_epoch_for_height(supplied_epoch: u64, height: u64) -> Result<u64, String> {
