@@ -117,15 +117,15 @@ fn default_min_validators() -> usize {
 }
 
 fn default_emergency_stable_committee_mode() -> bool {
-    true
+    false
 }
 
 fn default_freeze_validator_set() -> bool {
-    true
+    false
 }
 
 fn default_freeze_score_weighted_proposer_order() -> bool {
-    true
+    false
 }
 
 fn default_vote_only_rejoin_enabled() -> bool {
@@ -1778,7 +1778,7 @@ state_sync_before_join = true
     }
 
     #[test]
-    fn stable_committee_templates_keep_four_validator_safety_floor_without_growth_cap() {
+    fn dynamic_committee_templates_keep_safety_floor_without_freezing_growth() {
         let templates_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates");
         let entries = fs::read_dir(&templates_dir).expect("templates directory should be readable");
         let mut checked = 0usize;
@@ -1830,13 +1830,25 @@ state_sync_before_join = true
                     "{} must keep max_validators dynamic instead of capping the network at 6",
                     path.display()
                 );
+                for flag in [
+                    "emergency_stable_committee_mode",
+                    "freeze_validator_set",
+                    "freeze_score_weighted_proposer_order",
+                ] {
+                    assert_eq!(
+                        consensus.get(flag).and_then(toml::Value::as_bool),
+                        Some(false),
+                        "{} must leave {flag} disabled for automatic validator growth",
+                        path.display()
+                    );
+                }
                 checked += 1;
             }
         }
 
         assert!(
             checked > 0,
-            "expected at least one stable committee template"
+            "expected at least one dynamic committee template"
         );
     }
 

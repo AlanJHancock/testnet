@@ -799,6 +799,15 @@ impl ValidatorRegistry {
         }
     }
 
+    pub fn normalize_testnet_epoch_contract(&mut self) -> bool {
+        if self.epoch_length == TESTNET_EPOCH_LENGTH_BLOCKS {
+            return false;
+        }
+
+        self.epoch_length = TESTNET_EPOCH_LENGTH_BLOCKS;
+        true
+    }
+
     pub fn register_validator(
         &mut self,
         registration: ValidatorRegistration,
@@ -1803,7 +1812,10 @@ impl ValidatorManager {
 
     pub fn load_registry(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         let resolved = crate::utils::resolve_data_path(path);
-        let registry = ValidatorRegistry::load_from_file(resolved)?;
+        let mut registry = ValidatorRegistry::load_from_file(&resolved)?;
+        if registry.normalize_testnet_epoch_contract() {
+            registry.save_to_file(&resolved)?;
+        }
         if let Ok(mut current_registry) = self.registry.lock() {
             *current_registry = registry;
         }
@@ -2598,14 +2610,18 @@ mod tests {
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::create_dir_all(&legacy_dir).unwrap();
 
-        let stale_registry = active_registry(5);
+        let mut stale_registry = active_registry(5);
+        stale_registry.epoch_length = 30_000;
+        stale_registry.current_epoch = 650;
         std::fs::write(
             legacy_dir.join("validator_registry.json"),
             serde_json::to_string_pretty(&stale_registry).unwrap(),
         )
         .unwrap();
 
-        let restored_registry = active_registry(6);
+        let mut restored_registry = active_registry(6);
+        restored_registry.epoch_length = 30_000;
+        restored_registry.current_epoch = 650;
         std::fs::write(
             state_dir.join("validator_registry.json"),
             serde_json::to_string_pretty(&restored_registry).unwrap(),
@@ -2623,6 +2639,11 @@ mod tests {
             6,
             "runtime validator registry must load the restored snapshot registry, not stale workspace/data"
         );
+        {
+            let registry = manager.registry.lock().unwrap();
+            assert_eq!(registry.epoch_length, TESTNET_EPOCH_LENGTH_BLOCKS);
+            assert_eq!(registry.current_epoch, 650);
+        }
 
         manager
             .save_registry("data/validator_registry.json")
@@ -2630,6 +2651,7 @@ mod tests {
         let saved = ValidatorRegistry::load_from_file(state_dir.join("validator_registry.json"))
             .expect("saved runtime registry should be readable");
         assert_eq!(saved.get_active_validators().len(), 6);
+        assert_eq!(saved.epoch_length, TESTNET_EPOCH_LENGTH_BLOCKS);
 
         std::fs::remove_dir_all(temp_dir).ok();
     }
