@@ -1977,20 +1977,7 @@ fn apply_status_to_peer(
 
     peer.status_received_at = Some(status_received_at);
     peer.status_reported_at = status_reported_at.or(Some(status_received_at));
-    if let Some(validator_address) = normalized_status_string(status_validator_address) {
-        if peer
-            .validator_address
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or_default()
-            .is_empty()
-        {
-            peer.validator_address = Some(validator_address.clone());
-        }
-        peer.status_validator_address = Some(validator_address);
-    } else if peer.status_validator_address.is_none() {
-        peer.status_validator_address = peer.validator_address.clone();
-    }
+    peer.status_validator_address = normalized_status_string(status_validator_address);
     if let Some(source_session_id) = normalized_status_string(status_source_session_id) {
         peer.status_source_session_id = Some(source_session_id);
     } else if peer.status_source_session_id.is_none() {
@@ -2767,10 +2754,9 @@ fn handle_status_message(
         return;
     }
 
-    if !authorize_chain_requester_for_session(
+    if !authorize_status_exchange_for_session(
         connected_peers,
         peer_state_cache,
-        config,
         peer_address,
         session_id,
         "status",
@@ -2785,6 +2771,7 @@ fn handle_status_message(
         peer_is_active_validator,
         peer_is_designated_support,
         peer_is_designated_relayer,
+        status_validator_identity_matches,
     ) = {
         let peers = connected_peers.lock().unwrap();
         if !peer_session_is_current(peer_address, session_id) {
@@ -2799,10 +2786,23 @@ fn handle_status_message(
                     peer_is_active_consensus_validator(config, peer),
                     peer_is_designated_support_sync_source(config, peer),
                     peer_is_designated_relayer_sync_source(config, peer),
+                    status_validator_identity_matches_handshake(peer, status_validator_address),
                 )
             })
-            .unwrap_or((None, current_timestamp(), false, false, false))
+            .unwrap_or((None, current_timestamp(), false, false, false, false))
     };
+    if !status_validator_identity_matches {
+        warn!(
+            "p2p",
+            "Disconnecting peer whose status identity does not match its verified handshake",
+            "peer" => peer_address.to_string(),
+            "handshake_validator_address" => peer_validator_address.clone().unwrap_or_default(),
+            "status_validator_address" => status_validator_address.unwrap_or_default().to_string()
+        );
+        let mut peers = connected_peers.lock().unwrap();
+        disconnect_peer_entry_for_session(peer_state_cache, &mut peers, peer_address, session_id);
+        return;
+    }
     let now = current_timestamp();
     if local_node_runs_validator_consensus(config)
         && (quarantined || consensus_duties_disabled)
@@ -4342,6 +4342,61 @@ fn peer_is_authorized_block_sync_requester(config: &NodeConfig, peer: &PeerConne
         && !peer.consensus_duties_disabled
         && (peer_is_active_consensus_validator(config, peer)
             || peer_is_designated_support_sync_source(config, peer))
+}
+
+fn peer_has_verified_handshake(peer: &PeerConnection) -> bool {
+    peer.node_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+        && peer
+            .version
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some()
+}
+
+fn status_validator_identity_matches_handshake(
+    peer: &PeerConnection,
+    status_validator_address: Option<&str>,
+) -> bool {
+    let handshake_validator_address = normalized_status_string(peer.validator_address.as_deref());
+    let status_validator_address = normalized_status_string(status_validator_address);
+
+    status_validator_address == handshake_validator_address
+}
+
+fn authorize_status_exchange_for_session(
+    connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
+    peer_address: &str,
+    session_id: u64,
+    request_kind: &str,
+) -> bool {
+    let authorized = {
+        let peers = connected_peers.lock().unwrap();
+        peer_session_is_current(peer_address, session_id)
+            && peers
+                .get(peer_address)
+                .map(peer_has_verified_handshake)
+                .unwrap_or(false)
+    };
+    if authorized {
+        return true;
+    }
+
+    warn!(
+        "p2p",
+        "Refusing status exchange before verified handshake",
+        "peer" => peer_address.to_string(),
+        "session_id" => session_id,
+        "request_kind" => request_kind.to_string()
+    );
+    let mut peers = connected_peers.lock().unwrap();
+    disconnect_peer_entry_for_session(peer_state_cache, &mut peers, peer_address, session_id);
+    false
 }
 
 fn authorize_chain_requester_for_session(
@@ -7939,26 +7994,14 @@ fn handle_messages(
                                             Some((new_direction, new_connected_at)),
                                         ) = (existing_metadata, new_metadata)
                                         {
-                                            let existing_needs_status_recovery = peers
-                                                .get(&existing_key)
-                                                .map(|peer| {
-                                                    peer_has_validator_identity(peer)
-                                                        && !peer_has_remote_status(peer)
-                                                })
-                                                .unwrap_or(false);
-                                            let duplicate_resolution =
-                                                if existing_needs_status_recovery {
-                                                    DuplicateResolution::ReplaceExisting
-                                                } else {
-                                                    resolve_duplicate_connection(
-                                                        &local_identity,
-                                                        &peer_identity,
-                                                        existing_direction,
-                                                        existing_connected_at,
-                                                        new_direction,
-                                                        new_connected_at,
-                                                    )
-                                                };
+                                            let duplicate_resolution = resolve_duplicate_connection(
+                                                &local_identity,
+                                                &peer_identity,
+                                                existing_direction,
+                                                existing_connected_at,
+                                                new_direction,
+                                                new_connected_at,
+                                            );
 
                                             match duplicate_resolution {
                                                 DuplicateResolution::KeepExisting => {
@@ -8122,8 +8165,7 @@ fn handle_messages(
                                                                 &local_identity,
                                                                 &peer_identity
                                                             )
-                                                        ),
-                                                        "status_recovery_replacement" => existing_needs_status_recovery
+                                                        )
                                                     );
                                                     disconnect_peer_entry(
                                                         &peer_state_cache,
@@ -8414,10 +8456,9 @@ fn handle_messages(
                         );
                     }
                     NetworkMessage::GetStatus => {
-                        if !authorize_chain_requester_for_session(
+                        if !authorize_status_exchange_for_session(
                             &connected_peers,
                             &peer_state_cache,
-                            &config,
                             &peer_address,
                             session_id,
                             "status-request",
@@ -11023,6 +11064,33 @@ mod tests {
         assert_eq!(
             peer_readiness_exclusion_reason_at(&peer, now, Some("validator-set-hash")),
             None
+        );
+    }
+
+    #[test]
+    fn status_metadata_cannot_establish_validator_identity() {
+        let mut peer = test_peer_with_validator_address(None);
+        let now = current_timestamp();
+
+        apply_status_to_peer(
+            &mut peer,
+            77,
+            "fresh-hash",
+            "genesis-hash",
+            Some(now),
+            Some("synv1status-only"),
+            Some("peer-session"),
+            Some("validator-set-hash"),
+            false,
+            false,
+            None,
+            now,
+        );
+
+        assert!(peer.validator_address.is_none());
+        assert_eq!(
+            peer.status_validator_address.as_deref(),
+            Some("synv1status-only")
         );
     }
 
@@ -14641,7 +14709,7 @@ mod tests {
         let mut config = NodeConfig::default();
         config.identity.role = "validator".to_string();
 
-        for request_kind in ["status-request", "status", "block-headers", "block-bodies"] {
+        for request_kind in ["block-headers", "block-bodies"] {
             let mut peer =
                 test_peer_with_validator_address(Some("synv1ordinaryunactivatedrequester"));
             peer.node_id = Some("validator-onboarding".to_string());
@@ -14661,6 +14729,141 @@ mod tests {
             ));
             assert!(!connected_peers.lock().unwrap().contains_key("peer-a"));
         }
+    }
+
+    #[test]
+    fn status_exchange_accepts_verified_peer_before_readiness() {
+        let _session_guard = peer_session_test_guard();
+        let connected_peers = Arc::new(Mutex::new(HashMap::new()));
+        let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
+        let mut peer = test_peer_with_validator_address(Some("synv1onboarding"));
+        peer.handshake_role = None;
+        peer.status_received_at = None;
+        peer.genesis_hash.clear();
+        connected_peers
+            .lock()
+            .unwrap()
+            .insert("peer-a".to_string(), peer);
+        let session_id = begin_peer_session("peer-a");
+
+        assert!(super::authorize_status_exchange_for_session(
+            &connected_peers,
+            &peer_state_cache,
+            "peer-a",
+            session_id,
+            "status-request",
+        ));
+        assert!(connected_peers.lock().unwrap().contains_key("peer-a"));
+    }
+
+    #[test]
+    fn status_exchange_disconnects_peer_without_verified_handshake() {
+        let _session_guard = peer_session_test_guard();
+        let connected_peers = Arc::new(Mutex::new(HashMap::new()));
+        let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
+        let mut peer = test_peer_with_validator_address(Some("synv1onboarding"));
+        peer.version = None;
+        connected_peers
+            .lock()
+            .unwrap()
+            .insert("peer-a".to_string(), peer);
+        let session_id = begin_peer_session("peer-a");
+
+        assert!(!super::authorize_status_exchange_for_session(
+            &connected_peers,
+            &peer_state_cache,
+            "peer-a",
+            session_id,
+            "status",
+        ));
+        assert!(!connected_peers.lock().unwrap().contains_key("peer-a"));
+    }
+
+    #[test]
+    fn validator_status_identity_must_match_verified_handshake() {
+        let _session_guard = peer_session_test_guard();
+        let blockchain = Arc::new(Mutex::new(BlockChain::new()));
+        let connected_peers = Arc::new(Mutex::new(HashMap::new()));
+        let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+
+        let mut peer = test_peer_with_validator_address(Some("synv1handshake"));
+        peer.handshake_role = Some("validator".to_string());
+        peer.status_received_at = None;
+        connected_peers
+            .lock()
+            .unwrap()
+            .insert("peer-a".to_string(), peer);
+        let session_id = begin_peer_session("peer-a");
+
+        handle_status_message(
+            &blockchain,
+            &connected_peers,
+            &peer_state_cache,
+            &config,
+            "peer-a",
+            session_id,
+            12,
+            "best-hash",
+            &canonical_genesis_hash(),
+            Some(current_timestamp()),
+            Some("synv1spoofed"),
+            Some("peer-a"),
+            Some("validator-set-hash"),
+            false,
+            false,
+            None,
+        );
+
+        assert!(!connected_peers.lock().unwrap().contains_key("peer-a"));
+    }
+
+    #[test]
+    fn role_omitted_verified_handshake_accepts_matching_status() {
+        let _session_guard = peer_session_test_guard();
+        let blockchain = Arc::new(Mutex::new(BlockChain::new()));
+        let connected_peers = Arc::new(Mutex::new(HashMap::new()));
+        let peer_state_cache = Arc::new(Mutex::new(HashMap::new()));
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+
+        let mut peer = test_peer_with_validator_address(Some("synv1handshake"));
+        peer.handshake_role = None;
+        peer.status_received_at = None;
+        connected_peers
+            .lock()
+            .unwrap()
+            .insert("peer-a".to_string(), peer);
+        let session_id = begin_peer_session("peer-a");
+
+        handle_status_message(
+            &blockchain,
+            &connected_peers,
+            &peer_state_cache,
+            &config,
+            "peer-a",
+            session_id,
+            12,
+            "best-hash",
+            &canonical_genesis_hash(),
+            Some(current_timestamp()),
+            Some("synv1handshake"),
+            Some("peer-a"),
+            Some("validator-set-hash"),
+            false,
+            false,
+            None,
+        );
+
+        let peers = connected_peers.lock().unwrap();
+        let peer = peers.get("peer-a").expect("peer should remain connected");
+        assert_eq!(peer.validator_address.as_deref(), Some("synv1handshake"));
+        assert_eq!(
+            peer.status_validator_address.as_deref(),
+            Some("synv1handshake")
+        );
+        assert!(peer.status_received_at.is_some());
     }
 
     #[test]
@@ -14948,6 +15151,7 @@ mod tests {
 
         let mut peer = test_peer_with_validator_address(Some("synv1onboarding"));
         peer.node_id = Some("validator-onboarding".to_string());
+        peer.handshake_role = Some("validator".to_string());
         connected_peers
             .lock()
             .unwrap()
