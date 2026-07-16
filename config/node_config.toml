@@ -20,8 +20,8 @@ max_peers = 128
 bootnodes = []
 seed_servers = []
 bootstrap_dns_records = []
-additional_dial_targets = ["relay1.synergy-network.io:5622"]
-persistent_peers = ["relay1.synergy-network.io:5622"]
+additional_dial_targets = ["relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622", "relay3.synergynode.xyz:5622"]
+persistent_peers = ["relay1.synergynode.xyz:5622", "relay2.synergynode.xyz:5622", "relay3.synergynode.xyz:5622"]
 
 [blockchain]
 block_time = 2
