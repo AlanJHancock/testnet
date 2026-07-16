@@ -50,6 +50,11 @@ LOCAL_SYNID_METHODS = frozenset(
 # Kept under the live router's established name for deployment and QA tooling.
 LOCAL_READ_METHODS = LOCAL_SYNID_METHODS
 
+# Consensus membership must come from one canonical registry. Relayer-local
+# snapshots can legitimately differ during rollout and must not be mixed by
+# the public read pool.
+CANONICAL_LOCAL_METHODS = frozenset({"synergy_getValidatorSetSnapshot"})
+
 WRITE_METHODS = frozenset(
     {
         "eth_sendRawTransaction",
@@ -684,6 +689,25 @@ class Router:
         self.metrics.inc("rpc_requests_total")
         is_synid = method in LOCAL_SYNID_METHODS
         is_write = method in self.config.write_methods
+
+        if method in CANONICAL_LOCAL_METHODS:
+            if not self.config.local_fallback_url:
+                self.metrics.inc("rpc_request_failures_total")
+                return _rpc_error(
+                    _request_id(request),
+                    -32003,
+                    "canonical validator-set source unavailable",
+                )
+            try:
+                response = self._forward_local_url(request, self.config.local_fallback_url)
+                return _copy_with_id(response, _request_id(request))
+            except (OSError, ValueError, UpstreamError, json.JSONDecodeError):
+                self.metrics.inc("rpc_request_failures_total")
+                return _rpc_error(
+                    _request_id(request),
+                    -32003,
+                    "canonical validator-set source unavailable",
+                )
 
         if is_synid and self.config.synid_local_source:
             try:

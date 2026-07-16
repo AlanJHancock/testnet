@@ -162,6 +162,58 @@ class RouterTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
 
+    def test_validator_set_snapshot_uses_only_canonical_local_source(self) -> None:
+        relayer, relayer_url, relayer_requests = isolated_fake_server(
+            {"synergy_getValidatorSetSnapshot": {"source": "relayer"}}
+        )
+        canonical, canonical_url, canonical_requests = isolated_fake_server(
+            {"synergy_getValidatorSetSnapshot": {"source": "canonical"}}
+        )
+        try:
+            router = router_module.Router(
+                self.make_config(
+                    (relayer_url,) * 3,
+                    (relayer_url,),
+                    local_fallback_url=canonical_url,
+                )
+            )
+            response = router.route_one(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 41,
+                    "method": "synergy_getValidatorSetSnapshot",
+                    "params": [],
+                }
+            )
+            self.assertEqual(response["result"], {"source": "canonical"})
+            self.assertEqual(len(canonical_requests), 1)
+            self.assertEqual(relayer_requests, [])
+        finally:
+            relayer.shutdown()
+            relayer.server_close()
+            canonical.shutdown()
+            canonical.server_close()
+
+    def test_validator_set_snapshot_fails_closed_without_canonical_source(self) -> None:
+        relayer, relayer_url, relayer_requests = isolated_fake_server(
+            {"synergy_getValidatorSetSnapshot": {"source": "relayer"}}
+        )
+        try:
+            router = router_module.Router(self.make_config((relayer_url,) * 3, (relayer_url,)))
+            response = router.route_one(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 42,
+                    "method": "synergy_getValidatorSetSnapshot",
+                    "params": [],
+                }
+            )
+            self.assertEqual(response["error"]["code"], -32003)
+            self.assertEqual(relayer_requests, [])
+        finally:
+            relayer.shutdown()
+            relayer.server_close()
+
     def test_local_synid_source_preserves_registry_behavior(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "synid_registry.json"
