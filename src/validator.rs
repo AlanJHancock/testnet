@@ -1315,7 +1315,7 @@ impl ValidatorRegistry {
         })
     }
 
-    fn clear_cluster_assignments(&mut self) {
+    pub fn clear_cluster_assignments(&mut self) {
         self.clusters.clear();
         for validator in self.validators.values_mut() {
             validator.cluster_id = None;
@@ -1912,6 +1912,10 @@ pub fn epoch_validator_set_hash_for_height(height: u64) -> Result<Option<String>
         .and_then(|set| normalized_optional_string(set.validator_set_hash.as_deref())))
 }
 
+pub fn validator_set_effective_height_for_height(height: u64) -> Result<Option<u64>, String> {
+    Ok(epoch_validator_set_for_height(height)?.map(|set| set.effective_from_height))
+}
+
 pub fn epoch_validator_set_compatibility_for_height(
     height: u64,
 ) -> Result<Option<EpochValidatorSetCompatibility>, String> {
@@ -2210,10 +2214,10 @@ pub fn replay_validator_activation_transactions(
 
 /// Replay activation transactions for non-consensus services.
 ///
-/// Service roles need the registry's transaction-derived activation state for reads, but their
-/// local chain may be partial or pruned and therefore cannot safely drive canonical cluster
-/// promotion or redistribution. Consensus startup uses the replay function above, including the
-/// pending-shadow boundary processing.
+/// Service roles need the registry's transaction-derived activation state for reads, but must not
+/// start consensus duties. Reconstruct the registry from activation transactions and then apply
+/// the finalized chain tip once so effective shadow validators are visible to service RPCs after
+/// restart. Cluster metadata is registry state only; service roles never enter the consensus loop.
 pub fn replay_validator_activation_transactions_for_service(
     chain: &crate::block::BlockChain,
     token_manager: &TokenManager,
@@ -2238,6 +2242,10 @@ pub fn replay_validator_activation_transactions_for_service(
                 Err(_) => failed += 1,
             }
         }
+    }
+
+    if let Some(finalized_height) = chain.last().map(|block| block.block_index) {
+        let _ = validator_manager.apply_pending_shadow_activations(finalized_height);
     }
 
     (applied, failed)
@@ -3399,7 +3407,7 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
     }
 
     #[test]
-    fn service_activation_replay_updates_shadow_state_without_promoting_or_reorganizing_clusters() {
+    fn service_activation_replay_promotes_effective_shadow_without_consensus_duties() {
         let (token_manager, validator_address, activation_tx) =
             funded_activation_fixture("service-replay-public-key", vec![17, 18, 19]);
         let activation_height = 1;
@@ -3432,7 +3440,7 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
         ));
 
         let validator_manager = Arc::new(ValidatorManager::new());
-        let initial_clusters = {
+        {
             let mut registry = validator_manager
                 .registry
                 .lock()
@@ -3440,8 +3448,7 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
             let seeded_registry = active_registry(5);
             registry.validators = seeded_registry.validators;
             registry.clusters = seeded_registry.clusters;
-            registry.clusters.clone()
-        };
+        }
 
         let (applied, failed) = replay_validator_activation_transactions_for_service(
             &chain,
@@ -3453,17 +3460,129 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
         let replayed = validator_manager
             .get_validator(&validator_address)
             .expect("service replay should restore validator activation state");
-        assert_eq!(replayed.status, ValidatorStatus::Shadow);
+        assert_eq!(replayed.status, ValidatorStatus::Active);
         assert_eq!(replayed.activation_effective_height, Some(effective_height));
-        assert_eq!(validator_manager.get_active_validators().len(), 5);
+        assert_eq!(validator_manager.get_active_validators().len(), 6);
         let registry = validator_manager
             .registry
             .lock()
             .expect("test registry lock should be available");
         assert_eq!(
-            serde_json::to_value(&registry.clusters).expect("clusters should serialize"),
-            serde_json::to_value(&initial_clusters).expect("clusters should serialize")
+            registry
+                .clusters
+                .values()
+                .map(|cluster| cluster.validators.len())
+                .collect::<Vec<_>>(),
+            vec![6]
         );
+    }
+
+    #[test]
+    fn service_replay_reconstructs_sequential_validator_7_through_10_activation() {
+        let bonded_stake = TESTNET_MIN_VALIDATOR_STAKE_NWEI;
+        let funding_source = funded_test_address(bonded_stake.saturating_mul(4));
+        let token_manager = crate::token::TokenManager::new();
+        let activation_steps = [(7usize, 10u64), (8, 1_020), (9, 2_030), (10, 3_040)]
+            .into_iter()
+            .map(|(slot, activation_height)| {
+                let public_key = format!("sequential-validator-{slot}-key");
+                let validator_address =
+                    crate::address::generate_validator_address(&public_key, 1);
+                token_manager
+                    .transfer_tokens(
+                        &funding_source,
+                        &validator_address,
+                        "SNRG",
+                        bonded_stake,
+                        0,
+                    )
+                    .expect("sequential validator should receive test stake");
+                token_manager
+                    .stake_tokens(
+                        &validator_address,
+                        &validator_address,
+                        "SNRG",
+                        bonded_stake,
+                    )
+                    .expect("sequential validator should bond test stake");
+                let activation_tx = Transaction::new(
+                    validator_address.clone(),
+                    validator_address.clone(),
+                    0,
+                    0,
+                    vec![slot as u8, 41, 42],
+                    1,
+                    21_000,
+                    Some(format!(
+                        "validator_activation:{{\"validator\":\"{}\",\"public_key\":\"{}\",\"name\":\"Sequential Validator {}\",\"stake_amount_nwei\":{}}}",
+                        validator_address, public_key, slot, bonded_stake
+                    )),
+                    "fndsa".to_string(),
+                );
+                (slot, validator_address, activation_height, activation_tx)
+            })
+            .collect::<Vec<_>>();
+
+        let validator_manager = Arc::new(ValidatorManager::new());
+        {
+            let mut registry = validator_manager
+                .registry
+                .lock()
+                .expect("test registry lock should be available");
+            let seeded_registry = active_registry(6);
+            registry.validators = seeded_registry.validators;
+            registry.clusters = seeded_registry.clusters;
+        }
+
+        let mut chain = BlockChain::new();
+        for (step, (slot, address, activation_height, activation_tx)) in
+            activation_steps.iter().enumerate()
+        {
+            chain.add_block(Block::new_with_timestamp(
+                *activation_height,
+                vec![activation_tx.clone()],
+                format!("activation-parent-{step}"),
+                "genesis-validator".to_string(),
+                0,
+                step as u64 + 1,
+            ));
+            let effective_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS + 1;
+            chain.add_block(Block::new_with_timestamp(
+                effective_height,
+                Vec::new(),
+                format!("effective-parent-{step}"),
+                "genesis-validator".to_string(),
+                0,
+                step as u64 + 2,
+            ));
+
+            let (applied, failed) = replay_validator_activation_transactions_for_service(
+                &chain,
+                &token_manager,
+                &validator_manager,
+            );
+            assert_eq!((applied, failed), (step as u64 + 1, 0));
+            assert_eq!(validator_manager.get_active_validators().len(), *slot);
+            assert_eq!(
+                validator_manager
+                    .get_validator(address)
+                    .expect("sequential validator should be replayed")
+                    .status,
+                ValidatorStatus::Active
+            );
+        }
+
+        let registry = validator_manager
+            .registry
+            .lock()
+            .expect("test registry lock should be available");
+        let mut cluster_sizes = registry
+            .clusters
+            .values()
+            .map(|cluster| cluster.validators.len())
+            .collect::<Vec<_>>();
+        cluster_sizes.sort_unstable();
+        assert_eq!(cluster_sizes, vec![5, 5]);
     }
 
     #[test]

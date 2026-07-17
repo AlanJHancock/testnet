@@ -13,7 +13,9 @@ use crate::cluster::{fault_tolerance_f, quorum_threshold, EpochClusterAssignment
 use crate::consensus::chain_durability::recover_chain_and_validate_canonical;
 #[cfg(test)]
 use crate::consensus::consensus_algorithm::reconcile_validator_registry_clusters_for_height;
-use crate::consensus::consensus_algorithm::ProofOfSynergy;
+use crate::consensus::consensus_algorithm::{
+    reconcile_validator_registry_clusters_from_finalized_chain, ProofOfSynergy,
+};
 use crate::consensus::consensus_fork;
 use crate::consensus::dual_quorum::{required_validator_quorum, DualQuorumConsensus};
 use crate::consensus::legacy_canonical_lock::{
@@ -21,6 +23,7 @@ use crate::consensus::legacy_canonical_lock::{
 };
 use crate::consensus::synergy_score::SynergyScoreCalculator;
 use crate::crypto::pqc::PQCManager;
+use crate::epoch::{epoch_for_block_height, TESTNET_EPOCH_LENGTH_BLOCKS};
 use crate::genesis::canonical_genesis;
 use crate::role_profiles::{resolve_configured_role, AuthorityPlane, RoleProfile};
 use crate::sxcp;
@@ -39,11 +42,12 @@ use crate::validator::{
     balanced_validator_cluster_id, canonical_active_validator_set_hash,
     canonical_validator_cluster_address, canonical_validator_cluster_plan_for_epoch,
     canonical_validator_clusters_digest, canonical_validator_clusters_for_epoch,
-    canonical_validator_clusters_for_height, consensus_membership_validators_for_height,
-    effective_cluster_epoch_for_height, replay_validator_activation_transactions,
-    replay_validator_activation_transactions_for_service, target_validator_cluster_count,
-    Validator, ValidatorManager, ValidatorRegistry, ValidatorStatus,
-    INITIAL_VALIDATOR_SYNERGY_SCORE, TESTNET_MIN_VALIDATOR_STAKE_NWEI, VALIDATOR_MANAGER,
+    canonical_validator_clusters_for_height, canonical_validator_clusters_for_height_with_seed,
+    consensus_membership_validators_for_height, effective_cluster_epoch_for_height,
+    replay_validator_activation_transactions, replay_validator_activation_transactions_for_service,
+    target_validator_cluster_count, validator_set_effective_height_for_height, Validator,
+    ValidatorManager, ValidatorRegistry, ValidatorStatus, INITIAL_VALIDATOR_SYNERGY_SCORE,
+    TESTNET_CLUSTER_ROTATION_MIN_CLUSTERS, TESTNET_MIN_VALIDATOR_STAKE_NWEI, VALIDATOR_MANAGER,
 };
 use crate::wallet::WALLET_MANAGER;
 use crate::{info, warn};
@@ -608,6 +612,57 @@ fn replay_validator_activations_for_rpc_startup(
     }
 }
 
+/// Reconcile registry-only cluster state from the canonical finalized tip.
+///
+/// Service roles may expose validator-set state but never run consensus duties. For one or two
+/// clusters, the assignment seed is deterministic from the finalized membership and height. Once
+/// three or more clusters exist, the finalized boundary QC is required as the seed source; a
+/// partial/pruned chain therefore fails closed instead of publishing stale assignments.
+fn reconcile_validator_registry_from_finalized_chain(
+    canonical_chain: &BlockChain,
+    validator_manager: &Arc<ValidatorManager>,
+) -> Result<bool, String> {
+    let finalized_height = canonical_chain
+        .last()
+        .map(|block| block.block_index)
+        .ok_or_else(|| "canonical finalized chain tip is unavailable".to_string())?;
+    let canonical_epoch = epoch_for_block_height(finalized_height, TESTNET_EPOCH_LENGTH_BLOCKS);
+    let registry_validators = validator_manager
+        .registry
+        .lock()
+        .map_err(|_| "failed to lock validator registry for finalized reconciliation".to_string())?
+        .validators
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let active = consensus_membership_validators_for_height(registry_validators, finalized_height)?;
+    let cluster_count = target_validator_cluster_count(active.len());
+
+    if cluster_count >= TESTNET_CLUSTER_ROTATION_MIN_CLUSTERS {
+        return reconcile_validator_registry_clusters_from_finalized_chain(
+            validator_manager,
+            canonical_chain,
+            finalized_height,
+        );
+    }
+
+    let mut registry = validator_manager.registry.lock().map_err(|_| {
+        "failed to lock validator registry for finalized reconciliation".to_string()
+    })?;
+    let mut changed = registry.normalize_testnet_epoch_contract();
+    if active.is_empty() {
+        if registry.current_epoch != canonical_epoch || !registry.clusters.is_empty() {
+            registry.current_epoch = canonical_epoch;
+            registry.clear_cluster_assignments();
+            changed = true;
+        }
+        return Ok(changed);
+    }
+
+    changed |= registry.reconcile_clusters_for_height(canonical_epoch, finalized_height)?;
+    Ok(changed)
+}
+
 pub fn start_rpc_server(
     bind_address: &str,
     ws_bind_address: Option<String>,
@@ -632,7 +687,7 @@ pub fn start_rpc_server(
     // SHARED_CHAIN has already passed canonical genesis and chain-body validation during
     // initialization. Keep the validated chain locked while replay scans it by reference so a
     // missing or stale registry cannot suppress an activated validator or double chain memory.
-    let (activation_replayed, activation_failed) = {
+    let (activation_replayed, activation_failed, cluster_reconciliation) = {
         let canonical_chain = SHARED_CHAIN
             .lock()
             .expect("canonical startup chain lock should not be poisoned");
@@ -645,7 +700,12 @@ pub fn start_rpc_server(
         if let Some(block) = canonical_chain.last() {
             cache_last_known_good_chain_tip(block);
         }
-        replay_result
+        let cluster_reconciliation = if rpc_startup_uses_service_safe_replay(role_profile) {
+            reconcile_validator_registry_from_finalized_chain(&canonical_chain, &VALIDATOR_MANAGER)
+        } else {
+            Ok(false)
+        };
+        (replay_result.0, replay_result.1, cluster_reconciliation)
     };
     if activation_replayed > 0 {
         println!(
@@ -659,13 +719,23 @@ pub fn start_rpc_server(
             activation_failed
         );
     }
+    if let Err(error) = &cluster_reconciliation {
+        eprintln!(
+            "⚠️ Failed to reconcile validator clusters from finalized chain; validator-set RPC will fail closed: {}",
+            error
+        );
+    }
 
     let validators = VALIDATOR_MANAGER.get_active_validators();
     println!(
         "✅ Loaded {} validators from registry at startup",
         validators.len()
     );
-    if activation_replayed > 0 {
+    if activation_replayed > 0
+        || cluster_reconciliation
+            .as_ref()
+            .is_ok_and(|changed| *changed)
+    {
         if let Err(error) = VALIDATOR_MANAGER.save_registry(validator_registry_path) {
             println!(
                 "⚠️ Failed to persist startup validator registry replay: {}",
@@ -1333,26 +1403,221 @@ fn validator_set_snapshot_json(
     chain: &Arc<Mutex<BlockChain>>,
     validator_manager: &Arc<ValidatorManager>,
 ) -> Value {
-    // Capture the chain height before taking the registry lock so this read-only
-    // endpoint never establishes a chain-lock -> registry-lock dependency.
-    let finalized_height = chain_tip_snapshot_for_status(chain).height.unwrap_or(0);
+    let finalized_height = match chain.lock() {
+        Ok(canonical_chain) => match canonical_chain.last() {
+            Some(block) => block.block_index,
+            None => {
+                return json!({
+                    "error": "canonical finalized chain tip is unavailable",
+                    "chain_id": 1264,
+                    "fail_closed": true,
+                    "is_latest": false,
+                });
+            }
+        },
+        Err(_) => {
+            return json!({
+                "error": "canonical finalized chain lock is unavailable",
+                "chain_id": 1264,
+                "fail_closed": true,
+                "is_latest": false,
+            });
+        }
+    };
+
+    let canonical_epoch = epoch_for_block_height(finalized_height, TESTNET_EPOCH_LENGTH_BLOCKS);
+    let registry_validators = match validator_manager.registry.lock() {
+        Ok(registry) => registry.validators.values().cloned().collect::<Vec<_>>(),
+        Err(_) => {
+            return json!({
+                "error": "validator registry is temporarily unavailable",
+                "chain_id": 1264,
+                "fail_closed": true,
+                "is_latest": false,
+            });
+        }
+    };
+    let height_scoped_active = match consensus_membership_validators_for_height(
+        registry_validators.clone(),
+        finalized_height,
+    ) {
+        Ok(active) => active,
+        Err(error) => {
+            return json!({
+                "error": format!("validator membership is unavailable at finalized height {finalized_height}: {error}"),
+                "chain_id": 1264,
+                "current_finalized_height": finalized_height,
+                "fail_closed": true,
+                "is_latest": false,
+            });
+        }
+    };
+    if target_validator_cluster_count(height_scoped_active.len())
+        >= TESTNET_CLUSTER_ROTATION_MIN_CLUSTERS
+    {
+        let reconciliation = match chain.lock() {
+            Ok(canonical_chain) => reconcile_validator_registry_clusters_from_finalized_chain(
+                validator_manager,
+                &canonical_chain,
+                finalized_height,
+            ),
+            Err(_) => Err("canonical finalized chain lock is unavailable".to_string()),
+        };
+        if let Err(error) = reconciliation {
+            return json!({
+                "error": format!("canonical validator cluster seed is unavailable at finalized height {finalized_height}: {error}"),
+                "chain_id": 1264,
+                "current_finalized_height": finalized_height,
+                "epoch_id": canonical_epoch,
+                "fail_closed": true,
+                "is_latest": false,
+            });
+        }
+    }
+
+    // QC reconciliation may update assignment epoch, seed, and cluster membership. Refresh the
+    // authoritative clone before deriving the published membership and cluster plan.
+    let registry_validators = match validator_manager.registry.lock() {
+        Ok(registry) => registry.validators.values().cloned().collect::<Vec<_>>(),
+        Err(_) => {
+            return json!({
+                "error": "validator registry is temporarily unavailable after reconciliation",
+                "chain_id": 1264,
+                "current_finalized_height": finalized_height,
+                "fail_closed": true,
+                "is_latest": false,
+            });
+        }
+    };
+
     let Ok(registry) = validator_manager.registry.lock() else {
         return json!({
             "error": "validator registry is temporarily unavailable",
             "chain_id": 1264,
+            "fail_closed": true,
             "is_latest": false,
         });
     };
 
-    let active = registry
-        .get_active_validators()
-        .into_iter()
-        .cloned()
-        .collect::<Vec<_>>();
-    let active = crate::validator::consensus_membership_validators(active);
+    let active = match consensus_membership_validators_for_height(
+        registry_validators.clone(),
+        finalized_height,
+    ) {
+        Ok(active) => active,
+        Err(error) => {
+            return json!({
+                "error": format!("validator membership is unavailable at finalized height {finalized_height}: {error}"),
+                "chain_id": 1264,
+                "current_finalized_height": finalized_height,
+                "fail_closed": true,
+                "is_latest": false,
+            });
+        }
+    };
+    let effective_epoch = match effective_cluster_epoch_for_height(
+        canonical_epoch,
+        finalized_height,
+    ) {
+        Ok(epoch) => epoch,
+        Err(error) => {
+            return json!({
+                "error": format!("validator cluster epoch is unavailable at finalized height {finalized_height}: {error}"),
+                "chain_id": 1264,
+                "current_finalized_height": finalized_height,
+                "fail_closed": true,
+                "is_latest": false,
+            });
+        }
+    };
+    let cluster_count = target_validator_cluster_count(active.len());
+    let expected_assignment_seed = if cluster_count >= TESTNET_CLUSTER_ROTATION_MIN_CLUSTERS {
+        let seeds = active
+            .iter()
+            .filter_map(|validator| validator.cluster_assignment_seed.as_deref())
+            .filter(|seed| !seed.trim().is_empty())
+            .collect::<HashSet<_>>();
+        if seeds.len() != 1 {
+            return json!({
+                "error": format!("finalized QC-derived cluster seed is incomplete at finalized height {finalized_height}"),
+                "chain_id": 1264,
+                "current_finalized_height": finalized_height,
+                "epoch_id": effective_epoch,
+                "fail_closed": true,
+                "is_latest": false,
+            });
+        }
+        seeds.into_iter().next().unwrap_or_default().to_string()
+    } else {
+        canonical_validator_cluster_plan_for_epoch(&active, effective_epoch).randomness_source
+    };
+    let cluster_plan = if cluster_count >= TESTNET_CLUSTER_ROTATION_MIN_CLUSTERS {
+        match canonical_validator_clusters_for_height_with_seed(
+            registry_validators.clone(),
+            effective_epoch,
+            finalized_height,
+            &expected_assignment_seed,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return json!({
+                    "error": format!("canonical validator cluster assignment is unavailable at finalized height {finalized_height}: {error}"),
+                    "chain_id": 1264,
+                    "current_finalized_height": finalized_height,
+                    "fail_closed": true,
+                    "is_latest": false,
+                });
+            }
+        }
+    } else {
+        match canonical_validator_clusters_for_height(
+            registry_validators.clone(),
+            effective_epoch,
+            finalized_height,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return json!({
+                    "error": format!("validator cluster assignment is unavailable at finalized height {finalized_height}: {error}"),
+                    "chain_id": 1264,
+                    "current_finalized_height": finalized_height,
+                    "fail_closed": true,
+                    "is_latest": false,
+                });
+            }
+        }
+    };
     let validator_set_hash = canonical_active_validator_set_hash(&active);
-    let cluster_plan = canonical_validator_cluster_plan_for_epoch(&active, registry.current_epoch);
-    let cluster_map_hash = canonical_validator_clusters_digest(&active, registry.current_epoch);
+    let cluster_map_hash = canonical_validator_cluster_plan_digest(&cluster_plan, effective_epoch);
+    let manifest_effective_height = match validator_set_effective_height_for_height(
+        finalized_height,
+    ) {
+        Ok(height) => height,
+        Err(error) => {
+            return json!({
+                "error": format!("validator-set transition metadata is unavailable at finalized height {finalized_height}: {error}"),
+                "chain_id": 1264,
+                "current_finalized_height": finalized_height,
+                "is_latest": false,
+            });
+        }
+    };
+    let activation_effective_height = active
+        .iter()
+        .filter_map(|validator| validator.activation_effective_height)
+        .max();
+    let effective_from_height = manifest_effective_height
+        .into_iter()
+        .chain(activation_effective_height)
+        .max()
+        .unwrap_or(0);
+    let effective_height_source = match (manifest_effective_height, activation_effective_height) {
+        (Some(_), Some(_)) => "epoch_manifest_and_activation_replay",
+        (Some(_), None) => "epoch_validator_set_manifest",
+        (None, Some(_)) => "activation_replay",
+        (None, None) => "genesis_or_legacy_registry",
+    };
+    let effective_height_verified =
+        manifest_effective_height.is_some() || activation_effective_height.is_some();
     let assignment_epochs = active
         .iter()
         .filter_map(|validator| validator.cluster_assignment_epoch)
@@ -1366,8 +1631,8 @@ fn validator_set_snapshot_json(
         .iter()
         .filter_map(|validator| validator.cluster_assignment_effective_height)
         .collect::<HashSet<_>>();
-    let persisted_assignments_match_plan = cluster_plan.clusters.len() == registry.clusters.len()
-        && cluster_plan.clusters.iter().all(|(cluster_id, members)| {
+    let persisted_assignments_match_plan = cluster_plan.len() == registry.clusters.len()
+        && cluster_plan.iter().all(|(cluster_id, members)| {
             let expected_address = canonical_validator_cluster_address(*cluster_id, members);
             let expected_validators = members
                 .iter()
@@ -1383,31 +1648,27 @@ fn validator_set_snapshot_json(
                 && members.iter().all(|validator| {
                     validator.cluster_id == Some(*cluster_id)
                         && validator.cluster_address.as_deref() == Some(expected_address.as_str())
-                        && validator.cluster_assignment_epoch == Some(registry.current_epoch)
+                        && validator.cluster_assignment_epoch == Some(effective_epoch)
                         && validator
                             .cluster_assignment_seed
                             .as_deref()
-                            .is_some_and(|seed| !seed.trim().is_empty())
+                            .is_some_and(|seed| seed == expected_assignment_seed)
                         && validator.cluster_assignment_effective_height.is_some()
                 })
         });
     let cluster_assignments_complete = !active.is_empty()
+        && registry.current_epoch == effective_epoch
+        && registry.epoch_length == TESTNET_EPOCH_LENGTH_BLOCKS
         && active
             .iter()
             .all(|validator| validator.cluster_id.is_some())
-        && assignment_epochs == HashSet::from([registry.current_epoch])
-        && assignment_seeds.len() == 1
+        && assignment_epochs == HashSet::from([effective_epoch])
+        && assignment_seeds == HashSet::from([expected_assignment_seed.as_str()])
         && assignment_effective_heights.len() == 1
         && persisted_assignments_match_plan;
-    let cluster_assignment_epoch = cluster_assignments_complete.then_some(registry.current_epoch);
-    let cluster_randomness_source = cluster_assignments_complete.then(|| {
-        assignment_seeds
-            .iter()
-            .next()
-            .copied()
-            .unwrap_or_default()
-            .to_string()
-    });
+    let cluster_assignment_epoch = cluster_assignments_complete.then_some(effective_epoch);
+    let cluster_randomness_source =
+        cluster_assignments_complete.then(|| expected_assignment_seed.clone());
     let cluster_assignment_effective_height = cluster_assignments_complete.then(|| {
         assignment_effective_heights
             .iter()
@@ -1415,8 +1676,19 @@ fn validator_set_snapshot_json(
             .copied()
             .unwrap_or_default()
     });
+    if !cluster_assignments_complete {
+        return json!({
+            "error": format!("canonical validator cluster assignments are not proven at finalized height {finalized_height}"),
+            "chain_id": 1264,
+            "epoch_id": effective_epoch,
+            "current_finalized_height": finalized_height,
+            "active_validators": active.iter().map(|validator| validator.address.clone()).collect::<Vec<_>>(),
+            "cluster_assignments_complete": false,
+            "fail_closed": true,
+            "is_latest": false,
+        });
+    }
     let cluster_assignments = cluster_plan
-        .clusters
         .iter()
         .map(|(cluster_id, members)| {
             json!({
@@ -1427,20 +1699,23 @@ fn validator_set_snapshot_json(
                 "fault_tolerance_f": fault_tolerance_f(members.len()),
                 "assignment_epoch": cluster_assignment_epoch,
                 "assignment_effective_height": cluster_assignment_effective_height,
-                "validators": members.iter().map(|validator| json!({
-                    "address": validator.address,
-                    "public_key": validator.public_key,
-                    "stake_amount": validator.stake_amount,
-                    "cluster_id": validator.cluster_id,
-                    "activation_tx_hash": validator.activation_tx_hash,
-                    "finalized_synergy_score_bps": validator.finalized_synergy_score_bps,
-                })).collect::<Vec<_>>(),
+                    "validators": members.iter().map(|validator| json!({
+                        "address": validator.address,
+                        "public_key": validator.public_key,
+                        "stake_amount": validator.stake_amount,
+                        "cluster_id": validator.cluster_id,
+                        "status": format!("{:?}", validator.status),
+                        "activation_tx_hash": validator.activation_tx_hash,
+                        "activation_recorded_height": validator.activation_recorded_height,
+                        "activation_effective_height": validator.activation_effective_height,
+                        "finalized_synergy_score_bps": validator.finalized_synergy_score_bps,
+                    })).collect::<Vec<_>>(),
             })
         })
         .collect::<Vec<_>>();
     let membership_bundle_hash = validator_membership_bundle_hash(
         &active,
-        registry.current_epoch,
+        effective_epoch,
         registry.validator_set_version,
         &validator_set_hash,
         &cluster_map_hash,
@@ -1461,6 +1736,29 @@ fn validator_set_snapshot_json(
         .iter()
         .map(|validator| validator.address.clone())
         .collect::<Vec<_>>();
+    let mut syncing_addresses = registry
+        .validators
+        .values()
+        .filter(|validator| {
+            validator.status == ValidatorStatus::Shadow
+                && !validator
+                    .activation_effective_height
+                    .is_some_and(|height| height <= finalized_height)
+        })
+        .map(|validator| validator.address.clone())
+        .collect::<Vec<_>>();
+    syncing_addresses.sort();
+    let network_quorum_threshold = required_validator_quorum(active.len());
+    let cluster_quorum_thresholds = cluster_plan
+        .iter()
+        .map(|(cluster_id, members)| {
+            json!({
+                "cluster_id": cluster_id,
+                "validator_count": members.len(),
+                "quorum_threshold": quorum_threshold(members.len()),
+            })
+        })
+        .collect::<Vec<_>>();
 
     json!({
         "chain_id": 1264,
@@ -1468,21 +1766,28 @@ fn validator_set_snapshot_json(
         "snapshot_format_version": 1,
         "protocol_version": current_protocol_version(),
         "binary_version": env!("CARGO_PKG_VERSION"),
-        "epoch_id": registry.current_epoch,
+        "epoch_id": effective_epoch,
         "validator_set_version": registry.validator_set_version,
-        "effective_from_height": finalized_height,
+        "effective_from_height": effective_from_height,
+        "validator_set_effective_height": effective_from_height,
+        "effective_height_source": effective_height_source,
+        "effective_height_verified": effective_height_verified,
         "current_finalized_height": finalized_height,
         "active_validators": active_addresses.clone(),
         "pending_validators": addresses_for_status(ValidatorStatus::Pending),
-        "syncing_validators": addresses_for_status(ValidatorStatus::Shadow),
+        "syncing_validators": syncing_addresses,
         "eligible_validators": active_addresses,
         "jailed_validators": addresses_for_status(ValidatorStatus::Jailed),
         "removed_validators": addresses_for_status(ValidatorStatus::Slashed),
-        "quorum_threshold": required_validator_quorum(active.len()),
+        "quorum_threshold": network_quorum_threshold,
+        "network_quorum_threshold": network_quorum_threshold,
+        "quorum_scope": "network_aggregate_not_cluster_finality",
+        "cluster_quorum_scope": if cluster_count > 1 { "independent_per_cluster" } else { "single_cluster" },
+        "cluster_quorum_thresholds": cluster_quorum_thresholds,
         "validator_set_hash": validator_set_hash,
         "local_validator_set_hash": validator_set_hash,
         "network_validator_set_hash": validator_set_hash,
-        "cluster_count": cluster_plan.cluster_count,
+        "cluster_count": cluster_count,
         "cluster_assignments_complete": cluster_assignments_complete,
         "cluster_assignment_epoch": cluster_assignment_epoch,
         "cluster_assignment_effective_height": cluster_assignment_effective_height,
@@ -1493,6 +1798,24 @@ fn validator_set_snapshot_json(
         "is_latest": true,
         "generated_at_utc": current_timestamp(),
     })
+}
+
+fn canonical_validator_cluster_plan_digest(
+    cluster_plan: &[(u64, Vec<Validator>)],
+    epoch: u64,
+) -> String {
+    let mut hasher = Sha3_256::new();
+    hasher.update(epoch.to_be_bytes());
+    for (cluster_id, members) in cluster_plan {
+        hasher.update(cluster_id.to_be_bytes());
+        hasher.update((members.len() as u64).to_be_bytes());
+        for validator in members {
+            let address = validator.address.as_bytes();
+            hasher.update((address.len() as u64).to_be_bytes());
+            hasher.update(address);
+        }
+    }
+    hex::encode(hasher.finalize())
 }
 
 fn validator_membership_bundle_hash(
@@ -11242,6 +11565,19 @@ mod tests {
         }
 
         let chain = Arc::new(Mutex::new(BlockChain::new()));
+        chain.lock().unwrap().add_block(Block::new_with_timestamp(
+            12_001,
+            Vec::new(),
+            "snapshot-parent".to_string(),
+            "snapshot-validator-0".to_string(),
+            0,
+            1,
+        ));
+        {
+            let canonical_chain = chain.lock().unwrap();
+            reconcile_validator_registry_from_finalized_chain(&canonical_chain, &validator_manager)
+                .expect("two-cluster service reconciliation should not require a boundary QC");
+        }
         let snapshot = handle_json_rpc(
             "synergy_getValidatorSetSnapshot",
             json!([]),
@@ -11264,6 +11600,17 @@ mod tests {
         assert_eq!(snapshot["jailed_validators"], json!(["snapshot-jailed"]));
         assert_eq!(snapshot["removed_validators"], json!(["snapshot-slashed"]));
         assert_eq!(snapshot["quorum_threshold"], json!(7));
+        assert_eq!(snapshot["network_quorum_threshold"], json!(7));
+        assert_eq!(
+            snapshot["quorum_scope"],
+            json!("network_aggregate_not_cluster_finality")
+        );
+        assert_eq!(
+            snapshot["cluster_quorum_scope"],
+            json!("independent_per_cluster")
+        );
+        assert_eq!(snapshot["effective_from_height"], json!(0));
+        assert_eq!(snapshot["effective_height_verified"], json!(false));
         assert_eq!(snapshot["cluster_count"], json!(2));
         assert_eq!(snapshot["cluster_assignments_complete"], json!(true));
         assert_eq!(snapshot["cluster_assignment_epoch"], json!(12));
@@ -11323,10 +11670,206 @@ mod tests {
             &validator_manager,
         );
         assert_eq!(
-            corrupted_snapshot["cluster_assignments_complete"],
-            json!(false),
+            corrupted_snapshot["fail_closed"],
+            json!(true),
             "RPC membership evidence must fail closed when persisted validator assignments diverge"
         );
+        assert_eq!(corrupted_snapshot["is_latest"], json!(false));
+        assert!(corrupted_snapshot["cluster_assignments"].is_null());
+    }
+
+    #[test]
+    fn validator_set_snapshot_uses_effective_height_and_cluster_quorum_semantics() {
+        let validator_manager = Arc::new(ValidatorManager::new());
+        {
+            let mut registry = validator_manager.registry.lock().unwrap();
+            for index in 0..9 {
+                let mut validator = Validator::new(
+                    format!("snapshot-nine-validator-{index}"),
+                    format!("snapshot-nine-key-{index}"),
+                    format!("Snapshot Nine Validator {index}"),
+                    TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+                );
+                validator.status = ValidatorStatus::Active;
+                registry
+                    .validators
+                    .insert(validator.address.clone(), validator);
+            }
+            registry.reorganize_clusters_for_epoch(0);
+
+            let mut joining = Validator::new(
+                "snapshot-effective-validator-10".to_string(),
+                "snapshot-effective-key-10".to_string(),
+                "Snapshot Effective Validator 10".to_string(),
+                TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+            );
+            joining.status = ValidatorStatus::Shadow;
+            joining.shadow_started_at_height = Some(1);
+            joining.activation_recorded_height = Some(1_000);
+            joining.activation_effective_height = Some(1_001);
+            registry.validators.insert(joining.address.clone(), joining);
+        }
+
+        let chain = Arc::new(Mutex::new(BlockChain::new()));
+        chain.lock().unwrap().add_block(Block::new_with_timestamp(
+            1_001,
+            Vec::new(),
+            "parent".to_string(),
+            "snapshot-nine-validator-0".to_string(),
+            0,
+            1,
+        ));
+        {
+            let canonical_chain = chain.lock().unwrap();
+            reconcile_validator_registry_from_finalized_chain(&canonical_chain, &validator_manager)
+                .expect(
+                    "two-cluster service reconciliation should derive the canonical height epoch",
+                );
+        }
+        let snapshot = handle_json_rpc(
+            "synergy_getValidatorSetSnapshot",
+            json!([]),
+            &TX_POOL,
+            &chain,
+            &validator_manager,
+        );
+
+        assert_eq!(snapshot["current_finalized_height"], json!(1_001));
+        assert_eq!(snapshot["effective_from_height"], json!(1_001));
+        assert_eq!(snapshot["validator_set_effective_height"], json!(1_001));
+        assert_eq!(
+            snapshot["effective_height_source"],
+            json!("activation_replay")
+        );
+        assert_eq!(snapshot["effective_height_verified"], json!(true));
+        assert_eq!(snapshot["active_validators"].as_array().unwrap().len(), 10);
+        assert_eq!(snapshot["syncing_validators"], json!([]));
+        assert_eq!(snapshot["cluster_count"], json!(2));
+        assert_eq!(
+            snapshot["cluster_quorum_scope"],
+            json!("independent_per_cluster")
+        );
+        assert!(snapshot["cluster_quorum_thresholds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|cluster| cluster["validator_count"] == json!(5)
+                && cluster["quorum_threshold"] == json!(3)));
+    }
+
+    #[test]
+    fn validator_set_snapshot_reconciles_stale_service_epoch_from_finalized_height_without_manifest(
+    ) {
+        let validator_manager = Arc::new(ValidatorManager::new());
+        {
+            let mut registry = validator_manager.registry.lock().unwrap();
+            registry.current_epoch = 650;
+            registry.clusters.clear();
+            for index in 0..10 {
+                let mut validator = Validator::new(
+                    format!("stale-epoch-validator-{index}"),
+                    format!("stale-epoch-key-{index}"),
+                    format!("Stale Epoch Validator {index}"),
+                    TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+                );
+                validator.status = ValidatorStatus::Active;
+                registry
+                    .validators
+                    .insert(validator.address.clone(), validator);
+            }
+        }
+
+        let chain = Arc::new(Mutex::new(BlockChain::new()));
+        chain.lock().unwrap().add_block(Block::new_with_timestamp(
+            1_139_151,
+            Vec::new(),
+            "stale-epoch-parent".to_string(),
+            "stale-epoch-validator-0".to_string(),
+            0,
+            1,
+        ));
+        {
+            let canonical_chain = chain.lock().unwrap();
+            reconcile_validator_registry_from_finalized_chain(&canonical_chain, &validator_manager)
+                .expect("two-cluster reconciliation should not require a QC seed");
+        }
+
+        let snapshot = handle_json_rpc(
+            "synergy_getValidatorSetSnapshot",
+            json!([]),
+            &TX_POOL,
+            &chain,
+            &validator_manager,
+        );
+
+        assert_eq!(snapshot["current_finalized_height"], json!(1_139_151));
+        assert_eq!(snapshot["epoch_id"], json!(1_139));
+        assert_eq!(snapshot["cluster_count"], json!(2));
+        assert_eq!(snapshot["cluster_assignments_complete"], json!(true));
+        assert_eq!(
+            snapshot["cluster_quorum_scope"],
+            json!("independent_per_cluster")
+        );
+        assert!(snapshot["cluster_assignments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(
+                |cluster| cluster["validator_ids"].as_array().unwrap().len() == 5
+                    && cluster["quorum_threshold"] == json!(3)
+            ));
+        assert_eq!(
+            validator_manager.get_current_epoch(),
+            1_139,
+            "service reconciliation must replace stale registry epoch metadata"
+        );
+    }
+
+    #[test]
+    fn validator_set_snapshot_fails_closed_without_qc_seed_for_three_clusters() {
+        let validator_manager = Arc::new(ValidatorManager::new());
+        {
+            let mut registry = validator_manager.registry.lock().unwrap();
+            registry.current_epoch = 650;
+            registry.clusters.clear();
+            for index in 0..21 {
+                let mut validator = Validator::new(
+                    format!("missing-qc-validator-{index}"),
+                    format!("missing-qc-key-{index}"),
+                    format!("Missing QC Validator {index}"),
+                    TESTNET_MIN_VALIDATOR_STAKE_NWEI,
+                );
+                validator.status = ValidatorStatus::Active;
+                registry
+                    .validators
+                    .insert(validator.address.clone(), validator);
+            }
+        }
+
+        let chain = Arc::new(Mutex::new(BlockChain::new()));
+        chain.lock().unwrap().add_block(Block::new_with_timestamp(
+            1_139_151,
+            Vec::new(),
+            "missing-qc-parent".to_string(),
+            "missing-qc-validator-0".to_string(),
+            0,
+            1,
+        ));
+        let snapshot = handle_json_rpc(
+            "synergy_getValidatorSetSnapshot",
+            json!([]),
+            &TX_POOL,
+            &chain,
+            &validator_manager,
+        );
+
+        assert_eq!(snapshot["fail_closed"], json!(true));
+        assert_eq!(snapshot["is_latest"], json!(false));
+        assert_eq!(snapshot["epoch_id"], json!(1_139));
+        assert!(snapshot["error"].as_str().is_some_and(
+            |error| error.contains("boundary block") || error.contains("finalized QC")
+        ));
+        assert!(snapshot["cluster_assignments"].is_null());
     }
 
     #[test]

@@ -4200,7 +4200,7 @@ mod tests {
             );
             let own_votes = members
                 .iter()
-                .take(4)
+                .take(3)
                 .map(|validator| {
                     DualQuorumConsensus::create_vote_for_validator_with_manager(
                         &validator.address,
@@ -4218,7 +4218,13 @@ mod tests {
             };
             assert!(
                 consensus.has_commit_quorum_for_cluster(&context, &own_votes),
-                "cluster {} should reach quorum with four of its five validators",
+                "cluster {} should reach quorum with three of its five validators",
+                cluster_id
+            );
+            let insufficient_votes = own_votes.iter().take(2).cloned().collect::<Vec<_>>();
+            assert!(
+                !consensus.has_commit_quorum_for_cluster(&context, &insufficient_votes),
+                "cluster {} must not reach quorum with only two of its five validators",
                 cluster_id
             );
             let qc = consensus
@@ -4239,7 +4245,7 @@ mod tests {
                 .expect("two-cluster fixture should have another cluster");
             let cross_cluster_votes = other_members
                 .iter()
-                .take(4)
+                .take(3)
                 .map(|validator| {
                     signed_vote_with_explicit_cluster_context(
                         validator,
