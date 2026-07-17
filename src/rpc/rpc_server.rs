@@ -4943,6 +4943,22 @@ fn handle_json_rpc(
             Err(_) => json!({"error": "Failed to access reward ledger"}),
         },
 
+        // synergy_getEpochRewardAudit
+        "synergy_getEpochRewardAudit" => {
+            let epoch = params.get(0).and_then(|value| value.as_u64());
+            match crate::rewards::REWARD_LEDGER.lock() {
+                Ok(ledger) => {
+                    let audit_events = ledger.get_epoch_audit_events(epoch);
+                    json!({
+                        "epoch": epoch,
+                        "eventCount": audit_events.len(),
+                        "events": audit_events,
+                    })
+                }
+                Err(_) => json!({"error": "Failed to access reward ledger"}),
+            }
+        }
+
         // synergy_checkRewardInvariants
         "synergy_checkRewardInvariants" => {
             let epoch = params.get(0).and_then(|value| value.as_u64());
@@ -5852,6 +5868,7 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_getEpochFeeDistribution"
         | "synergy_getClusterRewardEscrow"
         | "synergy_getTreasuryRecovery"
+        | "synergy_getEpochRewardAudit"
         | "synergy_checkRewardInvariants"
         | "synergy_getValidatorPerformance"
         | "synergy_getValidatorQueue"
@@ -10320,6 +10337,7 @@ mod tests {
             "synergy_getFeeCollector",
             "synergy_getFeeCollectorBalance",
             "synergy_getBurnLedger",
+            "synergy_getEpochRewardAudit",
             "synergy_checkRewardInvariants",
         ] {
             enforce_rpc_exposure_policy(method, &context)
@@ -10409,6 +10427,25 @@ mod tests {
         assert!(report["checked_invariants"].is_array());
         assert!(report["violations"].is_array());
         assert!(report["passed"].is_boolean());
+    }
+
+    #[test]
+    fn reward_audit_rpc_returns_epoch_scoped_events() {
+        let tx_pool = Arc::new(Mutex::new(Vec::<Transaction>::new()));
+        let chain = Arc::new(Mutex::new(BlockChain::new()));
+        let validator_manager = Arc::new(ValidatorManager::new());
+
+        let audit = handle_json_rpc(
+            "synergy_getEpochRewardAudit",
+            json!([787]),
+            &tx_pool,
+            &chain,
+            &validator_manager,
+        );
+
+        assert_eq!(audit["epoch"], json!(787));
+        assert!(audit["eventCount"].is_number());
+        assert!(audit["events"].is_array());
     }
 
     #[test]

@@ -20,7 +20,6 @@ SUBDOMAINS=(
     "synergy-network.io"
     "www.synergy-network.io"
     "api.synergy-network.io"
-    "rpc.synergy-network.io"
     "ws.synergy-network.io"
     "explorer.synergy-network.io"
     "indexer.synergy-network.io"

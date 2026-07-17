@@ -99,6 +99,12 @@ Cluster escrow:
 {"jsonrpc":"2.0","id":1,"method":"synergy_getClusterRewardEscrow","params":["syngrp1cluster-a",42]}
 ```
 
+Epoch reward audit events:
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"synergy_getEpochRewardAudit","params":[42]}
+```
+
 Invariant check:
 
 ```json

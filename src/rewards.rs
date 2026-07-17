@@ -1410,6 +1410,62 @@ impl RewardLedger {
         report
     }
 
+    pub fn get_epoch_audit_events(&self, epoch: Option<u64>) -> Vec<RewardAuditEvent> {
+        self.audit_events
+            .iter()
+            .filter(|event| match event {
+                RewardAuditEvent::GasFeeCollected { epoch_id, .. } => {
+                    Self::epoch_matches(epoch, *epoch_id)
+                }
+                RewardAuditEvent::EpochFeesClosed { distribution, .. } => {
+                    Self::epoch_matches(epoch, distribution.epoch_id)
+                }
+                RewardAuditEvent::EpochFeeDistribution(distribution) => {
+                    Self::epoch_matches(epoch, distribution.epoch_id)
+                }
+                RewardAuditEvent::FeeCollectorDistributed(distribution) => {
+                    Self::epoch_matches(epoch, distribution.epoch_id)
+                }
+                RewardAuditEvent::ClusterRewardSettlement(settlement) => {
+                    Self::epoch_matches(epoch, settlement.epoch_id)
+                }
+                RewardAuditEvent::ClusterRewardEscrowed(escrow) => {
+                    Self::epoch_matches(epoch, escrow.epoch_id)
+                }
+                RewardAuditEvent::ValidatorPendingRewardCreated(reward) => {
+                    Self::epoch_matches(epoch, reward.original_epoch_id)
+                        || Self::epoch_matches(epoch, reward.accountability_epoch)
+                }
+                RewardAuditEvent::ValidatorReleaseCoefficientCalculated {
+                    accountability_epoch,
+                    ..
+                } => Self::epoch_matches(epoch, *accountability_epoch),
+                RewardAuditEvent::ValidatorRewardSettled(settlement) => {
+                    Self::settlement_matches(epoch, settlement)
+                }
+                RewardAuditEvent::TreasuryRecoveryCredited {
+                    original_epoch_id,
+                    settlement_epoch,
+                    ..
+                } => {
+                    Self::epoch_matches(epoch, *original_epoch_id)
+                        || Self::epoch_matches(epoch, *settlement_epoch)
+                }
+                RewardAuditEvent::NetworkOwnedValidatorRewardRouted(routing) => {
+                    Self::epoch_matches(epoch, routing.epoch_id)
+                }
+                RewardAuditEvent::ReliabilityBonusPoolFunded { epoch_id, .. }
+                | RewardAuditEvent::ReliabilityBonusPaid { epoch_id, .. } => {
+                    Self::epoch_matches(epoch, *epoch_id)
+                }
+                RewardAuditEvent::ValidatorReliabilityStreakUpdated(state) => epoch
+                    .map(|epoch_id| state.last_high_performance_epoch == Some(epoch_id))
+                    .unwrap_or(true),
+            })
+            .cloned()
+            .collect()
+    }
+
     fn check_fee_invariants(&self, epoch: Option<u64>, report: &mut RewardInvariantReport) {
         let mut fee_events_by_epoch: HashMap<u64, u128> = HashMap::new();
         let mut epoch_close_events: HashMap<u64, u64> = HashMap::new();
@@ -2934,6 +2990,31 @@ mod tests {
             .violations
             .iter()
             .any(|violation| violation.code == "fee_event_total_mismatch"));
+    }
+
+    #[test]
+    fn epoch_audit_events_are_filtered_by_related_epoch() {
+        let mut ledger = RewardLedger::default();
+        ledger
+            .record_fee_charged(787, "tx-audit-787", "native_snrg_send", 42, 787_001)
+            .expect("fee audit event should record");
+        ledger
+            .record_fee_charged(788, "tx-audit-788", "native_snrg_send", 7, 788_001)
+            .expect("other epoch fee audit event should record");
+
+        let audit = ledger.get_epoch_audit_events(Some(787));
+        assert_eq!(audit.len(), 1);
+        assert!(matches!(
+            audit.first(),
+            Some(RewardAuditEvent::GasFeeCollected {
+                epoch_id: 787,
+                fee_nwei: 42,
+                ..
+            })
+        ));
+
+        let all_audit = ledger.get_epoch_audit_events(None);
+        assert_eq!(all_audit.len(), 2);
     }
 
     #[test]
