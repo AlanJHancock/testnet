@@ -1190,20 +1190,12 @@ impl ProofOfSynergy {
                             leader_timeout_secs,
                             current_time,
                         );
-                        // Launch recovery must not let locally observed wall-clock view offsets
-                        // split the fleet into multiple same-height proposers. Use the canonical
-                        // height schedule for live leaders, then fall back to the live set below
-                        // only when that scheduled leader is not live.
-                        let view_offset = 0;
-                        if calculated_view_offset != 0 {
-                            debug!(
-                                "consensus",
-                                "Ignoring local wall-clock view offset for canonical leader selection",
-                                "calculated_view_offset" => calculated_view_offset,
-                                "canonical_view_offset" => view_offset,
-                                "block_height" => latest_block_clone.block_index + 1
-                            );
-                        }
+                        // The canonical timestamp supplies a fleet-shared timeout schedule, while
+                        // the local tip-observation cap prevents a freshly caught-up validator
+                        // from skipping views immediately. Do not pin this to zero: a scheduled
+                        // leader can remain status-live while it is unable to propose, and a fixed
+                        // primary view turns that condition into an unbounded chain stall.
+                        let view_offset = calculated_view_offset;
                         let transient_recovery_min_age_secs =
                             Self::transient_vote_recovery_min_age_secs(
                                 leader_timeout_secs,

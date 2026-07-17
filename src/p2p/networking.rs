@@ -5200,16 +5200,25 @@ impl P2PNetwork {
 
         let mut sent = 0usize;
         let mut failed_peers = Vec::new();
-        for (address, session_id) in peer_session_targets(&self.connected_peers) {
-            match send_peer_message_for_session(
-                &self.connected_peers,
-                &self.peer_state_cache,
-                &address,
-                session_id,
-                &message,
-                Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
-                "committed-block",
-            ) {
+        let block_targets = peer_session_targets(&self.connected_peers);
+        let send_results = run_with_bounded_parallelism(
+            &block_targets,
+            block_targets.len(),
+            "consensus fanout",
+            |(address, session_id)| {
+                send_peer_message_for_session(
+                    &self.connected_peers,
+                    &self.peer_state_cache,
+                    address,
+                    *session_id,
+                    &message,
+                    Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                    "committed-block",
+                )
+            },
+        );
+        for ((address, session_id), send_result) in block_targets.into_iter().zip(send_results) {
+            match send_result {
                 Ok(true) => {
                     let mut peers = self.connected_peers.lock().unwrap();
                     if let Some(peer) = peer_for_session_mut(&mut peers, &address, session_id) {
@@ -5310,16 +5319,26 @@ impl P2PNetwork {
                 })
                 .collect::<Vec<_>>()
         };
-        for (address, session_id, validator_address) in vote_targets {
-            match send_peer_message_for_session(
-                &self.connected_peers,
-                &self.peer_state_cache,
-                &address,
-                session_id,
-                &message,
-                Duration::from_millis(P2P_MESSAGE_WRITE_TIMEOUT_MILLIS),
-                "vote-request",
-            ) {
+        let send_results = run_with_bounded_parallelism(
+            &vote_targets,
+            vote_targets.len(),
+            "consensus fanout",
+            |(address, session_id, _validator_address)| {
+                send_peer_message_for_session(
+                    &self.connected_peers,
+                    &self.peer_state_cache,
+                    address,
+                    *session_id,
+                    &message,
+                    Duration::from_millis(CONSENSUS_MESSAGE_WRITE_TIMEOUT_MILLIS),
+                    "vote-request",
+                )
+            },
+        );
+        for ((address, _session_id, validator_address), send_result) in
+            vote_targets.into_iter().zip(send_results)
+        {
+            match send_result {
                 Ok(true) => {
                     sent_validator_addresses.insert(validator_address);
                     recipients += 1;
@@ -9381,14 +9400,16 @@ fn verify_network_commit_certificate_with_manager(
     Ok(qc)
 }
 
-fn verify_batch_with_bounded_parallelism<T, F>(
+fn run_with_bounded_parallelism<T, R, F>(
     items: &[T],
     max_workers: usize,
-    verify: F,
-) -> Vec<Result<(), String>>
+    operation_name: &str,
+    operation: F,
+) -> Vec<Result<R, String>>
 where
     T: Sync,
-    F: Fn(&T) -> Result<(), String> + Sync,
+    R: Send,
+    F: Fn(&T) -> Result<R, String> + Sync,
 {
     if items.is_empty() {
         return Vec::new();
@@ -9400,22 +9421,22 @@ where
     let results = Mutex::new(
         (0..items.len())
             .map(|_| None)
-            .collect::<Vec<Option<Result<(), String>>>>(),
+            .collect::<Vec<Option<Result<R, String>>>>(),
     );
 
     thread::scope(|scope| {
         for worker_index in 0..worker_count {
             let spawned = thread::Builder::new()
-                .name(format!("block-batch-verify-{worker_index}"))
+                .name(format!("{operation_name}-{worker_index}"))
                 .spawn_scoped(scope, || {
                     let _ = catch_unwind(AssertUnwindSafe(|| loop {
                         let index = next_index.fetch_add(1, Ordering::Relaxed);
                         if index >= items.len() {
                             break;
                         }
-                        let result = catch_unwind(AssertUnwindSafe(|| verify(&items[index])))
+                        let result = catch_unwind(AssertUnwindSafe(|| operation(&items[index])))
                             .unwrap_or_else(|_| {
-                                Err(format!("batch verifier panicked for item {index}"))
+                                Err(format!("{operation_name} panicked for item {index}"))
                             });
                         let mut results = match results.lock() {
                             Ok(results) => results,
@@ -9429,7 +9450,7 @@ where
                     Ok(spawn_error) => spawn_error,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                *spawn_error = Some(format!("failed to spawn batch verifier worker: {error}"));
+                *spawn_error = Some(format!("failed to spawn {operation_name} worker: {error}"));
             }
         }
     });
@@ -9452,11 +9473,23 @@ where
         .map(|(index, result)| {
             result.unwrap_or_else(|| {
                 Err(format!(
-                    "batch verifier worker terminated before item {index} completed"
+                    "{operation_name} worker terminated before item {index} completed"
                 ))
             })
         })
         .collect()
+}
+
+fn verify_batch_with_bounded_parallelism<T, F>(
+    items: &[T],
+    max_workers: usize,
+    verify: F,
+) -> Vec<Result<(), String>>
+where
+    T: Sync,
+    F: Fn(&T) -> Result<(), String> + Sync,
+{
+    run_with_bounded_parallelism(items, max_workers, "batch verifier", verify)
 }
 
 fn commit_verifier_validator_manager() -> Arc<ValidatorManager> {
