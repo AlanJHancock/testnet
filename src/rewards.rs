@@ -1288,6 +1288,21 @@ lazy_static! {
         Arc::new(Mutex::new(RewardLedger::default()));
 }
 
+#[cfg(test)]
+lazy_static! {
+    static ref REWARD_LEDGER_TEST_GUARD: Mutex<()> = Mutex::new(());
+}
+
+#[cfg(test)]
+pub(crate) fn reward_ledger_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    REWARD_LEDGER_TEST_GUARD.lock().unwrap()
+}
+
+#[cfg(test)]
+pub(crate) fn reset_reward_ledger_for_test() {
+    *REWARD_LEDGER.lock().unwrap() = RewardLedger::default();
+}
+
 impl RewardLedger {
     pub fn to_persisted_state(&self) -> PersistedRewardLedger {
         let mut fee_accumulators: Vec<_> = self.fee_accumulators.values().cloned().collect();

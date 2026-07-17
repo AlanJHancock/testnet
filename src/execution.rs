@@ -977,6 +977,12 @@ mod tests {
         state
     }
 
+    fn reward_ledger_test_scope() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::rewards::reward_ledger_test_guard();
+        crate::rewards::reset_reward_ledger_for_test();
+        guard
+    }
+
     #[derive(Clone)]
     struct CounterSynQFixture {
         public_key: SynQPublicKey,
@@ -1177,6 +1183,7 @@ mod tests {
         get_payload: Vec<u8>,
         expected_contract_address: &str,
     ) -> (Hash, String, String, String, u64) {
+        let _ledger_guard = reward_ledger_test_scope();
         let mut state = ExecutionState::new()
             .with_balance("alice", 1_000_000)
             .with_balance("carol", 0);
@@ -1245,6 +1252,7 @@ mod tests {
 
     #[test]
     fn same_block_executed_repeatedly_produces_same_state_root() {
+        let _ledger_guard = reward_ledger_test_scope();
         let transactions = vec![
             tx("alice", "carol", 0, 10, "alice"),
             tx("bob", "dave", 0, 20, "bob"),
@@ -1262,6 +1270,7 @@ mod tests {
 
     #[test]
     fn failed_receipt_is_deterministic_and_conflicts_execute_in_order() {
+        let _ledger_guard = reward_ledger_test_scope();
         let transactions = vec![
             tx("alice", "carol", 0, 10, "alice"),
             tx("alice", "dave", 1, 2_000_000, "alice"),
@@ -1279,6 +1288,7 @@ mod tests {
 
     #[test]
     fn receipt_preserves_synq_verification_summary() {
+        let _ledger_guard = reward_ledger_test_scope();
         let transaction = tx("alice", "carol", 0, 10, "synq-contract");
         let id = tx_id(&transaction).unwrap();
         let block = block(vec![transaction.clone()]);
@@ -1313,6 +1323,7 @@ mod tests {
 
     #[test]
     fn synq_deploy_carrier_reaches_receipt_through_node_admission() {
+        let _ledger_guard = reward_ledger_test_scope();
         let carrier = crate::synq_admission::test_support::deploy_carrier(
             crate::synergy_types::SYNERGY_TESTNET_V2_NETWORK_ID,
         );
@@ -1390,6 +1401,7 @@ mod tests {
             eprintln!("skipping SynQ Counter fixture test; contract artifacts are missing");
             return;
         };
+        let _ledger_guard = reward_ledger_test_scope();
         let deploy = synq_tx(fixture.deploy_payload(false), 0, 150_000, "synq-counter");
         let mut state = ExecutionState::new()
             .with_balance("alice", 1_000_000)
@@ -1415,6 +1427,7 @@ mod tests {
             eprintln!("skipping SynQ Counter fixture test; contract artifacts are missing");
             return;
         };
+        let _ledger_guard = reward_ledger_test_scope();
         let deploy = synq_tx(fixture.deploy_payload(true), 0, 150_000, "synq-counter");
         let contract_address = fixture.contract_address();
         let mut state = ExecutionState::new()
@@ -1460,6 +1473,7 @@ mod tests {
 
     #[test]
     fn native_value_execution_credits_fee_collector_with_total_network_fee() {
+        let _ledger_guard = reward_ledger_test_scope();
         let mut transaction = tx("alice", "carol", 0, 1_000_000_000, "alice");
         transaction.max_fee_nwei = 1_000;
         let block = block(vec![transaction.clone()]);
@@ -1495,6 +1509,7 @@ mod tests {
 
     #[test]
     fn transfer_to_network_burn_address_records_non_supply_reducing_event() {
+        let _ledger_guard = reward_ledger_test_scope();
         let mut transaction = tx(
             "alice",
             crate::address::NETWORK_BURN_ADDRESS,
@@ -1530,6 +1545,7 @@ mod tests {
 
     #[test]
     fn explicit_native_burn_reduces_supply_and_charges_total_network_fee() {
+        let _ledger_guard = reward_ledger_test_scope();
         let mut transaction = tx("alice", "", 0, 0, "alice");
         transaction.payload = br#"burn:{"asset":"SNRG","amount":"1000000000"}"#.to_vec();
         transaction.max_fee_nwei = 1_000;
@@ -1574,6 +1590,7 @@ mod tests {
 
     #[test]
     fn missing_or_altered_authorization_context_fails_closed() {
+        let _ledger_guard = reward_ledger_test_scope();
         let mut transaction = tx("alice", "carol", 0, 10, "alice");
         let original_block = block(vec![transaction.clone()]);
         let state = ExecutionState::new().with_balance("alice", 100);

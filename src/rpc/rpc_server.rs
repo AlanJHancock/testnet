@@ -10480,6 +10480,8 @@ mod tests {
 
     #[test]
     fn reward_invariant_rpc_returns_epoch_scoped_report() {
+        let _ledger_guard = crate::rewards::reward_ledger_test_guard();
+        crate::rewards::reset_reward_ledger_for_test();
         let tx_pool = Arc::new(Mutex::new(Vec::<Transaction>::new()));
         let chain = Arc::new(Mutex::new(BlockChain::new()));
         let validator_manager = Arc::new(ValidatorManager::new());
@@ -10500,6 +10502,8 @@ mod tests {
 
     #[test]
     fn reward_audit_rpc_returns_epoch_scoped_events() {
+        let _ledger_guard = crate::rewards::reward_ledger_test_guard();
+        crate::rewards::reset_reward_ledger_for_test();
         let tx_pool = Arc::new(Mutex::new(Vec::<Transaction>::new()));
         let chain = Arc::new(Mutex::new(BlockChain::new()));
         let validator_manager = Arc::new(ValidatorManager::new());
