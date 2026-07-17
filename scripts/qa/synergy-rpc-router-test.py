@@ -318,6 +318,37 @@ class RouterTests(unittest.TestCase):
             os.environ.clear()
             os.environ.update(old)
 
+    def test_config_rejects_non_loopback_read_upstreams_on_stale_relayer_port(self) -> None:
+        old = dict(os.environ)
+        try:
+            os.environ["SYNERGY_RPC_READ_UPSTREAMS"] = (
+                "http://195.26.241.95:15640,"
+                "http://94.72.117.108:5640,"
+                "http://209.145.48.117:5640"
+            )
+            os.environ["SYNERGY_RPC_WRITE_UPSTREAMS"] = "http://195.26.241.95:5640/"
+            with self.assertRaisesRegex(router_module.RouterConfigError, "relayer JSON-RPC port 5640"):
+                router_module.RouterConfig.from_env()
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+    def test_config_allows_explicit_relayer_rpc_port_override(self) -> None:
+        old = dict(os.environ)
+        try:
+            os.environ["SYNERGY_RPC_READ_UPSTREAMS"] = (
+                "http://195.26.241.95:15640,"
+                "http://94.72.117.108:15640,"
+                "http://209.145.48.117:15640"
+            )
+            os.environ["SYNERGY_RPC_WRITE_UPSTREAMS"] = "http://195.26.241.95:5640/"
+            os.environ["SYNERGY_RPC_RELAYER_RPC_PORT"] = "15640"
+            config = router_module.RouterConfig.from_env()
+            self.assertEqual(config.read_upstreams[0], "http://195.26.241.95:15640")
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
     def test_cache_eviction_and_degraded_health_are_visible(self) -> None:
         server, url = fake_server({})
         try:

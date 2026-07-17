@@ -8,6 +8,7 @@ The router deliberately has no validator endpoints or credentials built in.
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import threading
@@ -30,6 +31,7 @@ DEFAULT_TIMEOUT_SECONDS = 4.0
 DEFAULT_WRITE_TIMEOUT_SECONDS = 90.0
 MAX_TIMEOUT_SECONDS = 30.0
 MAX_WRITE_TIMEOUT_SECONDS = 90.0
+DEFAULT_RELAYER_RPC_PORT = 5640
 DEFAULT_MAX_REQUEST_BYTES = 2 * 1024 * 1024
 DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 DEFAULT_MAX_SYNID_REGISTRY_BYTES = 8 * 1024 * 1024
@@ -127,6 +129,30 @@ def _split_urls(value: str | None, name: str, minimum: int = 1) -> tuple[str, ..
     return urls
 
 
+def _is_loopback_hostname(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+    if hostname in {"localhost", "localhost.localdomain"}:
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_read_upstream_ports(urls: tuple[str, ...], expected_port: int) -> None:
+    for url in urls:
+        parsed = urlparse(url)
+        if _is_loopback_hostname(parsed.hostname):
+            continue
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if port != expected_port:
+            raise RouterConfigError(
+                "SYNERGY_RPC_READ_UPSTREAMS must use relayer JSON-RPC port "
+                f"{expected_port}; {url} uses {port}"
+            )
+
+
 def _env_first(*names: str) -> str | None:
     for name in names:
         value = os.environ.get(name)
@@ -166,6 +192,12 @@ class RouterConfig:
             raise RouterConfigError("SYNERGY_RPC_READ_UPSTREAMS must contain exactly three relayer URLs")
         if len(set(read)) != len(read):
             raise RouterConfigError("SYNERGY_RPC_READ_UPSTREAMS must contain three distinct relayer URLs")
+        relayer_rpc_port = _positive_int(
+            os.environ.get("SYNERGY_RPC_RELAYER_RPC_PORT", str(DEFAULT_RELAYER_RPC_PORT)),
+            "SYNERGY_RPC_RELAYER_RPC_PORT",
+            maximum=65535,
+        )
+        _validate_read_upstream_ports(read, relayer_rpc_port)
         write = _split_urls(
             _env_first("SYNERGY_RPC_WRITE_UPSTREAMS", "SYNERGY_RPC_WRITE_URLS"),
             "SYNERGY_RPC_WRITE_UPSTREAMS",

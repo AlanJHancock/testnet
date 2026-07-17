@@ -1241,34 +1241,20 @@ impl ProofOfSynergy {
                             epoch_length,
                             view_offset,
                         );
-                        let selected_validator = if live_active_validators
+                        if !live_active_validators
                             .iter()
                             .any(|validator| validator.address == selected_validator.address)
                         {
-                            selected_validator
-                        } else if !live_active_validators.is_empty() {
-                            let live_selected_validator = Self::select_leader_for_block(
-                                &live_active_validators,
-                                next_block_index,
-                                &synergy_calculator,
-                                &epoch_randomness,
-                                epoch_length,
-                                view_offset,
-                            );
                             warn!(
                                 "consensus",
-                                "Scheduled leader is not live; selecting live validator leader",
+                                "Scheduled leader is not locally visible; preserving canonical leader selection",
                                 "scheduled_leader" => selected_validator.address.clone(),
-                                "live_leader" => live_selected_validator.address.clone(),
                                 "live_validators" => live_active_validators.len() as u64,
                                 "active_validators" => active_validators.len() as u64,
                                 "block_height" => next_block_index,
                                 "view_offset" => view_offset
                             );
-                            live_selected_validator
-                        } else {
-                            selected_validator
-                        };
+                        }
                         let selected_validator = Self::prefer_local_vote_lock_leader(
                             selected_validator,
                             &active_validators,

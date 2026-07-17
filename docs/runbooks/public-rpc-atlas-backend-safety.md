@@ -79,3 +79,27 @@ itself failed.
 Archive-contained evidence is never trusted for repair. Archive snapshots remain
 out of validator recovery unless the archive canonical reseed gates pass in
 `docs/runbooks/archive-canonical-reseed.md`.
+
+## Public RPC Router Upstreams
+
+Atlas reads fresh blocks through `https://testnet-rpc.synergy-network.io`, which
+is fronted by `synergy-rpc-router` on the RPC gateway host. The router read pool
+must point at the three relayer JSON-RPC endpoints on port `5640`:
+
+```bash
+SYNERGY_RPC_READ_UPSTREAMS=http://195.26.241.95:5640,http://94.72.117.108:5640,http://209.145.48.117:5640
+```
+
+Do not use retired relayer proxy ports such as `15640` for the public read pool.
+The router fails startup validation for non-loopback read upstreams that do not
+match `SYNERGY_RPC_RELAYER_RPC_PORT`, which defaults to `5640`.
+
+After any router config change, prove both the local router and Atlas readiness:
+
+```bash
+curl -fsS http://127.0.0.1:5655 \
+  -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"synergy_blockNumber","params":[]}'
+
+curl -fsS https://testnet-atlas-api.synergy-network.io/readyz
+```
