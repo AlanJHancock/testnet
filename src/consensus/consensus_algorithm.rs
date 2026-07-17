@@ -26,7 +26,7 @@ use crate::validator::{
     apply_validator_activation_transaction, consensus_membership_validators,
     consensus_membership_validators_for_height, effective_cluster_epoch_for_height,
     is_validator_activation_transaction, replay_validator_activation_transactions,
-    validate_validator_activation_transaction, Validator, ValidatorManager,
+    validate_validator_activation_transaction, Validator, ValidatorManager, ValidatorStatus,
     TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
 };
 use crate::wallet::WALLET_MANAGER;
@@ -62,6 +62,22 @@ const PROPOSAL_TRANSACTION_MAX_AGE_SECS: u64 = 3_600;
 // that metadata through this frozen cutover window. Later off-by-one QCs fail closed.
 const CANONICAL_TESTNET_EPOCH_LENGTH: u64 = 1_000;
 const ONE_BASED_EPOCH_MIGRATION_CUTOFF_HEIGHT: u64 = 1_052_000;
+// Cluster assignment moves first, after a fixed rollout window. Leader selection retains the
+// longer compatibility window because mixing leader schedules can stop finality. These are
+// protocol heights, not wall-clock timers, so restarts cannot move either cutover.
+pub(crate) const CLUSTER_RANDOMNESS_V3_ACTIVATION_EPOCH: u64 = 1_150;
+pub(crate) const CLUSTER_RANDOMNESS_V3_ACTIVATION_HEIGHT: u64 = 1_150_001;
+pub(crate) const EPOCH_RANDOMNESS_V3_ACTIVATION_EPOCH: u64 = 1_200;
+pub(crate) const EPOCH_RANDOMNESS_V3_ACTIVATION_HEIGHT: u64 = 1_200_001;
+const LEGACY_EPOCH_RANDOMNESS_SCHEME: &str = "legacy-persisted-seed-v2";
+const LEGACY_TRANSITION_RANDOMNESS_SCHEME: &str = "legacy-qc-hash-v2";
+const LEGACY_GENESIS_RANDOMNESS_SCHEME: &str = "legacy-genesis-v2";
+const LEGACY_EPOCH_ZERO_RANDOMNESS_DOMAIN: &str = "synergy-epoch-zero-randomness-v2";
+const BOUNDARY_HASH_RANDOMNESS_SCHEME: &str = "boundary-hash-v3";
+const BOUNDARY_HASH_CLUSTER_RANDOMNESS_SCHEME: &str = "boundary-hash-cluster-v3";
+const BOUNDARY_HASH_LEADER_RANDOMNESS_DOMAIN: &[u8] = b"synergy-testnet-epoch-leader-randomness-v3";
+const BOUNDARY_HASH_CLUSTER_RANDOMNESS_DOMAIN: &[u8] =
+    b"synergy-testnet-epoch-cluster-randomness-v3";
 
 macro_rules! consensus_log {
     ($($arg:tt)*) => {
@@ -248,24 +264,64 @@ pub(crate) fn reconcile_validator_registry_clusters_from_finalized_chain(
     let epoch_length = CANONICAL_TESTNET_EPOCH_LENGTH;
     let supplied_epoch = epoch_for_block_height(height, epoch_length);
     let effective_epoch = effective_cluster_epoch_for_height(supplied_epoch, height)?;
-    let randomness = ProofOfSynergy::deterministic_epoch_randomness_for_epoch(
+    let evidence = ProofOfSynergy::cluster_epoch_randomness_evidence(
         chain,
         effective_epoch,
         epoch_length,
         validator_manager,
     )?;
-    let randomness_source = hex::encode(randomness);
+    let randomness_source = hex::encode(&evidence.randomness);
     let mut registry = validator_manager
         .registry
         .lock()
         .map_err(|_| "failed to lock validator registry for cluster reconciliation".to_string())?;
-    let epoch_contract_changed = registry.normalize_testnet_epoch_contract();
+    let epoch_contract_normalized = registry.normalize_testnet_epoch_contract();
+    let mut epoch_contract_changed = evidence.registry_migrated || epoch_contract_normalized;
+    let canonical_effective_height = epoch_start_height(effective_epoch, epoch_length);
+    let cutover_rebuild_required = registry.current_epoch < CLUSTER_RANDOMNESS_V3_ACTIVATION_EPOCH
+        && effective_epoch >= CLUSTER_RANDOMNESS_V3_ACTIVATION_EPOCH;
+    let same_epoch_metadata_conflict = registry.validators.values().any(|validator| {
+        validator.status == ValidatorStatus::Active
+            && validator.cluster_assignment_epoch == Some(effective_epoch)
+            && (validator.cluster_assignment_seed.as_deref() != Some(randomness_source.as_str())
+                || validator.cluster_assignment_effective_height
+                    != Some(canonical_effective_height))
+    });
+    if cutover_rebuild_required || same_epoch_metadata_conflict {
+        registry.clear_cluster_assignments();
+        epoch_contract_changed = true;
+    }
+    if registry.current_epoch != effective_epoch {
+        registry.current_epoch = effective_epoch;
+        epoch_contract_changed = true;
+    }
     let clusters_changed = registry.reconcile_clusters_for_height_with_seed(
         effective_epoch,
         height,
         &randomness_source,
     )?;
     Ok(epoch_contract_changed || clusters_changed)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EpochRandomnessEvidence {
+    pub next_epoch: u64,
+    pub boundary_height: Option<u64>,
+    pub boundary_block_hash: Option<String>,
+    pub boundary_qc_verified: bool,
+    pub scheme: &'static str,
+    pub assignment_effective_height: u64,
+    pub randomness: Vec<u8>,
+    pub registry_migrated: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CanonicalEpochBoundaryEvidence {
+    pub next_epoch: u64,
+    pub boundary_height: u64,
+    pub boundary_block_hash: String,
+    pub assignment_effective_height: u64,
+    pub randomness: Vec<u8>,
 }
 
 impl ProofOfSynergy {
@@ -746,11 +802,35 @@ impl ProofOfSynergy {
                                 }
                             };
                             let closing_epoch_validators = validator_manager.get_active_validators();
+                            let closing_epoch_randomness =
+                                match Self::deterministic_epoch_randomness_for_epoch(
+                                    &chain_guard,
+                                    current_epoch,
+                                    epoch_length,
+                                    &validator_manager,
+                                ) {
+                                    Ok(randomness) => randomness,
+                                    Err(error) => {
+                                        warn!(
+                                            "consensus",
+                                            "Refusing epoch transition without canonical closing-epoch randomness",
+                                            "current_epoch" => current_epoch,
+                                            "next_epoch" => next_epoch,
+                                            "latest_height" => latest_block.block_index,
+                                            "error" => error
+                                        );
+                                        drop(chain_guard);
+                                        drop(pool);
+                                        thread::sleep(Duration::from_millis(250));
+                                        continue;
+                                    }
+                                };
                             let finalized_scores = match Self::finalized_synergy_scores_for_epoch(
                                 &chain_guard,
                                 current_epoch,
                                 epoch_length,
                                 &closing_epoch_validators,
+                                &closing_epoch_randomness,
                             ) {
                                 Ok(scores) => scores,
                                 Err(error) => {
@@ -793,9 +873,9 @@ impl ProofOfSynergy {
                                 "previous_qc_block_hash" => previous_qc.block_hash.clone()
                             );
                             let latest_height = latest_block.block_index;
-                            drop(chain_guard);
                             drop(pool);
                             if Self::emergency_stable_committee_mode_enabled() {
+                                drop(chain_guard);
                                 let closing_epoch = current_epoch;
                                 let closing_epoch_validators =
                                     validator_manager.get_active_validators();
@@ -828,7 +908,9 @@ impl ProofOfSynergy {
                                     &dao_governance,
                                     &cartel_detection,
                                     latest_height,
+                                    &chain_guard,
                                 );
+                                drop(chain_guard);
                             }
                             thread::sleep(Duration::from_millis(100));
                             continue;
@@ -2768,28 +2850,94 @@ impl ProofOfSynergy {
         validator_manager: &Arc<ValidatorManager>,
         _synergy_calculator: &Arc<SynergyScoreCalculator>,
         dual_quorum_consensus: &Arc<Mutex<DualQuorumConsensus>>,
-        entropy_beacon: &Arc<Mutex<EntropyBeacon>>,
+        _entropy_beacon: &Arc<Mutex<EntropyBeacon>>,
         _validator_rotation: &Arc<ValidatorRotation>,
         dao_governance: &Arc<Mutex<DAOGovernance>>,
         cartel_detection: &Arc<Mutex<CartelDetectionEngine>>,
         transition_block_height: u64,
+        chain: &BlockChain,
     ) {
         let closing_epoch = *current_epoch;
         let closing_epoch_validators = validator_manager.get_active_validators();
-        *current_epoch = current_epoch.saturating_add(1);
+        let next_epoch = current_epoch.saturating_add(1);
+
+        // Before the fixed activation boundary, a new epoch transition must remain
+        // v2-compatible with the existing fleet: verify/load the finalized boundary QC,
+        // derive the legacy QC-hash seed, and persist it with the new epoch assignment.
+        // Current-epoch reads use the persisted seed and never repeat this derivation.
+        let leader_randomness = match Self::epoch_randomness_evidence_for_transition(
+            chain,
+            next_epoch,
+            CANONICAL_TESTNET_EPOCH_LENGTH,
+            validator_manager,
+        ) {
+            Ok(evidence) => evidence.randomness,
+            Err(error) => {
+                warn!(
+                    "consensus",
+                    "Refusing epoch transition without canonical boundary evidence",
+                    "next_epoch" => next_epoch,
+                    "transition_block_height" => transition_block_height,
+                    "previous_qc_block_hash" => previous_qc.block_hash,
+                    "error" => error
+                );
+                return;
+            }
+        };
+        if let Err(error) =
+            Self::persist_epoch_leader_randomness(validator_manager, next_epoch, &leader_randomness)
+        {
+            warn!(
+                "consensus",
+                "Refusing epoch transition because leader randomness could not be persisted",
+                "next_epoch" => next_epoch,
+                "transition_block_height" => transition_block_height,
+                "error" => error
+            );
+            return;
+        }
+        let cluster_randomness = match Self::cluster_epoch_randomness_evidence(
+            chain,
+            next_epoch,
+            CANONICAL_TESTNET_EPOCH_LENGTH,
+            validator_manager,
+        ) {
+            Ok(evidence) => evidence.randomness,
+            Err(error) => {
+                warn!(
+                    "consensus",
+                    "Refusing epoch transition without canonical cluster boundary evidence",
+                    "next_epoch" => next_epoch,
+                    "transition_block_height" => transition_block_height,
+                    "error" => error
+                );
+                return;
+            }
+        };
+
+        *current_epoch = next_epoch;
         println!("🔄 Epoch Transition: Starting epoch {}", current_epoch);
 
-        // 1. Generate new epoch randomness
-        let mut beacon = entropy_beacon.lock().unwrap();
-        let epoch_randomness = beacon.generate_epoch_randomness(&previous_qc);
-        drop(beacon);
-
-        // 2. Rebalance validator clusters from the finalized boundary-QC seed.
-        let cluster_randomness_source = hex::encode(epoch_randomness);
+        // Rebalance validator clusters from the canonical finalized-boundary seed.
+        let cluster_randomness_source = hex::encode(cluster_randomness);
+        if next_epoch == CLUSTER_RANDOMNESS_V3_ACTIVATION_EPOCH {
+            match validator_manager.registry.lock() {
+                Ok(mut registry) => registry.clear_cluster_assignments(),
+                Err(_) => {
+                    warn!(
+                        "consensus",
+                        "Refusing cluster-randomness cutover because the validator registry is unavailable",
+                        "next_epoch" => next_epoch,
+                        "transition_block_height" => transition_block_height
+                    );
+                    return;
+                }
+            }
+        }
         validator_manager.reorganize_clusters_for_epoch_with_seed(
             *current_epoch,
             &cluster_randomness_source,
-            transition_block_height.saturating_add(1),
+            epoch_start_height(*current_epoch, CANONICAL_TESTNET_EPOCH_LENGTH),
         );
         if let Err(error) = validator_manager.save_registry(VALIDATOR_REGISTRY_PATH) {
             warn!(
@@ -2829,6 +2977,16 @@ impl ProofOfSynergy {
         epoch_length: u64,
         validator_manager: &Arc<ValidatorManager>,
     ) -> Result<QuorumCertificate, String> {
+        Self::finalized_boundary_block_and_qc(chain, current_epoch, epoch_length, validator_manager)
+            .map(|(_block, qc)| qc)
+    }
+
+    fn finalized_boundary_block_and_qc(
+        chain: &BlockChain,
+        current_epoch: u64,
+        epoch_length: u64,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<(Block, QuorumCertificate), String> {
         let epoch_length = epoch_length.max(1);
         let boundary_height = current_epoch
             .checked_sub(1)
@@ -2840,6 +2998,7 @@ impl ProofOfSynergy {
             .iter()
             .rev()
             .find(|block| block.block_index == boundary_height)
+            .cloned()
             .ok_or_else(|| {
                 format!("epoch {current_epoch} boundary block {boundary_height} is unavailable")
             })?;
@@ -2868,7 +3027,7 @@ impl ProofOfSynergy {
         }
 
         DualQuorumConsensus::verify_commit_certificate_for_block_static(
-            block,
+            &block,
             &qc,
             validator_manager,
         )
@@ -2882,7 +3041,7 @@ impl ProofOfSynergy {
         if normalize_legacy_epoch {
             qc.epoch_number = expected_epoch;
         }
-        Ok(qc)
+        Ok((block, qc))
     }
 
     fn is_migratable_legacy_boundary_epoch(
@@ -2903,6 +3062,7 @@ impl ProofOfSynergy {
         epoch: u64,
         epoch_length: u64,
         validators: &[Validator],
+        epoch_randomness: &[u8],
     ) -> Result<HashMap<String, u64>, String> {
         if validators.is_empty() {
             return Ok(HashMap::new());
@@ -2910,33 +3070,21 @@ impl ProofOfSynergy {
         let epoch_length = epoch_length.max(1);
         let epoch_start = epoch_start_height(epoch, epoch_length);
         let epoch_end = epoch_end_height(epoch, epoch_length);
-        let assignment_start = validators
-            .iter()
-            .filter_map(|validator| validator.cluster_assignment_effective_height)
-            .max()
-            .unwrap_or(epoch_start)
-            .max(epoch_start);
-        if assignment_start > epoch_end {
-            return Err(format!(
-                "cluster assignment window begins at {assignment_start}, after epoch {epoch} ends at {epoch_end}"
-            ));
-        }
-
         let mut blocks = chain
             .chain
             .iter()
-            .filter(|block| block.block_index >= assignment_start && block.block_index <= epoch_end)
+            .filter(|block| block.block_index >= epoch_start && block.block_index <= epoch_end)
             .collect::<Vec<_>>();
         blocks.sort_by_key(|block| block.block_index);
-        let expected_block_count = epoch_end.saturating_sub(assignment_start).saturating_add(1);
+        let expected_block_count = epoch_end.saturating_sub(epoch_start).saturating_add(1);
         if blocks.len() as u64 != expected_block_count {
             return Err(format!(
-                "finalized score window {assignment_start}..={epoch_end} has {} block(s), expected {expected_block_count}",
+                "finalized score window {epoch_start}..={epoch_end} has {} block(s), expected {expected_block_count}",
                 blocks.len()
             ));
         }
         for (offset, block) in blocks.iter().enumerate() {
-            let expected_height = assignment_start.saturating_add(offset as u64);
+            let expected_height = epoch_start.saturating_add(offset as u64);
             if block.block_index != expected_height {
                 return Err(format!(
                     "finalized score window is missing block {expected_height}"
@@ -2954,7 +3102,7 @@ impl ProofOfSynergy {
             .iter()
             .map(|validator| (validator.address.clone(), 0u64))
             .collect::<HashMap<_, _>>();
-        let mut participation = opportunities.clone();
+        let mut successful_duties = opportunities.clone();
 
         for block in blocks {
             let qc = qcs.get(&block.hash).ok_or_else(|| {
@@ -2969,39 +3117,33 @@ impl ProofOfSynergy {
                     block.block_index
                 ));
             }
-            let eligible = validators
-                .iter()
-                .filter(|validator| {
-                    qc.cluster_id
-                        .is_none_or(|cluster_id| validator.cluster_id == Some(cluster_id))
-                })
-                .map(|validator| validator.address.as_str())
-                .collect::<HashSet<_>>();
+            let eligible =
+                consensus_membership_validators_for_height(validators.to_vec(), block.block_index)?;
             if eligible.is_empty() {
                 return Err(format!(
-                    "block {} QC references cluster {:?} with no eligible validators",
-                    block.block_index, qc.cluster_id
+                    "block {} has no height-scoped consensus membership",
+                    block.block_index
                 ));
             }
-            for address in &eligible {
-                *opportunities.entry((*address).to_string()).or_default() += 1;
+            if !eligible
+                .iter()
+                .any(|validator| validator.address == block.validator_id)
+            {
+                return Err(format!(
+                    "block {} proposer {} is outside the height-scoped consensus membership",
+                    block.block_index, block.validator_id
+                ));
             }
-            let mut seen = HashSet::new();
-            for vote in &qc.votes {
-                if !eligible.contains(vote.validator_address.as_str()) {
-                    return Err(format!(
-                        "block {} QC includes validator {} outside cluster {:?}",
-                        block.block_index, vote.validator_address, qc.cluster_id
-                    ));
-                }
-                if !seen.insert(vote.validator_address.as_str()) {
-                    return Err(format!(
-                        "block {} QC contains duplicate validator vote {}",
-                        block.block_index, vote.validator_address
-                    ));
-                }
-                *participation
-                    .entry(vote.validator_address.clone())
+            let primary_leaders =
+                Self::canonical_primary_leader_addresses(&eligible, epoch_randomness);
+            let leader_index = block_position_in_epoch(block.block_index, epoch_length)
+                .saturating_sub(1) as usize
+                % primary_leaders.len();
+            let assigned_leader = &primary_leaders[leader_index];
+            *opportunities.entry(assigned_leader.clone()).or_default() += 1;
+            if block.validator_id == *assigned_leader {
+                *successful_duties
+                    .entry(assigned_leader.clone())
                     .or_default() += 1;
             }
         }
@@ -3009,14 +3151,12 @@ impl ProofOfSynergy {
         validators
             .iter()
             .map(|validator| {
-                let eligible = opportunities[&validator.address];
-                let score_bps = if eligible == 0 {
-                    validator.finalized_synergy_score_bps
+                let assigned = opportunities[&validator.address];
+                let score_bps = if assigned == 0 {
+                    10_000
                 } else {
-                    participation[&validator.address]
-                        .saturating_mul(10_000)
-                        .checked_div(eligible)
-                        .unwrap_or(0)
+                    ((successful_duties[&validator.address] as u128 * 10_000u128)
+                        / assigned as u128) as u64
                 };
                 Ok((validator.address.clone(), score_bps))
             })
@@ -3041,44 +3181,386 @@ impl ProofOfSynergy {
 
     fn deterministic_epoch_randomness_for_epoch(
         chain: &BlockChain,
-        current_epoch: u64,
+        next_epoch: u64,
         epoch_length: u64,
         validator_manager: &Arc<ValidatorManager>,
     ) -> Result<Vec<u8>, String> {
-        if current_epoch == 0 {
-            let genesis_hash = canonical_genesis()?.hash().to_string();
-            let mut hasher = Sha3_512::new();
-            hasher.update(b"synergy-epoch-zero-randomness-v2");
-            hasher.update(genesis_hash.as_bytes());
-            return Ok(hasher.finalize().to_vec());
-        }
-        let previous_qc = Self::get_previous_quorum_certificate(
+        Ok(Self::epoch_randomness_evidence_for_epoch(
             chain,
-            current_epoch,
+            next_epoch,
+            epoch_length,
+            validator_manager,
+        )?
+        .randomness)
+    }
+
+    fn boundary_hash_v3_active_for_epoch(next_epoch: u64, epoch_length: u64) -> bool {
+        epoch_start_height(next_epoch, epoch_length.max(1)) >= EPOCH_RANDOMNESS_V3_ACTIVATION_HEIGHT
+    }
+
+    fn boundary_hash_cluster_v3_active_for_epoch(next_epoch: u64, epoch_length: u64) -> bool {
+        epoch_start_height(next_epoch, epoch_length.max(1))
+            >= CLUSTER_RANDOMNESS_V3_ACTIVATION_HEIGHT
+    }
+
+    pub(crate) fn epoch_randomness_evidence_for_epoch(
+        chain: &BlockChain,
+        next_epoch: u64,
+        epoch_length: u64,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<EpochRandomnessEvidence, String> {
+        let epoch_length = epoch_length.max(1);
+        let assignment_effective_height = epoch_start_height(next_epoch, epoch_length);
+
+        if !Self::boundary_hash_v3_active_for_epoch(next_epoch, epoch_length) {
+            if next_epoch == 0 {
+                let genesis_hash = canonical_genesis()?.hash().to_string();
+                let mut hasher = Sha3_512::new();
+                hasher.update(LEGACY_EPOCH_ZERO_RANDOMNESS_DOMAIN.as_bytes());
+                hasher.update(genesis_hash.as_bytes());
+                return Ok(EpochRandomnessEvidence {
+                    next_epoch,
+                    boundary_height: Some(0),
+                    boundary_block_hash: Some(genesis_hash),
+                    boundary_qc_verified: false,
+                    scheme: LEGACY_GENESIS_RANDOMNESS_SCHEME,
+                    assignment_effective_height,
+                    randomness: hasher.finalize().to_vec(),
+                    registry_migrated: false,
+                });
+            }
+
+            return Self::persisted_legacy_epoch_randomness_evidence(
+                next_epoch,
+                assignment_effective_height,
+                validator_manager,
+            );
+        }
+
+        let boundary = Self::canonical_epoch_boundary_evidence(
+            chain,
+            next_epoch,
             epoch_length,
             validator_manager,
         )?;
-        Ok(Self::deterministic_epoch_randomness_from_qc(&previous_qc))
+        Ok(EpochRandomnessEvidence {
+            next_epoch,
+            boundary_height: Some(boundary.boundary_height),
+            boundary_block_hash: Some(boundary.boundary_block_hash),
+            boundary_qc_verified: true,
+            scheme: BOUNDARY_HASH_RANDOMNESS_SCHEME,
+            assignment_effective_height: boundary.assignment_effective_height,
+            randomness: boundary.randomness,
+            registry_migrated: false,
+        })
     }
 
-    fn deterministic_epoch_randomness_from_qc(previous_qc: &QuorumCertificate) -> Vec<u8> {
-        let next_epoch = previous_qc.epoch_number.saturating_add(1);
-        let qc_hash = Self::hash_quorum_certificate(previous_qc);
+    pub(crate) fn cluster_epoch_randomness_evidence(
+        chain: &BlockChain,
+        next_epoch: u64,
+        epoch_length: u64,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<EpochRandomnessEvidence, String> {
+        let epoch_length = epoch_length.max(1);
+        if !Self::boundary_hash_cluster_v3_active_for_epoch(next_epoch, epoch_length) {
+            return Self::epoch_randomness_evidence_for_epoch(
+                chain,
+                next_epoch,
+                epoch_length,
+                validator_manager,
+            );
+        }
 
+        let boundary = Self::canonical_epoch_boundary_evidence(
+            chain,
+            next_epoch,
+            epoch_length,
+            validator_manager,
+        )?;
+        let randomness = Self::deterministic_epoch_randomness_from_boundary_with_domain(
+            BOUNDARY_HASH_CLUSTER_RANDOMNESS_DOMAIN,
+            1264,
+            next_epoch,
+            &boundary.boundary_block_hash,
+        );
+        Ok(EpochRandomnessEvidence {
+            next_epoch,
+            boundary_height: Some(boundary.boundary_height),
+            boundary_block_hash: Some(boundary.boundary_block_hash),
+            boundary_qc_verified: next_epoch > 0,
+            scheme: BOUNDARY_HASH_CLUSTER_RANDOMNESS_SCHEME,
+            assignment_effective_height: boundary.assignment_effective_height,
+            randomness,
+            registry_migrated: false,
+        })
+    }
+
+    fn epoch_randomness_evidence_for_transition(
+        chain: &BlockChain,
+        next_epoch: u64,
+        epoch_length: u64,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<EpochRandomnessEvidence, String> {
+        let epoch_length = epoch_length.max(1);
+        let assignment_effective_height = epoch_start_height(next_epoch, epoch_length);
+        if !Self::boundary_hash_v3_active_for_epoch(next_epoch, epoch_length) {
+            if next_epoch == 0 {
+                return Self::epoch_randomness_evidence_for_epoch(
+                    chain,
+                    next_epoch,
+                    epoch_length,
+                    validator_manager,
+                );
+            }
+
+            let previous_qc = Self::get_previous_quorum_certificate(
+                chain,
+                next_epoch,
+                epoch_length,
+                validator_manager,
+            )?;
+            return Ok(EpochRandomnessEvidence {
+                next_epoch,
+                boundary_height: None,
+                boundary_block_hash: None,
+                boundary_qc_verified: true,
+                scheme: LEGACY_TRANSITION_RANDOMNESS_SCHEME,
+                assignment_effective_height,
+                randomness: Self::legacy_deterministic_epoch_randomness_from_qc(&previous_qc),
+                registry_migrated: false,
+            });
+        }
+
+        let boundary = Self::canonical_epoch_boundary_evidence(
+            chain,
+            next_epoch,
+            epoch_length,
+            validator_manager,
+        )?;
+        Ok(EpochRandomnessEvidence {
+            next_epoch,
+            boundary_height: Some(boundary.boundary_height),
+            boundary_block_hash: Some(boundary.boundary_block_hash),
+            boundary_qc_verified: true,
+            scheme: BOUNDARY_HASH_RANDOMNESS_SCHEME,
+            assignment_effective_height: boundary.assignment_effective_height,
+            randomness: boundary.randomness,
+            registry_migrated: false,
+        })
+    }
+
+    fn persisted_legacy_epoch_randomness_evidence(
+        next_epoch: u64,
+        assignment_effective_height: u64,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<EpochRandomnessEvidence, String> {
+        let (seed, registry_migrated) = {
+            let mut registry = validator_manager.registry.lock().map_err(|_| {
+                "failed to lock validator registry while recovering the pre-activation epoch seed"
+                    .to_string()
+            })?;
+            if registry.leader_randomness_epoch == Some(next_epoch) {
+                if let Some(seed) = registry
+                    .leader_randomness_seed
+                    .as_deref()
+                    .filter(|seed| !seed.trim().is_empty())
+                {
+                    (seed.to_string(), false)
+                } else {
+                    return Err(format!(
+                        "pre-activation canonical leader seed unavailable for epoch {next_epoch}: the persisted leader seed is empty"
+                    ));
+                }
+            } else {
+                let active = registry
+                    .validators
+                    .values()
+                    .filter(|validator| validator.status == ValidatorStatus::Active)
+                    .collect::<Vec<_>>();
+                if active.is_empty() {
+                    return Err(format!(
+                    "pre-activation canonical epoch seed unavailable for epoch {next_epoch}: no active validators are persisted; one-time v19.0.45 migration is required"
+                ));
+                }
+
+                let mut seeds = HashSet::new();
+                let mut missing = Vec::new();
+                for validator in active {
+                    if validator.cluster_assignment_epoch != Some(next_epoch) {
+                        missing.push(format!(
+                            "{} has assignment epoch {:?}",
+                            validator.address, validator.cluster_assignment_epoch
+                        ));
+                        continue;
+                    }
+                    match validator.cluster_assignment_seed.as_deref() {
+                        Some(seed) if !seed.trim().is_empty() => {
+                            seeds.insert(seed.to_string());
+                        }
+                        _ => missing.push(format!(
+                            "{} has no persisted assignment seed",
+                            validator.address
+                        )),
+                    }
+                }
+                if !missing.is_empty() {
+                    return Err(format!(
+                    "pre-activation canonical epoch seed unavailable for epoch {next_epoch}: {}; one-time v19.0.45 migration is required to restore the canonical validator registry seed before starting consensus",
+                    missing.join(", ")
+                ));
+                }
+                if seeds.len() != 1 {
+                    return Err(format!(
+                    "pre-activation canonical epoch seed unavailable for epoch {next_epoch}: conflicting persisted seeds found ({}); one-time v19.0.45 migration is required",
+                    seeds.len()
+                ));
+                }
+                let seed = seeds.into_iter().next().unwrap_or_default();
+                registry.leader_randomness_epoch = Some(next_epoch);
+                registry.leader_randomness_seed = Some(seed.clone());
+                (seed, true)
+            }
+        };
+
+        let randomness = hex::decode(&seed).map_err(|error| {
+            format!(
+                "pre-activation canonical epoch seed for epoch {next_epoch} is malformed ({error}); one-time v19.0.45 migration is required"
+            )
+        })?;
+        if randomness.len() != 64 {
+            return Err(format!(
+                "pre-activation canonical epoch seed for epoch {next_epoch} has {} bytes, expected 64; one-time v19.0.45 migration is required",
+                randomness.len()
+            ));
+        }
+
+        Ok(EpochRandomnessEvidence {
+            next_epoch,
+            boundary_height: None,
+            boundary_block_hash: None,
+            boundary_qc_verified: false,
+            scheme: LEGACY_EPOCH_RANDOMNESS_SCHEME,
+            assignment_effective_height,
+            randomness,
+            registry_migrated,
+        })
+    }
+
+    fn persist_epoch_leader_randomness(
+        validator_manager: &Arc<ValidatorManager>,
+        epoch: u64,
+        randomness: &[u8],
+    ) -> Result<(), String> {
+        if randomness.len() != 64 {
+            return Err(format!(
+                "epoch {epoch} leader randomness has {} bytes, expected 64",
+                randomness.len()
+            ));
+        }
+        let mut registry = validator_manager.registry.lock().map_err(|_| {
+            "failed to lock validator registry while persisting leader randomness".to_string()
+        })?;
+        registry.leader_randomness_epoch = Some(epoch);
+        registry.leader_randomness_seed = Some(hex::encode(randomness));
+        Ok(())
+    }
+
+    pub(crate) fn canonical_epoch_boundary_evidence(
+        chain: &BlockChain,
+        next_epoch: u64,
+        epoch_length: u64,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<CanonicalEpochBoundaryEvidence, String> {
+        let epoch_length = epoch_length.max(1);
+        let genesis = canonical_genesis()?;
+        let chain_id = genesis.chain_id();
+        if chain_id != 1264 {
+            return Err(format!(
+                "canonical epoch randomness requires testnet chain id 1264, found {chain_id}"
+            ));
+        }
+
+        let (boundary_height, boundary_block_hash) = if next_epoch == 0 {
+            (0, genesis.hash().to_string())
+        } else {
+            let boundary_height = epoch_end_height(next_epoch - 1, epoch_length);
+            let (block, _qc) = Self::finalized_boundary_block_and_qc(
+                chain,
+                next_epoch,
+                epoch_length,
+                validator_manager,
+            )?;
+            if block.block_index != boundary_height {
+                return Err(format!(
+                    "canonical epoch boundary block height {} does not match expected {boundary_height}",
+                    block.block_index
+                ));
+            }
+            (boundary_height, block.hash)
+        };
+
+        let randomness = Self::deterministic_epoch_randomness_from_boundary(
+            chain_id,
+            next_epoch,
+            &boundary_block_hash,
+        );
+        Ok(CanonicalEpochBoundaryEvidence {
+            next_epoch,
+            boundary_height,
+            boundary_block_hash,
+            assignment_effective_height: epoch_start_height(next_epoch, epoch_length),
+            randomness,
+        })
+    }
+
+    fn deterministic_epoch_randomness_from_boundary(
+        chain_id: u64,
+        next_epoch: u64,
+        boundary_block_hash: &str,
+    ) -> Vec<u8> {
+        Self::deterministic_epoch_randomness_from_boundary_with_domain(
+            BOUNDARY_HASH_LEADER_RANDOMNESS_DOMAIN,
+            chain_id,
+            next_epoch,
+            boundary_block_hash,
+        )
+    }
+
+    fn deterministic_epoch_randomness_from_boundary_with_domain(
+        domain: &[u8],
+        chain_id: u64,
+        next_epoch: u64,
+        boundary_block_hash: &str,
+    ) -> Vec<u8> {
+        let mut hasher = Sha3_512::new();
+        hasher.update(domain);
+        hasher.update(chain_id.to_be_bytes());
+        hasher.update(next_epoch.to_be_bytes());
+        hasher.update((boundary_block_hash.len() as u64).to_be_bytes());
+        hasher.update(boundary_block_hash.as_bytes());
+        hasher.finalize().to_vec()
+    }
+
+    fn legacy_deterministic_epoch_randomness_from_qc(previous_qc: &QuorumCertificate) -> Vec<u8> {
+        let next_epoch = previous_qc.epoch_number.saturating_add(1);
+        let qc_hash = Self::legacy_hash_quorum_certificate(previous_qc);
         let mut input = Vec::new();
         input.extend(next_epoch.to_be_bytes());
         input.extend(qc_hash.as_bytes());
-
         let mut hasher = Sha3_512::new();
         hasher.update(&input);
         hasher.finalize().to_vec()
     }
 
-    fn hash_quorum_certificate(qc: &QuorumCertificate) -> String {
+    fn legacy_hash_quorum_certificate(qc: &QuorumCertificate) -> String {
         let mut hasher = Sha3_512::new();
         hasher.update(qc.block_hash.as_bytes());
         hasher.update(qc.epoch_number.to_be_bytes());
         hasher.update(qc.round_number.to_be_bytes());
+        hasher.update([qc.cluster_id.is_some() as u8]);
+        if let Some(cluster_id) = qc.cluster_id {
+            hasher.update(cluster_id.to_be_bytes());
+        }
         hasher.update(&qc.aggregate_signature);
         hasher.update(&qc.participant_bitmap);
         hasher.update([qc.validation_quorum_met as u8]);
@@ -3136,40 +3618,11 @@ impl ProofOfSynergy {
             let top_k_addresses: Vec<String> = if stable_committee_mode {
                 candidate_addresses.clone()
             } else {
-                // Calculate priority for each validator using Equation 17 from PoSy spec.
-                let mut validator_priorities = Vec::new();
-
                 consensus_log!(
                     "🔄 [select_leader_for_block] Calculating priorities for {} validators",
                     validators.len()
                 );
-                for validator in validators.iter() {
-                    let mut hasher = Sha3_512::new();
-                    hasher.update(epoch_randomness);
-                    hasher.update(validator.address.as_bytes());
-                    let hash = hasher.finalize();
-                    let raw_hash = u64::from_be_bytes(hash[..8].try_into().unwrap());
-                    let consensus_weight = Self::stable_leader_weight(validators, validator);
-                    let priority_value = raw_hash as f64 * consensus_weight;
-                    validator_priorities.push((validator.clone(), priority_value, raw_hash));
-                }
-
-                // Sort deterministically. When priorities tie, fall back to the raw
-                // hash and finally the validator address so every node computes the
-                // same top-K order from the same epoch randomness.
-                validator_priorities.sort_by(|a, b| {
-                    b.1.partial_cmp(&a.1)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| b.2.cmp(&a.2))
-                        .then_with(|| a.0.address.cmp(&b.0.address))
-                });
-
-                let k = std::cmp::min(10, validators.len());
-                validator_priorities
-                    .iter()
-                    .take(k)
-                    .map(|(v, _, _)| v.address.clone())
-                    .collect()
+                Self::canonical_primary_leader_addresses(validators, epoch_randomness)
             };
             let k = top_k_addresses.len();
 
@@ -3247,6 +3700,39 @@ impl ProofOfSynergy {
         } else {
             f64::EPSILON
         }
+    }
+
+    fn canonical_primary_leader_addresses(
+        validators: &[Validator],
+        epoch_randomness: &[u8],
+    ) -> Vec<String> {
+        let mut validator_priorities = validators
+            .iter()
+            .map(|validator| {
+                let mut hasher = Sha3_512::new();
+                hasher.update(epoch_randomness);
+                hasher.update(validator.address.as_bytes());
+                let hash = hasher.finalize();
+                let raw_hash = u64::from_be_bytes(hash[..8].try_into().unwrap());
+                let consensus_weight = Self::stable_leader_weight(validators, validator);
+                let priority_value = raw_hash as f64 * consensus_weight;
+                (validator.address.clone(), priority_value, raw_hash)
+            })
+            .collect::<Vec<_>>();
+
+        validator_priorities.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| right.2.cmp(&left.2))
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        validator_priorities
+            .into_iter()
+            .take(std::cmp::min(10, validators.len()))
+            .map(|(address, _, _)| address)
+            .collect()
     }
 
     fn prefer_local_vote_lock_leader(
@@ -4422,7 +4908,7 @@ mod tests {
                         .cluster_assignment_seed
                         .as_deref()
                         .is_some_and(|seed| !seed.is_empty())
-                    && validator.cluster_assignment_effective_height == Some(42)
+                    && validator.cluster_assignment_effective_height == Some(1)
             }));
         }
 
@@ -4537,7 +5023,7 @@ mod tests {
             assert!(registry
                 .validators
                 .values()
-                .all(|validator| validator.cluster_assignment_effective_height == Some(99)));
+                .all(|validator| validator.cluster_assignment_effective_height == Some(1)));
         }
 
         {
@@ -4562,7 +5048,7 @@ mod tests {
         assert!(registry
             .validators
             .values()
-            .all(|validator| validator.cluster_assignment_effective_height == Some(99)));
+            .all(|validator| validator.cluster_assignment_effective_height == Some(1)));
     }
 
     #[test]
@@ -4637,7 +5123,7 @@ mod tests {
     }
 
     #[test]
-    fn finalized_synergy_scores_use_only_committed_qc_participation() {
+    fn finalized_synergy_scores_ignore_noncanonical_qc_vote_subsets() {
         let _guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
         let mut chain = BlockChain::new();
@@ -4646,19 +5132,26 @@ mod tests {
             validator.cluster_id = Some(0);
             validator.cluster_assignment_effective_height = Some(1);
         }
+        let epoch_randomness = vec![42u8; 64];
+        let primary_leaders =
+            ProofOfSynergy::canonical_primary_leader_addresses(&validators, &epoch_randomness);
+        let mut first_qcs = Vec::new();
+        let mut alternate_qcs = Vec::new();
 
-        for (height, voters) in [
-            (1, vec!["validator-1", "validator-2", "validator-3"]),
-            (2, vec!["validator-1", "validator-2"]),
-            (3, vec!["validator-1"]),
-        ] {
+        for height in 1..=3 {
             let block_hash = format!("score-block-{height}");
+            let expected_leader = primary_leaders[(height - 1) as usize].clone();
+            let proposer = if height == 3 {
+                primary_leaders[0].clone()
+            } else {
+                expected_leader
+            };
             chain.add_block(Block {
                 block_index: height,
                 timestamp: height,
                 transactions: Vec::new(),
                 previous_hash: format!("score-block-{}", height.saturating_sub(1)),
-                validator_id: "validator-1".to_string(),
+                validator_id: proposer,
                 nonce: height,
                 hash: block_hash.clone(),
                 transactions_root: String::new(),
@@ -4666,31 +5159,66 @@ mod tests {
                 block_signature: Vec::new(),
                 block_signature_algorithm: "fndsa".to_string(),
             });
-            DualQuorumConsensus::record_committed_qc_checked(QuorumCertificate {
+            let qc = QuorumCertificate {
                 block_hash: block_hash.clone(),
                 cluster_id: Some(0),
                 epoch_number: 0,
                 round_number: 1,
                 aggregate_signature: Vec::new(),
                 participant_bitmap: Vec::new(),
-                cumulative_weight: voters.len() as f64,
+                cumulative_weight: 3.0,
                 validation_quorum_met: true,
                 cooperation_quorum_met: true,
                 timestamp: height,
-                votes: voters
+                votes: ["validator-1", "validator-2", "validator-3"]
                     .into_iter()
                     .map(|address| finalized_score_vote(address, &block_hash, height))
                     .collect(),
-            })
-            .unwrap();
+            };
+            let mut alternate_qc = qc.clone();
+            alternate_qc.round_number = 2;
+            alternate_qc.aggregate_signature = vec![9, height as u8];
+            alternate_qc.cumulative_weight = 2.0;
+            alternate_qc.votes = ["validator-1", "validator-3"]
+                .into_iter()
+                .map(|address| finalized_score_vote(address, &block_hash, height))
+                .collect();
+            first_qcs.push(qc);
+            alternate_qcs.push(alternate_qc);
         }
 
-        let scores =
-            ProofOfSynergy::finalized_synergy_scores_for_epoch(&chain, 0, 3, &validators).unwrap();
+        for qc in first_qcs {
+            DualQuorumConsensus::record_committed_qc_checked(qc).unwrap();
+        }
+        let first = ProofOfSynergy::finalized_synergy_scores_for_epoch(
+            &chain,
+            0,
+            3,
+            &validators,
+            &epoch_randomness,
+        )
+        .unwrap();
 
-        assert_eq!(scores["validator-1"], 10_000);
-        assert_eq!(scores["validator-2"], 6_666);
-        assert_eq!(scores["validator-3"], 3_333);
+        DualQuorumConsensus::reset_test_vote_tracking();
+        for qc in alternate_qcs {
+            DualQuorumConsensus::record_committed_qc_checked(qc).unwrap();
+        }
+        for (index, validator) in validators.iter_mut().enumerate() {
+            validator.finalized_synergy_score_bps = 500 + index as u64;
+        }
+        let alternate = ProofOfSynergy::finalized_synergy_scores_for_epoch(
+            &chain,
+            0,
+            3,
+            &validators,
+            &epoch_randomness,
+        )
+        .unwrap();
+
+        assert_eq!(first, alternate);
+        assert_eq!(first[&primary_leaders[0]], 10_000);
+        assert_eq!(first[&primary_leaders[1]], 10_000);
+        assert_eq!(first[&primary_leaders[2]], 0);
     }
 
     fn validator_membership_addresses(validators: &[Validator]) -> Vec<String> {
@@ -5580,7 +6108,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_epoch_randomness_uses_boundary_qc_only() {
+    fn pre_activation_transition_uses_legacy_qc_hash_v2_without_next_epoch_seed() {
         let _guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
         let mut chain = BlockChain::new();
@@ -5601,17 +6129,77 @@ mod tests {
             block_signature_algorithm: "fndsa".to_string(),
         });
 
-        let direct_qc =
-            ProofOfSynergy::get_previous_quorum_certificate(&chain, 1, 1000, &manager).unwrap();
-        let expected = ProofOfSynergy::deterministic_epoch_randomness_from_qc(&direct_qc);
-        let actual =
-            ProofOfSynergy::deterministic_epoch_randomness(&chain, 1_026, 1_000, &manager).unwrap();
-
-        assert_eq!(actual, expected);
+        let evidence =
+            ProofOfSynergy::epoch_randomness_evidence_for_transition(&chain, 1, 1_000, &manager)
+                .expect("an uninterrupted pre-activation transition must derive the v2 seed");
+        let boundary_qc =
+            ProofOfSynergy::get_previous_quorum_certificate(&chain, 1, 1_000, &manager)
+                .expect("the finalized boundary QC should be available");
+        let mut legacy_beacon = EntropyBeacon::new(Arc::new(Mutex::new(PQCManager::new())));
+        let legacy_fleet_randomness = legacy_beacon.generate_epoch_randomness(&boundary_qc);
+        assert_eq!(evidence.scheme, LEGACY_TRANSITION_RANDOMNESS_SCHEME);
+        assert!(evidence.boundary_qc_verified);
+        assert_eq!(evidence.assignment_effective_height, 1_001);
+        assert_eq!(
+            evidence.randomness, legacy_fleet_randomness,
+            "pre-cutover randomness must exactly match the v19.0.44 entropy beacon"
+        );
+        assert!(
+            ProofOfSynergy::epoch_randomness_evidence_for_epoch(&chain, 1, 1_000, &manager)
+                .expect_err("a current-epoch restart must not invent a missing persisted seed")
+                .contains("one-time v19.0.45 migration is required")
+        );
     }
 
     #[test]
-    fn startup_cluster_reconciliation_recovers_boundary_qc_seed_and_is_idempotent() {
+    fn canonical_boundary_seed_ignores_valid_qc_encoding_and_restart_height() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let (manager, boundary_block, qc) = signed_boundary_fixture(1_000, 0);
+        let mut alternate_qc = qc.clone();
+        alternate_qc.round_number = 2;
+        alternate_qc.timestamp = alternate_qc.timestamp.saturating_add(17);
+        alternate_qc.aggregate_signature = vec![9, 8, 7, 6];
+
+        DualQuorumConsensus::verify_commit_certificate_for_block_static(
+            &boundary_block,
+            &qc,
+            &manager,
+        )
+        .expect("first valid QC encoding should verify");
+        DualQuorumConsensus::verify_commit_certificate_for_block_static(
+            &boundary_block,
+            &alternate_qc,
+            &manager,
+        )
+        .expect("alternate valid QC encoding should verify");
+
+        let seed_a = ProofOfSynergy::deterministic_epoch_randomness_from_boundary(
+            1_264,
+            1,
+            &boundary_block.hash,
+        );
+        let seed_b = ProofOfSynergy::deterministic_epoch_randomness_from_boundary(
+            1_264,
+            1,
+            &alternate_qc.block_hash,
+        );
+        assert_eq!(seed_a, seed_b);
+
+        let mut chain = BlockChain::new();
+        chain.add_block(boundary_block);
+        DualQuorumConsensus::record_committed_qc_checked(qc).unwrap();
+        let first =
+            ProofOfSynergy::canonical_epoch_boundary_evidence(&chain, 1, 1_000, &manager).unwrap();
+        let second =
+            ProofOfSynergy::canonical_epoch_boundary_evidence(&chain, 1, 1_000, &manager).unwrap();
+        assert_eq!(first.randomness, second.randomness);
+        assert_eq!(first.assignment_effective_height, 1_001);
+        assert_eq!(first.boundary_height, 1_000);
+    }
+
+    #[test]
+    fn pre_activation_current_epoch_restart_uses_persisted_seed_at_any_restart_height() {
         let _guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
         let mut chain = BlockChain::new();
@@ -5620,33 +6208,170 @@ mod tests {
         DualQuorumConsensus::record_committed_qc_checked(qc.clone()).unwrap();
 
         let expected_seed =
-            hex::encode(ProofOfSynergy::deterministic_epoch_randomness_from_qc(&qc));
-        assert!(reconcile_validator_registry_clusters_from_finalized_chain(
-            &manager, &chain, 1_001
-        )
-        .expect("startup reconciliation should recover the finalized boundary-QC seed"));
-
+            hex::encode(ProofOfSynergy::legacy_deterministic_epoch_randomness_from_qc(&qc));
         {
-            let registry = manager
+            let mut registry = manager
                 .registry
                 .lock()
                 .expect("validator registry lock should succeed");
-            assert_eq!(registry.current_epoch, 1);
-            assert!(registry.validators.values().all(|validator| {
-                validator.cluster_assignment_epoch == Some(1)
-                    && validator.cluster_assignment_seed.as_deref() == Some(expected_seed.as_str())
-                    && validator.cluster_assignment_effective_height == Some(1_001)
-            }));
+            for validator in registry.validators.values_mut() {
+                validator.cluster_assignment_epoch = Some(1);
+                validator.cluster_assignment_seed = Some(expected_seed.clone());
+            }
         }
 
-        assert!(!reconcile_validator_registry_clusters_from_finalized_chain(
-            &manager, &chain, 1_001
-        )
-        .expect("repeated startup reconciliation should preserve the recovered seed"));
+        let first = ProofOfSynergy::epoch_randomness_evidence_for_epoch(&chain, 1, 1_000, &manager)
+            .expect("current-epoch restart should recover the persisted v2 seed");
+        let second = ProofOfSynergy::deterministic_epoch_randomness(&chain, 1_999, 1_000, &manager)
+            .expect("a later restart in the same epoch should use the persisted seed");
+        assert_eq!(first.scheme, LEGACY_EPOCH_RANDOMNESS_SCHEME);
+        assert!(!first.boundary_qc_verified);
+        assert_eq!(first.randomness, hex::decode(expected_seed).unwrap());
+        assert_eq!(first.randomness, second);
     }
 
     #[test]
-    fn startup_cluster_reconciliation_migrates_legacy_epoch_contract_at_live_height() {
+    fn pre_activation_cluster_reconciliation_preserves_legacy_seed_compatibility() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let mut chain = BlockChain::new();
+        let (manager, boundary_block, qc) = signed_boundary_fixture(1_000, 0);
+        chain.add_block(boundary_block);
+        DualQuorumConsensus::record_committed_qc_checked(qc.clone()).unwrap();
+
+        let legacy_seed =
+            hex::encode(ProofOfSynergy::legacy_deterministic_epoch_randomness_from_qc(&qc));
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            for validator in registry.validators.values_mut() {
+                validator.cluster_assignment_epoch = Some(1);
+                validator.cluster_assignment_seed = Some(legacy_seed.clone());
+            }
+        }
+
+        reconcile_validator_registry_clusters_from_finalized_chain(&manager, &chain, 1_001)
+            .expect("cluster reconciliation should migrate the old leader seed first");
+
+        let leader =
+            ProofOfSynergy::epoch_randomness_evidence_for_epoch(&chain, 1, 1_000, &manager)
+                .expect("leader schedule should retain the pre-activation v2 seed");
+        let cluster = ProofOfSynergy::cluster_epoch_randomness_evidence(&chain, 1, 1_000, &manager)
+            .expect("cluster assignment should remain legacy-compatible before cutover");
+        assert_eq!(leader.scheme, LEGACY_EPOCH_RANDOMNESS_SCHEME);
+        assert_eq!(hex::encode(&leader.randomness), legacy_seed);
+        assert_eq!(cluster.scheme, LEGACY_EPOCH_RANDOMNESS_SCHEME);
+        assert_eq!(leader.randomness, cluster.randomness);
+        let cluster_seed = hex::encode(&cluster.randomness);
+
+        let registry = manager
+            .registry
+            .lock()
+            .expect("validator registry lock should succeed");
+        assert_eq!(registry.leader_randomness_epoch, Some(1));
+        assert_eq!(
+            registry.leader_randomness_seed.as_deref(),
+            Some(legacy_seed.as_str())
+        );
+        assert!(registry.validators.values().all(|validator| {
+            validator.cluster_assignment_seed.as_deref() == Some(cluster_seed.as_str())
+        }));
+    }
+
+    #[test]
+    fn pre_activation_seed_migration_marks_reconciliation_dirty_for_persistence() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let mut chain = BlockChain::new();
+        let (manager, boundary_block, qc) = signed_boundary_fixture(1_000, 0);
+        chain.add_block(boundary_block);
+        DualQuorumConsensus::record_committed_qc_checked(qc.clone()).unwrap();
+
+        let legacy_seed =
+            hex::encode(ProofOfSynergy::legacy_deterministic_epoch_randomness_from_qc(&qc));
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            registry.reorganize_clusters_for_epoch_with_seed(1, &legacy_seed, 1_001);
+            registry.leader_randomness_epoch = None;
+            registry.leader_randomness_seed = None;
+        }
+
+        assert!(reconcile_validator_registry_clusters_from_finalized_chain(
+            &manager, &chain, 1_001,
+        )
+        .expect("legacy seed migration should reconcile"));
+        let registry = manager
+            .registry
+            .lock()
+            .expect("validator registry lock should succeed");
+        assert_eq!(registry.leader_randomness_epoch, Some(1));
+        assert_eq!(
+            registry.leader_randomness_seed.as_deref(),
+            Some(legacy_seed.as_str())
+        );
+    }
+
+    #[test]
+    fn cluster_cutover_is_fixed_and_domain_separated_from_leader_randomness() {
+        assert_eq!(
+            epoch_start_height(CLUSTER_RANDOMNESS_V3_ACTIVATION_EPOCH, 1_000),
+            1_150_001
+        );
+        assert!(!ProofOfSynergy::boundary_hash_cluster_v3_active_for_epoch(
+            1_149, 1_000
+        ));
+        assert!(ProofOfSynergy::boundary_hash_cluster_v3_active_for_epoch(
+            1_150, 1_000
+        ));
+        assert!(!ProofOfSynergy::boundary_hash_v3_active_for_epoch(
+            1_150, 1_000
+        ));
+
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let (manager, boundary_block, qc) = signed_boundary_fixture(1_150_000, 1_149);
+        let mut chain = BlockChain::new();
+        chain.add_block(boundary_block.clone());
+        DualQuorumConsensus::record_committed_qc_checked(qc).unwrap();
+        let legacy_leader_seed = "ab".repeat(64);
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .expect("validator registry lock should succeed");
+            registry.leader_randomness_epoch = Some(1_150);
+            registry.leader_randomness_seed = Some(legacy_leader_seed.clone());
+        }
+
+        let leader =
+            ProofOfSynergy::epoch_randomness_evidence_for_epoch(&chain, 1_150, 1_000, &manager)
+                .expect("leader schedule should remain legacy before its later cutover");
+        let cluster =
+            ProofOfSynergy::cluster_epoch_randomness_evidence(&chain, 1_150, 1_000, &manager)
+                .expect("cluster assignment should use verified boundary evidence at cutover");
+        assert_eq!(leader.scheme, LEGACY_EPOCH_RANDOMNESS_SCHEME);
+        assert_eq!(hex::encode(&leader.randomness), legacy_leader_seed);
+        assert_eq!(cluster.scheme, BOUNDARY_HASH_CLUSTER_RANDOMNESS_SCHEME);
+        assert!(cluster.boundary_qc_verified);
+        assert_eq!(cluster.boundary_height, Some(1_150_000));
+        assert_eq!(cluster.boundary_block_hash, Some(boundary_block.hash));
+        assert_ne!(leader.randomness, cluster.randomness);
+
+        let leader_v3 = ProofOfSynergy::deterministic_epoch_randomness_from_boundary(
+            1264,
+            1_150,
+            cluster.boundary_block_hash.as_deref().unwrap(),
+        );
+        assert_ne!(leader_v3, cluster.randomness);
+    }
+
+    #[test]
+    fn stale_registry_after_pre_activation_boundary_fails_closed_without_safe_seed() {
         let _guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
         let boundary_height = 1_132_000;
@@ -5668,26 +6393,49 @@ mod tests {
             }
         }
 
-        let expected_seed =
-            hex::encode(ProofOfSynergy::deterministic_epoch_randomness_from_qc(&qc));
-        assert!(reconcile_validator_registry_clusters_from_finalized_chain(
+        let error = reconcile_validator_registry_clusters_from_finalized_chain(
             &manager,
             &chain,
             current_height,
         )
-        .expect("startup reconciliation should ignore legacy registry epoch metadata"));
+        .expect_err("stale pre-activation registry state must fail closed");
+        assert!(error.contains("pre-activation canonical epoch seed unavailable"));
+        assert!(error.contains("one-time v19.0.45 migration is required"));
+    }
 
-        let registry = manager
-            .registry
-            .lock()
-            .expect("validator registry lock should succeed");
-        assert_eq!(registry.epoch_length, CANONICAL_TESTNET_EPOCH_LENGTH);
-        assert_eq!(registry.current_epoch, 1_132);
-        assert!(registry.validators.values().all(|validator| {
-            validator.cluster_assignment_epoch == Some(1_132)
-                && validator.cluster_assignment_seed.as_deref() == Some(expected_seed.as_str())
-                && validator.cluster_assignment_effective_height == Some(current_height)
-        }));
+    #[test]
+    fn activation_boundary_switches_to_v3_at_one_based_epoch_start() {
+        assert_eq!(
+            epoch_start_height(EPOCH_RANDOMNESS_V3_ACTIVATION_EPOCH, 1_000),
+            1_200_001
+        );
+        assert!(!ProofOfSynergy::boundary_hash_v3_active_for_epoch(
+            1_199, 1_000
+        ));
+        assert!(ProofOfSynergy::boundary_hash_v3_active_for_epoch(
+            1_200, 1_000
+        ));
+
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let (manager, boundary_block, qc) = signed_boundary_fixture(1_200_000, 1_199);
+        let mut chain = BlockChain::new();
+        chain.add_block(boundary_block.clone());
+        DualQuorumConsensus::record_committed_qc_checked(qc).unwrap();
+
+        let current =
+            ProofOfSynergy::epoch_randomness_evidence_for_epoch(&chain, 1_200, 1_000, &manager)
+                .expect("post-activation current epoch must use verified boundary evidence");
+        let transition = ProofOfSynergy::epoch_randomness_evidence_for_transition(
+            &chain, 1_200, 1_000, &manager,
+        )
+        .expect("post-activation transition must use verified boundary evidence");
+        assert_eq!(current.scheme, BOUNDARY_HASH_RANDOMNESS_SCHEME);
+        assert!(current.boundary_qc_verified);
+        assert_eq!(current.boundary_height, Some(1_200_000));
+        assert_eq!(current.boundary_block_hash, Some(boundary_block.hash));
+        assert_eq!(current.assignment_effective_height, 1_200_001);
+        assert_eq!(current.randomness, transition.randomness);
     }
 
     #[test]

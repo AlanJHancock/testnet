@@ -483,6 +483,10 @@ pub struct ValidatorRegistry {
     pub current_epoch: u64,
     #[serde(default)]
     pub validator_set_version: u64,
+    #[serde(default)]
+    pub leader_randomness_epoch: Option<u64>,
+    #[serde(default)]
+    pub leader_randomness_seed: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -796,6 +800,8 @@ impl ValidatorRegistry {
             epoch_length: TESTNET_EPOCH_LENGTH_BLOCKS,
             current_epoch: 0,
             validator_set_version: 0,
+            leader_randomness_epoch: None,
+            leader_randomness_seed: None,
         }
     }
 
@@ -1116,7 +1122,7 @@ impl ValidatorRegistry {
         &mut self,
         epoch: u64,
         randomness_source: &str,
-        effective_height: u64,
+        _effective_height: u64,
     ) {
         self.current_epoch = epoch;
         let active_validators: Vec<Validator> =
@@ -1127,7 +1133,13 @@ impl ValidatorRegistry {
             epoch,
             randomness_source,
         );
-        self.apply_cluster_memberships(plan.clusters, epoch, randomness_source, effective_height);
+        let canonical_effective_height = epoch_start_height(epoch, self.epoch_length.max(1));
+        self.apply_cluster_memberships(
+            plan.clusters,
+            epoch,
+            randomness_source,
+            canonical_effective_height,
+        );
     }
 
     pub fn reorganize_clusters_for_height(
@@ -1205,15 +1217,22 @@ impl ValidatorRegistry {
                 return Err(error);
             }
         };
+        let canonical_effective_height =
+            epoch_start_height(effective_epoch, self.epoch_length.max(1));
         if self.cluster_memberships_are_canonical(
             &cluster_members,
             effective_epoch,
             randomness_source,
-            height,
+            canonical_effective_height,
         ) {
             return Ok(false);
         }
-        self.apply_cluster_memberships(cluster_members, effective_epoch, randomness_source, height);
+        self.apply_cluster_memberships(
+            cluster_members,
+            effective_epoch,
+            randomness_source,
+            canonical_effective_height,
+        );
         self.current_epoch = effective_epoch;
         Ok(true)
     }
@@ -1285,7 +1304,7 @@ impl ValidatorRegistry {
             let Some(effective_height) = validator.cluster_assignment_effective_height else {
                 return false;
             };
-            if effective_height > assignment_effective_height {
+            if effective_height != assignment_effective_height {
                 return false;
             }
             if assigned_effective_height
