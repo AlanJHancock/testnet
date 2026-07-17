@@ -3,7 +3,7 @@ use super::chain_durability::append_committed_block_body;
 use super::dao_governance::{DAOGovernance, GovernanceProposal, ProposalStatus};
 use super::dual_quorum::{
     required_validator_quorum, DualQuorumConsensus, EntropyBeacon, QuorumCertificate,
-    ValidatorRotation, Vote, MIN_LAUNCH_VOTE_TIMEOUT_SECS,
+    ValidatorRotation, Vote, FAST_CONSENSUS_VOTE_TIMEOUT_SECS, MIN_LAUNCH_VOTE_TIMEOUT_SECS,
 };
 use super::legacy_canonical_lock::{verify_legacy_canonical_lock, write_legacy_canonical_lock};
 use super::synergy_score::SynergyScoreCalculator;
@@ -741,6 +741,7 @@ impl ProofOfSynergy {
             let mut genesis_status_gate_bypassed = false;
             let mut last_committed_height: u64 = 0;
             let mut last_logged_view_timeout: Option<(u64, usize)> = None;
+            let mut missed_quorum_view_override: Option<(u64, usize)> = None;
 
             loop {
                 let current_time = SystemTime::now();
@@ -756,6 +757,7 @@ impl ProofOfSynergy {
                         if latest_block.block_index != last_committed_height {
                             last_committed_height = latest_block.block_index;
                             last_logged_view_timeout = None;
+                            missed_quorum_view_override = None;
                             last_tip_observed_at = SystemTime::now();
                             last_block_time = Self::next_block_pacing_anchor_for_time(
                                 latest_block.timestamp,
@@ -1195,7 +1197,12 @@ impl ProofOfSynergy {
                         // from skipping views immediately. Do not pin this to zero: a scheduled
                         // leader can remain status-live while it is unable to propose, and a fixed
                         // primary view turns that condition into an unbounded chain stall.
-                        let view_offset = calculated_view_offset;
+                        let next_block_height = latest_block_clone.block_index.saturating_add(1);
+                        let forced_view_offset = missed_quorum_view_override
+                            .filter(|(height, _)| *height == next_block_height)
+                            .map(|(_, offset)| offset)
+                            .unwrap_or(0);
+                        let view_offset = calculated_view_offset.max(forced_view_offset);
                         let transient_recovery_min_age_secs =
                             Self::transient_vote_recovery_min_age_secs(
                                 leader_timeout_secs,
@@ -1696,6 +1703,7 @@ impl ProofOfSynergy {
                                 // Reset view-change state: the chain has advanced, so the next
                                 // block starts with the primary scheduled leader again.
                                 last_logged_view_timeout = None;
+                                missed_quorum_view_override = None;
 
                                 let mut block_appended_to_local_tip = false;
                                 let commit_started = Instant::now();
@@ -2136,6 +2144,8 @@ impl ProofOfSynergy {
                                 println!("⚠️ Block proposal failed: {}", e);
                                 consecutive_failures += 1;
 
+                                let needs_missed_quorum_view_change =
+                                    Self::consensus_failure_needs_missed_quorum_view_change(&e);
                                 if Self::consensus_failure_needs_transient_lock_recovery(&e) {
                                     let finalized_height = new_block.block_index.saturating_sub(1);
                                     let min_age_secs = Self::transient_vote_recovery_min_age_secs(
@@ -2170,8 +2180,32 @@ impl ProofOfSynergy {
                                                 "proposal_evidence" => proposal_report.evidence_dir.clone()
                                             );
                                             last_logged_view_timeout = None;
-                                            last_tip_observed_at = SystemTime::now();
-                                            last_block_time = SystemTime::now();
+                                            if needs_missed_quorum_view_change {
+                                                let next_view_offset = view_offset.saturating_add(1);
+                                                missed_quorum_view_override =
+                                                    Some((new_block.block_index, next_view_offset));
+                                                last_tip_observed_at = SystemTime::now()
+                                                    .checked_sub(Duration::from_secs(
+                                                        leader_timeout_secs.max(1),
+                                                    ))
+                                                    .unwrap_or_else(SystemTime::now);
+                                                last_block_time = SystemTime::now()
+                                                    .checked_sub(Duration::from_secs(
+                                                        block_time_secs.max(1),
+                                                    ))
+                                                    .unwrap_or_else(SystemTime::now);
+                                                warn!(
+                                                    "consensus",
+                                                    "Advancing same-height view after missed quorum",
+                                                    "height" => new_block.block_index,
+                                                    "failed_view_offset" => view_offset as u64,
+                                                    "next_view_offset" => next_view_offset as u64,
+                                                    "error" => e.clone()
+                                                );
+                                            } else {
+                                                last_tip_observed_at = SystemTime::now();
+                                                last_block_time = SystemTime::now();
+                                            }
                                             consecutive_failures = 0;
                                             thread::sleep(Duration::from_millis(500));
                                             continue;
@@ -2195,6 +2229,27 @@ impl ProofOfSynergy {
                                             );
                                         }
                                     }
+                                }
+                                if needs_missed_quorum_view_change {
+                                    let next_view_offset = view_offset.saturating_add(1);
+                                    missed_quorum_view_override =
+                                        Some((new_block.block_index, next_view_offset));
+                                    last_tip_observed_at = SystemTime::now()
+                                        .checked_sub(Duration::from_secs(leader_timeout_secs.max(1)))
+                                        .unwrap_or_else(SystemTime::now);
+                                    last_block_time = SystemTime::now()
+                                        .checked_sub(Duration::from_secs(block_time_secs.max(1)))
+                                        .unwrap_or_else(SystemTime::now);
+                                    warn!(
+                                        "consensus",
+                                        "Advancing same-height view after missed quorum",
+                                        "height" => new_block.block_index,
+                                        "failed_view_offset" => view_offset as u64,
+                                        "next_view_offset" => next_view_offset as u64,
+                                        "error" => e.clone()
+                                    );
+                                    thread::sleep(Duration::from_millis(100));
+                                    continue;
                                 }
 
                                 // Apply penalty to proposer for failed block
@@ -3854,6 +3909,58 @@ impl ProofOfSynergy {
                 .any(|validator| validator.address == selected_validator.address);
 
             if locked_proposer.address != selected_validator.address {
+                if selected_validator_is_live {
+                    let recovery_reason = format!(
+                        "live scheduled leader superseded local same-height vote lock: local_validator={} height={} finalized_height={} scheduled_leader={} locked_proposer={} locked_hash={} locked_latest_round={}",
+                        local_validator_address,
+                        next_block_index,
+                        finalized_height,
+                        selected_validator.address,
+                        locked_vote.proposer,
+                        locked_vote.block_hash,
+                        locked_vote.latest_round_number
+                    );
+                    match DualQuorumConsensus::recover_stale_transient_vote_locks_for_leader_selection(
+                        finalized_height,
+                        0,
+                        &recovery_reason,
+                    ) {
+                        Ok(recovered) => {
+                            warn!(
+                                "consensus",
+                                "Using live scheduled leader over local same-height vote lock",
+                                "local_validator" => local_validator_address.to_string(),
+                                "scheduled_leader" => selected_validator.address.clone(),
+                                "locked_proposer" => locked_vote.proposer.clone(),
+                                "locked_block_hash" => locked_vote.block_hash.clone(),
+                                "locked_first_round" => locked_vote.first_round_number,
+                                "locked_latest_round" => locked_vote.latest_round_number,
+                                "lock_age_secs" => lock_age_secs,
+                                "transient_locks_recovered" => recovered,
+                                "epoch" => current_epoch,
+                                "height" => next_block_index
+                            );
+                        }
+                        Err(error) => {
+                            warn!(
+                                "consensus",
+                                "Using live scheduled leader over local same-height vote lock without local transient recovery",
+                                "local_validator" => local_validator_address.to_string(),
+                                "scheduled_leader" => selected_validator.address.clone(),
+                                "locked_proposer" => locked_vote.proposer.clone(),
+                                "locked_block_hash" => locked_vote.block_hash.clone(),
+                                "locked_first_round" => locked_vote.first_round_number,
+                                "locked_latest_round" => locked_vote.latest_round_number,
+                                "lock_age_secs" => lock_age_secs,
+                                "recovery_error" => error,
+                                "epoch" => current_epoch,
+                                "height" => next_block_index
+                            );
+                        }
+                    }
+                    return selected_validator;
+                }
+
                 if Self::should_supersede_same_height_vote_lock_with_scheduled_leader(
                     selected_validator_is_live,
                     lock_age_secs,
@@ -3913,7 +4020,7 @@ impl ProofOfSynergy {
                 }
                 info!(
                     "consensus",
-                    "Preserving live same-height vote lock leader over deterministic scheduled leader",
+                    "Preserving live same-height vote lock leader because scheduled leader is not live",
                     "local_validator" => local_validator_address.to_string(),
                     "scheduled_leader" => selected_validator.address.clone(),
                     "scheduled_leader_live" => selected_validator_is_live,
@@ -4431,12 +4538,20 @@ impl ProofOfSynergy {
         result
     }
 
-    fn consensus_failure_needs_transient_lock_recovery(_error: &str) -> bool {
-        false
+    fn consensus_failure_needs_transient_lock_recovery(error: &str) -> bool {
+        Self::consensus_failure_needs_missed_quorum_view_change(error)
+            || error.contains("same-height vote supersede requires")
+            || error.contains("already locally voted for different block")
+    }
+
+    fn consensus_failure_needs_missed_quorum_view_change(error: &str) -> bool {
+        error.contains("Insufficient validator votes")
     }
 
     fn transient_vote_recovery_min_age_secs(leader_timeout_secs: u64, block_time_secs: u64) -> u64 {
-        leader_timeout_secs.max(block_time_secs).max(1)
+        leader_timeout_secs
+            .min(block_time_secs.max(FAST_CONSENSUS_VOTE_TIMEOUT_SECS))
+            .max(FAST_CONSENSUS_VOTE_TIMEOUT_SECS)
     }
 
     pub(crate) fn validate_transaction_for_mempool(
@@ -7171,34 +7286,34 @@ mod tests {
     }
 
     #[test]
-    fn insufficient_votes_do_not_trigger_transient_proposal_recovery() {
+    fn insufficient_votes_trigger_transient_liveness_recovery() {
         let required_quorum = required_validator_quorum(6);
         assert!(
-            !ProofOfSynergy::consensus_failure_needs_transient_lock_recovery(&format!(
+            ProofOfSynergy::consensus_failure_needs_transient_lock_recovery(&format!(
                 "Insufficient validator votes: 2 votes, {required_quorum} required for quorum"
             ))
         );
         assert!(
-            !ProofOfSynergy::consensus_failure_needs_transient_lock_recovery(
+            ProofOfSynergy::consensus_failure_needs_transient_lock_recovery(
                 "same-height vote supersede requires a durable finalized canonical parent lock"
             )
         );
         assert!(
-            !ProofOfSynergy::consensus_failure_needs_transient_lock_recovery(
+            ProofOfSynergy::consensus_failure_needs_transient_lock_recovery(
                 "already locally voted for different block at height 256039"
             )
         );
     }
 
     #[test]
-    fn transient_vote_recovery_age_tracks_leader_timeout() {
+    fn transient_vote_recovery_age_tracks_fast_proposal_path() {
         assert_eq!(
             ProofOfSynergy::transient_vote_recovery_min_age_secs(4, 1),
-            4
+            1
         );
         assert_eq!(
             ProofOfSynergy::transient_vote_recovery_min_age_secs(2, 3),
-            3
+            2
         );
         assert_eq!(
             ProofOfSynergy::transient_vote_recovery_min_age_secs(0, 0),
@@ -7207,7 +7322,7 @@ mod tests {
     }
 
     #[test]
-    fn leader_selection_preserves_live_same_height_vote_lock_over_scheduled_leader() {
+    fn leader_selection_uses_live_scheduled_leader_over_same_height_vote_lock() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
         DualQuorumConsensus::reset_test_vote_tracking();
 
@@ -7262,7 +7377,13 @@ mod tests {
             u64::MAX,
         );
 
-        assert_eq!(selected.address, locked.address);
+        assert_eq!(selected.address, scheduled.address);
+        let lock = DualQuorumConsensus::local_locked_vote_for_height("validator-local", 55, 810)
+            .expect("vote lock lookup should succeed");
+        assert!(
+            lock.is_none(),
+            "live scheduled leader should clear local same-height locks that would split quorum"
+        );
 
         DualQuorumConsensus::set_test_local_vote_lock_path(None);
         if let Some(root) = path.parent().and_then(|data| data.parent()) {

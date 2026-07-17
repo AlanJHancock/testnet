@@ -3089,7 +3089,7 @@ dependencies = [
 
 [[package]]
 name = "synergy-testnet"
-version = "19.0.47"
+version = "19.0.48"
 dependencies = [
  "aegis-pqsynq",
  "aegis-pqvm",
