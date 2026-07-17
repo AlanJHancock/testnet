@@ -13,9 +13,7 @@ use crate::cluster::{fault_tolerance_f, quorum_threshold, EpochClusterAssignment
 use crate::consensus::chain_durability::recover_chain_and_validate_canonical;
 #[cfg(test)]
 use crate::consensus::consensus_algorithm::reconcile_validator_registry_clusters_for_height;
-use crate::consensus::consensus_algorithm::{
-    reconcile_validator_registry_clusters_from_finalized_chain, ProofOfSynergy,
-};
+use crate::consensus::consensus_algorithm::ProofOfSynergy;
 use crate::consensus::consensus_fork;
 use crate::consensus::dual_quorum::{required_validator_quorum, DualQuorumConsensus};
 use crate::consensus::legacy_canonical_lock::{
@@ -43,9 +41,9 @@ use crate::validator::{
     canonical_validator_clusters_digest, canonical_validator_clusters_for_epoch,
     canonical_validator_clusters_for_height, consensus_membership_validators_for_height,
     effective_cluster_epoch_for_height, replay_validator_activation_transactions,
-    target_validator_cluster_count, Validator, ValidatorManager, ValidatorRegistry,
-    ValidatorStatus, INITIAL_VALIDATOR_SYNERGY_SCORE, TESTNET_MIN_VALIDATOR_STAKE_NWEI,
-    VALIDATOR_MANAGER,
+    replay_validator_activation_transactions_for_service, target_validator_cluster_count,
+    Validator, ValidatorManager, ValidatorRegistry, ValidatorStatus,
+    INITIAL_VALIDATOR_SYNERGY_SCORE, TESTNET_MIN_VALIDATOR_STAKE_NWEI, VALIDATOR_MANAGER,
 };
 use crate::wallet::WALLET_MANAGER;
 use crate::{info, warn};
@@ -583,6 +581,33 @@ fn replay_validator_activations_from_canonical_chain(
     replay_validator_activation_transactions(canonical_chain, token_manager, validator_manager)
 }
 
+fn rpc_startup_uses_service_safe_replay(role_profile: Option<&RoleProfile>) -> bool {
+    role_profile
+        .map(|profile| !profile.service_surface.contains(&"consensus"))
+        .unwrap_or(false)
+}
+
+fn replay_validator_activations_for_rpc_startup(
+    canonical_chain: &BlockChain,
+    token_manager: &crate::token::TokenManager,
+    validator_manager: &Arc<ValidatorManager>,
+    role_profile: Option<&RoleProfile>,
+) -> (u64, u64) {
+    if rpc_startup_uses_service_safe_replay(role_profile) {
+        replay_validator_activation_transactions_for_service(
+            canonical_chain,
+            token_manager,
+            validator_manager,
+        )
+    } else {
+        replay_validator_activations_from_canonical_chain(
+            canonical_chain,
+            token_manager,
+            validator_manager,
+        )
+    }
+}
+
 pub fn start_rpc_server(
     bind_address: &str,
     ws_bind_address: Option<String>,
@@ -602,27 +627,25 @@ pub fn start_rpc_server(
     if let Err(e) = VALIDATOR_MANAGER.load_registry(validator_registry_path) {
         println!("ℹ️ No validator registry found at startup: {}", e);
     }
+    let role_profile = current_rpc_role_profile();
 
     // SHARED_CHAIN has already passed canonical genesis and chain-body validation during
     // initialization. Keep the validated chain locked while replay scans it by reference so a
     // missing or stale registry cannot suppress an activated validator or double chain memory.
-    let ((activation_replayed, activation_failed), chain_height) = {
+    let (activation_replayed, activation_failed) = {
         let canonical_chain = SHARED_CHAIN
             .lock()
             .expect("canonical startup chain lock should not be poisoned");
-        let replay_result = replay_validator_activations_from_canonical_chain(
+        let replay_result = replay_validator_activations_for_rpc_startup(
             &canonical_chain,
             &TOKEN_MANAGER,
             &VALIDATOR_MANAGER,
+            role_profile,
         );
-        let chain_height = canonical_chain
-            .last()
-            .map(|block| block.block_index)
-            .unwrap_or(0);
         if let Some(block) = canonical_chain.last() {
             cache_last_known_good_chain_tip(block);
         }
-        (replay_result, chain_height)
+        replay_result
     };
     if activation_replayed > 0 {
         println!(
@@ -642,30 +665,11 @@ pub fn start_rpc_server(
         "✅ Loaded {} validators from registry at startup",
         validators.len()
     );
-    let cluster_reconciliation = {
-        let canonical_chain = SHARED_CHAIN
-            .lock()
-            .expect("canonical startup chain lock should not be poisoned");
-        reconcile_validator_registry_clusters_from_finalized_chain(
-            &VALIDATOR_MANAGER,
-            &canonical_chain,
-            chain_height,
-        )
-    };
-    match cluster_reconciliation {
-        Ok(changed) if changed || activation_replayed > 0 => {
-            if let Err(error) = VALIDATOR_MANAGER.save_registry(validator_registry_path) {
-                println!(
-                    "⚠️ Failed to persist startup validator registry repair at height {}: {}",
-                    chain_height, error
-                );
-            }
-        }
-        Ok(_) => {}
-        Err(error) => {
+    if activation_replayed > 0 {
+        if let Err(error) = VALIDATOR_MANAGER.save_registry(validator_registry_path) {
             println!(
-                "⚠️ Failed to reconcile validator clusters at startup height {}: {}",
-                chain_height, error
+                "⚠️ Failed to persist startup validator registry replay: {}",
+                error
             );
         }
     }
@@ -10673,6 +10677,38 @@ mod tests {
         assert_eq!(second["fault_tolerance_f"].as_u64(), Some(2));
         assert_eq!(second["can_finalize"].as_bool(), Some(false));
         assert_eq!(second["health"].as_str(), Some("halted_safely"));
+    }
+
+    #[test]
+    fn rpc_startup_uses_service_safe_replay_for_rpc_capable_service_roles() {
+        for role in [
+            crate::role_profiles::NodeRole::ArchiveValidator,
+            crate::role_profiles::NodeRole::Relayer,
+            crate::role_profiles::NodeRole::RpcGateway,
+            crate::role_profiles::NodeRole::IndexerExplorer,
+            crate::role_profiles::NodeRole::ObserverLight,
+        ] {
+            assert!(
+                rpc_startup_uses_service_safe_replay(Some(role.profile())),
+                "role {:?} should use service-safe activation replay",
+                role
+            );
+        }
+    }
+
+    #[test]
+    fn rpc_startup_preserves_consensus_replay_for_validator_and_committee() {
+        for role in [
+            crate::role_profiles::NodeRole::Validator,
+            crate::role_profiles::NodeRole::Committee,
+        ] {
+            assert!(
+                !rpc_startup_uses_service_safe_replay(Some(role.profile())),
+                "role {:?} should retain consensus activation replay",
+                role
+            );
+        }
+        assert!(!rpc_startup_uses_service_safe_replay(None));
     }
 
     #[test]

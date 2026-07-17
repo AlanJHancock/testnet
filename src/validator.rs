@@ -2208,6 +2208,41 @@ pub fn replay_validator_activation_transactions(
     (applied, failed)
 }
 
+/// Replay activation transactions for non-consensus services.
+///
+/// Service roles need the registry's transaction-derived activation state for reads, but their
+/// local chain may be partial or pruned and therefore cannot safely drive canonical cluster
+/// promotion or redistribution. Consensus startup uses the replay function above, including the
+/// pending-shadow boundary processing.
+pub fn replay_validator_activation_transactions_for_service(
+    chain: &crate::block::BlockChain,
+    token_manager: &TokenManager,
+    validator_manager: &Arc<ValidatorManager>,
+) -> (u64, u64) {
+    let mut applied = 0u64;
+    let mut failed = 0u64;
+
+    for block in &chain.chain {
+        for tx in &block.transactions {
+            if !is_validator_activation_transaction(tx) {
+                continue;
+            }
+
+            match apply_validator_activation_transaction(
+                tx,
+                token_manager,
+                validator_manager,
+                block.block_index,
+            ) {
+                Ok(_) => applied += 1,
+                Err(_) => failed += 1,
+            }
+        }
+    }
+
+    (applied, failed)
+}
+
 fn canonical_minimum_validator_stake_nwei() -> u64 {
     canonical_genesis()
         .ok()
@@ -3361,6 +3396,74 @@ additional_dial_targets = ["validator-7", "10.69.10.7:5622"]
             Some(activation_hash.as_str())
         );
         assert_eq!(activated.shadow_started_at_height, Some(1));
+    }
+
+    #[test]
+    fn service_activation_replay_updates_shadow_state_without_promoting_or_reorganizing_clusters() {
+        let (token_manager, validator_address, activation_tx) =
+            funded_activation_fixture("service-replay-public-key", vec![17, 18, 19]);
+        let activation_height = 1;
+        let recorded_height = activation_height + VALIDATOR_SHADOW_PHASE_BLOCKS;
+        let effective_height = recorded_height + 1;
+        let mut chain = BlockChain::new();
+        chain.add_block(Block::new_with_timestamp(
+            activation_height,
+            vec![activation_tx],
+            "genesis".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            1,
+        ));
+        chain.add_block(Block::new_with_timestamp(
+            recorded_height,
+            Vec::new(),
+            "activation-record-block".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            2,
+        ));
+        chain.add_block(Block::new_with_timestamp(
+            effective_height,
+            Vec::new(),
+            "activation-effective-block".to_string(),
+            "genesis-validator".to_string(),
+            0,
+            3,
+        ));
+
+        let validator_manager = Arc::new(ValidatorManager::new());
+        let initial_clusters = {
+            let mut registry = validator_manager
+                .registry
+                .lock()
+                .expect("test registry lock should be available");
+            let seeded_registry = active_registry(5);
+            registry.validators = seeded_registry.validators;
+            registry.clusters = seeded_registry.clusters;
+            registry.clusters.clone()
+        };
+
+        let (applied, failed) = replay_validator_activation_transactions_for_service(
+            &chain,
+            &token_manager,
+            &validator_manager,
+        );
+
+        assert_eq!((applied, failed), (1, 0));
+        let replayed = validator_manager
+            .get_validator(&validator_address)
+            .expect("service replay should restore validator activation state");
+        assert_eq!(replayed.status, ValidatorStatus::Shadow);
+        assert_eq!(replayed.activation_effective_height, Some(effective_height));
+        assert_eq!(validator_manager.get_active_validators().len(), 5);
+        let registry = validator_manager
+            .registry
+            .lock()
+            .expect("test registry lock should be available");
+        assert_eq!(
+            serde_json::to_value(&registry.clusters).expect("clusters should serialize"),
+            serde_json::to_value(&initial_clusters).expect("clusters should serialize")
+        );
     }
 
     #[test]
