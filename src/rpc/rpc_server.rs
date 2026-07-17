@@ -11261,6 +11261,9 @@ mod tests {
 
     #[test]
     fn epoch_cluster_rpc_uses_finalized_height_when_registry_epoch_is_stale() {
+        let _env_lock = RPC_VALIDATOR_ENV_LOCK
+            .lock()
+            .expect("RPC validator environment mutex should lock");
         let validator_manager = Arc::new(ValidatorManager::new());
         let epoch_seed = "11".repeat(64);
         {
@@ -11406,6 +11409,7 @@ mod tests {
             let epoch_13_seed = "11".repeat(64);
             registry.leader_randomness_epoch = Some(13);
             registry.leader_randomness_seed = Some(epoch_13_seed.clone());
+            registry.reorganize_clusters_for_epoch_with_seed(13, &epoch_13_seed, 13_001);
             let active_validators = registry
                 .get_active_validators()
                 .into_iter()
@@ -11661,6 +11665,9 @@ mod tests {
 
     #[test]
     fn validator_set_snapshot_handles_non_genesis_seed_without_registry_relock() {
+        let _env_lock = RPC_VALIDATOR_ENV_LOCK
+            .lock()
+            .expect("RPC validator environment mutex should lock");
         let validator_manager = Arc::new(ValidatorManager::new());
         let epoch_seed = "22".repeat(64);
         {
@@ -11698,7 +11705,6 @@ mod tests {
             &chain,
             &validator_manager,
         );
-
         assert_eq!(snapshot["is_latest"], json!(true));
         assert_eq!(snapshot["epoch_id"], json!(12));
         assert_eq!(snapshot["cluster_count"], json!(2));
@@ -12052,8 +12058,7 @@ mod tests {
         assert_eq!(snapshot["fail_closed"], json!(true));
         assert_eq!(snapshot["is_latest"], json!(false));
         assert!(snapshot["error"].as_str().is_some_and(|error| {
-            error.contains("pre-activation canonical epoch seed unavailable")
-                && error.contains("one-time v19.0.45 migration is required")
+            error.contains("epoch 1139 boundary block 1139000 is unavailable")
         }));
     }
 
@@ -12099,8 +12104,7 @@ mod tests {
         assert_eq!(snapshot["is_latest"], json!(false));
         assert_eq!(snapshot["epoch_id"], json!(1_139));
         assert!(snapshot["error"].as_str().is_some_and(|error| {
-            error.contains("pre-activation canonical epoch seed unavailable")
-                && error.contains("one-time v19.0.45 migration is required")
+            error.contains("epoch 1139 boundary block 1139000 is unavailable")
         }));
         assert!(snapshot["cluster_assignments"].is_null());
     }
