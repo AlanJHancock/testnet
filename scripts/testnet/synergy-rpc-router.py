@@ -827,12 +827,15 @@ class RouterHTTPHandler(BaseHTTPRequestHandler):
     server: "RouterHTTPServer"
 
     def _send(self, status: int, body: bytes, content_type: str = "application/json") -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/healthz":
@@ -890,6 +893,10 @@ class RouterHTTPHandler(BaseHTTPRequestHandler):
 
 
 class RouterHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    block_on_close = False
+    request_queue_size = 128
+
     def __init__(self, address: tuple[str, int], router: Router) -> None:
         self.router = router
         super().__init__(address, RouterHTTPHandler)

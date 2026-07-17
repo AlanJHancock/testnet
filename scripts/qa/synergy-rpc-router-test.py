@@ -401,6 +401,11 @@ class RouterTests(unittest.TestCase):
             upstream.shutdown()
             upstream.server_close()
 
+    def test_http_server_uses_bounded_backlog_and_daemon_threads(self) -> None:
+        self.assertTrue(router_module.RouterHTTPServer.daemon_threads)
+        self.assertFalse(router_module.RouterHTTPServer.block_on_close)
+        self.assertGreaterEqual(router_module.RouterHTTPServer.request_queue_size, 128)
+
 
 if __name__ == "__main__":
     unittest.main()
