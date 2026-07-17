@@ -65,7 +65,6 @@ ALL_DOMAINS=(
     "testnet-atlas.synergy-network.io"
     "testnet.synergy-network.io"
     "api.synergy-network.io"
-    "rpc.synergy-network.io"
     "ws.synergy-network.io"
     "explorer.synergy-network.io"
 )

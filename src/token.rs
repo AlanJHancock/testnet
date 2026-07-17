@@ -2651,7 +2651,7 @@ mod tests {
     }
 
     fn reset_reward_ledger() {
-        *crate::rewards::REWARD_LEDGER.lock().unwrap() = crate::rewards::RewardLedger::default();
+        crate::rewards::reset_reward_ledger_for_test();
     }
 
     fn perfect_phase1_metrics() -> crate::rewards::Phase1Metrics {
@@ -2757,7 +2757,8 @@ mod tests {
 
     #[test]
     fn native_snrg_transaction_updates_balances_and_transfer_history() {
-        let _guard = ENV_GUARD.lock().unwrap();
+        let _env_guard = ENV_GUARD.lock().unwrap();
+        let _ledger_guard = crate::rewards::reward_ledger_test_guard();
         reset_reward_ledger();
         let manager = TokenManager::new();
         let sender = "synw1sendernative000000000000000000000000";
@@ -2873,7 +2874,8 @@ mod tests {
 
     #[test]
     fn epoch_fee_distribution_moves_collector_balance_once() {
-        let _guard = ENV_GUARD.lock().unwrap();
+        let _env_guard = ENV_GUARD.lock().unwrap();
+        let _ledger_guard = crate::rewards::reward_ledger_test_guard();
         reset_reward_ledger();
         let manager = TokenManager::new();
         seed_snrg_balance(&manager, FEE_COLLECTOR_ADDRESS, 101);
@@ -2911,7 +2913,8 @@ mod tests {
 
     #[test]
     fn included_transaction_records_fee_accumulator_once() {
-        let _guard = ENV_GUARD.lock().unwrap();
+        let _env_guard = ENV_GUARD.lock().unwrap();
+        let _ledger_guard = crate::rewards::reward_ledger_test_guard();
         reset_reward_ledger();
         let manager = TokenManager::new();
         let sender = crate::address::generate_wallet_address("fee-accumulator-sender");
@@ -2951,7 +2954,8 @@ mod tests {
 
     #[test]
     fn validator_rewards_escrow_and_phase2_settlement_reconcile_balances() {
-        let _guard = ENV_GUARD.lock().unwrap();
+        let _env_guard = ENV_GUARD.lock().unwrap();
+        let _ledger_guard = crate::rewards::reward_ledger_test_guard();
         reset_reward_ledger();
         let manager = TokenManager::new();
         let cluster = crate::address::generate_validator_cluster_address("reward-cluster-a");
@@ -3057,7 +3061,8 @@ mod tests {
 
     #[test]
     fn three_validator_fee_burn_and_reward_lifecycle_reconciles_invariants() {
-        let _guard = ENV_GUARD.lock().unwrap();
+        let _env_guard = ENV_GUARD.lock().unwrap();
+        let _ledger_guard = crate::rewards::reward_ledger_test_guard();
         reset_reward_ledger();
         let manager = TokenManager::new();
         seed_snrg_balance(&manager, FEE_COLLECTOR_ADDRESS, 0);
@@ -3215,7 +3220,8 @@ mod tests {
 
     #[test]
     fn reward_ledger_survives_token_state_roundtrip() {
-        let _guard = ENV_GUARD.lock().unwrap();
+        let _env_guard = ENV_GUARD.lock().unwrap();
+        let _ledger_guard = crate::rewards::reward_ledger_test_guard();
         reset_reward_ledger();
         let manager = TokenManager::new();
         seed_snrg_balance(&manager, FEE_COLLECTOR_ADDRESS, 101);
