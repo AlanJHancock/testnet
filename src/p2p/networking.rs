@@ -2808,6 +2808,7 @@ fn handle_status_message(
     if local_node_runs_validator_consensus(config)
         && (quarantined || consensus_duties_disabled)
         && !peer_is_designated_support
+        && !(quarantined && peer_is_active_validator)
     {
         warn!(
             "p2p",
@@ -4309,7 +4310,8 @@ fn peer_is_eligible_block_sync_source_for_local(
         return peer_is_designated_relayer_sync_source(config, peer);
     }
     if local_validator_requires_designated_sync_sources(config) {
-        return peer_is_designated_support_sync_source(config, peer);
+        return peer_is_designated_support_sync_source(config, peer)
+            || peer_is_active_validator_recovery_sync_source(config, peer);
     }
     peer_is_eligible_block_sync_source(config, peer)
 }
@@ -4331,7 +4333,10 @@ fn status_peer_is_eligible_block_sync_source(
         return peer_is_designated_relayer;
     }
     if local_validator_requires_designated_sync_sources(config) {
-        return peer_is_designated_support;
+        return peer_is_designated_support
+            || (local_validator_can_request_recovery_from_active_validators(config)
+                && !consensus_duties_disabled
+                && peer_is_active_validator);
     }
     (!consensus_duties_disabled && peer_is_active_validator)
         || peer_is_designated_support
@@ -4339,10 +4344,34 @@ fn status_peer_is_eligible_block_sync_source(
 }
 
 fn peer_is_authorized_block_sync_requester(config: &NodeConfig, peer: &PeerConnection) -> bool {
-    !peer.quarantined
+    if !peer.quarantined
         && !peer.consensus_duties_disabled
         && (peer_is_active_consensus_validator(config, peer)
             || peer_is_designated_support_sync_source(config, peer))
+    {
+        return true;
+    }
+
+    peer.quarantined
+        && peer.consensus_duties_disabled
+        && peer_has_verified_handshake(peer)
+        && peer_is_active_consensus_validator(config, peer)
+}
+
+fn peer_is_active_validator_recovery_sync_source(
+    config: &NodeConfig,
+    peer: &PeerConnection,
+) -> bool {
+    local_validator_can_request_recovery_from_active_validators(config)
+        && peer_is_active_consensus_validator(config, peer)
+        && peer_has_fresh_remote_status_at(peer, current_timestamp())
+        && !peer_quarantine_active_at(peer, current_timestamp())
+        && !peer_duties_disabled_active_at(peer, current_timestamp())
+}
+
+fn local_validator_can_request_recovery_from_active_validators(config: &NodeConfig) -> bool {
+    local_node_runs_validator_consensus(config)
+        && current_validator_quarantine_duty_block().is_some()
 }
 
 fn peer_has_verified_handshake(peer: &PeerConnection) -> bool {
@@ -11057,7 +11086,8 @@ mod tests {
         parse_block_sync_busy_retry, parse_bootnode_dial_address, peer_has_identifying_metadata,
         peer_identity_key, peer_is_authorized_block_sync_requester,
         peer_is_designated_support_sync_source, peer_is_eligible_block_sync_source,
-        peer_matches_address, peer_readiness_exclusion_reason_at, peer_write_gate,
+        peer_is_eligible_block_sync_source_for_local, peer_matches_address,
+        peer_readiness_exclusion_reason_at, peer_write_gate,
         pending_incoming_connections_from_host, preferred_connection_direction,
         preflight_validator_activation_transactions, receive_message,
         recover_peer_validator_address_for_vote_target, release_block_sync_apply_slot_after_worker,
@@ -11096,7 +11126,9 @@ mod tests {
         register_test_validator_signing_key,
     };
     use crate::consensus::{
-        anti_divergence::current_self_quarantine_record,
+        anti_divergence::{
+            current_self_quarantine_record, record_self_quarantine_for_canonical_lock_conflict,
+        },
         legacy_canonical_lock::{
             clear_legacy_canonical_locks_for_tests, write_legacy_canonical_lock,
         },
@@ -14738,6 +14770,25 @@ mod tests {
             &onboarding_peer
         ));
 
+        let active_validator = "synv1recoveringactivexxxxxxxxxxxxxxxxxxxx";
+        ensure_test_validator_key(active_validator);
+        config.node.allowed_validator_addresses = vec![active_validator.to_string()];
+        config.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
+            validator_address: active_validator.to_string(),
+            dial_address: "10.70.10.5:5622".to_string(),
+        }];
+
+        let mut quarantined_active_peer = test_peer_with_validator_address(Some(active_validator));
+        quarantined_active_peer.node_id = Some("recovering-validator".to_string());
+        quarantined_active_peer.quarantined = true;
+        quarantined_active_peer.consensus_duties_disabled = true;
+        quarantined_active_peer.connected_endpoint = Some("10.70.10.5:49152".to_string());
+        quarantined_active_peer.direction = ConnectionDirection::Incoming;
+        assert!(
+            peer_is_authorized_block_sync_requester(&config, &quarantined_active_peer),
+            "a verified active validator on its signed VPN transport must be allowed to request recovery blocks while quarantined"
+        );
+
         let mut support_peer = test_peer_with_validator_address(None);
         support_peer.node_id = Some("sentry1".to_string());
         support_peer.handshake_role = Some("relayer".to_string());
@@ -14815,6 +14866,48 @@ mod tests {
             active_validator
         ));
         assert!(super::peer_is_active_consensus_validator(&config, &peer));
+    }
+
+    #[test]
+    fn quarantined_local_validator_can_recover_from_active_validator_source() {
+        configure_canonical_genesis_path_for_tests();
+        let active_validator = "synv1recoverysourcexxxxxxxxxxxxxxxxxxxx";
+        ensure_test_validator_key(active_validator);
+        record_self_quarantine_for_canonical_lock_conflict(
+            42,
+            Some("local-fork-hash".to_string()),
+            "majority-hash",
+            "test local fork",
+        )
+        .expect("test quarantine record should write");
+
+        let mut config = NodeConfig::default();
+        config.identity.role = "validator".to_string();
+        config.node.validator_address = "synv1localrecoveringxxxxxxxxxxxxxxxxxxx".to_string();
+        config.node.allowed_validator_addresses = vec![active_validator.to_string()];
+        config.network.validator_vpn_transports = vec![ValidatorVpnTransportConfig {
+            validator_address: active_validator.to_string(),
+            dial_address: "10.70.10.6:5622".to_string(),
+        }];
+
+        let mut source = test_peer_with_validator_address(Some(active_validator));
+        source.connected_endpoint = Some("10.70.10.6:5622".to_string());
+        source.direction = ConnectionDirection::Outgoing;
+        source.last_known_height = 100;
+        source.status_received_at = Some(current_timestamp());
+
+        assert!(super::current_validator_quarantine_duty_block().is_some());
+        assert!(
+            peer_is_eligible_block_sync_source_for_local(&config, &source),
+            "a locally quarantined validator must keep a recovery-only block sync path to healthy active validators"
+        );
+
+        source.quarantined = true;
+        source.consensus_duties_disabled = true;
+        assert!(
+            !peer_is_eligible_block_sync_source_for_local(&config, &source),
+            "recovery must not trust a quarantined source validator"
+        );
     }
 
     #[test]
