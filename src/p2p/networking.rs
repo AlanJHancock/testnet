@@ -9,8 +9,9 @@ use crate::consensus::chain_durability::{
 use crate::consensus::consensus_algorithm::ProofOfSynergy;
 use crate::consensus::dual_quorum::{DualQuorumConsensus, QuorumCertificate};
 use crate::consensus::legacy_canonical_lock::{
-    legacy_canonical_commit_record, verify_legacy_canonical_lock, verify_legacy_canonical_locks,
-    write_legacy_canonical_lock, write_legacy_canonical_locks,
+    legacy_canonical_commit_record, quarantine_legacy_canonical_locks_above,
+    verify_legacy_canonical_lock, verify_legacy_canonical_locks, write_legacy_canonical_lock,
+    write_legacy_canonical_locks,
 };
 use crate::consensus::timing_trace;
 use crate::crypto::aegis_pqvm::{
@@ -9621,6 +9622,126 @@ fn record_canonical_lock_conflict_from_peer(
     record_peer_canonical_lock_conflict(block, error);
 }
 
+#[derive(Debug, Clone)]
+struct CanonicalLockRecoveryPlan {
+    common_height: u64,
+    conflict_height: u64,
+    local_locked_hash: String,
+    conflicting_hash: String,
+}
+
+/// A valid QC is the source-majority proof for its exact block. Recovery is
+/// allowed only for a contiguous branch with a local overlap and a conflict
+/// against the local lock suffix; incomplete or ambiguous batches remain
+/// rejected by the normal canonical-lock path.
+fn source_majority_canonical_lock_recovery_plan(
+    blockchain: &BlockchainArc,
+    blocks: &[Block],
+    verified_source_hashes: &HashSet<String>,
+) -> Result<Option<CanonicalLockRecoveryPlan>, String> {
+    let chain = blockchain.lock().unwrap();
+    let local_tip_height = chain.last().map(|entry| entry.block_index).unwrap_or(0);
+    let common_height = blocks.iter().rev().find_map(|block| {
+        if block.block_index > local_tip_height {
+            return None;
+        }
+        chain
+            .block_at_height(block.block_index)
+            .filter(|local| local.hash == block.hash)
+            .map(|_| block.block_index)
+    });
+    let Some(common_height) = common_height.filter(|height| *height < local_tip_height) else {
+        return Ok(None);
+    };
+
+    let mut expected_height = common_height.saturating_add(1);
+    let Some(mut expected_parent_hash) = chain
+        .block_at_height(common_height)
+        .map(|block| block.hash.clone())
+    else {
+        return Ok(None);
+    };
+    for block in blocks
+        .iter()
+        .filter(|block| block.block_index <= common_height)
+    {
+        if let Some(record) = legacy_canonical_commit_record(block.block_index)? {
+            if record.block_hash != block.hash {
+                return Ok(None);
+            }
+        }
+    }
+    let mut conflict = None;
+    for block in blocks
+        .iter()
+        .filter(|block| block.block_index > common_height)
+    {
+        if block.block_index != expected_height {
+            return Ok(None);
+        }
+        if block.previous_hash != expected_parent_hash {
+            return Ok(None);
+        }
+        if !verified_source_hashes.contains(&block.hash) {
+            return Ok(None);
+        }
+
+        if let Some(record) = legacy_canonical_commit_record(block.block_index)? {
+            if record.block_hash != block.hash {
+                let Some(local_block) = chain.block_at_height(block.block_index) else {
+                    return Ok(None);
+                };
+                if local_block.hash != record.block_hash {
+                    return Ok(None);
+                }
+                if conflict.is_none() {
+                    conflict = Some(CanonicalLockRecoveryPlan {
+                        common_height,
+                        conflict_height: block.block_index,
+                        local_locked_hash: record.block_hash,
+                        conflicting_hash: block.hash.clone(),
+                    });
+                }
+            }
+        }
+
+        expected_height = expected_height.saturating_add(1);
+        expected_parent_hash = block.hash.clone();
+    }
+
+    Ok(conflict)
+}
+
+fn quarantine_local_suffix_for_recovery(
+    plan: &CanonicalLockRecoveryPlan,
+    context: &str,
+) -> Result<usize, String> {
+    let reason = format!(
+        "source-majority catch-up at h{} conflicts with local canonical lock; quarantining local fork suffix from h{}",
+        plan.conflict_height, plan.common_height.saturating_add(1)
+    );
+    record_self_quarantine_for_canonical_lock_conflict(
+        plan.conflict_height,
+        Some(plan.local_locked_hash.clone()),
+        &plan.conflicting_hash,
+        &reason,
+    )
+    .map_err(|error| format!("persist recovery duty quarantine ({context}): {error}"))?;
+
+    let quarantined = quarantine_legacy_canonical_locks_above(plan.common_height)
+        .map_err(|error| format!("quarantine local canonical lock suffix ({context}): {error}"))?;
+    warn!(
+        "p2p",
+        "Quarantined local fork suffix before source-majority catch-up",
+        "context" => context.to_string(),
+        "common_height" => plan.common_height,
+        "conflict_height" => plan.conflict_height,
+        "quarantined_locks" => quarantined.len() as u64,
+        "duties_disabled" => true
+    );
+    Ok(quarantined.len())
+}
+
 fn preflight_validator_activation_transactions<'a, I>(blocks: I) -> Result<(), String>
 where
     I: IntoIterator<Item = &'a Block>,
@@ -9981,18 +10102,46 @@ fn apply_block_batch_batched_durability(
             return 0;
         }
     }
+    let verified_source_hashes = blocks_to_verify
+        .iter()
+        .map(|block| block.hash.clone())
+        .collect::<HashSet<_>>();
+    let recovery_plan = match source_majority_canonical_lock_recovery_plan(
+        blockchain,
+        &blocks,
+        &verified_source_hashes,
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            warn!(
+                "p2p",
+                "Rejecting service block batch because canonical lock recovery could not be evaluated",
+                "error" => error
+            );
+            return 0;
+        }
+    };
     let blocks_to_check = blocks_to_verify
         .iter()
         .copied()
         .filter(|block| block.block_index > 0)
         .collect::<Vec<_>>();
-    if let Err(error) = verify_legacy_canonical_locks(&blocks_to_check) {
+    if recovery_plan.is_none() {
+        if let Err(error) = verify_legacy_canonical_locks(&blocks_to_check) {
+            warn!(
+                "p2p",
+                "Rejecting service block batch that conflicts with canonical block lock",
+                "error" => error
+            );
+            return 0;
+        }
+    } else {
         warn!(
             "p2p",
-            "Rejecting service block batch that conflicts with canonical block lock",
-            "error" => error
+            "Accepted source-majority service batch for local fork recovery",
+            "common_height" => recovery_plan.as_ref().unwrap().common_height,
+            "conflict_height" => recovery_plan.as_ref().unwrap().conflict_height
         );
-        return 0;
     }
     if let Err(error) = preflight_validator_activation_transactions(blocks.iter()) {
         warn!(
@@ -10019,6 +10168,17 @@ fn apply_block_batch_batched_durability(
                     .map(|local| local.hash == remote_tip.hash)
                     .unwrap_or(false)
             {
+                return 0;
+            }
+        }
+
+        if let Some(plan) = recovery_plan.as_ref() {
+            if let Err(error) = quarantine_local_suffix_for_recovery(plan, "service_block_batch") {
+                warn!(
+                    "p2p",
+                    "Rejecting service block batch because local fork quarantine could not be persisted",
+                    "error" => error
+                );
                 return 0;
             }
         }
@@ -10234,19 +10394,49 @@ fn apply_block_batch_legacy(
             );
             return 0;
         }
-        if block.block_index > 0 {
-            if let Err(error) = verify_legacy_canonical_lock(block) {
-                record_canonical_lock_conflict_from_peer(blockchain, block, &error);
-                warn!(
-                    "p2p",
-                    "Rejecting block batch that conflicts with canonical block lock",
-                    "height" => block.block_index,
-                    "hash" => block.hash.clone(),
-                    "error" => error
-                );
-                return 0;
+    }
+    let verified_source_hashes = blocks_to_verify
+        .iter()
+        .map(|block| block.hash.clone())
+        .collect::<HashSet<_>>();
+    let recovery_plan = match source_majority_canonical_lock_recovery_plan(
+        blockchain,
+        &blocks,
+        &verified_source_hashes,
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            warn!(
+                "p2p",
+                "Rejecting block batch because canonical lock recovery could not be evaluated",
+                "error" => error
+            );
+            return 0;
+        }
+    };
+    if recovery_plan.is_none() {
+        for block in &blocks_to_verify {
+            if block.block_index > 0 {
+                if let Err(error) = verify_legacy_canonical_lock(block) {
+                    record_canonical_lock_conflict_from_peer(blockchain, block, &error);
+                    warn!(
+                        "p2p",
+                        "Rejecting block batch that conflicts with canonical block lock",
+                        "height" => block.block_index,
+                        "hash" => block.hash.clone(),
+                        "error" => error
+                    );
+                    return 0;
+                }
             }
         }
+    } else {
+        warn!(
+            "p2p",
+            "Accepted source-majority batch for local fork recovery",
+            "common_height" => recovery_plan.as_ref().unwrap().common_height,
+            "conflict_height" => recovery_plan.as_ref().unwrap().conflict_height
+        );
     }
     if let Err(error) = preflight_validator_activation_transactions(blocks.iter()) {
         warn!(
@@ -10278,6 +10468,17 @@ fn apply_block_batch_legacy(
                     .map(|local| local.hash == remote_tip.hash)
                     .unwrap_or(false)
             {
+                return 0;
+            }
+        }
+
+        if let Some(plan) = recovery_plan.as_ref() {
+            if let Err(error) = quarantine_local_suffix_for_recovery(plan, "legacy_block_batch") {
+                warn!(
+                    "p2p",
+                    "Rejecting block batch because local fork quarantine could not be persisted",
+                    "error" => error
+                );
                 return 0;
             }
         }
@@ -15765,6 +15966,8 @@ mod tests {
         let block1 = test_block(&genesis, 1, "validator-a", 1);
         let block2 = test_block(&block1, 2, "validator-b", 2);
         let local_block3 = test_block(&block2, 3, "validator-c", 3);
+        write_legacy_canonical_lock(&local_block3, &test_quorum_certificate(&local_block3))
+            .expect("local fork lock should be written before peer recovery");
         chain.add_block(block1.clone());
         chain.add_block(block2.clone());
         chain.add_block(local_block3.clone());
@@ -15802,6 +16005,16 @@ mod tests {
             Some(remote_block4.hash.clone())
         );
         drop(chain);
+        assert_eq!(
+            crate::consensus::legacy_canonical_lock::legacy_canonical_commit_record(3)
+                .unwrap()
+                .map(|record| record.block_hash),
+            Some(remote_block3.hash.clone())
+        );
+        assert!(
+            super::current_validator_quarantine_duty_block().is_some(),
+            "source-majority fork recovery must keep consensus duties disabled"
+        );
         clear_legacy_canonical_locks_for_tests();
     }
 

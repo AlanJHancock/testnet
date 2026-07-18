@@ -109,6 +109,26 @@ pub fn latest_legacy_canonical_commit_record() -> Result<Option<LegacyCanonicalC
         .map(|(_, record)| record.clone()))
 }
 
+/// Remove only the untrusted lock suffix after a verified source-majority
+/// branch has identified a common ancestor. The caller must establish the
+/// durable recovery duty fence before allowing consensus duties to resume.
+pub fn quarantine_legacy_canonical_locks_above(
+    common_height: u64,
+) -> Result<Vec<LegacyCanonicalCommitRecord>, String> {
+    let mut locks = load_legacy_canonical_locks()?;
+    let quarantined = locks
+        .range((common_height.saturating_add(1))..)
+        .map(|(_, record)| record.clone())
+        .collect::<Vec<_>>();
+    if quarantined.is_empty() {
+        return Ok(quarantined);
+    }
+
+    locks.retain(|height, _| *height <= common_height);
+    persist_legacy_canonical_locks(&locks)?;
+    Ok(quarantined)
+}
+
 fn load_legacy_canonical_locks() -> Result<BTreeMap<u64, LegacyCanonicalCommitRecord>, String> {
     let path = legacy_canonical_lock_path();
     if !path.exists() {
