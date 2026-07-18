@@ -5963,6 +5963,76 @@ fn request_blocks_from_connected_peer(
     }
 }
 
+fn request_recovery_batch_after_canonical_lock_conflict(
+    blockchain: &BlockchainArc,
+    connected_peers: &PeersArc,
+    peer_state_cache: &PeerStateCacheArc,
+    config: &NodeConfig,
+    peer_address: &str,
+    session_id: u64,
+    conflicting_block: &Block,
+) {
+    if conflicting_block.block_index == 0 {
+        return;
+    }
+
+    let local_height = blockchain
+        .lock()
+        .unwrap()
+        .last()
+        .map(|block| block.block_index)
+        .unwrap_or(0);
+    if conflicting_block.block_index <= local_height {
+        return;
+    }
+
+    let Some(local_lock) = legacy_canonical_commit_record(local_height).ok().flatten() else {
+        return;
+    };
+    let local_tip_hash = blockchain
+        .lock()
+        .unwrap()
+        .block_at_height(local_height)
+        .map(|block| block.hash.clone());
+    if local_tip_hash.as_deref() != Some(local_lock.block_hash.as_str()) {
+        return;
+    }
+
+    let batch = status_sync_batch(config, conflicting_block.block_index, local_height)
+        .unwrap_or(IMMEDIATE_STATUS_SYNC_BATCH);
+    let include_reconciliation_overlap = {
+        let chain = blockchain.lock().unwrap();
+        chain_has_block_sync_overlap(&chain, local_height, batch)
+    };
+    let Some((from_height, count)) = block_sync_request_range_with_overlap(
+        local_height,
+        conflicting_block.block_index,
+        batch,
+        include_reconciliation_overlap,
+    ) else {
+        return;
+    };
+
+    warn!(
+        "p2p",
+        "Requesting source-majority recovery batch after canonical lock conflict",
+        "peer" => peer_address.to_string(),
+        "conflict_height" => conflicting_block.block_index,
+        "local_height" => local_height,
+        "from_height" => from_height,
+        "count" => count as u64
+    );
+    request_blocks_from_connected_peer(
+        config,
+        connected_peers,
+        peer_state_cache,
+        peer_address,
+        session_id,
+        from_height,
+        count,
+    );
+}
+
 fn send_vote_to_requester(
     connected_peers: &PeersArc,
     peer_state_cache: &PeerStateCacheArc,
@@ -6740,6 +6810,15 @@ fn handle_block_message(
             "txs" => block_data.transactions.len() as u64
         );
     } else {
+        request_recovery_batch_after_canonical_lock_conflict(
+            blockchain,
+            connected_peers,
+            peer_state_cache,
+            config,
+            peer_address,
+            session_id,
+            &block_data,
+        );
         debug!(
             "p2p",
             "Block ignored (duplicate/out-of-order)",
