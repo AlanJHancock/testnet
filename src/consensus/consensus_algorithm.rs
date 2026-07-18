@@ -1248,10 +1248,10 @@ impl ProofOfSynergy {
                             epoch_length,
                             view_offset,
                         );
-                        if !live_active_validators
+                        let selected_validator_live = live_active_validators
                             .iter()
-                            .any(|validator| validator.address == selected_validator.address)
-                        {
+                            .any(|validator| validator.address == selected_validator.address);
+                        if !selected_validator_live {
                             warn!(
                                 "consensus",
                                 "Scheduled leader is not locally visible; preserving canonical leader selection",
@@ -1262,6 +1262,16 @@ impl ProofOfSynergy {
                                 "view_offset" => view_offset
                             );
                         }
+                        let selected_validator = Self::select_live_leader_after_view_timeout(
+                            selected_validator,
+                            &active_validators,
+                            &live_active_validators,
+                            next_block_index,
+                            &synergy_calculator,
+                            &epoch_randomness,
+                            epoch_length,
+                            view_offset,
+                        );
                         let selected_validator = Self::prefer_local_vote_lock_leader(
                             selected_validator,
                             &active_validators,
@@ -3782,6 +3792,57 @@ impl ProofOfSynergy {
             block_in_epoch,
             selected_validator.address
         );
+        selected_validator
+    }
+
+    fn select_live_leader_after_view_timeout(
+        selected_validator: Validator,
+        active_validators: &[Validator],
+        live_validators: &[Validator],
+        block_height: u64,
+        synergy_calculator: &Arc<SynergyScoreCalculator>,
+        epoch_randomness: &[u8],
+        epoch_length: u64,
+        view_offset: usize,
+    ) -> Validator {
+        if view_offset == 0
+            || live_validators.is_empty()
+            || live_validators
+                .iter()
+                .any(|validator| validator.address == selected_validator.address)
+        {
+            return selected_validator;
+        }
+
+        for extra_offset in 1..=active_validators.len() {
+            let candidate_view_offset = view_offset.saturating_add(extra_offset);
+            let candidate = Self::select_leader_for_block(
+                active_validators,
+                block_height,
+                synergy_calculator,
+                epoch_randomness,
+                epoch_length,
+                candidate_view_offset,
+            );
+            if live_validators
+                .iter()
+                .any(|validator| validator.address == candidate.address)
+            {
+                warn!(
+                    "consensus",
+                    "Skipping non-live scheduled leader after shared view timeout",
+                    "offline_scheduled_leader" => selected_validator.address.clone(),
+                    "fallback_leader" => candidate.address.clone(),
+                    "block_height" => block_height,
+                    "view_offset" => view_offset,
+                    "fallback_view_offset" => candidate_view_offset,
+                    "live_validators" => live_validators.len() as u64,
+                    "active_validators" => active_validators.len() as u64
+                );
+                return candidate;
+            }
+        }
+
         selected_validator
     }
 
@@ -6749,6 +6810,73 @@ mod tests {
         assert!(
             view_advanced_to_different_active_validator,
             "deterministic view advance must move past an unresponsive scheduled proposer"
+        );
+    }
+
+    #[test]
+    fn view_timeout_falls_forward_to_live_leader_when_scheduled_leader_is_offline() {
+        let _guard = proposal_cache_test_lock()
+            .lock()
+            .expect("leader rotation test lock should succeed");
+        let manager = Arc::new(ValidatorManager::new());
+        let pqc_manager = Arc::new(Mutex::new(PQCManager::new()));
+        let synergy_calculator = Arc::new(SynergyScoreCalculator::new(
+            Arc::clone(&manager),
+            Arc::clone(&pqc_manager),
+        ));
+        let epoch_randomness = vec![17; 32];
+        let build_validator = |address: &str| {
+            let mut validator = Validator::new(
+                address.to_string(),
+                format!("{address}-pubkey"),
+                address.to_string(),
+                1_000,
+            );
+            validator.status = ValidatorStatus::Active;
+            validator
+        };
+        let validators = vec![
+            build_validator("synv1active0"),
+            build_validator("synv1active1"),
+            build_validator("synv1active2"),
+            build_validator("synv1active3"),
+            build_validator("synv1active4"),
+        ];
+
+        *EPOCH_LEADER_ROTATION
+            .lock()
+            .expect("rotation lock should succeed") = (0, Vec::new(), 0, Vec::new());
+        let offline_scheduled = ProofOfSynergy::select_leader_for_block(
+            &validators,
+            126,
+            &synergy_calculator,
+            &epoch_randomness,
+            1_000,
+            1,
+        );
+        let live_validators = validators
+            .iter()
+            .filter(|validator| validator.address != offline_scheduled.address)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let selected = ProofOfSynergy::select_live_leader_after_view_timeout(
+            offline_scheduled.clone(),
+            &validators,
+            &live_validators,
+            126,
+            &synergy_calculator,
+            &epoch_randomness,
+            1_000,
+            1,
+        );
+
+        assert_ne!(selected.address, offline_scheduled.address);
+        assert!(
+            live_validators
+                .iter()
+                .any(|validator| validator.address == selected.address),
+            "fallback leader must come from the locally live active validator set"
         );
     }
 
