@@ -1,34 +1,26 @@
-//! # Falcon Shim
-//!
-//! **WARNING:** This is a placeholder/stub. Do NOT use for real cryptography
-//! or production deployment until this module is replaced with the final pure
-//! Rust implementation of Falcon.
+use pqcrypto::sign::falcon512;
+use pqcrypto::prelude::*;
 
-// Based on Falcon-512
 pub const FALCON_PUBLIC_KEY_BYTES: usize = 897;
 pub const FALCON_SECRET_KEY_BYTES: usize = 1281;
-pub const FALCON_SIGNATURE_BYTES: usize = 666; // This can vary
+pub const FALCON_SIGNATURE_BYTES: usize = 666;
 
-/// A placeholder for Falcon key generation.
-/// Returns a tuple of (public_key, secret_key) with fixed-size zeroed vectors.
-pub fn keygen() -> (Vec<u8>, Vec<u8>) {
-    // TODO: Replace with real rusty-falcon keygen when ready
-    (
-        vec![0u8; FALCON_PUBLIC_KEY_BYTES],
-        vec![0u8; FALCON_SECRET_KEY_BYTES],
-    )
+pub fn keygen() -> Result<(Vec<u8>, Vec<u8>), String> {
+    let (pk, sk) = falcon512::keypair();
+    Ok((pk.as_bytes().to_vec(), sk.as_bytes().to_vec()))
 }
 
-/// A placeholder for Falcon signing.
-/// Returns a fixed-size zeroed vector for the signature.
-pub fn sign(_msg: &[u8], _sk: &[u8]) -> Vec<u8> {
-    // TODO: Replace with real rusty-falcon sign when ready
-    vec![0u8; FALCON_SIGNATURE_BYTES]
+pub fn sign(msg: &[u8], sk_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let sk = falcon512::SecretKey::from_bytes(sk_bytes)
+        .map_err(|e| format!("Invalid secret key: {:?}", e))?;
+    let sig = falcon512::detached_sign(msg, &sk);
+    Ok(sig.as_bytes().to_vec())
 }
 
-/// A placeholder for Falcon signature verification.
-/// Always returns `true`.
-pub fn verify(_msg: &[u8], _sig: &[u8], _pk: &[u8]) -> bool {
-    // TODO: Replace with real rusty-falcon verify when ready
-    true
+pub fn verify(msg: &[u8], sig_bytes: &[u8], pk_bytes: &[u8]) -> Result<bool, String> {
+    let pk = falcon512::PublicKey::from_bytes(pk_bytes)
+        .map_err(|e| format!("Invalid public key: {:?}", e))?;
+    let sig = falcon512::DetachedSignature::from_bytes(sig_bytes)
+        .map_err(|e| format!("Invalid signature: {:?}", e))?;
+    Ok(falcon512::verify_detached_signature(&sig, msg, &pk).is_ok())
 }

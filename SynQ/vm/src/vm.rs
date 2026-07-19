@@ -1,12 +1,31 @@
 use std::collections::HashMap;
 use super::opcode::{OpCode, VMError};
+use ruint::aliases::U256;
+#[cfg(feature = "native")]
 use pqc_shims::{dilithium, kyber, falcon, sphincs};
+
+// ── PR-B constants ──────────────────────────────────────────────────────────
+
+/// Default maximum execution steps per call_function() invocation.
+/// 1,000,000 steps is generous for any real contract but terminates
+/// infinite loops in bounded time (milliseconds at native speed).
+pub const DEFAULT_MAX_STEPS: usize = 1_000_000;
+
+/// Default maximum call-stack depth enforced at runtime.
+/// Matches the compile-time MAX_CALL_DEPTH = 64 in compiler/src/lib.rs —
+/// belt-and-suspenders: the compiler rejects obvious infinite recursion
+/// statically; this catches anything that slips through at runtime.
+pub const DEFAULT_MAX_CALL_DEPTH: usize = 64;
 
 // Value types that can be stored on the stack
 #[derive(Debug, Clone)]
 pub enum Value {
     I32(i32),
     I64(i64),
+    /// UInt256 values — covers up to 2^128 (full realistic token supply range).
+    U128(u128),
+    /// Full 256-bit unsigned integer (Ethereum address, real UInt256).
+    U256(U256),
     Bytes(Vec<u8>),
     Bool(bool),
 }
@@ -27,18 +46,64 @@ impl Value {
         }
     }
 
-    pub fn as_bytes(&self) -> Result<&[u8], VMError> {
+    /// Coerce to u128. I32 values >= 0 are promoted automatically so
+    /// mixed-type arithmetic (i32 literal + UInt256 state var) just works.
+    pub fn as_u128(&self) -> Result<u128, VMError> {
         match self {
-            Value::Bytes(v) => Ok(v),
-            _ => Err(VMError::RuntimeError("Expected bytes".to_string())),
+            Value::U128(v) => Ok(*v),
+            Value::U256(v) => {
+                let u128_max = U256::from(u128::MAX);
+                if *v > u128_max {
+                    return Err(VMError::RuntimeError(
+                        "Value too large for u128 operation".to_string()));
+                }
+                Ok(v.wrapping_to::<u128>())
+            }
+            Value::I32(v) if *v >= 0 => Ok(*v as u128),
+            _ => Err(VMError::RuntimeError("Expected UInt256 (u128)".to_string())),
+        }
+    }
+
+    pub fn as_u256(&self) -> Result<U256, VMError> {
+        match self {
+            Value::U256(v) => Ok(*v),
+            Value::U128(v) => Ok(U256::from(*v)),
+            Value::I32(v) if *v >= 0 => Ok(U256::from(*v as u128)),
+            Value::Bool(b) => Ok(if *b { U256::from(1u32) } else { U256::ZERO }),
+            _ => Err(VMError::RuntimeError("Expected UInt256".to_string())),
         }
     }
 
     pub fn as_bool(&self) -> Result<bool, VMError> {
         match self {
-            Value::Bool(v) => Ok(*v),
-            Value::I32(v) => Ok(*v != 0),
+            Value::Bool(b) => Ok(*b),
+            Value::I32(v)  => Ok(*v != 0),
             _ => Err(VMError::RuntimeError("Expected bool".to_string())),
+        }
+    }
+
+    pub fn as_bytes(&self) -> Result<&[u8], VMError> {
+        match self {
+            Value::Bytes(b) => Ok(b),
+            _ => Err(VMError::RuntimeError("Expected bytes".to_string())),
+        }
+    }
+
+    /// True if this value is a large uint or can be promoted to one.
+    fn is_uint_compat(&self) -> bool {
+        matches!(self, Value::U256(_) | Value::U128(_) | Value::I32(_) | Value::Bool(_))
+    }
+
+    /// Convert to a canonical Value: shrink U256→U128→I32 when it fits.
+    fn from_u256_shrink(v: U256) -> Value {
+        let u128_max = U256::from(u128::MAX);
+        let i32_max  = U256::from(i32::MAX as u64);
+        if v <= i32_max {
+            Value::I32(v.wrapping_to::<u128>() as i32)
+        } else if v <= u128_max {
+            Value::U128(v.wrapping_to::<u128>())
+        } else {
+            Value::U256(v)
         }
     }
 }
@@ -81,28 +146,149 @@ impl Header {
     }
 }
 
+/// A single entry in the function dispatch table.
+#[derive(Debug, Clone)]
+pub struct FunctionEntry {
+    pub name: String,
+    pub address: u32,
+    pub param_addresses: Vec<u32>,
+    pub has_return: bool,
+    pub requires_caller: bool,
+    pub capabilities: Vec<String>,
+}
+
+fn parse_function_table(data: &[u8]) -> Result<HashMap<String, FunctionEntry>, VMError> {
+    let mut table = HashMap::new();
+    if data.len() < 4 {
+        return Ok(table);
+    }
+    let mut pos = 0usize;
+    let read_u32 = |data: &[u8], pos: &mut usize| -> Result<u32, VMError> {
+        if *pos + 4 > data.len() {
+            return Err(VMError::InvalidBytecode("truncated function table".to_string()));
+        }
+        let bytes = [data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]];
+        *pos += 4;
+        Ok(u32::from_le_bytes(bytes))
+    };
+
+    let count = read_u32(data, &mut pos)?;
+    for _ in 0..count {
+        let name_len = read_u32(data, &mut pos)? as usize;
+        if pos + name_len > data.len() {
+            return Err(VMError::InvalidBytecode("truncated function name".to_string()));
+        }
+        let name = String::from_utf8_lossy(&data[pos..pos + name_len]).to_string();
+        pos += name_len;
+
+        let address = read_u32(data, &mut pos)?;
+        let param_count = read_u32(data, &mut pos)? as usize;
+        let mut param_addresses = Vec::with_capacity(param_count);
+        for _ in 0..param_count {
+            param_addresses.push(read_u32(data, &mut pos)?);
+        }
+        if pos >= data.len() {
+            return Err(VMError::InvalidBytecode("truncated has_return flag".to_string()));
+        }
+        let has_return = data[pos] != 0;
+        pos += 1;
+
+        // Extended fields: requires_caller (1 byte) + cap_count (4 bytes LE) + cap strings
+        let requires_caller = if pos < data.len() { data[pos] != 0 } else { false };
+        if pos < data.len() { pos += 1; }
+
+        let cap_count = if pos + 4 <= data.len() {
+            let n = read_u32(data, &mut pos)? as usize;
+            n
+        } else {
+            0
+        };
+        let mut capabilities = Vec::with_capacity(cap_count);
+        for _ in 0..cap_count {
+            let cap_len = read_u32(data, &mut pos)? as usize;
+            if pos + cap_len > data.len() {
+                return Err(VMError::InvalidBytecode("truncated capability name".to_string()));
+            }
+            let cap_name = String::from_utf8_lossy(&data[pos..pos + cap_len]).to_string();
+            pos += cap_len;
+            capabilities.push(cap_name);
+        }
+
+        table.insert(name.clone(), FunctionEntry {
+            name, address, param_addresses, has_return, requires_caller, capabilities
+        });
+    }
+
+    Ok(table)
+}
+
+// ── PR-B Item 1: Per-call stack frame ───────────────────────────────────────
+//
+// Each Call opcode pushes a CallFrame onto call_stack. Return pops it and
+// restores pc. The frame carries no cloned memory — the compiler already
+// assigns disjoint address blocks per function (state vars at low addresses,
+// each function's locals/params at a unique higher range) so there is no
+// aliasing between frames. This is the simplest correct design given the
+// existing compiler address layout.
+//
+// call_function() (the external API) uses a separate snapshot/rollback
+// mechanism (PR-B Item 2) on the full memory, which subsumes any frame
+// isolation concern for the top-level call.
+#[derive(Debug, Clone)]
+struct CallFrame {
+    /// The PC to return to when this frame's Return opcode fires.
+    return_pc: usize,
+}
 
 // The main VM struct
 pub struct QuantumVM {
+    pub extern_call_handler: Option<std::sync::Arc<dyn Fn(&str, &str, &[Value]) -> Result<Option<Value>, VMError> + Send + Sync>>,
+    pub call_context: CallContext,
+
     pub stack: Vec<Value>,
-    memory: HashMap<usize, Value>,
+    pub memory:             HashMap<usize, Value>,
+    /// Maximum distinct memory addresses per session (PR-F Item 3). Default: 1024.
+    pub max_memory_entries: usize,
     code: Vec<u8>,
     data: Vec<u8>,
     pc: usize,
-    call_stack: Vec<usize>,
+    /// PR-B Item 1: call stack now carries full CallFrame structs, not bare PCs.
+    call_stack: Vec<CallFrame>,
     halted: bool,
+    functions: HashMap<String, FunctionEntry>,
+
+    // ── PR-B Item 3: step limit ─────────────────────────────────────────────
+    /// Steps executed in the current call_function() invocation.
+    /// Reset to 0 at the start of each call_function() call.
+    steps: usize,
+    /// Hard limit on steps per invocation.  Default: DEFAULT_MAX_STEPS.
+    /// Set this before calling call_function() to override.
+    pub max_steps: usize,
+
+    // ── PR-B Item 4: runtime call depth guard ──────────────────────────────
+    /// Hard limit on call_stack depth enforced at the Call opcode.
+    /// Default: DEFAULT_MAX_CALL_DEPTH.
+    pub max_call_depth: usize,
 }
 
 impl QuantumVM {
     pub fn new() -> Self {
         QuantumVM {
+            extern_call_handler: None,
+            call_context: CallContext::anonymous(),
+
             stack: Vec::new(),
-            memory: HashMap::new(),
+            memory:             HashMap::new(),
+            max_memory_entries: 1024,
             code: Vec::new(),
             data: Vec::new(),
             pc: 0,
             call_stack: Vec::new(),
             halted: false,
+            functions: HashMap::new(),
+            steps: 0,
+            max_steps: DEFAULT_MAX_STEPS,
+            max_call_depth: DEFAULT_MAX_CALL_DEPTH,
         }
     }
 
@@ -110,24 +296,109 @@ impl QuantumVM {
         let header = Header::parse(bytecode)?;
 
         let header_end = header.header_length as usize;
-        let code_end = header_end + header.code_length as usize;
-        let data_end = code_end + header.data_length as usize;
+        let code_end   = header_end + header.code_length as usize;
+        let data_end   = code_end   + header.data_length as usize;
 
         if bytecode.len() < data_end {
             return Err(VMError::InvalidBytecode("Bytecode too short".to_string()));
         }
 
-        self.code = bytecode[header_end..code_end].to_vec();
-        self.data = bytecode[code_end..data_end].to_vec();
-        self.pc = 0;
+        self.code  = bytecode[header_end..code_end].to_vec();
+        self.data  = bytecode[code_end..data_end].to_vec();
+        self.pc    = 0;
         self.halted = false;
+        self.steps  = 0;  // reset step counter on fresh load
+        self.functions = parse_function_table(&self.data)?;
 
         Ok(())
     }
 
+    pub fn list_functions(&self) -> Vec<String> {
+        self.functions.keys().cloned().collect()
+    }
+
+    pub fn call_function(&mut self, name: &str, args: &[Value]) -> Result<Option<Value>, VMError> {
+        let entry = self
+            .functions
+            .get(name)
+            .cloned()
+            .ok_or_else(|| VMError::RuntimeError(format!("Unknown function: {}", name)))?;
+
+        if args.len() != entry.param_addresses.len() {
+            return Err(VMError::RuntimeError(format!(
+                "Function '{}' expects {} argument(s), got {}",
+                name, entry.param_addresses.len(), args.len()
+            )));
+        }
+
+        // ── PR-B Item 2: snapshot memory before any mutations ───────────────
+        // On ANY error (Revert, RuntimeError, overflow, etc.) we restore the
+        // snapshot so partial state changes from a failed call never persist.
+        // This matches EVM atomicity: a reverted transaction leaves no trace.
+        let snapshot = self.memory.clone();
+
+        // Clear any residual stack state from a previous call so each
+        // top-level call_function invocation starts with a clean stack.
+        self.stack.clear();
+        self.call_stack.clear();
+        self.halted = false;
+
+        // Write params into memory
+        for (addr, value) in entry.param_addresses.iter().zip(args.iter()) {
+            self.memory.insert(*addr as usize, value.clone());
+        }
+
+        let sentinel = self.code.len();
+        self.call_stack.push(CallFrame { return_pc: sentinel });
+        self.pc = entry.address as usize;
+        self.halted = false;
+        // ── PR-B Item 3: reset step counter for this invocation ─────────────
+        self.steps = 0;
+
+        let result = loop {
+            if self.halted {
+                break Ok(());
+            }
+            if self.pc == sentinel {
+                self.halted = true;
+                break Ok(());
+            }
+            if self.pc >= self.code.len() {
+                break Err(VMError::InvalidAddress(self.pc));
+            }
+            match self.execute_instruction() {
+                Ok(()) => {}
+                Err(e) => break Err(e),
+            }
+        };
+
+        match result {
+            Ok(()) => Ok(self.stack.pop()),
+            Err(e) => {
+                // ── PR-B Item 2: rollback on any error ──────────────────────
+                self.memory = snapshot;
+                // Clean up any dangling call frames from this invocation
+                self.call_stack.clear();
+                self.stack.clear();
+                Err(e)
+            }
+        }
+    }
+
     pub fn execute(&mut self) -> Result<(), VMError> {
-        while !self.halted && self.pc < self.code.len() {
-            self.execute_instruction()?;
+        self.steps = 0;
+        let snapshot = self.memory.clone();
+        loop {
+            if self.halted || self.pc >= self.code.len() {
+                break;
+            }
+            match self.execute_instruction() {
+                Ok(()) => {}
+                Err(e) => {
+                    self.memory = snapshot;
+                    return Err(e);
+                }
+            }
         }
         Ok(())
     }
@@ -135,6 +406,12 @@ impl QuantumVM {
     fn execute_instruction(&mut self) -> Result<(), VMError> {
         if self.pc >= self.code.len() {
             return Err(VMError::InvalidAddress(self.pc));
+        }
+
+        // ── PR-B Item 3: step counter / gas analogue ────────────────────────
+        self.steps += 1;
+        if self.steps > self.max_steps {
+            return Err(VMError::StepLimitExceeded(self.max_steps));
         }
 
         let opcode = OpCode::try_from(self.code[self.pc])?;
@@ -145,9 +422,7 @@ impl QuantumVM {
                 let value = self.read_i32()?;
                 self.push(Value::I32(value))?;
             }
-            OpCode::Pop => {
-                self.pop()?;
-            }
+            OpCode::Pop => { self.pop()?; }
             OpCode::Dup => {
                 let value = self.peek()?.clone();
                 self.push(value)?;
@@ -158,59 +433,144 @@ impl QuantumVM {
                 self.push(a)?;
                 self.push(b)?;
             }
+
+            // ── Arithmetic — handles I32, U128, and U256 ───────────────────
             OpCode::Add => {
-                let b = self.pop()?.as_i32()?;
-                let a = self.pop()?.as_i32()?;
-                self.push(Value::I32(a + b))?;
+                let b = self.pop()?;
+                let a = self.pop()?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    let av = a.as_u256()?;
+                    let bv = b.as_u256()?;
+                    let result = av.checked_add(bv)
+                        .ok_or_else(|| VMError::RuntimeError(format!(
+                            "UInt256 overflow on Add: {} + {} exceeds 2²⁵⁶−1 (max UInt256)", av, bv)))?;
+                    self.push(Value::from_u256_shrink(result))?;
+                } else {
+                    return Err(VMError::RuntimeError("Add: expected numeric value".to_string()));
+                }
             }
             OpCode::Sub => {
-                let b = self.pop()?.as_i32()?;
-                let a = self.pop()?.as_i32()?;
-                self.push(Value::I32(a - b))?;
+                let b = self.pop()?;
+                let a = self.pop()?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    let av = a.as_u256()?;
+                    let bv = b.as_u256()?;
+                    let result = av.checked_sub(bv)
+                        .ok_or_else(|| VMError::RuntimeError(
+                            format!("UInt256 underflow on Sub: {} - {} would be negative", av, bv)))?;
+                    self.push(Value::from_u256_shrink(result))?;
+                } else {
+                    return Err(VMError::RuntimeError("Sub: expected numeric value".to_string()));
+                }
             }
             OpCode::Mul => {
-                let b = self.pop()?.as_i32()?;
-                let a = self.pop()?.as_i32()?;
-                self.push(Value::I32(a * b))?;
+                let b = self.pop()?;
+                let a = self.pop()?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    let av = a.as_u256()?;
+                    let bv = b.as_u256()?;
+                    let result = av.checked_mul(bv)
+                        .ok_or_else(|| VMError::RuntimeError(format!(
+                            "UInt256 overflow on Mul: {} × {} exceeds 2²⁵⁶−1 (max UInt256)", av, bv)))?;
+                    self.push(Value::from_u256_shrink(result))?;
+                } else {
+                    return Err(VMError::RuntimeError("Mul: expected numeric value".to_string()));
+                }
             }
             OpCode::Div => {
-                let b = self.pop()?.as_i32()?;
-                let a = self.pop()?.as_i32()?;
-                if b == 0 {
-                    return Err(VMError::RuntimeError("Division by zero".to_string()));
+                let b = self.pop()?;
+                let a = self.pop()?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    let av = a.as_u256()?;
+                    let bv = b.as_u256()?;
+                    if bv == U256::ZERO {
+                        return Err(VMError::RuntimeError(format!("Division by zero: {} / 0 is undefined", av)));
+                    }
+                    let result = av.checked_div(bv)
+                        .ok_or_else(|| VMError::RuntimeError(format!(
+                            "UInt256 Div error: {} / {} failed", av, bv)))?;
+                    self.push(Value::from_u256_shrink(result))?;
+                } else {
+                    return Err(VMError::RuntimeError("Div: expected numeric value".to_string()));
                 }
-                self.push(Value::I32(a / b))?;
             }
+            OpCode::Rem => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    let av = a.as_u256()?;
+                    let bv = b.as_u256()?;
+                    if bv == U256::ZERO {
+                        return Err(VMError::RuntimeError(format!("Remainder by zero: {} % 0 is undefined", av)));
+                    }
+                    let result = av.checked_rem(bv)
+                        .ok_or_else(|| VMError::RuntimeError(format!(
+                            "UInt256 Rem error: {} % {} failed", av, bv)))?;
+                    self.push(Value::from_u256_shrink(result))?;
+                } else {
+                    return Err(VMError::RuntimeError("Rem: expected numeric value".to_string()));
+                }
+            }
+
+            // ── Comparison ─────────────────────────────────────────────────
             OpCode::Eq => {
-                let b = self.pop()?.as_i32()?;
-                let a = self.pop()?.as_i32()?;
-                self.push(Value::Bool(a == b))?;
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let result = if a.is_uint_compat() && b.is_uint_compat() {
+                    a.as_u256()? == b.as_u256()?
+                } else {
+                    matches!((&a, &b), (Value::Bool(x), Value::Bool(y)) if x == y)
+                };
+                self.push(Value::Bool(result))?;
             }
             OpCode::Ne => {
-                let b = self.pop()?.as_i32()?;
-                let a = self.pop()?.as_i32()?;
-                self.push(Value::Bool(a != b))?;
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let result = if a.is_uint_compat() && b.is_uint_compat() {
+                    a.as_u256()? != b.as_u256()?
+                } else {
+                    !matches!((&a, &b), (Value::Bool(x), Value::Bool(y)) if x == y)
+                };
+                self.push(Value::Bool(result))?;
             }
             OpCode::Lt => {
-                let b = self.pop()?.as_i32()?;
-                let a = self.pop()?.as_i32()?;
-                self.push(Value::Bool(a < b))?;
+                let b = self.pop()?;
+                let a = self.pop()?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    self.push(Value::Bool(a.as_u256()? < b.as_u256()?))?;
+                } else {
+                    return Err(VMError::RuntimeError("Lt: expected numeric value".to_string()));
+                }
             }
             OpCode::Le => {
-                let b = self.pop()?.as_i32()?;
-                let a = self.pop()?.as_i32()?;
-                self.push(Value::Bool(a <= b))?;
+                let b = self.pop()?;
+                let a = self.pop()?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    self.push(Value::Bool(a.as_u256()? <= b.as_u256()?))?;
+                } else {
+                    return Err(VMError::RuntimeError("Le: expected numeric value".to_string()));
+                }
             }
             OpCode::Gt => {
-                let b = self.pop()?.as_i32()?;
-                let a = self.pop()?.as_i32()?;
-                self.push(Value::Bool(a > b))?;
+                let b = self.pop()?;
+                let a = self.pop()?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    self.push(Value::Bool(a.as_u256()? > b.as_u256()?))?;
+                } else {
+                    return Err(VMError::RuntimeError("Gt: expected numeric value".to_string()));
+                }
             }
             OpCode::Ge => {
-                let b = self.pop()?.as_i32()?;
-                let a = self.pop()?.as_i32()?;
-                self.push(Value::Bool(a >= b))?;
+                let b = self.pop()?;
+                let a = self.pop()?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    self.push(Value::Bool(a.as_u256()? >= b.as_u256()?))?;
+                } else {
+                    return Err(VMError::RuntimeError("Ge: expected numeric value".to_string()));
+                }
             }
+
+            // ── Control flow ───────────────────────────────────────────────
             OpCode::Jump => {
                 let addr = self.read_u32()? as usize;
                 if addr >= self.code.len() {
@@ -233,72 +593,191 @@ impl QuantumVM {
                 if addr >= self.code.len() {
                     return Err(VMError::InvalidAddress(addr));
                 }
-                self.call_stack.push(self.pc);
+                // ── PR-B Item 4: runtime call depth guard ───────────────────
+                // Belt-and-suspenders over the compile-time MAX_CALL_DEPTH = 64.
+                // The compiler rejects obvious infinite recursion statically;
+                // this catches anything that slips through at runtime.
+                if self.call_stack.len() >= self.max_call_depth {
+                    return Err(VMError::RuntimeError(format!(
+                        "call depth limit exceeded ({} frames): possible unbounded recursion",
+                        self.max_call_depth
+                    )));
+                }
+                // ── PR-B Item 1: push a proper CallFrame ────────────────────
+                self.call_stack.push(CallFrame { return_pc: self.pc });
                 self.pc = addr;
             }
             OpCode::Return => {
-                if let Some(return_addr) = self.call_stack.pop() {
-                    self.pc = return_addr;
+                // ── PR-B Item 1: pop the CallFrame, restore pc ──────────────
+                if let Some(frame) = self.call_stack.pop() {
+                    self.pc = frame.return_pc;
                 } else {
-                    return Err(VMError::RuntimeError("Return without call".to_string()));
+                    self.halted = true;
                 }
             }
+
+            // ── Memory ─────────────────────────────────────────────────────
             OpCode::Load => {
                 let addr = self.pop()?.as_i32()? as usize;
-                if let Some(value) = self.memory.get(&addr) {
-                    self.push(value.clone())?;
-                } else {
-                    return Err(VMError::InvalidAddress(addr));
-                }
+                let value = self.memory.get(&addr).cloned().unwrap_or(Value::I32(0));
+                self.push(value)?;
             }
             OpCode::Store => {
-                let addr = self.pop()?.as_i32()? as usize;
+                let addr  = self.pop()?.as_i32()? as usize;
                 let value = self.pop()?;
+                // PR-F Item 3: enforce per-session memory cap
+                if !self.memory.contains_key(&addr) && self.memory.len() >= self.max_memory_entries {
+                    return Err(VMError::RuntimeError(format!(
+                        "memory cap exceeded: max {} distinct addresses per session",
+                        self.max_memory_entries
+                    )));
+                }
                 self.memory.insert(addr, value);
             }
             OpCode::LoadImm => {
+                // Raw bytes (strings, PQC keys)
                 let len = self.read_u32()? as usize;
                 let bytes = self.read_bytes(len)?;
                 self.push(Value::Bytes(bytes))?;
             }
+            OpCode::LoadImm128 => {
+                // 16 big-endian bytes → Value::U128  (UInt256 literals ≤ 2^128)
+                let bytes = self.read_bytes(16)?;
+                let v = u128::from_be_bytes(bytes.try_into().unwrap());
+                self.push(Value::U128(v))?;
+            }
+            OpCode::LoadImm256 => {
+                // 32 big-endian bytes → Value::U256  (full Ethereum address / real UInt256)
+                let bytes = self.read_bytes(32)?;
+                let v = U256::from_be_bytes::<32>(bytes.try_into().unwrap());
+                self.push(Value::from_u256_shrink(v))?;
+            }
+            OpCode::LoadCaller => {
+                // ── G2: UMA stub (§20.5.3, §20.2.1) ───────────────────────
+                // Per spec: identities are referenced via UMA, not raw keys.
+                // Key material is an implementation detail, not the identity.
+                //
+                // Testnet stub: UMA = keccak256(b"UMA:" || evm_address)[12..]
+                // This is deterministic, publicly derivable, and structurally
+                // distinct from the raw EVM address — satisfying UMA invariants
+                // U-6 (deterministic/reproducible) and U-2 (key-independent).
+                //
+                // Mainnet: replace with UMA registry resolution.
+                // The opcode interface is unchanged — contracts see a U256
+                // UMA identifier regardless of underlying derivation method.
+                let uma = {
+                    use sha3::{Digest, Keccak256};
+                    let mut input = [0u8; 24]; // b"UMA:" (4) + address (20)
+                    input[0..4].copy_from_slice(b"UMA:");
+                    input[4..24].copy_from_slice(&self.call_context.caller);
+                    let digest = Keccak256::digest(&input);
+                    let digest: [u8; 32] = digest.into();
+                    // Take last 20 bytes (same layout as EVM address in U256)
+                    let mut b = [0u8; 32];
+                    b[12..32].copy_from_slice(&digest[12..32]);
+                    U256::from_be_bytes::<32>(b)
+                };
+                self.stack.push(Value::U256(uma));
+            }
+
+            // ── PQC ────────────────────────────────────────────────────────
+#[cfg(feature = "native")]
             OpCode::DilithiumVerify => {
                 let public_key = self.pop()?.as_bytes()?.to_vec();
-                let message = self.pop()?.as_bytes()?.to_vec();
-                let signature = self.pop()?.as_bytes()?.to_vec();
-
+                let message    = self.pop()?.as_bytes()?.to_vec();
+                let signature  = self.pop()?.as_bytes()?.to_vec();
                 let result = dilithium::verify(&message, &signature, &public_key);
-                self.push(Value::Bool(result))?;
+                self.push(Value::Bool(result.unwrap_or(false)))?;
             }
             OpCode::KyberKeyExchange => {
-                // This opcode performs decapsulation as per the spec.
                 let private_key = self.pop()?.as_bytes()?.to_vec();
-                let ciphertext = self.pop()?.as_bytes()?.to_vec();
-
-                let shared_secret = kyber::decaps(&ciphertext, &private_key);
+                let ciphertext  = self.pop()?.as_bytes()?.to_vec();
+                let shared_secret = kyber::decaps(&ciphertext, &private_key)
+                    .map_err(VMError::RuntimeError)?;
                 self.push(Value::Bytes(shared_secret))?;
             }
             OpCode::FalconVerify => {
                 let public_key = self.pop()?.as_bytes()?.to_vec();
-                let message = self.pop()?.as_bytes()?.to_vec();
-                let signature = self.pop()?.as_bytes()?.to_vec();
-
+                let message    = self.pop()?.as_bytes()?.to_vec();
+                let signature  = self.pop()?.as_bytes()?.to_vec();
                 let result = falcon::verify(&message, &signature, &public_key);
-                self.push(Value::Bool(result))?;
+                self.push(Value::Bool(result.unwrap_or(false)))?;
             }
             OpCode::SphincsVerify => {
                 let public_key = self.pop()?.as_bytes()?.to_vec();
-                let message = self.pop()?.as_bytes()?.to_vec();
-                let signature = self.pop()?.as_bytes()?.to_vec();
-
+                let message    = self.pop()?.as_bytes()?.to_vec();
+                let signature  = self.pop()?.as_bytes()?.to_vec();
                 let result = sphincs::verify(&message, &signature, &public_key);
-                self.push(Value::Bool(result))?;
+                self.push(Value::Bool(result.unwrap_or(false)))?;
             }
+#[cfg(not(feature = "native"))]
+            OpCode::DilithiumVerify | OpCode::KyberKeyExchange |
+            OpCode::FalconVerify    | OpCode::SphincsVerify => {
+                return Err(VMError::RuntimeError(
+                    "PQC opcodes require native build — use synq-server for signing".into()
+                ));
+            }
+            // ── ExternCall (0x60): call function on another workspace contract ─────
+            OpCode::ExternCall => {
+                let _ec_start_pc = self.pc - 1;
+                eprintln!("[SynQ EC] at pc={} code_len={} stack_len={}", _ec_start_pc, self.code.len(), self.stack.len());
+                if self.pc + 4 > self.code.len() {
+                    return Err(VMError::InvalidBytecode("ExternCall: truncated contract_len".into()));
+                }
+                let clen = u32::from_le_bytes(self.code[self.pc..self.pc+4].try_into().unwrap()) as usize;
+                eprintln!("[SynQ EC] clen={} bytes_at_pc={:?}", clen, &self.code[self.pc..std::cmp::min(self.pc+16,self.code.len())]);
+                self.pc += 4;
+                if self.pc + clen > self.code.len() {
+                    return Err(VMError::InvalidBytecode("ExternCall: truncated contract name".into()));
+                }
+                let contract_name = String::from_utf8_lossy(&self.code[self.pc..self.pc+clen]).into_owned();
+                self.pc += clen;
+                if self.pc + 4 > self.code.len() {
+                    return Err(VMError::InvalidBytecode("ExternCall: truncated fn_len".into()));
+                }
+                let flen = u32::from_le_bytes(self.code[self.pc..self.pc+4].try_into().unwrap()) as usize;
+                self.pc += 4;
+                if self.pc + flen > self.code.len() {
+                    return Err(VMError::InvalidBytecode("ExternCall: truncated fn name".into()));
+                }
+                let fn_name = String::from_utf8_lossy(&self.code[self.pc..self.pc+flen]).into_owned();
+                self.pc += flen;
+                if self.pc >= self.code.len() {
+                    return Err(VMError::InvalidBytecode("ExternCall: missing arg_count".into()));
+                }
+                let arg_count = self.code[self.pc] as usize;
+                self.pc += 1;
+                let mut args: Vec<Value> = Vec::with_capacity(arg_count);
+                for _ in 0..arg_count {
+                    args.push(self.stack.pop().ok_or_else(|| {
+                        eprintln!("[SynQ debug] ExternCall StackUnderflow: contract='{}' fn='{}' argc={} stack_len={} pc={}", contract_name, fn_name, arg_count, self.stack.len(), self.pc);
+                        VMError::StackUnderflow
+                    })?);
+                }
+                args.reverse();
+                eprintln!("[EC] calling {}.{}({:?})", contract_name, fn_name, args);
+                let result = match &self.extern_call_handler {
+                    Some(h) => h(&contract_name, &fn_name, &args)?,
+                    None    => return Err(VMError::RuntimeError(format!(
+                        "extern_call: no workspace active — '{}' not reachable", contract_name))),
+                };
+                self.stack.push(result.unwrap_or(Value::I32(0)));
+            }
+
             OpCode::Print => {
                 let value = self.pop()?;
                 println!("{:?}", value);
             }
             OpCode::Halt => {
                 self.halted = true;
+            }
+            OpCode::Revert => {
+                // Followed by: 4-byte LE message length + message bytes
+                // Rollback is handled by the call_function() wrapper (PR-B Item 2).
+                let msg_len = self.read_u32()? as usize;
+                let msg_bytes = self.read_bytes(msg_len)?;
+                let msg = String::from_utf8_lossy(&msg_bytes).into_owned();
+                return Err(VMError::Reverted(msg));
             }
         }
 
@@ -314,7 +793,10 @@ impl QuantumVM {
     }
 
     fn pop(&mut self) -> Result<Value, VMError> {
-        self.stack.pop().ok_or(VMError::StackUnderflow)
+        self.stack.pop().ok_or_else(|| {
+            eprintln!("[SynQ debug] StackUnderflow at pc={} stack_len={}", self.pc, self.stack.len());
+            VMError::StackUnderflow
+        })
     }
 
     fn peek(&self) -> Result<&Value, VMError> {
@@ -325,12 +807,8 @@ impl QuantumVM {
         if self.pc + 4 > self.code.len() {
             return Err(VMError::InvalidAddress(self.pc));
         }
-        let bytes = [
-            self.code[self.pc],
-            self.code[self.pc + 1],
-            self.code[self.pc + 2],
-            self.code[self.pc + 3],
-        ];
+        let bytes = [self.code[self.pc], self.code[self.pc+1],
+                     self.code[self.pc+2], self.code[self.pc+3]];
         self.pc += 4;
         Ok(i32::from_le_bytes(bytes))
     }
@@ -339,12 +817,8 @@ impl QuantumVM {
         if self.pc + 4 > self.code.len() {
             return Err(VMError::InvalidAddress(self.pc));
         }
-        let bytes = [
-            self.code[self.pc],
-            self.code[self.pc + 1],
-            self.code[self.pc + 2],
-            self.code[self.pc + 3],
-        ];
+        let bytes = [self.code[self.pc], self.code[self.pc+1],
+                     self.code[self.pc+2], self.code[self.pc+3]];
         self.pc += 4;
         Ok(u32::from_le_bytes(bytes))
     }
@@ -356,5 +830,19 @@ impl QuantumVM {
         let bytes = self.code[self.pc..self.pc + len].to_vec();
         self.pc += len;
         Ok(bytes)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CallContext {
+    pub caller: [u8; 20],
+}
+
+impl CallContext {
+    pub fn from_address(addr: [u8; 20]) -> Self {
+        Self { caller: addr }
+    }
+    pub fn anonymous() -> Self {
+        Self { caller: [0u8; 20] }
     }
 }

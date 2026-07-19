@@ -4,6 +4,7 @@
 //! Provides key encapsulation mechanism for quantum-resistant security.
 
 use pqcrypto::kem::mlkem768;
+use pqcrypto::prelude::*;
 
 /// Kyber-768 public key size in bytes
 pub const KYBER_PUBLIC_KEY_BYTES: usize = 1184;

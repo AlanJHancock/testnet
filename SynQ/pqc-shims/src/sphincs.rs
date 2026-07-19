@@ -1,34 +1,26 @@
-//! # SPHINCS+ Shim
-//!
-//! **WARNING:** This is a placeholder/stub. Do NOT use for real cryptography
-//! or production deployment until this module is replaced with the final pure
-//! Rust implementation of SPHINCS+.
+use pqcrypto::sign::sphincsshake128ssimple;
+use pqcrypto::prelude::*;
 
-// Based on SPHINCS+-SHAKE-128s-simple
 pub const SPHINCS_PUBLIC_KEY_BYTES: usize = 32;
 pub const SPHINCS_SECRET_KEY_BYTES: usize = 64;
 pub const SPHINCS_SIGNATURE_BYTES: usize = 7856;
 
-/// A placeholder for SPHINCS+ key generation.
-/// Returns a tuple of (public_key, secret_key) with fixed-size zeroed vectors.
-pub fn keygen() -> (Vec<u8>, Vec<u8>) {
-    // TODO: Replace with real rusty-sphincs keygen when ready
-    (
-        vec![0u8; SPHINCS_PUBLIC_KEY_BYTES],
-        vec![0u8; SPHINCS_SECRET_KEY_BYTES],
-    )
+pub fn keygen() -> Result<(Vec<u8>, Vec<u8>), String> {
+    let (pk, sk) = sphincsshake128ssimple::keypair();
+    Ok((pk.as_bytes().to_vec(), sk.as_bytes().to_vec()))
 }
 
-/// A placeholder for SPHINCS+ signing.
-/// Returns a fixed-size zeroed vector for the signature.
-pub fn sign(_msg: &[u8], _sk: &[u8]) -> Vec<u8> {
-    // TODO: Replace with real rusty-sphincs sign when ready
-    vec![0u8; SPHINCS_SIGNATURE_BYTES]
+pub fn sign(msg: &[u8], sk_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let sk = sphincsshake128ssimple::SecretKey::from_bytes(sk_bytes)
+        .map_err(|e| format!("Invalid secret key: {:?}", e))?;
+    let sig = sphincsshake128ssimple::detached_sign(msg, &sk);
+    Ok(sig.as_bytes().to_vec())
 }
 
-/// A placeholder for SPHINCS+ signature verification.
-/// Always returns `true`.
-pub fn verify(_msg: &[u8], _sig: &[u8], _pk: &[u8]) -> bool {
-    // TODO: Replace with real rusty-sphincs verify when ready
-    true
+pub fn verify(msg: &[u8], sig_bytes: &[u8], pk_bytes: &[u8]) -> Result<bool, String> {
+    let pk = sphincsshake128ssimple::PublicKey::from_bytes(pk_bytes)
+        .map_err(|e| format!("Invalid public key: {:?}", e))?;
+    let sig = sphincsshake128ssimple::DetachedSignature::from_bytes(sig_bytes)
+        .map_err(|e| format!("Invalid signature: {:?}", e))?;
+    Ok(sphincsshake128ssimple::verify_detached_signature(&sig, msg, &pk).is_ok())
 }
