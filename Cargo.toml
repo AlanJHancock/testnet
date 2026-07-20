@@ -32,6 +32,7 @@ pqrust-hqckem = { path = "synq-language/pqrust/pqrust-hqckem" }
 
 # Random number generation for fallback keypair generation
 rand = "0.8"
+anyhow = ">=1.0.103"  # RUSTSEC-2026-0190: downcast_mut unsoundness, fix in 1.0.103
 
 # Aegis PQVM (when available)
 # aegis-pqvm-precompiles = { path = "./node_modules/aegis-pqvm/evm/precompiles" }
