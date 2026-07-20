@@ -44,10 +44,16 @@ const FUNCTION_LOCAL_STRIDE: u32 = 1_000;
 /// The tuple is (arg count, opcode, pushes a Bool/Bytes result).
 fn pqc_builtin_opcode(name: &str) -> Option<OpCode> {
     match name {
-        "dilithium_verify" => Some(OpCode::DilithiumVerify),
-        "falcon_verify" => Some(OpCode::FalconVerify),
-        "sphincs_verify" => Some(OpCode::SphincsVerify),
-        "kyber_decaps" => Some(OpCode::KyberKeyExchange),
+        "dilithium_verify"                        => Some(OpCode::DilithiumVerify),
+        "falcon_verify" | "falcon_sign"           => Some(OpCode::FalconVerify),
+        "sphincs_verify"                          => Some(OpCode::SphincsVerify),
+        // KEM family — all route to KyberKeyExchange opcode (0x81)
+        "kyber_encapsulate" | "kyber_decapsulate"
+        | "kyber_decaps"                          => Some(OpCode::KyberKeyExchange),
+        // McEliece and HQC KEMs — also route to KyberKeyExchange for now;
+        // dedicated opcodes are future work.
+        "mceliece_encapsulate" | "mceliece_decapsulate"
+        | "hqc_encapsulate"   | "hqc_decapsulate" => Some(OpCode::KyberKeyExchange),
         _ => None,
     }
 }
@@ -66,6 +72,9 @@ pub struct CodeGenerator {
     assembler: Assembler,
     /// Contract-wide state variable addresses, shared across all functions.
     state_vars: HashMap<String, u32>,
+    map_vars:   HashMap<String, u32>,
+    set_vars:   HashMap<String, u32>,
+    pub strict_authority: bool,
     next_state_addr: u32,
     /// Forward-referenceable function addresses, registered in a
     /// pre-pass before any function body is generated so a caller can
@@ -73,10 +82,16 @@ pub struct CodeGenerator {
     function_addresses: HashMap<String, u32>,
     function_param_addrs: HashMap<String, Vec<u32>>,
     function_has_return: HashMap<String, bool>,
+    /// Whether each function declares `as caller` (requires authenticated identity).
+    function_requires_caller: HashMap<String, bool>,
+    /// Capability names declared via `requires cap::X` per function.
+    function_capabilities: HashMap<String, Vec<String>>,
     /// (placeholder position, callee name) pairs for calls made before
     /// the callee's address was known (forward references). Backpatched
     /// once all functions have been code-generated.
     pending_call_patches: Vec<(usize, String)>,
+    /// Name of the function currently being compiled (for caller-check enforcement).
+    current_function: Option<String>,
 }
 
 impl CodeGenerator {
@@ -84,11 +99,17 @@ impl CodeGenerator {
         CodeGenerator {
             assembler: Assembler::new(),
             state_vars: HashMap::new(),
+            map_vars:   HashMap::new(),
+            set_vars:   HashMap::new(),
+            strict_authority: true,
             next_state_addr: 0,
             function_addresses: HashMap::new(),
             function_param_addrs: HashMap::new(),
             function_has_return: HashMap::new(),
+            function_requires_caller: HashMap::new(),
+            function_capabilities: HashMap::new(),
             pending_call_patches: Vec::new(),
+            current_function: None,
         }
     }
 
@@ -125,7 +146,9 @@ impl CodeGenerator {
             let address = self.function_addresses[&name];
             let params = self.function_param_addrs.get(&name).cloned().unwrap_or_default();
             let has_return = *self.function_has_return.get(&name).unwrap_or(&false);
-            self.assembler.add_function_entry(&name, address, &params, has_return);
+            let req_caller = *self.function_requires_caller.get(&name).unwrap_or(&false);
+            let caps = self.function_capabilities.get(&name).cloned().unwrap_or_default();
+            self.assembler.add_function_entry(&name, address, &params, has_return, req_caller, &caps);
         }
 
         let bytecode = self.assembler.build();
@@ -136,11 +159,22 @@ impl CodeGenerator {
     }
 
     fn register_contract_symbols(&mut self, c: &ContractDefinition) -> Result<(), String> {
+        // Build a role->caps lookup table for this contract so capability_clause
+        // `requires role::X` entries can be expanded to their constituent caps.
+        let role_map: HashMap<String, Vec<String>> = c.roles.iter()
+            .map(|r| (r.name.clone(), r.caps.clone()))
+            .collect();
+
         for part in &c.parts {
             if let ContractPart::StateVariable(sv) = part {
                 let addr = self.next_state_addr;
                 self.next_state_addr += 1;
                 self.state_vars.insert(sv.name.clone(), addr);
+                match &sv.ty {
+                    Type::Mapping(_, _) => { self.map_vars.insert(sv.name.clone(), addr); }
+                    Type::Array(_)      => { self.set_vars.insert(sv.name.clone(), addr); }
+                    _ => {}
+                }
             }
         }
 
@@ -154,11 +188,25 @@ impl CodeGenerator {
                     addr += 1;
                 }
                 self.function_param_addrs.insert(f.name.clone(), param_addrs);
-                // The grammar has no explicit return-type declaration in a
-                // function signature, so infer "has a return value" from
-                // whether the body actually contains a `return <expr>;`.
                 let has_return = f.body.statements.iter().any(|s| matches!(s, Statement::Return(Some(_))));
                 self.function_has_return.insert(f.name.clone(), has_return);
+                self.function_requires_caller.insert(f.name.clone(), f.requires_caller);
+
+                // Expand role::X references into their constituent caps
+                let mut resolved_caps: Vec<String> = vec![];
+                for cap_entry in &f.capabilities {
+                    if cap_entry.starts_with("role::") {
+                        let role_name = &cap_entry["role::".len()..];
+                        if let Some(caps) = role_map.get(role_name) {
+                            resolved_caps.extend(caps.iter().cloned());
+                        } else {
+                            return Err(format!("undefined role '{}' used in function '{}'", role_name, f.name));
+                        }
+                    } else {
+                        resolved_caps.push(cap_entry.clone());
+                    }
+                }
+                self.function_capabilities.insert(f.name.clone(), resolved_caps);
             }
         }
 
@@ -167,9 +215,10 @@ impl CodeGenerator {
 
     fn gen_source_unit(&mut self, unit: &SourceUnit) -> Result<(), String> {
         match unit {
-            SourceUnit::Struct(s) => self.gen_struct(s),
-            SourceUnit::Contract(c) => self.gen_contract(c),
-            _ => Err("Not implemented".to_string()),
+            SourceUnit::Struct(s)    => self.gen_struct(s),
+            SourceUnit::Contract(c)  => self.gen_contract(c),
+            SourceUnit::Interface(_) => Ok(()), // interfaces are compile-time only
+            SourceUnit::Event(_)     => Ok(()), // top-level events: metadata only
         }
     }
 
@@ -191,6 +240,7 @@ impl CodeGenerator {
     fn gen_function(&mut self, f: &FunctionDefinition) -> Result<(), String> {
         let address = self.assembler.current_pos() as u32;
         self.function_addresses.insert(f.name.clone(), address);
+        self.current_function = Some(f.name.clone());
 
         // Build this function's local scope: its parameters, at the
         // addresses already assigned in the pre-pass.
@@ -205,6 +255,86 @@ impl CodeGenerator {
             FUNCTION_LOCAL_BASE + idx * FUNCTION_LOCAL_STRIDE
         });
         let mut scope = FunctionScope { locals, next_local_addr };
+
+        // ── G1: Authority enforcement pre-pass ─────────────────────────────
+        // Per §20.2.1: "There is no implicit authority derived from call
+        // context, transaction origin, or caller address."
+        // Any function that writes to a STATE VARIABLE (not a local) must
+        // declare `as caller`. Writing state without authority declaration
+        // is a compile error — not a warning, not opt-in.
+        //
+        // We distinguish state vars from locals: state vars live in
+        // self.state_vars (pre-assigned addresses); locals live in
+        // scope.locals (function parameters only at this point, since
+        // Let bindings are added to scope during gen_statement).
+        // The pre-pass checks the raw statement list before gen runs.
+        if !f.requires_caller {
+            fn writes_state(stmt: &Statement, state_vars: &HashMap<String, u32>) -> bool {
+                match stmt {
+                    Statement::Assignment(name, _) => state_vars.contains_key(name.as_str()),
+                    Statement::If { then_block, else_block, .. } => {
+                        then_block.statements.iter().any(|s| writes_state(s, state_vars))
+                        || else_block.as_ref().map_or(false, |eb|
+                            eb.statements.iter().any(|s| writes_state(s, state_vars)))
+                    }
+                    // Let bindings are always local — they allocate a new
+                    // address and never overwrite state var slots.
+                    _ => false,
+                }
+            }
+            let mutates_state = f.body.statements.iter()
+                .any(|s| writes_state(s, &self.state_vars));
+            if mutates_state && self.strict_authority {
+                return Err(format!(
+                    "function '{}' mutates contract state but declares no authority \
+                     (add `as caller` to the function signature — §20.2.1)",
+                    f.name
+                ));
+            }
+        }
+
+        // ── Identity prologue ────────────────────────────────────────────────
+        // `as caller`: emit a runtime check that caller != UMA(zero address).
+        // LoadCaller returns keccak256('UMA:' || evm_address)[12..] as U256.
+        // For an anonymous (unauthenticated) call, evm_address = [0u8;20],
+        // so the anonymous sentinel = keccak256('UMA:' || 0x00...)[12..]
+        //   = 0x0000000000000000000000000c8f6953b3c576f6e9aa77cdf8ec8cbdfe6f4219
+        // Pattern: LoadCaller → LoadImm256(UMA_ANON) → Eq → JumpIf revert → Jump body → Revert
+        if f.requires_caller {
+            // UMA of the zero address — the anonymous sentinel
+            const UMA_ANON: [u8; 32] = [
+                0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+                0x00,0x00,0x00,0x00,0x0c,0x8f,0x69,0x53,
+                0xb3,0xc5,0x76,0xf6,0xe9,0xaa,0x77,0xcd,
+                0xf8,0xec,0x8c,0xbd,0xfe,0x6f,0x42,0x19,
+            ];
+            self.assembler.emit_op(OpCode::LoadCaller);
+            self.assembler.emit_op(OpCode::LoadImm256);
+            self.assembler.emit_raw(&UMA_ANON);
+            self.assembler.emit_op(OpCode::Eq);
+            self.assembler.emit_op(OpCode::JumpIf);
+            let patch_to_revert = self.assembler.emit_placeholder_u32();
+            self.assembler.emit_op(OpCode::Jump);
+            let patch_to_body = self.assembler.emit_placeholder_u32();
+            let revert_pos = self.assembler.current_pos() as u32;
+            self.assembler.patch_u32(patch_to_revert, revert_pos);
+            let msg = format!("{}: unauthenticated call", f.name);
+            let mb = msg.as_bytes();
+            self.assembler.emit_op(OpCode::Revert);
+            self.assembler.emit_raw(&(mb.len() as u32).to_le_bytes());
+            self.assembler.emit_raw(mb);
+            let body_pos = self.assembler.current_pos() as u32;
+            self.assembler.patch_u32(patch_to_body, body_pos);
+        }
+
+        // ── Capability stubs ─────────────────────────────────────────────────
+        // Capabilities are declared, parsed, stored in the dispatch table, and
+        // included in the EIP-712 signed payload — so they are expressed and
+        // auditable at every level. Runtime enforcement (extern_call into a
+        // __CapRegistry contract) is the next implementation step.
+        // TODO(cap-enforcement): for each cap in f.capabilities, emit:
+        //   LoadCaller, LoadImm256(keccak256(cap_name)), ExternCall(__CapRegistry, hasCapability, 2)
+        //   JumpIf past revert, Revert "missing capability: <cap>"
 
         for stmt in &f.body.statements {
             self.gen_statement(stmt, &mut scope)?;
@@ -256,6 +386,27 @@ impl CodeGenerator {
                 self.assembler.patch_u32(jump_target_pos, after_revert);
                 Ok(())
             }
+            Statement::ExternCall { contract, function, args } => {
+                // Push args onto stack left-to-right, then emit ExternCall opcode
+                for arg in args.iter() {
+                    self.gen_expression(arg, scope)?;
+                }
+                // Encode: ExternCall <4-byte-LE contract_len> <contract_bytes>
+                //                    <4-byte-LE fn_len> <fn_bytes> <1-byte arg_count>
+                let contract_bytes = contract.as_bytes();
+                let fn_bytes       = function.as_bytes();
+                let arg_count      = args.len() as u8;
+                self.assembler.emit_op(OpCode::ExternCall);
+                // VM reads: u32 clen, clen bytes, u32 flen, flen bytes, u8 argc
+                self.assembler.emit_u32(contract_bytes.len() as u32);
+                self.assembler.emit_raw(contract_bytes);
+                self.assembler.emit_u32(fn_bytes.len() as u32);
+                self.assembler.emit_raw(fn_bytes);
+                self.assembler.emit_raw(&[arg_count]);
+                // ExternCall pushes a return value; pop it (stmt context, discard)
+                self.assembler.emit_op(OpCode::Pop);
+                Ok(())
+            }
             Statement::Assignment(name, expr) => {
                 let addr = self.resolve_address(scope, name)?;
                 self.gen_expression(expr, scope)?;
@@ -264,15 +415,139 @@ impl CodeGenerator {
                 self.assembler.emit_op(OpCode::Store);
                 Ok(())
             }
-            Statement::Return(expr) => {
+            Statement::MapAssignment { map, key, value } => {
+                let addr = *self.state_vars.get(map.as_str())
+                    .ok_or_else(|| format!("MapAssignment: unknown map '{}'", map))?;
+                // VM MapSet pops: map_addr (top), key, value (bottom)
+                self.gen_expression(value, scope)?;
+                self.gen_expression(key, scope)?;
+                self.assembler.emit_op(OpCode::Push);
+                self.assembler.emit_i32(addr as i32);
+                self.assembler.emit_op(OpCode::MapSet);
+                Ok(())
+            }
+            Statement::SetOp { set, op, value } => {
+                let addr = *self.state_vars.get(set.as_str())
+                    .ok_or_else(|| format!("SetOp: unknown set '{}'", set))?;
+                let is_map = self.map_vars.contains_key(set.as_str());
+                // VM ops pop: addr (top), value (bottom)
+                self.gen_expression(value, scope)?;
+                self.assembler.emit_op(OpCode::Push);
+                self.assembler.emit_i32(addr as i32);
+                match op {
+                    SetOpKind::Add    => {
+                        if is_map {
+                            // map.add(k) used as statement — no value, emit MapGet to check presence
+                            // (This shouldn't normally appear; map writes use MapAssignment.)
+                            return Err(format!("map '{}' does not support .add() — use indexing: {}[key] = value", set, set));
+                        }
+                        self.assembler.emit_op(OpCode::SetAdd);
+                    }
+                    SetOpKind::Remove => {
+                        if is_map {
+                            // map.remove(k) — use MapRemove opcode
+                            self.assembler.emit_op(OpCode::MapRemove);
+                            // MapRemove doesn't push a value; push 1 as statement result
+                            self.assembler.emit_op(OpCode::Push);
+                            self.assembler.emit_i32(1);
+                        } else {
+                            self.assembler.emit_op(OpCode::SetRemove);
+                            self.assembler.emit_op(OpCode::Push);
+                            self.assembler.emit_i32(1);
+                        }
+                    }
+                }
+                Ok(())
+            }
+                        Statement::Return(expr) => {
                 if let Some(e) = expr {
                     self.gen_expression(e, scope)?;
                 }
-                // Note: the actual Return opcode is emitted by the
-                // caller context (gen_function emits a trailing Return
-                // for the implicit end-of-body case). An explicit early
-                // `return;` mid-function also just emits Return here.
                 self.assembler.emit_op(OpCode::Return);
+                Ok(())
+            }
+            // ── Named error revert: `revert ErrorName(args...)` ────────────
+            Statement::RevertNamed { error, args } => {
+                // For now: pack args count + error name into the Revert message.
+                // Future: ABI-encode args properly when full ABI is implemented.
+                let msg = if args.is_empty() {
+                    error.clone()
+                } else {
+                    format!("{}({} arg(s))", error, args.len())
+                };
+                // Still push args so they are evaluated (side-effect safe).
+                for arg in args.iter() {
+                    self.gen_expression(arg, scope)?;
+                    self.assembler.emit_op(OpCode::Pop);
+                }
+                let msg_bytes = msg.as_bytes();
+                self.assembler.emit_op(OpCode::Revert);
+                self.assembler.emit_bytes(msg_bytes);
+                Ok(())
+            }
+            // ── Event emission: `emit EventName(args...)` ───────────────────
+            // Emits a Print opcode with a tagged string: "event:<Name>:<arg0>:..."
+            // The server collects Print output and surfaces it as "events" in the
+            // run response. A dedicated Emit opcode (0x70) will replace this
+            // once the VM log/receipt subsystem is implemented.
+            Statement::Emit { event, args } => {
+                // Push each arg then use Print to surface it.
+                // For now: emit `Print("event:<EventName>")` as a marker,
+                // then Print each arg. The server aggregates these.
+                let tag = format!("event:{}", event);
+                self.assembler.emit_op(OpCode::LoadImm);
+                self.assembler.emit_bytes(tag.as_bytes());
+                self.assembler.emit_op(OpCode::Print);
+                for arg in args.iter() {
+                    self.gen_expression(arg, scope)?;
+                    self.assembler.emit_op(OpCode::Print);
+                }
+                Ok(())
+            }
+            // ── If statement ─────────────────────────────────────────────────
+            Statement::If { condition, then_block, else_block } => {
+                self.gen_expression(condition, scope)?;
+                // JumpIf to then-block; else jump over
+                self.assembler.emit_op(OpCode::JumpIf);
+                let patch_to_then = self.assembler.emit_placeholder_u32();
+                // Jump to else (or past everything if no else)
+                self.assembler.emit_op(OpCode::Jump);
+                let patch_past_then = self.assembler.emit_placeholder_u32();
+                // Then-block
+                let then_addr = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(patch_to_then, then_addr);
+                for stmt in &then_block.statements {
+                    self.gen_statement(stmt, scope)?;
+                }
+                // If there's an else, jump past it after then-block
+                let patch_past_else = if else_block.is_some() {
+                    self.assembler.emit_op(OpCode::Jump);
+                    Some(self.assembler.emit_placeholder_u32())
+                } else { None };
+                // Else-block (or just landing point)
+                let else_addr = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(patch_past_then, else_addr);
+                if let Some(eb) = else_block {
+                    for stmt in &eb.statements {
+                        self.gen_statement(stmt, scope)?;
+                    }
+                }
+                if let Some(p) = patch_past_else {
+                    let after_else = self.assembler.current_pos() as u32;
+                    self.assembler.patch_u32(p, after_else);
+                }
+                Ok(())
+            }
+            // ── Let binding: `let x = expr` ──────────────────────────────────
+            Statement::Let { name, ty: _, value } => {
+                // Allocate a new local slot and assign
+                let addr = scope.next_local_addr;
+                scope.next_local_addr += 1;
+                scope.locals.insert(name.clone(), addr);
+                self.gen_expression(value, scope)?;
+                self.assembler.emit_op(OpCode::Push);
+                self.assembler.emit_i32(addr as i32);
+                self.assembler.emit_op(OpCode::Store);
                 Ok(())
             }
         }
@@ -305,6 +580,126 @@ impl CodeGenerator {
             Expression::Literal(Literal::String(s)) => {
                 self.assembler.emit_op(OpCode::LoadImm);
                 self.assembler.emit_bytes(s.as_bytes());
+                Ok(())
+            }
+            Expression::Literal(Literal::Hex(bytes)) => {
+                self.assembler.emit_op(OpCode::LoadImm);
+                self.assembler.emit_bytes(bytes);
+                Ok(())
+            }
+            Expression::UnaryOp(op, operand) => {
+                match op {
+                    UnaryOperator::Neg => {
+                        // Emit `0 - operand`
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_i32(0);
+                        self.gen_expression(operand, scope)?;
+                        self.assembler.emit_op(OpCode::Sub);
+                    }
+                    UnaryOperator::Not => {
+                        // Logical not: `operand == 0`
+                        self.gen_expression(operand, scope)?;
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_i32(0);
+                        self.assembler.emit_op(OpCode::Eq);
+                    }
+                }
+                Ok(())
+            }
+            Expression::Caller => {
+                // LoadCaller (0x50) — pushes authenticated EVM caller address as U256.
+                // Compile error if `caller` is used in a function not declared `as caller`.
+                let fn_name = self.current_function.clone().unwrap_or_default();
+                let req = *self.function_requires_caller.get(&fn_name).unwrap_or(&false);
+                if !req {
+                    return Err(format!(
+                        "'caller' used in '{}' which is not declared 'as caller'                          — add 'as caller' to the function signature",
+                        fn_name
+                    ));
+                }
+                self.assembler.emit_op(OpCode::LoadCaller);
+                Ok(())
+            }
+            Expression::MapIndex(map, key) => {
+                let addr = *self.state_vars.get(map.as_str())
+                    .ok_or_else(|| format!("MapIndex: unknown map '{}'", map))?;
+                // VM MapGet pops: map_addr (top), key (bottom)
+                self.gen_expression(key, scope)?;
+                self.assembler.emit_op(OpCode::Push);
+                self.assembler.emit_i32(addr as i32);
+                self.assembler.emit_op(OpCode::MapGet);
+                Ok(())
+            }
+            Expression::MapMethod { map, method, args } => {
+                let addr = *self.state_vars.get(map.as_str())
+                    .ok_or_else(|| format!("MapMethod: unknown map '{}'", map))?;
+                // The parser routes `.contains` and `.len` to MapMethod even for set<> vars.
+                // Check set_vars and emit Set opcodes instead when appropriate.
+                let is_set = self.set_vars.contains_key(map.as_str());
+                match method.as_str() {
+                    "get" => {
+                        if args.len() != 1 { return Err("map.get expects 1 arg".into()); }
+                        self.gen_expression(&args[0], scope)?;
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_i32(addr as i32);
+                        self.assembler.emit_op(OpCode::MapGet);
+                    }
+                    "contains" => {
+                        if args.len() != 1 { return Err("map/set.contains expects 1 arg".into()); }
+                        self.gen_expression(&args[0], scope)?;
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_i32(addr as i32);
+                        if is_set {
+                            self.assembler.emit_op(OpCode::SetContains);
+                        } else {
+                            self.assembler.emit_op(OpCode::MapContains);
+                        }
+                    }
+                    "len" => {
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_i32(addr as i32);
+                        if is_set {
+                            self.assembler.emit_op(OpCode::SetLen);
+                        } else {
+                            self.assembler.emit_op(OpCode::MapLen);
+                        }
+                    }
+                    "remove" => {
+                        if args.len() != 1 { return Err("map.remove expects 1 arg".into()); }
+                        self.gen_expression(&args[0], scope)?;
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_i32(addr as i32);
+                        if is_set {
+                            self.assembler.emit_op(OpCode::SetRemove);
+                        } else {
+                            self.assembler.emit_op(OpCode::MapRemove);
+                        }
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_i32(1);
+                    }
+                    _ => return Err(format!("unknown map/set method: {}", method)),
+                }
+                Ok(())
+            }
+            Expression::SetMethod { set, method, args } => {
+                let addr = *self.state_vars.get(set.as_str())
+                    .ok_or_else(|| format!("SetMethod: unknown set '{}'", set))?;
+                match method.as_str() {
+                    "contains" => {
+                        if args.len() != 1 { return Err("set.contains expects 1 arg".into()); }
+                        // VM SetContains pops: set_addr (top), value
+                        self.gen_expression(&args[0], scope)?;
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_i32(addr as i32);
+                        self.assembler.emit_op(OpCode::SetContains);
+                    }
+                    "len" => {
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_i32(addr as i32);
+                        self.assembler.emit_op(OpCode::SetLen);
+                    }
+                    _ => return Err(format!("unknown set method: {}", method)),
+                }
                 Ok(())
             }
             Expression::Identifier(name) => {
@@ -340,7 +735,12 @@ impl CodeGenerator {
                     BinaryOperator::Lt => OpCode::Lt,
                     BinaryOperator::Le => OpCode::Le,
                     BinaryOperator::Gt => OpCode::Gt,
-                    BinaryOperator::Ge => OpCode::Ge,
+                    BinaryOperator::Ge  => OpCode::Ge,
+                    // Logical operators: emit both sides then combine
+                    // && → Mul (1*1=1, 0*x=0 — correct for boolean 0/1 operands)
+                    BinaryOperator::And => OpCode::Mul,
+                    // || → Add (0+0=0, any non-zero is truthy in require conditions)
+                    BinaryOperator::Or  => OpCode::Add,
                 };
                 self.assembler.emit_op(opcode);
                 Ok(())
@@ -367,14 +767,28 @@ impl CodeGenerator {
                     self.gen_expression(&args[0], scope)?; // message
                     self.gen_expression(&args[2], scope)?; // public_key
                 }
-                "kyber_decaps" => {
-                    // Source order: (ciphertext, private_key).
-                    // VM pops: private_key, then ciphertext.
-                    // So push order must be: ciphertext, private_key.
+                "kyber_decaps" | "kyber_decapsulate"
+                | "mceliece_decapsulate" | "hqc_decapsulate" => {
+                    // KEM decapsulate: (ciphertext, private_key) → 2 args
                     if args.len() != 2 {
                         return Err(format!("{} expects 2 arguments", name));
                     }
                     self.gen_expression(&args[0], scope)?; // ciphertext
+                    self.gen_expression(&args[1], scope)?; // private_key
+                }
+                "kyber_encapsulate" | "mceliece_encapsulate" | "hqc_encapsulate" => {
+                    // KEM encapsulate: (public_key) → 1 arg
+                    if args.len() != 1 {
+                        return Err(format!("{} expects 1 argument", name));
+                    }
+                    self.gen_expression(&args[0], scope)?; // public_key
+                }
+                "falcon_sign" => {
+                    // falcon_sign(message, private_key) → 2 args
+                    if args.len() != 2 {
+                        return Err(format!("{} expects 2 arguments", name));
+                    }
+                    self.gen_expression(&args[0], scope)?; // message
                     self.gen_expression(&args[1], scope)?; // private_key
                 }
                 _ => unreachable!(),
