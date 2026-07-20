@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+rand = "0.8"
 k256          = { workspace = true }
 sha3          = { workspace = true }
 axum          = { version = "0.7", features = ["json"] }

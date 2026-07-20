@@ -44,6 +44,11 @@ impl Assembler {
         self.code.extend_from_slice(bytes);
     }
 
+    /// Emit raw bytes with no length prefix (used for fixed-format fields).
+    pub fn emit_raw(&mut self, bytes: &[u8]) {
+        self.code.extend_from_slice(bytes);
+    }
+
     /// Returns the current write position (byte offset) in the code buffer.
     /// Used to record jump targets (e.g. a function's entry address, or the
     /// address right after a conditional block) for later backpatching.
@@ -70,7 +75,27 @@ impl Assembler {
 
     /// Registers a function in the dispatch table (stored in the data
     /// section) so the VM can resolve calls by name at runtime.
-    pub fn add_function_entry(&mut self, name: &str, address: u32, param_addresses: &[u32], has_return: bool) {
+    /// Extended function entry — binary format per entry:
+    ///   4B LE  name_len
+    ///   N      name UTF-8
+    ///   4B LE  entry address
+    ///   4B LE  param count
+    ///   4*N    param addresses (LE u32 each)
+    ///   1B     has_return  (0|1)
+    ///   1B     requires_caller (0|1)   ← NEW
+    ///   4B LE  cap_count              ← NEW
+    ///   for each cap:
+    ///     4B LE  cap_name_len
+    ///     N      cap_name UTF-8
+    pub fn add_function_entry(
+        &mut self,
+        name: &str,
+        address: u32,
+        param_addresses: &[u32],
+        has_return: bool,
+        requires_caller: bool,
+        capabilities: &[String],
+    ) {
         let name_bytes = name.as_bytes();
         self.data.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
         self.data.extend_from_slice(name_bytes);
@@ -80,6 +105,13 @@ impl Assembler {
             self.data.extend_from_slice(&addr.to_le_bytes());
         }
         self.data.push(if has_return { 1 } else { 0 });
+        self.data.push(if requires_caller { 1 } else { 0 });
+        self.data.extend_from_slice(&(capabilities.len() as u32).to_le_bytes());
+        for cap in capabilities {
+            let cb = cap.as_bytes();
+            self.data.extend_from_slice(&(cb.len() as u32).to_le_bytes());
+            self.data.extend_from_slice(cb);
+        }
         self.function_count += 1;
     }
 
