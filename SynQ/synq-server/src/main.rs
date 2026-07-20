@@ -475,13 +475,27 @@ fn value_to_json(v: &Value) -> serde_json::Value {
         Value::Bytes(b) => json!({"type": "Bytes",   "value": hex_encode(b)}),
         Value::Map(m)   => {
             let obj: serde_json::Map<String,serde_json::Value> = m.iter()
-                .map(|(k,v)| (String::from_utf8_lossy(k).to_string(), value_to_json(v)))
+                .map(|(k,v)| {
+                    // Keys are raw bytes — use hex for any non-UTF-8 or null-containing key
+                    let key_str = if k.iter().all(|b| *b != 0 && *b < 0x80) {
+                        String::from_utf8_lossy(k).to_string()
+                    } else {
+                        format!("0x{}", hex_encode(k))
+                    };
+                    (key_str, value_to_json(v))
+                })
                 .collect();
             json!({"type": "Map", "value": serde_json::Value::Object(obj)})
         }
         Value::Set(s)   => {
             let arr: Vec<serde_json::Value> = s.iter()
-                .map(|k| json!(String::from_utf8_lossy(k).to_string()))
+                .map(|k| {
+                    if k.iter().all(|b| *b != 0 && *b < 0x80) {
+                        json!(String::from_utf8_lossy(k).to_string())
+                    } else {
+                        json!(format!("0x{}", hex_encode(k)))
+                    }
+                })
                 .collect();
             json!({"type": "Set", "value": arr})
         }
@@ -502,43 +516,37 @@ fn value_display(v: &Value) -> String {
 }
 
 fn parse_arg(v: &serde_json::Value) -> Result<Value, String> {
-    match v {
+    // Normalise to string first — avoids f64 precision loss for large integers
+    // (serde_json stores JSON numbers that overflow i64/u64 as f64 internally).
+    let s: String = match v {
         serde_json::Value::Number(n) => {
+            // Prefer lossless integer paths; fall back to string representation.
             if let Some(i) = n.as_i64() {
                 if i < 0 { return Err(format!("UInt256 arguments must be non-negative, got {}", i)); }
                 return Ok(if i <= i32::MAX as i64 { Value::I32(i as i32) } else { Value::U128(i as u128) });
             }
-            if let Some(u) = n.as_u64() { return Ok(Value::U128(u as u128)); }
-            // Large floats (e.g. 1e30) — convert via string representation
-            let s = n.to_string();
-            if let Ok(u) = s.parse::<u128>() { return Ok(Value::U128(u)); }
-            match s.parse::<U256>() {
-                Ok(v)  => Ok(Value::U256(v)),
-                Err(_) => {
-                    // Last attempt: parse as f64 and convert
-                    if let Some(f) = n.as_f64() {
-                        if f >= 0.0 && f.is_finite() {
-                            let big_s = format!("{:.0}", f);
-                            if let Ok(u) = big_s.parse::<u128>() { return Ok(Value::U128(u)); }
-                            if let Ok(v2) = big_s.parse::<U256>() { return Ok(Value::U256(v2)); }
-                        }
-                    }
-                    Err(format!("Cannot represent {} as UInt256", n))
-                }
+            if let Some(u) = n.as_u64() {
+                return Ok(if u <= i32::MAX as u64 { Value::I32(u as i32) } else { Value::U128(u as u128) });
             }
+            // Number overflows u64 — serde_json has it as f64; use string repr
+            // which serde_json formats as the original decimal (no scientific notation)
+            n.to_string()
         }
-        serde_json::Value::String(s) => {
-            let s = s.trim();
-            if s.starts_with('-') { return Err(format!("UInt256 arguments must be non-negative, got {}", s)); }
-            if let Ok(u) = s.parse::<u128>() {
-                return Ok(if u <= i32::MAX as u128 { Value::I32(u as i32) } else { Value::U128(u) });
-            }
-            match s.parse::<U256>() {
-                Ok(v)  => Ok(Value::U256(v)),
-                Err(_) => Err(format!("Cannot parse {:?} as UInt256", s)),
-            }
-        }
-        other => Err(format!("Expected number or string, got {}", other)),
+        serde_json::Value::String(s) => s.trim().to_string(),
+        other => return Err(format!("Expected number or string, got {}", other)),
+    };
+    let s = s.trim();
+    if s.starts_with('-') { return Err(format!("UInt256 arguments must be non-negative, got {}", s)); }
+    // Try small integers first for compact VM representation
+    if let Ok(u) = s.parse::<i32>() {
+        if u >= 0 { return Ok(Value::I32(u)); }
+    }
+    if let Ok(u) = s.parse::<u128>() {
+        return Ok(if u <= i32::MAX as u128 { Value::I32(u as i32) } else { Value::U128(u) });
+    }
+    match s.parse::<U256>() {
+        Ok(v)  => Ok(Value::U256(v)),
+        Err(_) => Err(format!("Cannot parse {:?} as UInt256", s)),
     }
 }
 
@@ -1850,7 +1858,7 @@ async fn session_state_handler(
             Some(Value::U128(v))  => json!(v.to_string()),
             Some(Value::U256(v))  => json!(v.to_string()),
             Some(Value::Bool(b))  => json!(b),
-            Some(Value::Bytes(b)) => json!(String::from_utf8_lossy(b).to_string()),
+            Some(Value::Bytes(b)) => json!(format!("0x{}", hex::encode(b))),
             Some(Value::Map(m))   => {
                 let obj: serde_json::Map<String,serde_json::Value> = m.iter().map(|(k,v)| {
                     // Map keys are raw bytes (UMA = 32-byte hash, integers = BE bytes).
@@ -1865,7 +1873,7 @@ async fn session_state_handler(
                         Value::U128(n)  => json!(n.to_string()),
                         Value::U256(n)  => json!(n.to_string()),
                         Value::Bool(b)  => json!(b),
-                        Value::Bytes(b) => json!(String::from_utf8_lossy(b).to_string()),
+                        Value::Bytes(b) => json!(format!("0x{}", hex::encode(b))),
                         _               => json!(null),
                     };
                     (key_s, val_j)

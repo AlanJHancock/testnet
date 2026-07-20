@@ -36,11 +36,27 @@ pub enum Value {
 
 /// Coerce any Value to a stable byte key for map/set indexing.
 fn value_to_key(v: &Value) -> Result<Vec<u8>, VMError> {
+    // All numeric types are stored as 32-byte big-endian keys so that:
+    //   - I32(1) and U128(1) and U256(1) all produce the same key
+    //   - UMA hashes (U128 or U256) render as full 0x... hex in the state display
     match v {
-        Value::I32(n)   => Ok(n.to_le_bytes().to_vec()),
-        Value::I64(n)   => Ok(n.to_le_bytes().to_vec()),
-        Value::U128(n)  => Ok(n.to_be_bytes().to_vec()),
-        Value::U256(n)  => { let mut b = [0u8;32]; n.to_be_bytes::<32>(); Ok(n.to_be_bytes::<32>().to_vec()) }
+        Value::I32(n)   => {
+            let mut b = [0u8; 32];
+            if *n >= 0 { b[28..32].copy_from_slice(&(*n as u32).to_be_bytes()); }
+            else { let u = ((*n as i64 + (1i64 << 32)) as u32).to_be_bytes(); b[28..32].copy_from_slice(&u); }
+            Ok(b.to_vec())
+        }
+        Value::I64(n)   => {
+            let mut b = [0u8; 32];
+            b[24..32].copy_from_slice(&n.to_be_bytes());
+            Ok(b.to_vec())
+        }
+        Value::U128(n)  => {
+            let mut b = [0u8; 32];
+            b[16..32].copy_from_slice(&n.to_be_bytes());
+            Ok(b.to_vec())
+        }
+        Value::U256(n)  => Ok(n.to_be_bytes::<32>().to_vec()),
         Value::Bytes(b) => Ok(b.clone()),
         Value::Bool(b)  => Ok(vec![*b as u8]),
         Value::Map(_)   => Err(VMError::RuntimeError("Map cannot be used as a map key".into())),
