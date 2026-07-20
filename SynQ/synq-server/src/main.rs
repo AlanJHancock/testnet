@@ -1853,7 +1853,13 @@ async fn session_state_handler(
             Some(Value::Bytes(b)) => json!(String::from_utf8_lossy(b).to_string()),
             Some(Value::Map(m))   => {
                 let obj: serde_json::Map<String,serde_json::Value> = m.iter().map(|(k,v)| {
-                    let key_s = String::from_utf8_lossy(k).to_string();
+                    // Map keys are raw bytes (UMA = 32-byte hash, integers = BE bytes).
+                    // Hex-encode so binary keys display cleanly as 0x... strings.
+                    let key_s = if k.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_') {
+                        String::from_utf8_lossy(k).to_string()  // plain ASCII key — keep as-is
+                    } else {
+                        format!("0x{}", hex::encode(k))          // binary key — hex
+                    };
                     let val_j = match v {
                         Value::I32(n)   => json!(n),
                         Value::U128(n)  => json!(n.to_string()),
@@ -1868,7 +1874,13 @@ async fn session_state_handler(
             }
             Some(Value::Set(s))   => {
                 let arr: Vec<serde_json::Value> = s.iter()
-                    .map(|k| json!(String::from_utf8_lossy(k).to_string()))
+                    .map(|k| {
+                        if k.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_') {
+                            json!(String::from_utf8_lossy(k).to_string())
+                        } else {
+                            json!(format!("0x{}", hex::encode(k)))
+                        }
+                    })
                     .collect();
                 json!(arr)
             }
