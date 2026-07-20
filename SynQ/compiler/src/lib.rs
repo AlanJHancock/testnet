@@ -14,9 +14,11 @@ use std::collections::{HashMap, HashSet};
 /// Result of compiling a SynQ source file.
 #[derive(Debug)]
 pub struct CompileResult {
-    pub bytecode: Vec<u8>,
-    pub state_vars: Vec<(String, u32)>,
-    pub warnings: Vec<String>,
+    pub bytecode:         Vec<u8>,
+    pub state_vars:       Vec<(String, u32)>,
+    pub warnings:         Vec<String>,
+    /// Contract names called via extern_call, in first-appearance order, deduplicated.
+    pub extern_contracts: Vec<String>,
 }
 
 /// Top-level compile entry point.
@@ -29,9 +31,48 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
 
     // 2. Semantic checks per contract
     for unit in &ast {
-        if let SourceUnit::Contract(c) = unit {
+        if let SourceUnit::Contract(ref c) = unit {
             check_undefined_refs(c, &mut warnings)?;
             check_call_graph(c)?;
+        }
+    }
+
+    // 3a. PQC simulation warning — emitted on both server and WASM paths so
+    //     the developer sees it regardless of which compile route was used.
+    const PQC_BUILTINS: &[&str] = &[
+        "dilithium_verify", "falcon_verify", "sphincs_verify",
+        "kyber_encapsulate", "kyber_decapsulate", "kyber_decaps",
+        "falcon_sign", "mceliece_encapsulate", "mceliece_decapsulate",
+        "hqc_encapsulate", "hqc_decapsulate",
+    ];
+    'pqc_scan: for unit in &ast {
+        if let SourceUnit::Contract(ref c) = unit {
+            for part in &c.parts {
+                if let ContractPart::Function(f) = part {
+                    for stmt in &f.body.statements {
+                        let exprs: Vec<&Expression> = match stmt {
+                            Statement::Expression(e) => vec![e],
+                            Statement::Return(Some(e)) => vec![e],
+                            Statement::Assignment(_, e) => vec![e],
+                            Statement::Require(e, _) => vec![e],
+                            Statement::Let { value, .. } => vec![value],
+                            _ => vec![],
+                        };
+                        for expr in exprs {
+                            if let Expression::Call(name, _) = expr {
+                                if PQC_BUILTINS.contains(&name.as_str()) {
+                                    warnings.push(format!(
+                                        "PQC builtin '{}' executes via synq-server native VM only. \
+                                         In browser (WASM) mode it will throw a RuntimeError.",
+                                        name
+                                    ));
+                                    break 'pqc_scan;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -39,7 +80,21 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
     let gen = codegen::CodeGenerator::new();
     let (bytecode, state_vars) = gen.generate(&ast)?;
 
-    Ok(CompileResult { bytecode, state_vars, warnings })
+    // Collect extern_call targets from AST — these are contracts this one depends on.
+    let mut extern_contracts: Vec<String> = Vec::new();
+    for unit in &ast {
+        if let SourceUnit::Contract(ref c) = unit {
+            for part in &c.parts {
+                if let crate::ast::ContractPart::Function(f) = part {
+                    for stmt in &f.body.statements {
+                        collect_extern_contracts_stmt(stmt, &mut extern_contracts);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(CompileResult { bytecode, state_vars, warnings, extern_contracts })
 }
 
 // ─── Semantic check: undefined variables and calls ───────────────────────────
@@ -100,6 +155,15 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                     Statement::Assignment(_, e) => vec![e],
                     Statement::Return(Some(e)) => vec![e],
                     Statement::Return(None) => vec![],
+                    Statement::ExternCall { args, .. } => args.iter().collect(),
+                    Statement::Emit { args, .. } => args.iter().collect(),
+                    Statement::RevertNamed { args, .. } => args.iter().collect(),
+                    Statement::If { condition, then_block, else_block: _ } => vec![condition],
+                    Statement::Let { value, .. } => vec![value],
+                    Statement::MapAssignment { key, value, .. } => vec![key, value],
+                    Statement::SetOp { value, .. } => vec![value],
+                    Statement::While { condition, .. } => vec![condition],
+                    Statement::Break | Statement::Continue => vec![],
                 };
                 for expr in exprs {
                     // Check identifiers
@@ -181,6 +245,15 @@ fn check_call_graph(contract: &ContractDefinition) -> Result<(), String> {
                     Statement::Assignment(_, e) => vec![e],
                     Statement::Return(Some(e)) => vec![e],
                     Statement::Return(None) => vec![],
+                    Statement::ExternCall { args, .. } => args.iter().collect(),
+                    Statement::Emit { args, .. } => args.iter().collect(),
+                    Statement::RevertNamed { args, .. } => args.iter().collect(),
+                    Statement::If { condition, then_block: _, else_block: _ } => vec![condition],
+                    Statement::Let { value, .. } => vec![value],
+                    Statement::MapAssignment { key, value, .. } => vec![key, value],
+                    Statement::SetOp { value, .. } => vec![value],
+                    Statement::While { condition, .. } => vec![condition],
+                    Statement::Break | Statement::Continue => vec![],
                 };
                 for expr in exprs { collect_calls(expr, &mut calls); }
             }
@@ -243,4 +316,21 @@ fn dfs_check<'a>(
     }
     path.pop();
     Ok(())
+}
+
+/// Recursively walk a statement collecting unique extern_call contract targets.
+fn collect_extern_contracts_stmt(stmt: &crate::ast::Statement, out: &mut Vec<String>) {
+    use crate::ast::Statement;
+    match stmt {
+        Statement::ExternCall { contract, .. } => {
+            if !out.contains(contract) { out.push(contract.clone()); }
+        }
+        Statement::If { then_block, else_block, .. } => {
+            for s in &then_block.statements { collect_extern_contracts_stmt(s, out); }
+            if let Some(eb) = else_block {
+                for s in &eb.statements { collect_extern_contracts_stmt(s, out); }
+            }
+        }
+        _ => {}
+    }
 }

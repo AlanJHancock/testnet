@@ -275,6 +275,18 @@ fn parse_statement(pair: Pair<Rule>) -> Statement {
             });
             Statement::If { condition, then_block: Block { statements: then_pairs }, else_block }
         }
+        Rule::while_statement => {
+            let mut inner = pair.into_inner();
+            let condition = parse_expression(inner.next().unwrap());
+            let body_stmts: Vec<Statement> = inner.next().unwrap().into_inner()
+                .filter(|p| p.as_rule() == Rule::statement)
+                .map(|p| parse_statement(p.into_inner().next().unwrap()))
+                .collect();
+            Statement::While { condition, body: Block { statements: body_stmts } }
+        }
+        Rule::break_statement    => Statement::Break,
+        Rule::continue_statement => Statement::Continue,
+
         Rule::extern_call_statement => {
             let mut inner = pair.into_inner();
             let contract = inner.next().unwrap().as_str().trim_matches('"').to_string();

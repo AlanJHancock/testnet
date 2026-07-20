@@ -70,6 +70,28 @@ pub enum OpCode {
     LoadImm    = 0x42,   // push raw bytes (strings / PQC keys)
     LoadImm128 = 0x43,   // push a 16-byte big-endian u128 (UInt256 values ≤ 2^128)
     LoadImm256 = 0x44,   // push a 32-byte big-endian U256 (full Ethereum address / real UInt256)
+    LoadCaller = 0x50,   // push authenticated EVM caller address as U256 (zero if unauthenticated)
+    ExternCall = 0x60,   // call a function on another contract in the same workspace
+
+    // Map operations (0x90-0x96)
+    MapNew      = 0x90,   // MapNew  <4-byte-LE name_len> <name_bytes> — init map slot, push handle (addr)
+    MapGet      = 0x91,   // pops key, pops map_addr → pushes value (or I32(0) if missing)
+    MapSet      = 0x92,   // pops value, pops key, pops map_addr → stores entry
+    MapContains = 0x93,   // pops key, pops map_addr → pushes Bool
+    MapRemove   = 0x94,   // pops key, pops map_addr → removes entry
+    MapLen      = 0x95,   // pops map_addr → pushes I32(count)
+
+    // Set operations (0x97-0x9B)
+    SetNew      = 0x97,   // SetNew <4-byte-LE name_len> <name_bytes> — init set slot, push handle
+    SetAdd      = 0x98,   // pops value, pops set_addr → inserts
+    SetContains = 0x99,   // pops value, pops set_addr → pushes Bool
+    SetRemove   = 0x9A,   // pops value, pops set_addr → removes
+    SetLen      = 0x9B,   // pops set_addr → pushes I32(count)
+
+    // String operations (0x9C-0x9E)
+    StrLen      = 0x9C,   // pops Bytes/string addr → pushes I32(len)
+    StrConcat   = 0x9D,   // pops b, pops a → pushes Bytes(a+b)
+    StrEq       = 0x9E,   // pops b, pops a → pushes Bool
 
     // PQC operations
     DilithiumVerify  = 0x80,
@@ -95,6 +117,7 @@ impl TryFrom<u8> for OpCode {
             0x11 => Ok(OpCode::Sub),
             0x12 => Ok(OpCode::Mul),
             0x13 => Ok(OpCode::Div),
+            0x14 => Ok(OpCode::Rem),
             0x20 => Ok(OpCode::Eq),
             0x21 => Ok(OpCode::Ne),
             0x22 => Ok(OpCode::Lt),
@@ -111,6 +134,25 @@ impl TryFrom<u8> for OpCode {
             0x42 => Ok(OpCode::LoadImm),
             0x43 => Ok(OpCode::LoadImm128),
             0x44 => Ok(OpCode::LoadImm256),
+            0x50 => Ok(OpCode::LoadCaller),
+            0x60 => Ok(OpCode::ExternCall),
+            // Map ops
+            0x90 => Ok(OpCode::MapNew),
+            0x91 => Ok(OpCode::MapGet),
+            0x92 => Ok(OpCode::MapSet),
+            0x93 => Ok(OpCode::MapContains),
+            0x94 => Ok(OpCode::MapRemove),
+            0x95 => Ok(OpCode::MapLen),
+            // Set ops
+            0x97 => Ok(OpCode::SetNew),
+            0x98 => Ok(OpCode::SetAdd),
+            0x99 => Ok(OpCode::SetContains),
+            0x9A => Ok(OpCode::SetRemove),
+            0x9B => Ok(OpCode::SetLen),
+            // String ops
+            0x9C => Ok(OpCode::StrLen),
+            0x9D => Ok(OpCode::StrConcat),
+            0x9E => Ok(OpCode::StrEq),
             0x80 => Ok(OpCode::DilithiumVerify),
             0x81 => Ok(OpCode::KyberKeyExchange),
             0x82 => Ok(OpCode::FalconVerify),

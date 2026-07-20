@@ -68,12 +68,20 @@ struct FunctionScope {
     next_local_addr: u32,
 }
 
+/// Jump-patch bookkeeping for break/continue inside while loops.
+struct LoopContext {
+    loop_top:         u32,
+    break_patches:    Vec<usize>,
+    continue_patches: Vec<usize>,
+}
+
 pub struct CodeGenerator {
     assembler: Assembler,
     /// Contract-wide state variable addresses, shared across all functions.
     state_vars: HashMap<String, u32>,
     map_vars:   HashMap<String, u32>,
     set_vars:   HashMap<String, u32>,
+    loop_stack: Vec<LoopContext>,
     pub strict_authority: bool,
     next_state_addr: u32,
     /// Forward-referenceable function addresses, registered in a
@@ -101,6 +109,7 @@ impl CodeGenerator {
             state_vars: HashMap::new(),
             map_vars:   HashMap::new(),
             set_vars:   HashMap::new(),
+            loop_stack: Vec::new(),
             strict_authority: true,
             next_state_addr: 0,
             function_addresses: HashMap::new(),
@@ -536,6 +545,47 @@ impl CodeGenerator {
                     let after_else = self.assembler.current_pos() as u32;
                     self.assembler.patch_u32(p, after_else);
                 }
+                Ok(())
+            }
+            Statement::While { condition, body } => {
+                let loop_top = self.assembler.current_pos() as u32;
+                self.gen_expression(condition, scope)?;
+                self.assembler.emit_op(OpCode::JumpIf);
+                let patch_to_body = self.assembler.emit_placeholder_u32();
+                self.assembler.emit_op(OpCode::Jump);
+                let patch_to_exit = self.assembler.emit_placeholder_u32();
+                let body_addr = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(patch_to_body, body_addr);
+                self.loop_stack.push(LoopContext {
+                    loop_top,
+                    break_patches:    vec![],
+                    continue_patches: vec![],
+                });
+                for stmt in &body.statements {
+                    self.gen_statement(stmt, scope)?;
+                }
+                self.assembler.emit_op(OpCode::Jump);
+                let jback = self.assembler.emit_placeholder_u32();
+                self.assembler.patch_u32(jback, loop_top);
+                let exit_addr = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(patch_to_exit, exit_addr);
+                let ctx = self.loop_stack.pop().unwrap();
+                for bp in ctx.break_patches    { self.assembler.patch_u32(bp, exit_addr); }
+                for cp in ctx.continue_patches { self.assembler.patch_u32(cp, loop_top);  }
+                Ok(())
+            }
+            Statement::Break => {
+                if self.loop_stack.is_empty() { return Err("'break' outside loop".into()); }
+                self.assembler.emit_op(OpCode::Jump);
+                let p = self.assembler.emit_placeholder_u32();
+                self.loop_stack.last_mut().unwrap().break_patches.push(p);
+                Ok(())
+            }
+            Statement::Continue => {
+                if self.loop_stack.is_empty() { return Err("'continue' outside loop".into()); }
+                self.assembler.emit_op(OpCode::Jump);
+                let p = self.assembler.emit_placeholder_u32();
+                self.loop_stack.last_mut().unwrap().continue_patches.push(p);
                 Ok(())
             }
             // ── Let binding: `let x = expr` ──────────────────────────────────
