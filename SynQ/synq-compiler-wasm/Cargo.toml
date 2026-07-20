@@ -1,0 +1,25 @@
+[workspace]
+
+[package]
+name = "synq-compiler-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+getrandom    = { version = "0.3", features = ["wasm_js"] }
+serde        = { version = "1.0", features = ["derive"] }
+serde_json   = "1.0"
+hex          = "0.4"
+
+# Pure-Rust deps — same as compiler/vm use, no C linkage
+pest        = "2.7.7"
+pest_derive = "2.7.7"
+sha3        = "0.10"
+ruint       = "1"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O3"]

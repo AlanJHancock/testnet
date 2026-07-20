@@ -1,0 +1,824 @@
+use super::ast::*;
+use crate::vm_inner::{Assembler, OpCode};
+use ruint::aliases::U256;
+use std::collections::HashMap;
+
+// ## UInt256 Arithmetic Semantics
+//
+// All numeric values in SynQ are conceptually UInt256 (unsigned 256-bit integers).
+// The VM stores them as `Value::I32`, `Value::U128`, or `Value::U256` and promotes
+// automatically during arithmetic using `as_u256()`.
+//
+// **Overflow / underflow:**  All arithmetic uses checked operations via the `ruint`
+// crate. Overflow raises a `RuntimeError` — no silent wrapping.
+//   - Addition overflow → RuntimeError("UInt256 overflow on Add")
+//   - Subtraction underflow → RuntimeError (no negative wrapping)
+//   - Multiplication overflow → RuntimeError("UInt256 overflow on Mul")
+//
+// **Division / modulo by zero:**
+//   - Literal zero divisor → compile-time `Err` (caught here in codegen)
+//   - Runtime zero divisor → `RuntimeError("Division by zero")` / `RuntimeError("Modulo by zero")`
+//
+// **Mixed-width promotion:** I32 and U128 operands are promoted to U256 via
+// `as_u256()` before the operation. The result shrinks back via `from_u256_shrink()`
+// to I32 if it fits in i32, U128 if it fits in u128, otherwise stays U256.
+//
+// **Negative literals:** UInt256 has no sign. Negative number literals (e.g. `-1`)
+// are encoded at parse time as `(0 - N)` and will underflow at runtime →
+// RuntimeError. A future signed integer type will handle signed arithmetic.
+//
+// **Boundary values handled by ruint:**
+//   - 2^128 (u128::MAX + 1) — stored as U256, no truncation
+//   - 2^255 — stored as U256
+//   - 2^256 - 1 (U256::MAX) — maximum representable value
+//   - 2^256 — overflow, RuntimeError
+
+// Memory layout: state variables get fixed contract-wide addresses (0..N).
+// Each function gets its own disjoint address block so that parameters
+// with the same name across different functions never alias the same
+// memory slot.
+const FUNCTION_LOCAL_BASE: u32 = 1_000_000;
+const FUNCTION_LOCAL_STRIDE: u32 = 1_000;
+
+/// One PQC/KEM builtin call compiles directly to its matching VM opcode.
+/// The tuple is (arg count, opcode, pushes a Bool/Bytes result).
+fn pqc_builtin_opcode(name: &str) -> Option<OpCode> {
+    match name {
+        "dilithium_verify"                        => Some(OpCode::DilithiumVerify),
+        "falcon_verify" | "falcon_sign"           => Some(OpCode::FalconVerify),
+        "sphincs_verify"                          => Some(OpCode::SphincsVerify),
+        // KEM family — all route to KyberKeyExchange opcode (0x81)
+        "kyber_encapsulate" | "kyber_decapsulate"
+        | "kyber_decaps"                          => Some(OpCode::KyberKeyExchange),
+        // McEliece and HQC KEMs — also route to KyberKeyExchange for now;
+        // dedicated opcodes are future work.
+        "mceliece_encapsulate" | "mceliece_decapsulate"
+        | "hqc_encapsulate"   | "hqc_decapsulate" => Some(OpCode::KyberKeyExchange),
+        _ => None,
+    }
+}
+
+struct FunctionScope {
+    /// name -> memory address, local to this function (params + any
+    /// future locals). Looked up before falling back to state variables.
+    locals: HashMap<String, u32>,
+    /// Reserved for future local-variable declarations (not yet supported
+    /// by the grammar -- only params are locals today).
+    #[allow(dead_code)]
+    next_local_addr: u32,
+}
+
+struct LoopContext { loop_top:u32, break_patches:Vec<usize>, continue_patches:Vec<usize>, }
+
+pub struct CodeGenerator {
+    assembler: Assembler,
+    /// Contract-wide state variable addresses, shared across all functions.
+    state_vars: HashMap<String, u32>,
+    next_state_addr: u32,
+    loop_stack: Vec<LoopContext>,
+    map_vars: HashMap<String, u32>,
+    set_vars: HashMap<String, u32>,
+    /// Forward-referenceable function addresses, registered in a
+    /// pre-pass before any function body is generated so a caller can
+    /// marshal args into a callee defined later in the source.
+    function_addresses: HashMap<String, u32>,
+    function_param_addrs: HashMap<String, Vec<u32>>,
+    function_has_return: HashMap<String, bool>,
+    /// Whether each function declares `as caller` (requires authenticated identity).
+    function_requires_caller: HashMap<String, bool>,
+    /// Capability names declared via `requires cap::X` per function.
+    function_capabilities: HashMap<String, Vec<String>>,
+    /// (placeholder position, callee name) pairs for calls made before
+    /// the callee's address was known (forward references). Backpatched
+    /// once all functions have been code-generated.
+    pending_call_patches: Vec<(usize, String)>,
+    /// Name of the function currently being compiled (for caller-check enforcement).
+    current_function: Option<String>,
+}
+
+impl CodeGenerator {
+    pub fn new() -> Self {
+        CodeGenerator {
+            assembler: Assembler::new(),
+            state_vars: HashMap::new(),
+            next_state_addr: 0,
+            loop_stack: Vec::new(),
+            map_vars: HashMap::new(),
+            set_vars: HashMap::new(),
+            function_addresses: HashMap::new(),
+            function_param_addrs: HashMap::new(),
+            function_has_return: HashMap::new(),
+            function_requires_caller: HashMap::new(),
+            function_capabilities: HashMap::new(),
+            pending_call_patches: Vec::new(),
+            current_function: None,
+        }
+    }
+
+    pub fn generate(mut self, ast: &[SourceUnit]) -> Result<(Vec<u8>, Vec<(String, u32)>), String> {
+        // Pre-registration pass: assign every state variable and every
+        // function's parameter memory addresses before generating any
+        // code, so forward references (function A calling function B
+        // defined later) and state variable reads work everywhere.
+        for item in ast {
+            if let SourceUnit::Contract(c) = item {
+                self.register_contract_symbols(c)?;
+            }
+        }
+
+        for item in ast {
+            self.gen_source_unit(item)?;
+        }
+
+        // Backpatch any inter-function calls made before their callee's
+        // address was known (a caller calling a function defined later in
+        // source order).
+        for (pos, name) in self.pending_call_patches.drain(..).collect::<Vec<_>>() {
+            let addr = *self
+                .function_addresses
+                .get(&name)
+                .ok_or_else(|| format!("Undefined function: {}", name))?;
+            self.assembler.patch_u32(pos, addr);
+        }
+
+        // Emit the function dispatch table (in the data section) now that
+        // every function's real code address is known.
+        let functions: Vec<String> = self.function_addresses.keys().cloned().collect();
+        for name in functions {
+            let address = self.function_addresses[&name];
+            let params = self.function_param_addrs.get(&name).cloned().unwrap_or_default();
+            let has_return = *self.function_has_return.get(&name).unwrap_or(&false);
+            let req_caller = *self.function_requires_caller.get(&name).unwrap_or(&false);
+            let caps = self.function_capabilities.get(&name).cloned().unwrap_or_default();
+            self.assembler.add_function_entry(&name, address, &params, has_return, req_caller, &caps);
+        }
+
+        let bytecode = self.assembler.build();
+        // Return state var layout so callers can expose live state
+        let mut sv_layout: Vec<(String, u32)> = self.state_vars.into_iter().collect();
+        sv_layout.sort_by_key(|e| e.1); // order by address
+        Ok((bytecode, sv_layout))
+    }
+
+    fn register_contract_symbols(&mut self, c: &ContractDefinition) -> Result<(), String> {
+        // Build a role->caps lookup table for this contract so capability_clause
+        // `requires role::X` entries can be expanded to their constituent caps.
+        let role_map: HashMap<String, Vec<String>> = c.roles.iter()
+            .map(|r| (r.name.clone(), r.caps.clone()))
+            .collect();
+
+        for part in &c.parts {
+            if let ContractPart::StateVariable(sv) = part {
+                let addr = self.next_state_addr;
+                self.next_state_addr += 1;
+                self.state_vars.insert(sv.name.clone(), addr);
+                match &sv.ty {
+                    Type::Mapping(_, _) => { self.map_vars.insert(sv.name.clone(), addr); }
+                    Type::Array(_)      => { self.set_vars.insert(sv.name.clone(), addr); }
+                    _ => {}
+                }
+            }
+        }
+
+        for (i, part) in c.parts.iter().enumerate() {
+            if let ContractPart::Function(f) = part {
+                let base = FUNCTION_LOCAL_BASE + (i as u32) * FUNCTION_LOCAL_STRIDE;
+                let mut addr = base;
+                let mut param_addrs = Vec::with_capacity(f.params.len());
+                for _param in &f.params {
+                    param_addrs.push(addr);
+                    addr += 1;
+                }
+                self.function_param_addrs.insert(f.name.clone(), param_addrs);
+                let has_return = f.body.statements.iter().any(|s| matches!(s, Statement::Return(Some(_))));
+                self.function_has_return.insert(f.name.clone(), has_return);
+                self.function_requires_caller.insert(f.name.clone(), f.requires_caller);
+
+                // Expand role::X references into their constituent caps
+                let mut resolved_caps: Vec<String> = vec![];
+                for cap_entry in &f.capabilities {
+                    if cap_entry.starts_with("role::") {
+                        let role_name = &cap_entry["role::".len()..];
+                        if let Some(caps) = role_map.get(role_name) {
+                            resolved_caps.extend(caps.iter().cloned());
+                        } else {
+                            return Err(format!("undefined role '{}' used in function '{}'", role_name, f.name));
+                        }
+                    } else {
+                        resolved_caps.push(cap_entry.clone());
+                    }
+                }
+                self.function_capabilities.insert(f.name.clone(), resolved_caps);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn gen_source_unit(&mut self, unit: &SourceUnit) -> Result<(), String> {
+        match unit {
+            SourceUnit::Struct(s)    => self.gen_struct(s),
+            SourceUnit::Contract(c)  => self.gen_contract(c),
+            SourceUnit::Interface(_) => Ok(()), // interfaces are compile-time only
+            SourceUnit::Event(_)     => Ok(()), // top-level events: metadata only
+        }
+    }
+
+    fn gen_struct(&mut self, _s: &StructDefinition) -> Result<(), String> {
+        // Structs don't generate executable code (metadata only, for now).
+        Ok(())
+    }
+
+    fn gen_contract(&mut self, c: &ContractDefinition) -> Result<(), String> {
+        for part in &c.parts {
+            match part {
+                ContractPart::Function(f) => self.gen_function(f)?,
+                _ => {} // State variables were handled in the pre-pass.
+            }
+        }
+        Ok(())
+    }
+
+    fn gen_function(&mut self, f: &FunctionDefinition) -> Result<(), String> {
+        let address = self.assembler.current_pos() as u32;
+        self.function_addresses.insert(f.name.clone(), address);
+        self.current_function = Some(f.name.clone());
+
+        // Build this function's local scope: its parameters, at the
+        // addresses already assigned in the pre-pass.
+        let param_addrs = self.function_param_addrs.get(&f.name).cloned().unwrap_or_default();
+        let mut locals = HashMap::new();
+        for (param, addr) in f.params.iter().zip(param_addrs.iter()) {
+            locals.insert(param.name.clone(), *addr);
+        }
+        let next_local_addr = param_addrs.last().map(|a| a + 1).unwrap_or_else(|| {
+            // No params: still needs a base for any future local vars.
+            let idx = self.function_addresses.len() as u32 - 1;
+            FUNCTION_LOCAL_BASE + idx * FUNCTION_LOCAL_STRIDE
+        });
+        let mut scope = FunctionScope { locals, next_local_addr };
+
+        // ── G1: Authority enforcement pre-pass ─────────────────────────────
+        // Per §20.2.1: "There is no implicit authority derived from call
+        // context, transaction origin, or caller address."
+        // Any function that writes to a STATE VARIABLE (not a local) must
+        // declare `as caller`. Writing state without authority declaration
+        // is a compile error — not a warning, not opt-in.
+        //
+        // We distinguish state vars from locals: state vars live in
+        // self.state_vars (pre-assigned addresses); locals live in
+        // scope.locals (function parameters only at this point, since
+        // Let bindings are added to scope during gen_statement).
+        // The pre-pass checks the raw statement list before gen runs.
+        if !f.requires_caller {
+            fn writes_state(stmt: &Statement, state_vars: &HashMap<String, u32>) -> bool {
+                match stmt {
+                    Statement::Assignment(name, _) => state_vars.contains_key(name.as_str()),
+                    Statement::If { then_block, else_block, .. } => {
+                        then_block.statements.iter().any(|s| writes_state(s, state_vars))
+                        || else_block.as_ref().map_or(false, |eb|
+                            eb.statements.iter().any(|s| writes_state(s, state_vars)))
+                    }
+                    // Let bindings are always local — they allocate a new
+                    // address and never overwrite state var slots.
+                    _ => false,
+                }
+            }
+            let mutates_state = f.body.statements.iter()
+                .any(|s| writes_state(s, &self.state_vars));
+            if mutates_state {
+                return Err(format!(
+                    "function '{}' mutates contract state but declares no authority \
+                     (add `as caller` to the function signature — §20.2.1)",
+                    f.name
+                ));
+            }
+        }
+
+        // ── Identity prologue ────────────────────────────────────────────────
+        // `as caller`: emit a runtime check that caller != zero address.
+        // Zero address == unauthenticated (no wallet / unsigned call).
+        // Pattern: LoadCaller → LoadImm256(0) → Eq → JumpIf revert → Jump body → Revert
+        if f.requires_caller {
+            self.assembler.emit_op(OpCode::LoadCaller);
+            self.assembler.emit_op(OpCode::LoadImm256);
+            self.assembler.emit_raw(&[0u8; 32]);
+            self.assembler.emit_op(OpCode::Eq);
+            self.assembler.emit_op(OpCode::JumpIf);
+            let patch_to_revert = self.assembler.emit_placeholder_u32();
+            self.assembler.emit_op(OpCode::Jump);
+            let patch_to_body = self.assembler.emit_placeholder_u32();
+            let revert_pos = self.assembler.current_pos() as u32;
+            self.assembler.patch_u32(patch_to_revert, revert_pos);
+            let msg = format!("{}: unauthenticated call", f.name);
+            let mb = msg.as_bytes();
+            self.assembler.emit_op(OpCode::Revert);
+            self.assembler.emit_raw(&(mb.len() as u32).to_le_bytes());
+            self.assembler.emit_raw(mb);
+            let body_pos = self.assembler.current_pos() as u32;
+            self.assembler.patch_u32(patch_to_body, body_pos);
+        }
+
+        // ── Capability stubs ─────────────────────────────────────────────────
+        // Capabilities are declared, parsed, stored in the dispatch table, and
+        // included in the EIP-712 signed payload — so they are expressed and
+        // auditable at every level. Runtime enforcement (extern_call into a
+        // __CapRegistry contract) is the next implementation step.
+        // TODO(cap-enforcement): for each cap in f.capabilities, emit:
+        //   LoadCaller, LoadImm256(keccak256(cap_name)), ExternCall(__CapRegistry, hasCapability, 2)
+        //   JumpIf past revert, Revert "missing capability: <cap>"
+
+        for stmt in &f.body.statements {
+            self.gen_statement(stmt, &mut scope)?;
+        }
+
+        // Every function must end in Return (not Halt) so multi-function
+        // dispatch/call chains resume correctly; a top-level call (the old
+        // plain `execute()` convention with pc=0 and an empty call stack)
+        // gracefully halts on Return instead of erroring.
+        self.assembler.emit_op(OpCode::Return);
+
+        Ok(())
+    }
+
+    fn resolve_address(&self, scope: &FunctionScope, name: &str) -> Result<u32, String> {
+        if let Some(addr) = scope.locals.get(name) {
+            return Ok(*addr);
+        }
+        if let Some(addr) = self.state_vars.get(name) {
+            return Ok(*addr);
+        }
+        Err(format!("Undefined variable: {}", name))
+    }
+
+    fn gen_statement(&mut self, stmt: &Statement, scope: &mut FunctionScope) -> Result<(), String> {
+        match stmt {
+            Statement::Expression(expr) => {
+                self.gen_expression(expr, scope)?;
+                // Expression statements discard their result.
+                self.assembler.emit_op(OpCode::Pop);
+                Ok(())
+            }
+            Statement::Require(cond, msg) => {
+                // require(cond, msg): compiles to a JumpIf-based
+                // conditional abort. If the condition is TRUE we jump
+                // PAST the Halt (execution continues normally); if FALSE
+                // we fall straight through into Halt, aborting the
+                // contract. The jump target is backpatched once we know
+                // where the Halt instruction ends.
+                self.gen_expression(cond, scope)?;
+                self.assembler.emit_op(OpCode::JumpIf);
+                let jump_target_pos = self.assembler.emit_placeholder_u32();
+                // Emit Revert opcode + length-prefixed message.
+                // emit_bytes() already prepends the 4-byte LE length.
+                self.assembler.emit_op(OpCode::Revert);
+                let msg_bytes = msg.as_bytes();
+                self.assembler.emit_bytes(msg_bytes);
+                let after_revert = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(jump_target_pos, after_revert);
+                Ok(())
+            }
+            Statement::ExternCall { contract, function, args } => {
+                // Push args onto stack left-to-right, then emit ExternCall opcode
+                for arg in args.iter() {
+                    self.gen_expression(arg, scope)?;
+                }
+                // Encode: ExternCall <4-byte-LE contract_len> <contract_bytes>
+                //                    <4-byte-LE fn_len> <fn_bytes> <1-byte arg_count>
+                let contract_bytes = contract.as_bytes();
+                let fn_bytes       = function.as_bytes();
+                let arg_count      = args.len() as u8;
+                self.assembler.emit_op(OpCode::ExternCall);
+                // VM reads: u32 clen, clen bytes, u32 flen, flen bytes, u8 argc
+                self.assembler.emit_u32(contract_bytes.len() as u32);
+                self.assembler.emit_raw(contract_bytes);
+                self.assembler.emit_u32(fn_bytes.len() as u32);
+                self.assembler.emit_raw(fn_bytes);
+                self.assembler.emit_raw(&[arg_count]);
+                // ExternCall pushes a return value; pop it (stmt context, discard)
+                self.assembler.emit_op(OpCode::Pop);
+                Ok(())
+            }
+            Statement::Assignment(name, expr) => {
+                let addr = self.resolve_address(scope, name)?;
+                self.gen_expression(expr, scope)?;
+                self.assembler.emit_op(OpCode::Push);
+                self.assembler.emit_i32(addr as i32);
+                self.assembler.emit_op(OpCode::Store);
+                Ok(())
+            }
+            Statement::Return(expr) => {
+                if let Some(e) = expr {
+                    self.gen_expression(e, scope)?;
+                }
+                self.assembler.emit_op(OpCode::Return);
+                Ok(())
+            }
+            // ── Named error revert: `revert ErrorName(args...)` ────────────
+            Statement::RevertNamed { error, args } => {
+                // For now: pack args count + error name into the Revert message.
+                // Future: ABI-encode args properly when full ABI is implemented.
+                let msg = if args.is_empty() {
+                    error.clone()
+                } else {
+                    format!("{}({} arg(s))", error, args.len())
+                };
+                // Still push args so they are evaluated (side-effect safe).
+                for arg in args.iter() {
+                    self.gen_expression(arg, scope)?;
+                    self.assembler.emit_op(OpCode::Pop);
+                }
+                let msg_bytes = msg.as_bytes();
+                self.assembler.emit_op(OpCode::Revert);
+                self.assembler.emit_bytes(msg_bytes);
+                Ok(())
+            }
+            // ── Event emission: `emit EventName(args...)` ───────────────────
+            // Emits a Print opcode with a tagged string: "event:<Name>:<arg0>:..."
+            // The server collects Print output and surfaces it as "events" in the
+            // run response. A dedicated Emit opcode (0x70) will replace this
+            // once the VM log/receipt subsystem is implemented.
+            Statement::Emit { event, args } => {
+                // Push each arg then use Print to surface it.
+                // For now: emit `Print("event:<EventName>")` as a marker,
+                // then Print each arg. The server aggregates these.
+                let tag = format!("event:{}", event);
+                self.assembler.emit_op(OpCode::LoadImm);
+                self.assembler.emit_bytes(tag.as_bytes());
+                self.assembler.emit_op(OpCode::Print);
+                for arg in args.iter() {
+                    self.gen_expression(arg, scope)?;
+                    self.assembler.emit_op(OpCode::Print);
+                }
+                Ok(())
+            }
+            // ── If statement ─────────────────────────────────────────────────
+            Statement::If { condition, then_block, else_block } => {
+                self.gen_expression(condition, scope)?;
+                // JumpIf to then-block; else jump over
+                self.assembler.emit_op(OpCode::JumpIf);
+                let patch_to_then = self.assembler.emit_placeholder_u32();
+                // Jump to else (or past everything if no else)
+                self.assembler.emit_op(OpCode::Jump);
+                let patch_past_then = self.assembler.emit_placeholder_u32();
+                // Then-block
+                let then_addr = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(patch_to_then, then_addr);
+                for stmt in &then_block.statements {
+                    self.gen_statement(stmt, scope)?;
+                }
+                // If there's an else, jump past it after then-block
+                let patch_past_else = if else_block.is_some() {
+                    self.assembler.emit_op(OpCode::Jump);
+                    Some(self.assembler.emit_placeholder_u32())
+                } else { None };
+                // Else-block (or just landing point)
+                let else_addr = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(patch_past_then, else_addr);
+                if let Some(eb) = else_block {
+                    for stmt in &eb.statements {
+                        self.gen_statement(stmt, scope)?;
+                    }
+                }
+                if let Some(p) = patch_past_else {
+                    let after_else = self.assembler.current_pos() as u32;
+                    self.assembler.patch_u32(p, after_else);
+                }
+                Ok(())
+            }
+            // ── Let binding: `let x = expr` ──────────────────────────────────
+            Statement::Let { name, ty: _, value } => {
+                // Allocate a new local slot and assign
+                let addr = scope.next_local_addr;
+                scope.next_local_addr += 1;
+                scope.locals.insert(name.clone(), addr);
+                self.gen_expression(value, scope)?;
+                self.assembler.emit_op(OpCode::Push);
+                self.assembler.emit_i32(addr as i32);
+                self.assembler.emit_op(OpCode::Store);
+                Ok(())
+            }
+            Statement::MapAssignment { map, key, value } => {
+                let is_set = self.set_vars.contains_key(map.as_str());
+                let addr = *self.state_vars.get(map.as_str()).ok_or_else(||format!("undefined '{}'",map))?;
+                self.gen_expression(value, scope)?;
+                self.gen_expression(key, scope)?;
+                self.assembler.emit_op(OpCode::Push); self.assembler.emit_i32(addr as i32);
+                if is_set { self.assembler.emit_op(OpCode::SetAdd); } else { self.assembler.emit_op(OpCode::MapSet); }
+                Ok(())
+            }
+            Statement::SetOp { set, op, value } => {
+                let is_map = self.map_vars.contains_key(set.as_str());
+                let addr = *self.state_vars.get(set.as_str()).ok_or_else(||format!("undefined '{}'",set))?;
+                self.gen_expression(value, scope)?;
+                self.assembler.emit_op(OpCode::Push); self.assembler.emit_i32(addr as i32);
+                match op {
+                    SetOpKind::Add    => if is_map { self.assembler.emit_op(OpCode::MapSet); } else { self.assembler.emit_op(OpCode::SetAdd); },
+                    SetOpKind::Remove => if is_map { self.assembler.emit_op(OpCode::MapRemove); } else { self.assembler.emit_op(OpCode::SetRemove); },
+                }
+                Ok(())
+            }
+            Statement::While { condition, body } => {
+                let loop_top = self.assembler.current_pos() as u32;
+                self.gen_expression(condition, scope)?;
+                self.assembler.emit_op(OpCode::JumpIf);
+                let pb = self.assembler.emit_placeholder_u32();
+                self.assembler.emit_op(OpCode::Jump);
+                let pe = self.assembler.emit_placeholder_u32();
+                let ba = self.assembler.current_pos() as u32; self.assembler.patch_u32(pb, ba);
+                self.loop_stack.push(LoopContext{loop_top,break_patches:vec![],continue_patches:vec![]});
+                for s in &body.statements { self.gen_statement(s, scope)?; }
+                self.assembler.emit_op(OpCode::Jump);
+                let jb = self.assembler.emit_placeholder_u32(); self.assembler.patch_u32(jb, loop_top);
+                let ea = self.assembler.current_pos() as u32; self.assembler.patch_u32(pe, ea);
+                let ctx = self.loop_stack.pop().unwrap();
+                for p in ctx.break_patches { self.assembler.patch_u32(p, ea); }
+                for p in ctx.continue_patches { self.assembler.patch_u32(p, loop_top); }
+                Ok(())
+            }
+            Statement::Break => {
+                if self.loop_stack.is_empty(){return Err("'break' outside loop".into());}
+                self.assembler.emit_op(OpCode::Jump);
+                let p=self.assembler.emit_placeholder_u32(); self.loop_stack.last_mut().unwrap().break_patches.push(p); Ok(())
+            }
+            Statement::Continue => {
+                if self.loop_stack.is_empty(){return Err("'continue' outside loop".into());}
+                self.assembler.emit_op(OpCode::Jump);
+                let p=self.assembler.emit_placeholder_u32(); self.loop_stack.last_mut().unwrap().continue_patches.push(p); Ok(())
+            }
+        }
+    }
+
+    fn gen_expression(&mut self, expr: &Expression, scope: &mut FunctionScope) -> Result<(), String> {
+        match expr {
+            Expression::Literal(Literal::Number(n)) => {
+                if *n > i32::MAX as u128 {
+                    self.assembler.emit_op(OpCode::LoadImm128);
+                    self.assembler.emit_u128(*n as u128);
+                } else {
+                    self.assembler.emit_op(OpCode::Push);
+                    self.assembler.emit_i32(*n as i32);
+                }
+                Ok(())
+            }
+            Expression::Literal(Literal::BigNumber(s)) => {
+                // Full UInt256 literal (> u128::MAX) — 32 big-endian bytes via LoadImm256.
+                let v: U256 = s.parse().map_err(|_| format!("Invalid UInt256 literal: {}", s))?;
+                self.assembler.emit_op(OpCode::LoadImm256);
+                self.assembler.emit_u256_bytes(&v.to_be_bytes::<32>());
+                Ok(())
+            }
+            Expression::Literal(Literal::Bool(b)) => {
+                self.assembler.emit_op(OpCode::Push);
+                self.assembler.emit_i32(if *b { 1 } else { 0 });
+                Ok(())
+            }
+            Expression::Literal(Literal::String(s)) => {
+                self.assembler.emit_op(OpCode::LoadImm);
+                self.assembler.emit_bytes(s.as_bytes());
+                Ok(())
+            }
+            Expression::Literal(Literal::Hex(bytes)) => {
+                self.assembler.emit_op(OpCode::LoadImm);
+                self.assembler.emit_bytes(bytes);
+                Ok(())
+            }
+            Expression::UnaryOp(op, operand) => {
+                match op {
+                    UnaryOperator::Neg => {
+                        // Emit `0 - operand`
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_i32(0);
+                        self.gen_expression(operand, scope)?;
+                        self.assembler.emit_op(OpCode::Sub);
+                    }
+                    UnaryOperator::Not => {
+                        // Logical not: `operand == 0`
+                        self.gen_expression(operand, scope)?;
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_i32(0);
+                        self.assembler.emit_op(OpCode::Eq);
+                    }
+                }
+                Ok(())
+            }
+            Expression::Caller => {
+                // LoadCaller (0x50) — pushes authenticated EVM caller address as U256.
+                // Compile error if `caller` is used in a function not declared `as caller`.
+                let fn_name = self.current_function.clone().unwrap_or_default();
+                let req = *self.function_requires_caller.get(&fn_name).unwrap_or(&false);
+                if !req {
+                    return Err(format!(
+                        "'caller' used in '{}' which is not declared 'as caller'                          — add 'as caller' to the function signature",
+                        fn_name
+                    ));
+                }
+                self.assembler.emit_op(OpCode::LoadCaller);
+                Ok(())
+            }
+            Expression::Identifier(name) => {
+                let addr = self.resolve_address(scope, name)?;
+                self.assembler.emit_op(OpCode::Push);
+                self.assembler.emit_i32(addr as i32);
+                self.assembler.emit_op(OpCode::Load);
+                Ok(())
+            }
+            Expression::BinaryOp(lhs, op, rhs) => {
+                // Compile-time divide/modulo by zero detection
+                if matches!(op, BinaryOperator::Div | BinaryOperator::Mod) {
+                    match rhs.as_ref() {
+                        Expression::Literal(Literal::Number(0)) =>
+                            return Err(format!("{} by zero (compile-time literal)",
+                                if matches!(op, BinaryOperator::Div) { "Division" } else { "Modulo" })),
+                        Expression::Literal(Literal::BigNumber(s)) if s == "0" =>
+                            return Err(format!("{} by zero (compile-time literal)",
+                                if matches!(op, BinaryOperator::Div) { "Division" } else { "Modulo" })),
+                        _ => {}
+                    }
+                }
+                self.gen_expression(lhs, scope)?;
+                self.gen_expression(rhs, scope)?;
+                let opcode = match op {
+                    BinaryOperator::Add => OpCode::Add,
+                    BinaryOperator::Sub => OpCode::Sub,
+                    BinaryOperator::Mul => OpCode::Mul,
+                    BinaryOperator::Div => OpCode::Div,
+                    BinaryOperator::Mod => OpCode::Rem,
+                    BinaryOperator::Eq => OpCode::Eq,
+                    BinaryOperator::Ne => OpCode::Ne,
+                    BinaryOperator::Lt => OpCode::Lt,
+                    BinaryOperator::Le => OpCode::Le,
+                    BinaryOperator::Gt => OpCode::Gt,
+                    BinaryOperator::Ge  => OpCode::Ge,
+                    // Logical operators: emit both sides then combine
+                    // && → Mul (1*1=1, 0*x=0 — correct for boolean 0/1 operands)
+                    BinaryOperator::And => OpCode::Mul,
+                    // || → Add (0+0=0, any non-zero is truthy in require conditions)
+                    BinaryOperator::Or  => OpCode::Add,
+                };
+                self.assembler.emit_op(opcode);
+                Ok(())
+            }
+            Expression::Call(name, args) => self.gen_call(name, args, scope),
+            Expression::MapIndex(map_name, key_expr) => {
+                let is_set = self.set_vars.contains_key(map_name.as_str());
+                let addr = *self.state_vars.get(map_name.as_str()).ok_or_else(||format!("undefined '{}'",map_name))?;
+                self.gen_expression(key_expr, scope)?;
+                self.assembler.emit_op(OpCode::Push); self.assembler.emit_i32(addr as i32);
+                if is_set { self.assembler.emit_op(OpCode::SetContains); } else { self.assembler.emit_op(OpCode::MapGet); }
+                Ok(())
+            }
+            Expression::MapMethod { map, method, args } => {
+                let is_set = self.set_vars.contains_key(map.as_str());
+                let addr = *self.state_vars.get(map.as_str()).ok_or_else(||format!("undefined '{}'",map))?;
+                match method.as_str() {
+                    "contains" => {
+                        if let Some(a)=args.first(){self.gen_expression(a,scope)?;}
+                        self.assembler.emit_op(OpCode::Push); self.assembler.emit_i32(addr as i32);
+                        if is_set { self.assembler.emit_op(OpCode::SetContains); } else { self.assembler.emit_op(OpCode::MapContains); }
+                    }
+                    "len"|"length" => {
+                        self.assembler.emit_op(OpCode::Push); self.assembler.emit_i32(addr as i32);
+                        if is_set { self.assembler.emit_op(OpCode::SetLen); } else { self.assembler.emit_op(OpCode::MapLen); }
+                    }
+                    "get" => {
+                        if let Some(a)=args.first(){self.gen_expression(a,scope)?;}
+                        self.assembler.emit_op(OpCode::Push); self.assembler.emit_i32(addr as i32);
+                        self.assembler.emit_op(OpCode::MapGet);
+                    }
+                    _ => return Err(format!("unknown map method '{}'", method)),
+                }
+                Ok(())
+            }
+                        Expression::SetMethod { set, method, args } => {
+                let is_map = self.map_vars.contains_key(set.as_str());
+                let addr = *self.state_vars.get(set.as_str()).ok_or_else(||format!("undefined '{}'",set))?;
+                match method.as_str() {
+                    "contains" => {
+                        if let Some(a)=args.first(){self.gen_expression(a,scope)?;}
+                        self.assembler.emit_op(OpCode::Push); self.assembler.emit_i32(addr as i32);
+                        if is_map { self.assembler.emit_op(OpCode::MapContains); } else { self.assembler.emit_op(OpCode::SetContains); }
+                    }
+                    "len"|"length" => {
+                        self.assembler.emit_op(OpCode::Push); self.assembler.emit_i32(addr as i32);
+                        if is_map { self.assembler.emit_op(OpCode::MapLen); } else { self.assembler.emit_op(OpCode::SetLen); }
+                    }
+                    "remove" => {
+                        if let Some(a)=args.first(){self.gen_expression(a,scope)?;}
+                        self.assembler.emit_op(OpCode::Push); self.assembler.emit_i32(addr as i32);
+                        if is_map { self.assembler.emit_op(OpCode::MapRemove); } else { self.assembler.emit_op(OpCode::SetRemove); }
+                        self.assembler.emit_op(OpCode::Push); self.assembler.emit_i32(1);
+                    }
+                    _ => return Err(format!("unknown method '{}'", method)),
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn gen_call(&mut self, name: &str, args: &[Expression], scope: &mut FunctionScope) -> Result<(), String> {
+        if let Some(opcode) = pqc_builtin_opcode(name) {
+            // PQC/KEM builtins: argument push order matches the VM
+            // opcode handler's pop order exactly (see vm.rs), which is
+            // the reverse of natural source-code argument order for
+            // these specific ops.
+            match name {
+                "dilithium_verify" | "falcon_verify" | "sphincs_verify" => {
+                    // Source order: (message, signature, public_key).
+                    // VM pops: public_key, then message, then signature.
+                    // So push order must be: signature, message, public_key.
+                    if args.len() != 3 {
+                        return Err(format!("{} expects 3 arguments", name));
+                    }
+                    self.gen_expression(&args[1], scope)?; // signature
+                    self.gen_expression(&args[0], scope)?; // message
+                    self.gen_expression(&args[2], scope)?; // public_key
+                }
+                "kyber_decaps" | "kyber_decapsulate"
+                | "mceliece_decapsulate" | "hqc_decapsulate" => {
+                    // KEM decapsulate: (ciphertext, private_key) → 2 args
+                    if args.len() != 2 {
+                        return Err(format!("{} expects 2 arguments", name));
+                    }
+                    self.gen_expression(&args[0], scope)?; // ciphertext
+                    self.gen_expression(&args[1], scope)?; // private_key
+                }
+                "kyber_encapsulate" | "mceliece_encapsulate" | "hqc_encapsulate" => {
+                    // KEM encapsulate: (public_key) → 1 arg
+                    if args.len() != 1 {
+                        return Err(format!("{} expects 1 argument", name));
+                    }
+                    self.gen_expression(&args[0], scope)?; // public_key
+                }
+                "falcon_sign" => {
+                    // falcon_sign(message, private_key) → 2 args
+                    if args.len() != 2 {
+                        return Err(format!("{} expects 2 arguments", name));
+                    }
+                    self.gen_expression(&args[0], scope)?; // message
+                    self.gen_expression(&args[1], scope)?; // private_key
+                }
+                _ => unreachable!(),
+            }
+            self.assembler.emit_op(opcode);
+            return Ok(());
+        }
+
+        // Inter-function call: push args in source order into the
+        // callee's known parameter slots isn't how the VM's Call opcode
+        // works (Call is a plain code jump with a call-stack return
+        // address) — argument marshaling for a same-VM `Call` happens by
+        // storing directly into the callee's fixed local addresses
+        // before jumping, since the VM has no register-passing ABI.
+        let param_addrs = self
+            .function_param_addrs
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("Undefined function: {}", name))?;
+
+        if args.len() != param_addrs.len() {
+            return Err(format!(
+                "Function '{}' expects {} argument(s), got {}",
+                name,
+                param_addrs.len(),
+                args.len()
+            ));
+        }
+
+        for (arg, addr) in args.iter().zip(param_addrs.iter()) {
+            self.gen_expression(arg, scope)?;
+            self.assembler.emit_op(OpCode::Push);
+            self.assembler.emit_i32(*addr as i32);
+            self.assembler.emit_op(OpCode::Store);
+        }
+
+        // Forward-reference safe: address is patched even if the target
+        // function hasn't been code-generated yet, because we backpatch
+        // using the function_addresses map filled in during codegen. If
+        // the callee comes AFTER this call site in source order, we defer
+        // patching via a placeholder resolved once the whole contract has
+        // been generated (see generate()'s final backpatch pass)... 
+        self.assembler.emit_op(OpCode::Call);
+        if let Some(&addr) = self.function_addresses.get(name) {
+            self.assembler.emit_u32(addr);
+        } else {
+            // Callee not yet generated (forward reference): emit a
+            // placeholder and record it for a final backpatch pass.
+            let pos = self.assembler.emit_placeholder_u32();
+            self.pending_call_patches.push((pos, name.to_string()));
+        }
+
+        // The callee leaves its return value (if any) on the stack; if it
+        // has no return value the caller treats the call as a statement
+        // and the surrounding gen_statement's Pop handles cleanup. To keep
+        // the stack balanced for void calls used as expressions, push a
+        // dummy 0 when the function has no return value.
+        let has_return = *self.function_has_return.get(name).unwrap_or(&false);
+        if !has_return {
+            self.assembler.emit_op(OpCode::Push);
+            self.assembler.emit_i32(0);
+        }
+
+        Ok(())
+    }
+}
