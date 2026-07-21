@@ -1676,6 +1676,10 @@ async fn session_run_handler(
             .unwrap_or_else(eip712_domain_separator_zero);
         let struct_hash = eip712_hash_contract_call(&call_sig_early, &req.session_id, nonce);
         let digest      = eip712_digest_with_domain(run_domain, &struct_hash);
+        eprintln!("[AUTH] contract_name={:?} call_sig={:?}",
+            session.contract_name.as_deref().unwrap_or("(none)"), call_sig_early);
+        eprintln!("[AUTH] domain_sep={} struct_hash={} digest={}",
+            hex_encode(&run_domain), hex_encode(&struct_hash), hex_encode(&digest));
         // 4. ecrecover against EIP-712 digest
         let sig_bytes = hex_decode_strict(sig_str.strip_prefix("0x").unwrap_or(sig_str))
             .map_err(|e| format!("evm_signature hex invalid: {}", e));
@@ -1689,7 +1693,10 @@ async fn session_run_handler(
             }
         };
         let recovered = match ecrecover(&digest, &sig_bytes) {
-            Ok(r) => r,
+            Ok(r) => {
+                eprintln!("[AUTH] recovered={} claimed={}", hex_encode(&r), addr_str);
+                r
+            }
             Err(e) => {
                 { state.sessions.lock().unwrap().insert(req.session_id.clone(), session); }
                 return (StatusCode::UNAUTHORIZED, RespJson(RunResponse {
@@ -1756,7 +1763,7 @@ async fn session_run_handler(
         }));
     }
 
-    eprintln!("[RUN] fn={} args={:?}", req.function, vm_args);
+    eprintln!("[RUN] sid={} caller={} fn={} args_len={}", &req.session_id[..8], hex_encode(&caller_addr), req.function, vm_args.len());
     let call_result = session.vm.call_function(&req.function, &vm_args);
     eprintln!("[RUN] result={:?}", call_result);
     session.vm.call_context = synq_vm::CallContext::anonymous();

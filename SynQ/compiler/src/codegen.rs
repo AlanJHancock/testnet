@@ -66,13 +66,10 @@ struct FunctionScope {
     /// by the grammar -- only params are locals today).
     #[allow(dead_code)]
     next_local_addr: u32,
-}
-
-/// Jump-patch bookkeeping for break/continue inside while loops.
-struct LoopContext {
-    loop_top:         u32,
-    break_patches:    Vec<usize>,
-    continue_patches: Vec<usize>,
+    /// Stacks of placeholder offsets for Break statements (one Vec per while loop).
+    break_patches:    Vec<Vec<usize>>,
+    /// Stack of loop-start addresses for Continue statements.
+    continue_targets: Vec<u32>,
 }
 
 pub struct CodeGenerator {
@@ -81,8 +78,6 @@ pub struct CodeGenerator {
     state_vars: HashMap<String, u32>,
     map_vars:   HashMap<String, u32>,
     set_vars:   HashMap<String, u32>,
-    loop_stack: Vec<LoopContext>,
-    pub strict_authority: bool,
     next_state_addr: u32,
     /// Forward-referenceable function addresses, registered in a
     /// pre-pass before any function body is generated so a caller can
@@ -109,8 +104,6 @@ impl CodeGenerator {
             state_vars: HashMap::new(),
             map_vars:   HashMap::new(),
             set_vars:   HashMap::new(),
-            loop_stack: Vec::new(),
-            strict_authority: true,
             next_state_addr: 0,
             function_addresses: HashMap::new(),
             function_param_addrs: HashMap::new(),
@@ -263,7 +256,7 @@ impl CodeGenerator {
             let idx = self.function_addresses.len() as u32 - 1;
             FUNCTION_LOCAL_BASE + idx * FUNCTION_LOCAL_STRIDE
         });
-        let mut scope = FunctionScope { locals, next_local_addr };
+        let mut scope = FunctionScope { locals, next_local_addr, break_patches: Vec::new(), continue_targets: Vec::new() };
 
         // ── G1: Authority enforcement pre-pass ─────────────────────────────
         // Per §20.2.1: "There is no implicit authority derived from call
@@ -293,7 +286,7 @@ impl CodeGenerator {
             }
             let mutates_state = f.body.statements.iter()
                 .any(|s| writes_state(s, &self.state_vars));
-            if mutates_state && self.strict_authority {
+            if mutates_state {
                 return Err(format!(
                     "function '{}' mutates contract state but declares no authority \
                      (add `as caller` to the function signature — §20.2.1)",
@@ -303,19 +296,19 @@ impl CodeGenerator {
         }
 
         // ── Identity prologue ────────────────────────────────────────────────
-        // `as caller`: emit a runtime check that caller != UMA(zero address).
-        // LoadCaller returns keccak256('UMA:' || evm_address)[12..] as U256.
-        // For an anonymous (unauthenticated) call, evm_address = [0u8;20],
-        // so the anonymous sentinel = keccak256('UMA:' || 0x00...)[12..]
-        //   = 0x0000000000000000000000000c8f6953b3c576f6e9aa77cdf8ec8cbdfe6f4219
-        // Pattern: LoadCaller → LoadImm256(UMA_ANON) → Eq → JumpIf revert → Jump body → Revert
+        // `as caller`: emit a runtime check that caller != zero address.
+        // LoadCaller (0x50) returns the raw EVM signing address padded to 32
+        // bytes (devnet placeholder — not final UMA semantics).
+        // For an anonymous (unauthenticated) call, LoadCaller pushes [0u8;32].
+        // Sentinel = [0u8; 32] — the zero address.
+        // Pattern: LoadCaller → LoadImm256(ANON_ZERO) → Eq → JumpIf revert → Jump body → Revert
         if f.requires_caller {
-            // UMA of the zero address — the anonymous sentinel
+            // Zero address — anonymous sentinel matching LoadCaller behaviour
             const UMA_ANON: [u8; 32] = [
                 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-                0x00,0x00,0x00,0x00,0x0c,0x8f,0x69,0x53,
-                0xb3,0xc5,0x76,0xf6,0xe9,0xaa,0x77,0xcd,
-                0xf8,0xec,0x8c,0xbd,0xfe,0x6f,0x42,0x19,
+                0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+                0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+                0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
             ];
             self.assembler.emit_op(OpCode::LoadCaller);
             self.assembler.emit_op(OpCode::LoadImm256);
@@ -427,44 +420,22 @@ impl CodeGenerator {
             Statement::MapAssignment { map, key, value } => {
                 let addr = *self.state_vars.get(map.as_str())
                     .ok_or_else(|| format!("MapAssignment: unknown map '{}'", map))?;
-                // VM MapSet pops: map_addr (top), key, value (bottom)
-                self.gen_expression(value, scope)?;
-                self.gen_expression(key, scope)?;
                 self.assembler.emit_op(OpCode::Push);
                 self.assembler.emit_i32(addr as i32);
+                self.gen_expression(key, scope)?;
+                self.gen_expression(value, scope)?;
                 self.assembler.emit_op(OpCode::MapSet);
                 Ok(())
             }
             Statement::SetOp { set, op, value } => {
                 let addr = *self.state_vars.get(set.as_str())
                     .ok_or_else(|| format!("SetOp: unknown set '{}'", set))?;
-                let is_map = self.map_vars.contains_key(set.as_str());
-                // VM ops pop: addr (top), value (bottom)
-                self.gen_expression(value, scope)?;
                 self.assembler.emit_op(OpCode::Push);
                 self.assembler.emit_i32(addr as i32);
+                self.gen_expression(value, scope)?;
                 match op {
-                    SetOpKind::Add    => {
-                        if is_map {
-                            // map.add(k) used as statement — no value, emit MapGet to check presence
-                            // (This shouldn't normally appear; map writes use MapAssignment.)
-                            return Err(format!("map '{}' does not support .add() — use indexing: {}[key] = value", set, set));
-                        }
-                        self.assembler.emit_op(OpCode::SetAdd);
-                    }
-                    SetOpKind::Remove => {
-                        if is_map {
-                            // map.remove(k) — use MapRemove opcode
-                            self.assembler.emit_op(OpCode::MapRemove);
-                            // MapRemove doesn't push a value; push 1 as statement result
-                            self.assembler.emit_op(OpCode::Push);
-                            self.assembler.emit_i32(1);
-                        } else {
-                            self.assembler.emit_op(OpCode::SetRemove);
-                            self.assembler.emit_op(OpCode::Push);
-                            self.assembler.emit_i32(1);
-                        }
-                    }
+                    SetOpKind::Add    => self.assembler.emit_op(OpCode::SetAdd),
+                    SetOpKind::Remove => self.assembler.emit_op(OpCode::SetRemove),
                 }
                 Ok(())
             }
@@ -547,47 +518,6 @@ impl CodeGenerator {
                 }
                 Ok(())
             }
-            Statement::While { condition, body } => {
-                let loop_top = self.assembler.current_pos() as u32;
-                self.gen_expression(condition, scope)?;
-                self.assembler.emit_op(OpCode::JumpIf);
-                let patch_to_body = self.assembler.emit_placeholder_u32();
-                self.assembler.emit_op(OpCode::Jump);
-                let patch_to_exit = self.assembler.emit_placeholder_u32();
-                let body_addr = self.assembler.current_pos() as u32;
-                self.assembler.patch_u32(patch_to_body, body_addr);
-                self.loop_stack.push(LoopContext {
-                    loop_top,
-                    break_patches:    vec![],
-                    continue_patches: vec![],
-                });
-                for stmt in &body.statements {
-                    self.gen_statement(stmt, scope)?;
-                }
-                self.assembler.emit_op(OpCode::Jump);
-                let jback = self.assembler.emit_placeholder_u32();
-                self.assembler.patch_u32(jback, loop_top);
-                let exit_addr = self.assembler.current_pos() as u32;
-                self.assembler.patch_u32(patch_to_exit, exit_addr);
-                let ctx = self.loop_stack.pop().unwrap();
-                for bp in ctx.break_patches    { self.assembler.patch_u32(bp, exit_addr); }
-                for cp in ctx.continue_patches { self.assembler.patch_u32(cp, loop_top);  }
-                Ok(())
-            }
-            Statement::Break => {
-                if self.loop_stack.is_empty() { return Err("'break' outside loop".into()); }
-                self.assembler.emit_op(OpCode::Jump);
-                let p = self.assembler.emit_placeholder_u32();
-                self.loop_stack.last_mut().unwrap().break_patches.push(p);
-                Ok(())
-            }
-            Statement::Continue => {
-                if self.loop_stack.is_empty() { return Err("'continue' outside loop".into()); }
-                self.assembler.emit_op(OpCode::Jump);
-                let p = self.assembler.emit_placeholder_u32();
-                self.loop_stack.last_mut().unwrap().continue_patches.push(p);
-                Ok(())
-            }
             // ── Let binding: `let x = expr` ──────────────────────────────────
             Statement::Let { name, ty: _, value } => {
                 // Allocate a new local slot and assign
@@ -598,6 +528,56 @@ impl CodeGenerator {
                 self.assembler.emit_op(OpCode::Push);
                 self.assembler.emit_i32(addr as i32);
                 self.assembler.emit_op(OpCode::Store);
+                Ok(())
+            }
+            Statement::While { condition, body } => {
+                // while <cond> { <body> }
+                // loop_start: eval cond
+                //   JumpIf body_start  (cond true → enter body)
+                //   Jump loop_end       (cond false → exit)
+                // body_start: gen body stmts
+                //   Jump loop_start    (back-edge)
+                // loop_end:
+                let loop_start = self.assembler.current_pos() as u32;
+                self.gen_expression(condition, scope)?;
+                self.assembler.emit_op(OpCode::JumpIf);
+                let patch_body = self.assembler.emit_placeholder_u32();
+                self.assembler.emit_op(OpCode::Jump);
+                let patch_end = self.assembler.emit_placeholder_u32();
+                let body_start = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(patch_body, body_start);
+                scope.break_patches.push(vec![]);
+                scope.continue_targets.push(loop_start);
+                for stmt in &body.statements {
+                    self.gen_statement(stmt, scope)?;
+                }
+                // back-edge
+                self.assembler.emit_op(OpCode::Jump);
+                self.assembler.emit_u32(loop_start);
+                let loop_end = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(patch_end, loop_end);
+                // patch break targets
+                if let Some(breaks) = scope.break_patches.pop() {
+                    for p in breaks {
+                        self.assembler.patch_u32(p, loop_end);
+                    }
+                }
+                scope.continue_targets.pop();
+                Ok(())
+            }
+            Statement::Break => {
+                self.assembler.emit_op(OpCode::Jump);
+                let p = self.assembler.emit_placeholder_u32();
+                if let Some(v) = scope.break_patches.last_mut() {
+                    v.push(p);
+                }
+                Ok(())
+            }
+            Statement::Continue => {
+                if let Some(&target) = scope.continue_targets.last() {
+                    self.assembler.emit_op(OpCode::Jump);
+                    self.assembler.emit_u32(target);
+                }
                 Ok(())
             }
         }
@@ -673,61 +653,45 @@ impl CodeGenerator {
             Expression::MapIndex(map, key) => {
                 let addr = *self.state_vars.get(map.as_str())
                     .ok_or_else(|| format!("MapIndex: unknown map '{}'", map))?;
-                // VM MapGet pops: map_addr (top), key (bottom)
-                self.gen_expression(key, scope)?;
                 self.assembler.emit_op(OpCode::Push);
                 self.assembler.emit_i32(addr as i32);
+                self.gen_expression(key, scope)?;
                 self.assembler.emit_op(OpCode::MapGet);
                 Ok(())
             }
             Expression::MapMethod { map, method, args } => {
                 let addr = *self.state_vars.get(map.as_str())
                     .ok_or_else(|| format!("MapMethod: unknown map '{}'", map))?;
-                // The parser routes `.contains` and `.len` to MapMethod even for set<> vars.
-                // Check set_vars and emit Set opcodes instead when appropriate.
-                let is_set = self.set_vars.contains_key(map.as_str());
                 match method.as_str() {
                     "get" => {
                         if args.len() != 1 { return Err("map.get expects 1 arg".into()); }
-                        self.gen_expression(&args[0], scope)?;
                         self.assembler.emit_op(OpCode::Push);
                         self.assembler.emit_i32(addr as i32);
+                        self.gen_expression(&args[0], scope)?;
                         self.assembler.emit_op(OpCode::MapGet);
                     }
                     "contains" => {
-                        if args.len() != 1 { return Err("map/set.contains expects 1 arg".into()); }
-                        self.gen_expression(&args[0], scope)?;
+                        if args.len() != 1 { return Err("map.contains expects 1 arg".into()); }
                         self.assembler.emit_op(OpCode::Push);
                         self.assembler.emit_i32(addr as i32);
-                        if is_set {
-                            self.assembler.emit_op(OpCode::SetContains);
-                        } else {
-                            self.assembler.emit_op(OpCode::MapContains);
-                        }
+                        self.gen_expression(&args[0], scope)?;
+                        self.assembler.emit_op(OpCode::MapContains);
                     }
                     "len" => {
                         self.assembler.emit_op(OpCode::Push);
                         self.assembler.emit_i32(addr as i32);
-                        if is_set {
-                            self.assembler.emit_op(OpCode::SetLen);
-                        } else {
-                            self.assembler.emit_op(OpCode::MapLen);
-                        }
+                        self.assembler.emit_op(OpCode::MapLen);
                     }
                     "remove" => {
                         if args.len() != 1 { return Err("map.remove expects 1 arg".into()); }
-                        self.gen_expression(&args[0], scope)?;
                         self.assembler.emit_op(OpCode::Push);
                         self.assembler.emit_i32(addr as i32);
-                        if is_set {
-                            self.assembler.emit_op(OpCode::SetRemove);
-                        } else {
-                            self.assembler.emit_op(OpCode::MapRemove);
-                        }
+                        self.gen_expression(&args[0], scope)?;
+                        self.assembler.emit_op(OpCode::MapRemove);
                         self.assembler.emit_op(OpCode::Push);
                         self.assembler.emit_i32(1);
                     }
-                    _ => return Err(format!("unknown map/set method: {}", method)),
+                    _ => return Err(format!("unknown map method: {}", method)),
                 }
                 Ok(())
             }
@@ -737,10 +701,9 @@ impl CodeGenerator {
                 match method.as_str() {
                     "contains" => {
                         if args.len() != 1 { return Err("set.contains expects 1 arg".into()); }
-                        // VM SetContains pops: set_addr (top), value
-                        self.gen_expression(&args[0], scope)?;
                         self.assembler.emit_op(OpCode::Push);
                         self.assembler.emit_i32(addr as i32);
+                        self.gen_expression(&args[0], scope)?;
                         self.assembler.emit_op(OpCode::SetContains);
                     }
                     "len" => {

@@ -374,6 +374,15 @@ impl QuantumVM {
         self.halted = false;
         // ── PR-B Item 3: reset step counter for this invocation ─────────────
         self.steps = 0;
+        eprintln!("[VM] call_function name={:?} pc={} code_len={} memory_slots={}",
+            name, self.pc, self.code.len(), self.memory.len());
+        // Dump 200 bytes starting at entry PC
+        let dump_end = (self.pc + 200).min(self.code.len());
+        if self.pc < self.code.len() {
+            let chunk = &self.code[self.pc..dump_end];
+            let hex: String = chunk.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+            eprintln!("[VM] bytecode[{}..{}] = {}", self.pc, dump_end, hex);
+        }
 
         let result = loop {
             if self.halted {
@@ -725,12 +734,18 @@ impl QuantumVM {
                 let map_addr = self.pop()?.as_i32()? as usize;
                 let key_val  = self.pop()?;
                 let key = value_to_key(&key_val)?;
+                eprintln!("[VM] MapGet slot={} key_type={} key_hex={}",
+                    map_addr,
+                    match &key_val { crate::Value::U256(_) => "U256", crate::Value::Bytes(_) => "Bytes",
+                        crate::Value::U128(_) => "U128", crate::Value::I32(_) => "I32", _ => "other" },
+                    key.iter().map(|b| format!("{:02x}", b)).collect::<String>());
                 match self.memory.get(&map_addr) {
                     Some(Value::Map(m)) => {
                         let v = m.get(&key).cloned().unwrap_or(Value::I32(0));
+                        eprintln!("[VM] MapGet slot={} result={:?}", map_addr, v);
                         self.push(v)?;
                     }
-                    None => { self.push(Value::I32(0))?; }
+                    None => { self.push(Value::I32(0))?; eprintln!("[VM] MapGet slot={} empty memory", map_addr); }
                     _ => return Err(VMError::RuntimeError("MapGet: slot is not a Map".into())),
                 }
             }
@@ -739,6 +754,12 @@ impl QuantumVM {
                 let key_val  = self.pop()?;
                 let val      = self.pop()?;
                 let key = value_to_key(&key_val)?;
+                eprintln!("[VM] MapSet slot={} key_type={} key_hex={} val={:?}",
+                    map_addr,
+                    match &key_val { crate::Value::U256(_) => "U256", crate::Value::Bytes(_) => "Bytes",
+                        crate::Value::U128(_) => "U128", crate::Value::I32(_) => "I32", _ => "other" },
+                    key.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+                    val);
                 match self.memory.entry(map_addr).or_insert_with(|| Value::Map(BTreeMap::new())) {
                     Value::Map(m) => { m.insert(key, val); }
                     _ => return Err(VMError::RuntimeError("MapSet: slot is not a Map".into())),
