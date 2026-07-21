@@ -1837,13 +1837,16 @@ async fn session_state_handler(
             Some(Value::Bytes(b)) => json!(String::from_utf8_lossy(b).to_string()),
             Some(Value::Map(m))   => {
                 let obj: serde_json::Map<String,serde_json::Value> = m.iter().map(|(k,v)| {
-                    let key_s = String::from_utf8_lossy(k).to_string();
+                    // Always hex-encode map keys — they are 32-byte BE integers
+                    // (addresses, UMA hashes, etc.) and must not go through
+                    // from_utf8_lossy which corrupts non-ASCII bytes.
+                    let key_s = format!("0x{}", hex_encode(k));
                     let val_j = match v {
                         Value::I32(n)   => json!(n),
                         Value::U128(n)  => json!(n.to_string()),
                         Value::U256(n)  => json!(n.to_string()),
                         Value::Bool(b)  => json!(b),
-                        Value::Bytes(b) => json!(String::from_utf8_lossy(b).to_string()),
+                        Value::Bytes(b) => json!(hex_encode(b)),
                         _               => json!(null),
                     };
                     (key_s, val_j)
@@ -1852,7 +1855,7 @@ async fn session_state_handler(
             }
             Some(Value::Set(s))   => {
                 let arr: Vec<serde_json::Value> = s.iter()
-                    .map(|k| json!(String::from_utf8_lossy(k).to_string()))
+                    .map(|k| json!(format!("0x{}", hex_encode(k))))
                     .collect();
                 json!(arr)
             }
