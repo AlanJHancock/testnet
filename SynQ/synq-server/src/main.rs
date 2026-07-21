@@ -1897,6 +1897,60 @@ async fn pubkey_handler(State(state): State<AppState>) -> RespJson<serde_json::V
 
 // ─── GET /health ──────────────────────────────────────────────────────────────
 
+
+// ── Bench compile (loopback timing, no PQC signing, no rate-limit) ────────
+#[derive(serde::Deserialize)]
+struct BenchCompileRequest { source: String }
+
+#[derive(serde::Serialize)]
+struct BenchCompileResponse {
+    success:        bool,
+    parse_ns:       u64,   // nanoseconds spent in parser only
+    codegen_ns:     u64,   // nanoseconds spent in codegen only
+    total_ns:       u64,   // parse + codegen combined
+    bytecode_bytes: usize, // output size (proves identical result)
+    error:          Option<String>,
+}
+
+async fn bench_compile_handler(
+    Json(req): Json<BenchCompileRequest>,
+) -> RespJson<BenchCompileResponse> {
+    use std::time::Instant;
+
+    let t0 = Instant::now();
+    let ast = match synq_compiler::parser::parse(&req.source) {
+        Ok(a)  => a,
+        Err(e) => return RespJson(BenchCompileResponse {
+            success: false, parse_ns: t0.elapsed().as_nanos() as u64,
+            codegen_ns: 0, total_ns: t0.elapsed().as_nanos() as u64,
+            bytecode_bytes: 0, error: Some(format!("Parse error: {}", e)),
+        }),
+    };
+    let parse_ns = t0.elapsed().as_nanos() as u64;
+
+    let t1 = Instant::now();
+    let (bytecode, _state_vars) = match synq_compiler::codegen::CodeGenerator::new().generate(&ast) {
+        Ok(b)  => b,
+        Err(e) => return RespJson(BenchCompileResponse {
+            success: false, parse_ns,
+            codegen_ns: t1.elapsed().as_nanos() as u64,
+            total_ns: t0.elapsed().as_nanos() as u64,
+            bytecode_bytes: 0, error: Some(format!("Codegen error: {}", e)),
+        }),
+    };
+    let codegen_ns = t1.elapsed().as_nanos() as u64;
+
+    RespJson(BenchCompileResponse {
+        success: true,
+        parse_ns,
+        codegen_ns,
+        total_ns: parse_ns + codegen_ns,
+        bytecode_bytes: bytecode.len(),
+        error: None,
+    })
+}
+
+
 async fn health(State(state): State<AppState>) -> RespJson<serde_json::Value> {
     let count = state.sessions.lock().unwrap().len();
     RespJson(json!({
@@ -2011,6 +2065,7 @@ async fn main() {
         .route("/workspace/:id/remove", post(workspace_remove_handler))
         .route("/session/:id/state", get(session_state_handler))
         .route("/debug/ecrecover",   post(debug_ecrecover_handler))
+        .route("/bench-compile",      post(bench_compile_handler))
         .with_state(store.clone())
         .layer(
             ServiceBuilder::new()
