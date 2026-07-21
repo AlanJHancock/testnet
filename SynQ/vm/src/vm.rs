@@ -38,16 +38,39 @@ pub enum Value {
 fn hex_encode(b: &[u8]) -> String { b.iter().map(|x| format!("{:02x}", x)).collect() }
 
 fn value_to_key(v: &Value) -> Result<Vec<u8>, VMError> {
+    // All key types normalised to 32-byte big-endian so that
+    // I32(0xDEAD) and U256(0xDEAD) produce the same map key.
+    let mut key = [0u8; 32];
     match v {
-        Value::I32(n)   => Ok(n.to_le_bytes().to_vec()),
-        Value::I64(n)   => Ok(n.to_le_bytes().to_vec()),
-        Value::U128(n)  => Ok(n.to_be_bytes().to_vec()),
-        Value::U256(n)  => { let mut b = [0u8;32]; n.to_be_bytes::<32>(); Ok(n.to_be_bytes::<32>().to_vec()) }
-        Value::Bytes(b) => Ok(b.clone()),
-        Value::Bool(b)  => Ok(vec![*b as u8]),
-        Value::Map(_)   => Err(VMError::RuntimeError("Map cannot be used as a map key".into())),
-        Value::Set(_)   => Err(VMError::RuntimeError("Set cannot be used as a map key".into())),
+        Value::I32(n)  => {
+            // Sign-extend to i64, then treat as unsigned 32-byte BE
+            let u = *n as u64;
+            key[24..].copy_from_slice(&u.to_be_bytes());
+        }
+        Value::I64(n)  => {
+            let u = *n as u64;
+            key[24..].copy_from_slice(&u.to_be_bytes());
+        }
+        Value::U128(n) => {
+            key[16..].copy_from_slice(&n.to_be_bytes());
+        }
+        Value::U256(n) => {
+            let b = n.to_be_bytes::<32>();
+            key.copy_from_slice(&b);
+        }
+        Value::Bytes(b) => {
+            // Right-align bytes into 32-byte buffer (same as U256 BE)
+            if b.len() >= 32 {
+                key.copy_from_slice(&b[b.len()-32..]);
+            } else {
+                key[32-b.len()..].copy_from_slice(b);
+            }
+        }
+        Value::Bool(b) => { key[31] = *b as u8; }
+        Value::Map(_)  => return Err(VMError::RuntimeError("Map cannot be used as a map key".into())),
+        Value::Set(_)  => return Err(VMError::RuntimeError("Set cannot be used as a map key".into())),
     }
+    Ok(key.to_vec())
 }
 
 impl Value {

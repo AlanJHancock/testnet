@@ -420,10 +420,12 @@ impl CodeGenerator {
             Statement::MapAssignment { map, key, value } => {
                 let addr = *self.state_vars.get(map.as_str())
                     .ok_or_else(|| format!("MapAssignment: unknown map '{}'", map))?;
+                // VM MapSet pops: map_addr first, then key, then val.
+                // Push in reverse order so top-of-stack = map_addr.
+                self.gen_expression(value, scope)?;  // pushed first → popped last as val
+                self.gen_expression(key, scope)?;    // pushed second → popped as key
                 self.assembler.emit_op(OpCode::Push);
-                self.assembler.emit_i32(addr as i32);
-                self.gen_expression(key, scope)?;
-                self.gen_expression(value, scope)?;
+                self.assembler.emit_i32(addr as i32); // pushed last → popped first as map_addr
                 self.assembler.emit_op(OpCode::MapSet);
                 Ok(())
             }
@@ -653,9 +655,11 @@ impl CodeGenerator {
             Expression::MapIndex(map, key) => {
                 let addr = *self.state_vars.get(map.as_str())
                     .ok_or_else(|| format!("MapIndex: unknown map '{}'", map))?;
+                // VM MapGet: map_addr = pop() first, key = pop() second.
+                // Push key first (popped last), map_addr last (popped first).
+                self.gen_expression(key, scope)?;    // pushed first → popped last as key
                 self.assembler.emit_op(OpCode::Push);
-                self.assembler.emit_i32(addr as i32);
-                self.gen_expression(key, scope)?;
+                self.assembler.emit_i32(addr as i32); // pushed last → popped first as map_addr
                 self.assembler.emit_op(OpCode::MapGet);
                 Ok(())
             }
@@ -665,16 +669,16 @@ impl CodeGenerator {
                 match method.as_str() {
                     "get" => {
                         if args.len() != 1 { return Err("map.get expects 1 arg".into()); }
+                        self.gen_expression(&args[0], scope)?;
                         self.assembler.emit_op(OpCode::Push);
                         self.assembler.emit_i32(addr as i32);
-                        self.gen_expression(&args[0], scope)?;
                         self.assembler.emit_op(OpCode::MapGet);
                     }
                     "contains" => {
                         if args.len() != 1 { return Err("map.contains expects 1 arg".into()); }
+                        self.gen_expression(&args[0], scope)?;
                         self.assembler.emit_op(OpCode::Push);
                         self.assembler.emit_i32(addr as i32);
-                        self.gen_expression(&args[0], scope)?;
                         self.assembler.emit_op(OpCode::MapContains);
                     }
                     "len" => {
@@ -684,9 +688,9 @@ impl CodeGenerator {
                     }
                     "remove" => {
                         if args.len() != 1 { return Err("map.remove expects 1 arg".into()); }
+                        self.gen_expression(&args[0], scope)?;
                         self.assembler.emit_op(OpCode::Push);
                         self.assembler.emit_i32(addr as i32);
-                        self.gen_expression(&args[0], scope)?;
                         self.assembler.emit_op(OpCode::MapRemove);
                         self.assembler.emit_op(OpCode::Push);
                         self.assembler.emit_i32(1);

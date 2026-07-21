@@ -1840,7 +1840,10 @@ async fn session_state_handler(
                     // Always hex-encode map keys — they are 32-byte BE integers
                     // (addresses, UMA hashes, etc.) and must not go through
                     // from_utf8_lossy which corrupts non-ASCII bytes.
-                    let key_s = format!("0x{}", hex_encode(k));
+                    // Strip leading zero bytes so 0x000...dead → 0xdead
+                    let hex_full = hex_encode(k);
+                    let stripped = hex_full.trim_start_matches('0');
+                    let key_s = format!("0x{}", if stripped.is_empty() { "0" } else { stripped });
                     let val_j = match v {
                         Value::I32(n)   => json!(n),
                         Value::U128(n)  => json!(n.to_string()),
@@ -1855,7 +1858,7 @@ async fn session_state_handler(
             }
             Some(Value::Set(s))   => {
                 let arr: Vec<serde_json::Value> = s.iter()
-                    .map(|k| json!(format!("0x{}", hex_encode(k))))
+                    .map(|k| { let h = hex_encode(k); let s = h.trim_start_matches('0'); json!(format!("0x{}", if s.is_empty() { "0" } else { s })) })
                     .collect();
                 json!(arr)
             }
