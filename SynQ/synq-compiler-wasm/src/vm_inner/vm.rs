@@ -30,6 +30,14 @@ pub enum Value {
     Map(BTreeMap<Vec<u8>, Value>),
     /// Set<value_bytes> — heap-allocated per session address slot.
     Set(BTreeSet<Vec<u8>>),
+    /// UTF-8 string — length-prefixed (4-byte LE) in bytecode.
+    Str(String),
+    /// Ordered tuple of values.
+    Tuple(Vec<Value>),
+    /// Option<Value> — None or Some(Value).
+    SynqOption(Option<Box<Value>>),
+    /// Result<Value> — bool true=Ok, false=Err.
+    SynqResult(bool, Box<Value>),
 }
 
 /// Coerce any Value to a stable byte key for map/set indexing.
@@ -65,8 +73,16 @@ fn value_to_key(v: &Value) -> Result<Vec<u8>, VMError> {
             }
         }
         Value::Bool(b) => { key[31] = *b as u8; }
-        Value::Map(_)  => return Err(VMError::RuntimeError("Map cannot be used as a map key".into())),
-        Value::Set(_)  => return Err(VMError::RuntimeError("Set cannot be used as a map key".into())),
+        Value::Str(s) => {
+            let b = s.as_bytes();
+            if b.len() <= 32 { key[32-b.len()..].copy_from_slice(b); }
+            else { key.copy_from_slice(&b[b.len()-32..]); }
+        }
+        Value::Map(_)        => return Err(VMError::RuntimeError("Map cannot be used as a map key".into())),
+        Value::Set(_)        => return Err(VMError::RuntimeError("Set cannot be used as a map key".into())),
+        Value::Tuple(_)      => return Err(VMError::RuntimeError("Tuple cannot be used as a map key".into())),
+        Value::SynqOption(_) => return Err(VMError::RuntimeError("Option cannot be used as a map key".into())),
+        Value::SynqResult(..)=> return Err(VMError::RuntimeError("Result cannot be used as a map key".into())),
     }
     Ok(key.to_vec())
 }
@@ -76,14 +92,6 @@ impl Value {
         match self {
             Value::I32(v) => Ok(*v),
             _ => Err(VMError::RuntimeError("Expected i32".to_string())),
-        }
-    }
-
-    pub fn as_i64(&self) -> Result<i64, VMError> {
-        match self {
-            Value::I64(v) => Ok(*v),
-            Value::I32(v) => Ok(*v as i64),
-            _ => Err(VMError::RuntimeError("Expected i64".to_string())),
         }
     }
 
@@ -110,8 +118,34 @@ impl Value {
             Value::U256(v) => Ok(*v),
             Value::U128(v) => Ok(U256::from(*v)),
             Value::I32(v) if *v >= 0 => Ok(U256::from(*v as u128)),
+            Value::I64(v) if *v >= 0 => Ok(U256::from(*v as u128)),
             Value::Bool(b) => Ok(if *b { U256::from(1u32) } else { U256::ZERO }),
-            _ => Err(VMError::RuntimeError("Expected UInt256".to_string())),
+            Value::Bytes(b) if b.len() <= 32 => {
+                let mut arr = [0u8; 32];
+                arr[32 - b.len()..].copy_from_slice(b);
+                Ok(U256::from_be_bytes::<32>(arr))
+            }
+            Value::Str(s) => {
+                let b = s.as_bytes();
+                if b.len() <= 32 {
+                    let mut arr = [0u8; 32];
+                    arr[32 - b.len()..].copy_from_slice(b);
+                    Ok(U256::from_be_bytes::<32>(arr))
+                } else {
+                    Err(VMError::RuntimeError("String too long for U256 coercion".to_string()))
+                }
+            }
+            _ => Err(VMError::RuntimeError(format!("Cannot coerce {:?} to UInt256", self))),
+        }
+    }
+
+    fn as_i64(&self) -> Result<i64, VMError> {
+        match self {
+            Value::I32(v)  => Ok(*v as i64),
+            Value::I64(v)  => Ok(*v),
+            Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
+            Value::U128(v) if *v <= i64::MAX as u128 => Ok(*v as i64),
+            _ => Err(VMError::RuntimeError(format!("Cannot coerce {:?} to i64", self))),
         }
     }
 
@@ -938,6 +972,61 @@ impl QuantumVM {
                 self.stack.push(result.unwrap_or(Value::I32(0)));
             }
 
+            OpCode::TuplePack => {
+                let count = self.stack.pop().ok_or(VMError::StackUnderflow)?.as_i32().map_err(|_| VMError::RuntimeError("TuplePack: expected count".into()))? as usize;
+                if self.stack.len() < count { return Err(VMError::StackUnderflow); }
+                let mut elems = Vec::with_capacity(count);
+                for _ in 0..count { elems.push(self.stack.pop().ok_or(VMError::StackUnderflow)?); }
+                elems.reverse();
+                self.stack.push(Value::Tuple(elems));
+            }
+            OpCode::TupleUnpack => {
+                let t = self.stack.pop().ok_or(VMError::StackUnderflow)?;
+                if let Value::Tuple(elems) = t {
+                    let n = elems.len();
+                    for e in elems { self.stack.push(e); }
+                    self.stack.push(Value::I32(n as i32));
+                } else { return Err(VMError::RuntimeError("TupleUnpack: not a Tuple".into())); }
+            }
+            OpCode::TupleGet => {
+                let idx = self.stack.pop().ok_or(VMError::StackUnderflow)?.as_i32().map_err(|_| VMError::RuntimeError("TupleGet: expected index".into()))? as usize;
+                let t   = self.stack.pop().ok_or(VMError::StackUnderflow)?;
+                if let Value::Tuple(elems) = t {
+                    let v = elems.into_iter().nth(idx).ok_or_else(|| VMError::RuntimeError(format!("TupleGet: index {} out of range", idx)))?;
+                    self.stack.push(v);
+                } else { return Err(VMError::RuntimeError("TupleGet: not a Tuple".into())); }
+            }
+            OpCode::OptionSome => {
+                let v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
+                self.stack.push(Value::SynqOption(Some(Box::new(v))));
+            }
+            OpCode::OptionNone => { self.stack.push(Value::SynqOption(None)); }
+            OpCode::OptionUnwrap => {
+                let v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
+                if let Value::SynqOption(Some(inner)) = v { self.stack.push(*inner); }
+                else { return Err(VMError::RuntimeError("OptionUnwrap: None".into())); }
+            }
+            OpCode::ResultOk => {
+                let v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
+                self.stack.push(Value::SynqResult(true, Box::new(v)));
+            }
+            OpCode::ResultErr => {
+                let v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
+                self.stack.push(Value::SynqResult(false, Box::new(v)));
+            }
+            OpCode::ResultUnwrap => {
+                let v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
+                if let Value::SynqResult(true, inner) = v { self.stack.push(*inner); }
+                else { return Err(VMError::RuntimeError("ResultUnwrap: Err variant".into())); }
+            }
+            OpCode::IsOk => {
+                let v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
+                self.stack.push(Value::I32(if matches!(v, Value::SynqResult(true, _)) { 1 } else { 0 }));
+            }
+            OpCode::IsSome => {
+                let v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
+                self.stack.push(Value::I32(if matches!(v, Value::SynqOption(Some(_))) { 1 } else { 0 }));
+            }
             OpCode::Print => {
                 let value = self.pop()?;
                 println!("{:?}", value);

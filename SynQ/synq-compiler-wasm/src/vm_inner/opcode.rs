@@ -93,6 +93,19 @@ pub enum OpCode {
     StrConcat   = 0x9D,   // pops b, pops a → pushes Bytes(a+b)
     StrEq       = 0x9E,   // pops b, pops a → pushes Bool
 
+    // Compound type constructors (0xA0-0xAA)
+    TuplePack    = 0xA0,
+    TupleUnpack  = 0xA1,
+    TupleGet     = 0xA2,
+    OptionSome   = 0xA3,
+    OptionNone   = 0xA4,
+    OptionUnwrap = 0xA5,
+    ResultOk     = 0xA6,
+    ResultErr    = 0xA7,
+    ResultUnwrap = 0xA8,
+    IsOk         = 0xA9,
+    IsSome       = 0xAA,
+
     // PQC operations
     DilithiumVerify  = 0x80,
     KyberKeyExchange = 0x81,
@@ -153,6 +166,17 @@ impl TryFrom<u8> for OpCode {
             0x9C => Ok(OpCode::StrLen),
             0x9D => Ok(OpCode::StrConcat),
             0x9E => Ok(OpCode::StrEq),
+            0xA0 => Ok(OpCode::TuplePack),
+            0xA1 => Ok(OpCode::TupleUnpack),
+            0xA2 => Ok(OpCode::TupleGet),
+            0xA3 => Ok(OpCode::OptionSome),
+            0xA4 => Ok(OpCode::OptionNone),
+            0xA5 => Ok(OpCode::OptionUnwrap),
+            0xA6 => Ok(OpCode::ResultOk),
+            0xA7 => Ok(OpCode::ResultErr),
+            0xA8 => Ok(OpCode::ResultUnwrap),
+            0xA9 => Ok(OpCode::IsOk),
+            0xAA => Ok(OpCode::IsSome),
             0x80 => Ok(OpCode::DilithiumVerify),
             0x81 => Ok(OpCode::KyberKeyExchange),
             0x82 => Ok(OpCode::FalconVerify),

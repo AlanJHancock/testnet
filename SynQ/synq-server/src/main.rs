@@ -473,8 +473,14 @@ fn value_to_json(v: &Value) -> serde_json::Value {
         Value::U256(n)  => json!({"type": "UInt256", "value": n.to_string()}),
         Value::Bool(b)  => json!({"type": "Bool", "value": b}),
         Value::Bytes(b) => json!({"type": "Bytes","value": hex_encode(b)}),
-        Value::Map(_)   => json!({"type": "Map",   "value": "[map]"}),
-        Value::Set(_)   => json!({"type": "Set",   "value": "[set]"}),
+        Value::Map(_)        => json!({"type": "Map",   "value": "[map]"}),
+        Value::Set(_)        => json!({"type": "Set",   "value": "[set]"}),
+        Value::Str(s)        => json!({"type": "String", "value": s}),
+        Value::Tuple(elems)  => json!({"type": "Tuple",  "value": elems.iter().map(value_to_json).collect::<Vec<_>>()}),
+        Value::SynqOption(None)     => json!({"type": "Option", "value": null}),
+        Value::SynqOption(Some(v))  => json!({"type": "Option", "value": value_to_json(v)}),
+        Value::SynqResult(true, v)  => json!({"type": "Result", "variant": "Ok",  "value": value_to_json(v)}),
+        Value::SynqResult(false, v) => json!({"type": "Result", "variant": "Err", "value": value_to_json(v)}),
     }
 }
 
@@ -486,8 +492,14 @@ fn value_display(v: &Value) -> String {
         Value::U256(n)  => format!("{} (UInt256)", n),
         Value::Bool(b)  => b.to_string(),
         Value::Bytes(b) => format!("0x{}", hex_encode(b)),
-        Value::Map(_)   => "[map]".to_string(),
-        Value::Set(_)   => "[set]".to_string(),
+        Value::Map(_)        => "[map]".to_string(),
+        Value::Set(_)        => "[set]".to_string(),
+        Value::Str(s)        => format!("{:?}", s),
+        Value::Tuple(elems)  => format!("({})", elems.iter().map(value_display).collect::<Vec<_>>().join(", ")),
+        Value::SynqOption(None)     => "None".to_string(),
+        Value::SynqOption(Some(v))  => format!("Some({})", value_display(v)),
+        Value::SynqResult(true, v)  => format!("Ok({})", value_display(v)),
+        Value::SynqResult(false, v) => format!("Err({})", value_display(v)),
     }
 }
 
