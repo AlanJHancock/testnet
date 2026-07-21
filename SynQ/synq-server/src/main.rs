@@ -1834,7 +1834,7 @@ async fn session_state_handler(
             Some(Value::U128(v))  => json!(v.to_string()),
             Some(Value::U256(v))  => json!(v.to_string()),
             Some(Value::Bool(b))  => json!(b),
-            Some(Value::Bytes(b)) => json!(String::from_utf8_lossy(b).to_string()),
+            Some(Value::Bytes(b)) => json!(format!("0x{}", hex::encode(b))),
             Some(Value::Map(m))   => {
                 let obj: serde_json::Map<String,serde_json::Value> = m.iter().map(|(k,v)| {
                     // Always hex-encode map keys — they are 32-byte BE integers

@@ -198,7 +198,8 @@ fn parse_function_table(data: &[u8]) -> Result<HashMap<String, FunctionEntry>, V
         if pos + name_len > data.len() {
             return Err(VMError::InvalidBytecode("truncated function name".to_string()));
         }
-        let name = String::from_utf8_lossy(&data[pos..pos + name_len]).to_string();
+        let name = String::from_utf8(data[pos..pos + name_len].to_vec())
+            .map_err(|_| VMError::InvalidBytecode("function name is not valid UTF-8".to_string()))?;
         pos += name_len;
 
         let address = read_u32(data, &mut pos)?;
@@ -229,7 +230,8 @@ fn parse_function_table(data: &[u8]) -> Result<HashMap<String, FunctionEntry>, V
             if pos + cap_len > data.len() {
                 return Err(VMError::InvalidBytecode("truncated capability name".to_string()));
             }
-            let cap_name = String::from_utf8_lossy(&data[pos..pos + cap_len]).to_string();
+            let cap_name = String::from_utf8(data[pos..pos + cap_len].to_vec())
+            .map_err(|_| VMError::InvalidBytecode("capability name is not valid UTF-8".to_string()))?;
             pos += cap_len;
             capabilities.push(cap_name);
         }
@@ -922,7 +924,8 @@ impl QuantumVM {
                 if self.pc + clen > self.code.len() {
                     return Err(VMError::InvalidBytecode("ExternCall: truncated contract name".into()));
                 }
-                let contract_name = String::from_utf8_lossy(&self.code[self.pc..self.pc+clen]).into_owned();
+                let contract_name = String::from_utf8(self.code[self.pc..self.pc+clen].to_vec())
+            .map_err(|_| VMError::InvalidBytecode("ExternCall: contract name is not valid UTF-8".to_string()))?;
                 self.pc += clen;
                 if self.pc + 4 > self.code.len() {
                     return Err(VMError::InvalidBytecode("ExternCall: truncated fn_len".into()));
@@ -932,7 +935,8 @@ impl QuantumVM {
                 if self.pc + flen > self.code.len() {
                     return Err(VMError::InvalidBytecode("ExternCall: truncated fn name".into()));
                 }
-                let fn_name = String::from_utf8_lossy(&self.code[self.pc..self.pc+flen]).into_owned();
+                let fn_name = String::from_utf8(self.code[self.pc..self.pc+flen].to_vec())
+            .map_err(|_| VMError::InvalidBytecode("ExternCall: fn name is not valid UTF-8".to_string()))?;
                 self.pc += flen;
                 if self.pc >= self.code.len() {
                     return Err(VMError::InvalidBytecode("ExternCall: missing arg_count".into()));
@@ -968,7 +972,8 @@ impl QuantumVM {
                 // Rollback is handled by the call_function() wrapper (PR-B Item 2).
                 let msg_len = self.read_u32()? as usize;
                 let msg_bytes = self.read_bytes(msg_len)?;
-                let msg = String::from_utf8_lossy(&msg_bytes).into_owned();
+                let msg = String::from_utf8(msg_bytes.to_vec())
+            .unwrap_or_else(|e| format!("revert(0x{})", hex::encode(&msg_bytes[..e.utf8_error().valid_up_to()])));
                 return Err(VMError::Reverted(msg));
             }
         }
