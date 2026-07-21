@@ -6,3 +6,4 @@ pub mod assembler;
 pub use opcode::{OpCode, VMError};
 pub use vm::{QuantumVM, Value, CallContext};
 pub use assembler::Assembler;
+pub mod uma;

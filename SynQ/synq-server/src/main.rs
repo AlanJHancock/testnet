@@ -1730,6 +1730,9 @@ async fn session_run_handler(
         // Unauthenticated call — caller == zero address
         [0u8; 20]
     };
+    // UMA hook: when the consensus layer is wired, replace from_address() with
+    // from_uma(registry.resolve(&caller_addr).unwrap_or_default(), caller_addr).
+    // See vm/src/uma.rs — NullUmaRegistry is the devnet stub (U-8, U-13, U-14).
     session.vm.call_context = synq_vm::CallContext::from_address(caller_addr);
 
     // Wire ExternCall handler if session belongs to a workspace
@@ -1763,7 +1766,7 @@ async fn session_run_handler(
         }));
     }
 
-    eprintln!("[RUN] sid={} caller={} fn={} args_len={}", &req.session_id[..8], hex_encode(&caller_addr), req.function, vm_args.len());
+    eprintln!("[RUN] sid={} signing_key={} fn={} args_len={}", &req.session_id[..8], hex_encode(&caller_addr), req.function, vm_args.len());
     let call_result = session.vm.call_function(&req.function, &vm_args);
     eprintln!("[RUN] result={:?}", call_result);
     session.vm.call_context = synq_vm::CallContext::anonymous();

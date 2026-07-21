@@ -707,29 +707,24 @@ impl QuantumVM {
                 self.push(Value::from_u256_shrink(v))?;
             }
             OpCode::LoadCaller => {
-                // ── LoadCaller (0x50) — devnet: raw EVM signing address ────
+                // ── LoadCaller (0x50) ─────────────────────────────────────
                 //
-                // Pushes the authenticated caller's EVM address right-aligned
-                // as a 32-byte big-endian UInt256 (bytes 0..11 = zero,
-                // bytes 12..31 = 20-byte EVM address).
+                // Pushes the caller identity as a 32-byte UInt256.
                 //
-                // DEVNET NOTE: In the full Synergy protocol the consensus layer
-                // resolves AuthorizationSignature → UMA identity root BEFORE
-                // the VM executes. LoadCaller will then push the stable UMA
-                // identity root (key-rotation-stable, ZK-anchored per the
-                // Synergy Security Specification v1.6).
+                // Devnet:   signing_key (EVM address) right-aligned in 32 bytes
+                //           — bytes 0..11 zero, bytes 12..31 = 20-byte address.
                 //
-                // The keccak256("UMA:" || addr) derivation previously used here
-                // was removed because it was still key-tied and did not satisfy
-                // the UMA invariant of key-rotation-stability. Raw address is
-                // the correct devnet interim — consistent with the IDE's
-                // callerIdentity() helper and the /session/run ecrecover path.
+                // Mainnet:  consensus-resolved UMA reference (32 bytes).
+                //           The consensus layer populates CallContext.uma_ref
+                //           BEFORE the VM executes (U-8: resolution must not
+                //           influence consensus ordering).  The VM never
+                //           derives or resolves UMA itself (U-13).
                 //
-                // Migration: replace Self { caller: [u8; 20] } with
-                // Self { caller_uma: [u8; 32], signing_key: [u8; 20] } and
-                // read caller_uma here once the UMA registry is integrated.
-                let mut b = [0u8; 32];
-                b[12..32].copy_from_slice(&self.call_context.caller);
+                // `caller_value()` encapsulates the devnet/mainnet switch.
+                // No code change is needed here when the UMA registry is
+                // wired — only CallContext construction at the call site
+                // (synq-server /session/run) needs updating.
+                let b = self.call_context.caller_value();
                 self.stack.push(Value::U256(U256::from_be_bytes::<32>(b)));
             }
 
@@ -1054,15 +1049,62 @@ impl QuantumVM {
 }
 
 #[derive(Clone, Debug, Default)]
+/// Identity context supplied to the VM before each function call.
+///
+/// # Devnet vs mainnet semantics
+///
+/// `signing_key` — the 20-byte EVM address recovered from the EIP-712
+/// signature on the call.  This is the ONLY field populated on devnet.
+///
+/// `uma_ref` — the 32-byte Universal Meta-Address reference resolved by the
+/// Synergy consensus layer *before* the VM executes.  On devnet this is
+/// always `None`.  On mainnet the consensus layer will resolve the signing
+/// key to a stable UMA and populate this field; `LoadCaller` (0x50) will
+/// then push `uma_ref` rather than `signing_key`, satisfying invariants
+/// U-2, U-3, and U-4 from the Synergy Security Specification v1.6.
+///
+/// Resolution is performed outside the VM (U-8: must not influence
+/// consensus ordering) and failures must be handled upstream (U-14: must
+/// not halt execution).  The VM itself MUST NOT attempt UMA derivation —
+/// that would violate U-13 (no contract-specific semantics in the UMA
+/// layer).
 pub struct CallContext {
-    pub caller: [u8; 20],
+    /// Raw 20-byte EVM signing address — devnet identity proxy.
+    pub signing_key: [u8; 20],
+    /// Consensus-resolved UMA reference (32 bytes).  `None` on devnet.
+    /// When `Some`, `LoadCaller` pushes this value instead of `signing_key`.
+    pub uma_ref: Option<[u8; 32]>,
 }
 
 impl CallContext {
+    /// Construct a devnet call context from a recovered EVM address.
+    /// `uma_ref` is set to `None` — UMA resolution is not yet wired.
     pub fn from_address(addr: [u8; 20]) -> Self {
-        Self { caller: addr }
+        Self { signing_key: addr, uma_ref: None }
     }
+
+    /// Construct a mainnet-ready call context with a resolved UMA reference.
+    /// The signing key is retained for audit / logging purposes.
+    pub fn from_uma(uma: [u8; 32], signing_key: [u8; 20]) -> Self {
+        Self { signing_key, uma_ref: Some(uma) }
+    }
+
+    /// Anonymous context — no authenticated caller.
     pub fn anonymous() -> Self {
-        Self { caller: [0u8; 20] }
+        Self { signing_key: [0u8; 20], uma_ref: None }
+    }
+
+    /// Returns the 32-byte value that `LoadCaller` pushes onto the stack.
+    /// Devnet (uma_ref = None): signing key right-aligned in 32 bytes.
+    /// Mainnet (uma_ref = Some): the resolved UMA reference directly.
+    pub fn caller_value(&self) -> [u8; 32] {
+        match self.uma_ref {
+            Some(uma) => uma,
+            None => {
+                let mut b = [0u8; 32];
+                b[12..32].copy_from_slice(&self.signing_key);
+                b
+            }
+        }
     }
 }

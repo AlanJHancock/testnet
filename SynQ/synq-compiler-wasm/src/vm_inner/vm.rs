@@ -705,29 +705,9 @@ impl QuantumVM {
                 self.push(Value::from_u256_shrink(v))?;
             }
             OpCode::LoadCaller => {
-                // ── LoadCaller (0x50) — devnet: raw EVM signing address ────
-                //
-                // Pushes the authenticated caller's EVM address right-aligned
-                // as a 32-byte big-endian UInt256 (bytes 0..11 = zero,
-                // bytes 12..31 = 20-byte EVM address).
-                //
-                // DEVNET NOTE: In the full Synergy protocol the consensus layer
-                // resolves AuthorizationSignature → UMA identity root BEFORE
-                // the VM executes. LoadCaller will then push the stable UMA
-                // identity root (key-rotation-stable, ZK-anchored per the
-                // Synergy Security Specification v1.6).
-                //
-                // The keccak256("UMA:" || addr) derivation previously used here
-                // was removed because it was still key-tied and did not satisfy
-                // the UMA invariant of key-rotation-stability. Raw address is
-                // the correct devnet interim — consistent with the IDE's
-                // callerIdentity() helper and the /session/run ecrecover path.
-                //
-                // Migration: replace Self { caller: [u8; 20] } with
-                // Self { caller_uma: [u8; 32], signing_key: [u8; 20] } and
-                // read caller_uma here once the UMA registry is integrated.
-                let mut b = [0u8; 32];
-                b[12..32].copy_from_slice(&self.call_context.caller);
+                // Devnet: signing key right-aligned; Mainnet: uma_ref.
+                // See vm/src/uma.rs for the UMA registry interface.
+                let b = self.call_context.caller_value();
                 self.stack.push(Value::U256(U256::from_be_bytes::<32>(b)));
             }
 
@@ -1030,14 +1010,28 @@ impl QuantumVM {
 
 #[derive(Clone, Debug, Default)]
 pub struct CallContext {
-    pub caller: [u8; 20],
+    pub signing_key: [u8; 20],
+    pub uma_ref: Option<[u8; 32]>,
 }
 
 impl CallContext {
     pub fn from_address(addr: [u8; 20]) -> Self {
-        Self { caller: addr }
+        Self { signing_key: addr, uma_ref: None }
+    }
+    pub fn from_uma(uma: [u8; 32], signing_key: [u8; 20]) -> Self {
+        Self { signing_key, uma_ref: Some(uma) }
     }
     pub fn anonymous() -> Self {
-        Self { caller: [0u8; 20] }
+        Self { signing_key: [0u8; 20], uma_ref: None }
+    }
+    pub fn caller_value(&self) -> [u8; 32] {
+        match self.uma_ref {
+            Some(uma) => uma,
+            None => {
+                let mut b = [0u8; 32];
+                b[12..32].copy_from_slice(&self.signing_key);
+                b
+            }
+        }
     }
 }
