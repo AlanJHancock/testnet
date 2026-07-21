@@ -35,28 +35,14 @@ pub enum Value {
 }
 
 /// Coerce any Value to a stable byte key for map/set indexing.
+fn hex_encode(b: &[u8]) -> String { b.iter().map(|x| format!("{:02x}", x)).collect() }
+
 fn value_to_key(v: &Value) -> Result<Vec<u8>, VMError> {
-    // All numeric types are stored as 32-byte big-endian keys so that:
-    //   - I32(1) and U128(1) and U256(1) all produce the same key
-    //   - UMA hashes (U128 or U256) render as full 0x... hex in the state display
     match v {
-        Value::I32(n)   => {
-            let mut b = [0u8; 32];
-            if *n >= 0 { b[28..32].copy_from_slice(&(*n as u32).to_be_bytes()); }
-            else { let u = ((*n as i64 + (1i64 << 32)) as u32).to_be_bytes(); b[28..32].copy_from_slice(&u); }
-            Ok(b.to_vec())
-        }
-        Value::I64(n)   => {
-            let mut b = [0u8; 32];
-            b[24..32].copy_from_slice(&n.to_be_bytes());
-            Ok(b.to_vec())
-        }
-        Value::U128(n)  => {
-            let mut b = [0u8; 32];
-            b[16..32].copy_from_slice(&n.to_be_bytes());
-            Ok(b.to_vec())
-        }
-        Value::U256(n)  => Ok(n.to_be_bytes::<32>().to_vec()),
+        Value::I32(n)   => Ok(n.to_le_bytes().to_vec()),
+        Value::I64(n)   => Ok(n.to_le_bytes().to_vec()),
+        Value::U128(n)  => Ok(n.to_be_bytes().to_vec()),
+        Value::U256(n)  => { let mut b = [0u8;32]; n.to_be_bytes::<32>(); Ok(n.to_be_bytes::<32>().to_vec()) }
         Value::Bytes(b) => Ok(b.clone()),
         Value::Bool(b)  => Ok(vec![*b as u8]),
         Value::Map(_)   => Err(VMError::RuntimeError("Map cannot be used as a map key".into())),
@@ -687,31 +673,30 @@ impl QuantumVM {
                 self.push(Value::from_u256_shrink(v))?;
             }
             OpCode::LoadCaller => {
-                // ── G2: UMA stub (§20.5.3, §20.2.1) ───────────────────────
-                // Per spec: identities are referenced via UMA, not raw keys.
-                // Key material is an implementation detail, not the identity.
+                // ── LoadCaller (0x50) — devnet: raw EVM signing address ────
                 //
-                // Testnet stub: UMA = keccak256(b"UMA:" || evm_address)[12..]
-                // This is deterministic, publicly derivable, and structurally
-                // distinct from the raw EVM address — satisfying UMA invariants
-                // U-6 (deterministic/reproducible) and U-2 (key-independent).
+                // Pushes the authenticated caller's EVM address right-aligned
+                // as a 32-byte big-endian UInt256 (bytes 0..11 = zero,
+                // bytes 12..31 = 20-byte EVM address).
                 //
-                // Mainnet: replace with UMA registry resolution.
-                // The opcode interface is unchanged — contracts see a U256
-                // UMA identifier regardless of underlying derivation method.
-                let uma = {
-                    use sha3::{Digest, Keccak256};
-                    let mut input = [0u8; 24]; // b"UMA:" (4) + address (20)
-                    input[0..4].copy_from_slice(b"UMA:");
-                    input[4..24].copy_from_slice(&self.call_context.caller);
-                    let digest = Keccak256::digest(&input);
-                    let digest: [u8; 32] = digest.into();
-                    // Take last 20 bytes (same layout as EVM address in U256)
-                    let mut b = [0u8; 32];
-                    b[12..32].copy_from_slice(&digest[12..32]);
-                    U256::from_be_bytes::<32>(b)
-                };
-                self.stack.push(Value::U256(uma));
+                // DEVNET NOTE: In the full Synergy protocol the consensus layer
+                // resolves AuthorizationSignature → UMA identity root BEFORE
+                // the VM executes. LoadCaller will then push the stable UMA
+                // identity root (key-rotation-stable, ZK-anchored per the
+                // Synergy Security Specification v1.6).
+                //
+                // The keccak256("UMA:" || addr) derivation previously used here
+                // was removed because it was still key-tied and did not satisfy
+                // the UMA invariant of key-rotation-stability. Raw address is
+                // the correct devnet interim — consistent with the IDE's
+                // callerIdentity() helper and the /session/run ecrecover path.
+                //
+                // Migration: replace Self { caller: [u8; 20] } with
+                // Self { caller_uma: [u8; 32], signing_key: [u8; 20] } and
+                // read caller_uma here once the UMA registry is integrated.
+                let mut b = [0u8; 32];
+                b[12..32].copy_from_slice(&self.call_context.caller);
+                self.stack.push(Value::U256(U256::from_be_bytes::<32>(b)));
             }
 
             // ── PQC ────────────────────────────────────────────────────────

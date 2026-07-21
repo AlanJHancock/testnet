@@ -471,34 +471,10 @@ fn value_to_json(v: &Value) -> serde_json::Value {
         Value::I64(n)   => json!({"type": "UInt256", "value": n.to_string()}),
         Value::U128(n)  => json!({"type": "UInt256", "value": n.to_string()}),
         Value::U256(n)  => json!({"type": "UInt256", "value": n.to_string()}),
-        Value::Bool(b)  => json!({"type": "Bool",    "value": b}),
-        Value::Bytes(b) => json!({"type": "Bytes",   "value": hex_encode(b)}),
-        Value::Map(m)   => {
-            let obj: serde_json::Map<String,serde_json::Value> = m.iter()
-                .map(|(k,v)| {
-                    // Keys are raw bytes — use hex for any non-UTF-8 or null-containing key
-                    let key_str = if k.iter().all(|b| *b != 0 && *b < 0x80) {
-                        String::from_utf8_lossy(k).to_string()
-                    } else {
-                        format!("0x{}", hex_encode(k))
-                    };
-                    (key_str, value_to_json(v))
-                })
-                .collect();
-            json!({"type": "Map", "value": serde_json::Value::Object(obj)})
-        }
-        Value::Set(s)   => {
-            let arr: Vec<serde_json::Value> = s.iter()
-                .map(|k| {
-                    if k.iter().all(|b| *b != 0 && *b < 0x80) {
-                        json!(String::from_utf8_lossy(k).to_string())
-                    } else {
-                        json!(format!("0x{}", hex_encode(k)))
-                    }
-                })
-                .collect();
-            json!({"type": "Set", "value": arr})
-        }
+        Value::Bool(b)  => json!({"type": "Bool", "value": b}),
+        Value::Bytes(b) => json!({"type": "Bytes","value": hex_encode(b)}),
+        Value::Map(_)   => json!({"type": "Map",   "value": "[map]"}),
+        Value::Set(_)   => json!({"type": "Set",   "value": "[set]"}),
     }
 }
 
@@ -510,43 +486,36 @@ fn value_display(v: &Value) -> String {
         Value::U256(n)  => format!("{} (UInt256)", n),
         Value::Bool(b)  => b.to_string(),
         Value::Bytes(b) => format!("0x{}", hex_encode(b)),
-        Value::Map(m)   => format!("Map({} entries)", m.len()),
-        Value::Set(s)   => format!("Set({} entries)", s.len()),
+        Value::Map(_)   => "[map]".to_string(),
+        Value::Set(_)   => "[set]".to_string(),
     }
 }
 
 fn parse_arg(v: &serde_json::Value) -> Result<Value, String> {
-    // Normalise to string first — avoids f64 precision loss for large integers
-    // (serde_json stores JSON numbers that overflow i64/u64 as f64 internally).
-    let s: String = match v {
+    match v {
         serde_json::Value::Number(n) => {
-            // Prefer lossless integer paths; fall back to string representation.
             if let Some(i) = n.as_i64() {
                 if i < 0 { return Err(format!("UInt256 arguments must be non-negative, got {}", i)); }
                 return Ok(if i <= i32::MAX as i64 { Value::I32(i as i32) } else { Value::U128(i as u128) });
             }
-            if let Some(u) = n.as_u64() {
-                return Ok(if u <= i32::MAX as u64 { Value::I32(u as i32) } else { Value::U128(u as u128) });
+            if let Some(u) = n.as_u64() { return Ok(Value::U128(u as u128)); }
+            match n.to_string().parse::<u128>() {
+                Ok(u)  => Ok(Value::U128(u)),
+                Err(_) => Err(format!("Cannot represent {} as UInt256", n)),
             }
-            // Number overflows u64 — serde_json has it as f64; use string repr
-            // which serde_json formats as the original decimal (no scientific notation)
-            n.to_string()
         }
-        serde_json::Value::String(s) => s.trim().to_string(),
-        other => return Err(format!("Expected number or string, got {}", other)),
-    };
-    let s = s.trim();
-    if s.starts_with('-') { return Err(format!("UInt256 arguments must be non-negative, got {}", s)); }
-    // Try small integers first for compact VM representation
-    if let Ok(u) = s.parse::<i32>() {
-        if u >= 0 { return Ok(Value::I32(u)); }
-    }
-    if let Ok(u) = s.parse::<u128>() {
-        return Ok(if u <= i32::MAX as u128 { Value::I32(u as i32) } else { Value::U128(u) });
-    }
-    match s.parse::<U256>() {
-        Ok(v)  => Ok(Value::U256(v)),
-        Err(_) => Err(format!("Cannot parse {:?} as UInt256", s)),
+        serde_json::Value::String(s) => {
+            let s = s.trim();
+            if s.starts_with('-') { return Err(format!("UInt256 arguments must be non-negative, got {}", s)); }
+            if let Ok(u) = s.parse::<u128>() {
+                return Ok(if u <= i32::MAX as u128 { Value::I32(u as i32) } else { Value::U128(u) });
+            }
+            match s.parse::<U256>() {
+                Ok(v)  => Ok(Value::U256(v)),
+                Err(_) => Err(format!("Cannot parse {:?} as UInt256", s)),
+            }
+        }
+        other => Err(format!("Expected number or string, got {}", other)),
     }
 }
 
@@ -555,14 +524,11 @@ fn parse_arg(v: &serde_json::Value) -> Result<Value, String> {
 #[derive(Deserialize)]
 struct CompileRequest {
     source: String,
+    /// extern_contracts reported by the WASM compiler — cross-checked server-side
+    /// to detect in-browser memory tampering of compile output.
     #[serde(default)]
     wasm_extern_contracts: Option<Vec<String>>,
-    /// Set false to skip the §20.2.1 authority check (devnet/smoke-test mode). Default: true.
-    #[serde(default = "bool_true")]
-    strict_authority: bool,
 }
-
-fn bool_true() -> bool { true }
 
 #[derive(serde::Serialize)]
 struct CompileResponse {
@@ -659,9 +625,7 @@ async fn compile_handler(
         format!("0x{}", hex_encode(&hash[12..]))
     });
 
-    let mut _cg1 = synq_compiler::codegen::CodeGenerator::new();
-    _cg1.strict_authority = req.strict_authority;
-    let (bytecode, state_vars) = match _cg1.generate(&ast) {
+    let (bytecode, state_vars) = match synq_compiler::codegen::CodeGenerator::new().generate(&ast) {
         Ok(b)  => b,
         Err(e) => return (StatusCode::OK, RespJson(CompileResponse {
             success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
@@ -1639,6 +1603,11 @@ async fn session_run_handler(
         _ => {
             let arg_strs: Vec<String> = req.args.as_deref().unwrap_or(&[]).iter().map(|a| match a {
                 serde_json::Value::String(s) => s.clone(),
+                // Numbers must not go through serde f64 formatting — that loses precision for
+                // UInt256 values (>2^53). Use the raw JSON representation which preserves the
+                // exact digits the browser sent. This ensures the EIP-712 callSignature the
+                // server builds matches the one the browser signed.
+                serde_json::Value::Number(n) => n.to_string(),
                 other => other.to_string(),
             }).collect();
             format!("{}({})", req.function, arg_strs.join(", "))
@@ -1858,22 +1827,16 @@ async fn session_state_handler(
             Some(Value::U128(v))  => json!(v.to_string()),
             Some(Value::U256(v))  => json!(v.to_string()),
             Some(Value::Bool(b))  => json!(b),
-            Some(Value::Bytes(b)) => json!(format!("0x{}", hex::encode(b))),
+            Some(Value::Bytes(b)) => json!(String::from_utf8_lossy(b).to_string()),
             Some(Value::Map(m))   => {
                 let obj: serde_json::Map<String,serde_json::Value> = m.iter().map(|(k,v)| {
-                    // Map keys are raw bytes (UMA = 32-byte hash, integers = BE bytes).
-                    // Hex-encode so binary keys display cleanly as 0x... strings.
-                    let key_s = if k.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_') {
-                        String::from_utf8_lossy(k).to_string()  // plain ASCII key — keep as-is
-                    } else {
-                        format!("0x{}", hex::encode(k))          // binary key — hex
-                    };
+                    let key_s = String::from_utf8_lossy(k).to_string();
                     let val_j = match v {
                         Value::I32(n)   => json!(n),
                         Value::U128(n)  => json!(n.to_string()),
                         Value::U256(n)  => json!(n.to_string()),
                         Value::Bool(b)  => json!(b),
-                        Value::Bytes(b) => json!(format!("0x{}", hex::encode(b))),
+                        Value::Bytes(b) => json!(String::from_utf8_lossy(b).to_string()),
                         _               => json!(null),
                     };
                     (key_s, val_j)
@@ -1882,13 +1845,7 @@ async fn session_state_handler(
             }
             Some(Value::Set(s))   => {
                 let arr: Vec<serde_json::Value> = s.iter()
-                    .map(|k| {
-                        if k.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_') {
-                            json!(String::from_utf8_lossy(k).to_string())
-                        } else {
-                            json!(format!("0x{}", hex::encode(k)))
-                        }
-                    })
+                    .map(|k| json!(String::from_utf8_lossy(k).to_string()))
                     .collect();
                 json!(arr)
             }
@@ -1962,6 +1919,29 @@ async fn health_ready(State(state): State<AppState>) -> (StatusCode, RespJson<se
     })))
 }
 
+#[derive(serde::Deserialize)]
+struct DebugEcrecoverRequest { hash: String, signature: String }
+#[derive(serde::Serialize)]
+struct DebugEcrecoverResponse { recovered: String, error: Option<String> }
+
+async fn debug_ecrecover_handler(
+    Json(req): Json<DebugEcrecoverRequest>,
+) -> axum::Json<DebugEcrecoverResponse> {
+    let hash_bytes = match hex_decode_strict(req.hash.trim_start_matches("0x")) {
+        Ok(b) if b.len() == 32 => b,
+        _ => return axum::Json(DebugEcrecoverResponse { recovered: String::new(), error: Some("hash must be 32 hex bytes".into()) }),
+    };
+    let sig_bytes = match hex_decode_strict(req.signature.trim_start_matches("0x")) {
+        Ok(b) if b.len() == 65 => b,
+        _ => return axum::Json(DebugEcrecoverResponse { recovered: String::new(), error: Some("sig must be 65 hex bytes".into()) }),
+    };
+    let hash: [u8; 32] = hash_bytes.try_into().unwrap();
+    match ecrecover(&hash, &sig_bytes) {
+        Ok(addr) => axum::Json(DebugEcrecoverResponse { recovered: format!("0x{}", hex_encode(&addr)), error: None }),
+        Err(e)   => axum::Json(DebugEcrecoverResponse { recovered: String::new(), error: Some(e) }),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let sessions:   SessionStore   = Arc::new(Mutex::new(HashMap::new()));
@@ -2017,6 +1997,7 @@ async fn main() {
         .route("/workspace/:id/join",   post(workspace_join_handler))
         .route("/workspace/:id/remove", post(workspace_remove_handler))
         .route("/session/:id/state", get(session_state_handler))
+        .route("/debug/ecrecover",   post(debug_ecrecover_handler))
         .with_state(store.clone())
         .layer(
             ServiceBuilder::new()
