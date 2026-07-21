@@ -37,8 +37,10 @@ use std::collections::HashMap;
 // Each function gets its own disjoint address block so that parameters
 // with the same name across different functions never alias the same
 // memory slot.
-const FUNCTION_LOCAL_BASE: u32 = 1_000_000;
-const FUNCTION_LOCAL_STRIDE: u32 = 1_000;
+// Param slots start at 1024 (above realistic state-var range 0..1023).
+// STRIDE=16 → supports ≤16 params per function; functions 0..63 fit in 0..2047.
+const FUNCTION_LOCAL_BASE: u32 = 1024;
+const FUNCTION_LOCAL_STRIDE: u32 = 16;
 
 /// One PQC/KEM builtin call compiles directly to its matching VM opcode.
 /// The tuple is (arg count, opcode, pushes a Bool/Bytes result).
@@ -86,6 +88,7 @@ pub struct CodeGenerator {
     /// marshal args into a callee defined later in the source.
     function_addresses: HashMap<String, u32>,
     function_param_addrs: HashMap<String, Vec<u32>>,
+    function_param_signs: HashMap<String, Vec<bool>>,
     function_has_return: HashMap<String, bool>,
     /// Whether each function declares `as caller` (requires authenticated identity).
     function_requires_caller: HashMap<String, bool>,
@@ -109,6 +112,7 @@ impl CodeGenerator {
             next_state_addr: 0,
             function_addresses: HashMap::new(),
             function_param_addrs: HashMap::new(),
+            function_param_signs: HashMap::new(),
             function_has_return: HashMap::new(),
             function_requires_caller: HashMap::new(),
             function_capabilities: HashMap::new(),
@@ -153,7 +157,8 @@ impl CodeGenerator {
             let has_return = *self.function_has_return.get(&name).unwrap_or(&false);
             let req_caller = *self.function_requires_caller.get(&name).unwrap_or(&false);
             let caps = self.function_capabilities.get(&name).cloned().unwrap_or_default();
-            self.assembler.add_function_entry(&name, address, &params, has_return, req_caller, &caps);
+            let signs = self.function_param_signs.get(&name).cloned().unwrap_or_default();
+            self.assembler.add_function_entry(&name, address, &params, &signs, has_return, req_caller, &caps);
         }
 
         let bytecode = self.assembler.build();
@@ -192,7 +197,12 @@ impl CodeGenerator {
                     param_addrs.push(addr);
                     addr += 1;
                 }
+                let param_signs: Vec<bool> = f.params.iter()
+                    .map(|p| matches!(p.ty, Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
+                                         | Type::Int128 | Type::Int256))
+                    .collect();
                 self.function_param_addrs.insert(f.name.clone(), param_addrs);
+                self.function_param_signs.insert(f.name.clone(), param_signs);
                 let has_return = f.body.statements.iter().any(|s| matches!(s, Statement::Return(Some(_))));
                 self.function_has_return.insert(f.name.clone(), has_return);
                 self.function_requires_caller.insert(f.name.clone(), f.requires_caller);

@@ -84,6 +84,7 @@ pub struct CodeGenerator {
     /// marshal args into a callee defined later in the source.
     function_addresses: HashMap<String, u32>,
     function_param_addrs: HashMap<String, Vec<u32>>,
+    function_param_signs: HashMap<String, Vec<bool>>,
     function_has_return: HashMap<String, bool>,
     /// Whether each function declares `as caller` (requires authenticated identity).
     function_requires_caller: HashMap<String, bool>,
@@ -107,6 +108,7 @@ impl CodeGenerator {
             next_state_addr: 0,
             function_addresses: HashMap::new(),
             function_param_addrs: HashMap::new(),
+            function_param_signs: HashMap::new(),
             function_has_return: HashMap::new(),
             function_requires_caller: HashMap::new(),
             function_capabilities: HashMap::new(),
@@ -151,7 +153,8 @@ impl CodeGenerator {
             let has_return = *self.function_has_return.get(&name).unwrap_or(&false);
             let req_caller = *self.function_requires_caller.get(&name).unwrap_or(&false);
             let caps = self.function_capabilities.get(&name).cloned().unwrap_or_default();
-            self.assembler.add_function_entry(&name, address, &params, has_return, req_caller, &caps);
+            let signs = self.function_param_signs.get(&name).cloned().unwrap_or_default();
+            self.assembler.add_function_entry(&name, address, &params, &signs, has_return, req_caller, &caps);
         }
 
         let bytecode = self.assembler.build();
@@ -190,7 +193,12 @@ impl CodeGenerator {
                     param_addrs.push(addr);
                     addr += 1;
                 }
+                let param_signs: Vec<bool> = f.params.iter()
+                    .map(|p| matches!(p.ty, Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
+                                         | Type::Int128 | Type::Int256))
+                    .collect();
                 self.function_param_addrs.insert(f.name.clone(), param_addrs);
+                self.function_param_signs.insert(f.name.clone(), param_signs);
                 let has_return = f.body.statements.iter().any(|s| matches!(s, Statement::Return(Some(_))));
                 self.function_has_return.insert(f.name.clone(), has_return);
                 self.function_requires_caller.insert(f.name.clone(), f.requires_caller);

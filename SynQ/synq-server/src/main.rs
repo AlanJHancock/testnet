@@ -471,7 +471,7 @@ fn value_to_json(v: &Value) -> serde_json::Value {
         Value::I64(n)   => json!({"type": "UInt256", "value": n.to_string()}),
         Value::U128(n)  => json!({"type": "UInt256", "value": n.to_string()}),
         Value::U256(n)  => json!({"type": "UInt256", "value": n.to_string()}),
-        Value::Bool(b)  => json!({"type": "Bool", "value": b}),
+        Value::Bool(b)  => json!({"type": "Bool", "value": if *b { "true" } else { "false" }}),
         Value::Bytes(b) => json!({"type": "Bytes","value": hex_encode(b)}),
         Value::Map(_)        => json!({"type": "Map",   "value": "[map]"}),
         Value::Set(_)        => json!({"type": "Set",   "value": "[set]"}),
@@ -507,7 +507,8 @@ fn parse_arg(v: &serde_json::Value) -> Result<Value, String> {
     match v {
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                if i < 0 { return Err(format!("UInt256 arguments must be non-negative, got {}", i)); }
+                // Negative → signed Value; positive small → I32; large → U128
+                if i < 0 { return Ok(if i >= i32::MIN as i64 { Value::I32(i as i32) } else { Value::I64(i) }); }
                 return Ok(if i <= i32::MAX as i64 { Value::I32(i as i32) } else { Value::U128(i as u128) });
             }
             if let Some(u) = n.as_u64() { return Ok(Value::U128(u as u128)); }
@@ -518,7 +519,12 @@ fn parse_arg(v: &serde_json::Value) -> Result<Value, String> {
         }
         serde_json::Value::String(s) => {
             let s = s.trim();
-            if s.starts_with('-') { return Err(format!("UInt256 arguments must be non-negative, got {}", s)); }
+            if s.starts_with('-') {
+                if let Ok(i) = s.parse::<i64>() {
+                    return Ok(if i >= i32::MIN as i64 { Value::I32(i as i32) } else { Value::I64(i) });
+                }
+                return Err(format!("Cannot parse negative value: {}", s));
+            }
             if let Ok(u) = s.parse::<u128>() {
                 return Ok(if u <= i32::MAX as u128 { Value::I32(u as i32) } else { Value::U128(u) });
             }

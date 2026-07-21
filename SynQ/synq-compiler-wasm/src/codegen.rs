@@ -37,8 +37,8 @@ use std::collections::HashMap;
 // Each function gets its own disjoint address block so that parameters
 // with the same name across different functions never alias the same
 // memory slot.
-const FUNCTION_LOCAL_BASE: u32 = 1_000_000;
-const FUNCTION_LOCAL_STRIDE: u32 = 1_000;
+const FUNCTION_LOCAL_BASE: u32 = 1024;
+const FUNCTION_LOCAL_STRIDE: u32 = 16;
 
 /// One PQC/KEM builtin call compiles directly to its matching VM opcode.
 /// The tuple is (arg count, opcode, pushes a Bool/Bytes result).
@@ -153,7 +153,8 @@ impl CodeGenerator {
             let has_return = *self.function_has_return.get(&name).unwrap_or(&false);
             let req_caller = *self.function_requires_caller.get(&name).unwrap_or(&false);
             let caps = self.function_capabilities.get(&name).cloned().unwrap_or_default();
-            self.assembler.add_function_entry(&name, address, &params, has_return, req_caller, &caps);
+            let signs = self.function_param_signs.get(&name).cloned().unwrap_or_default();
+            self.assembler.add_function_entry(&name, address, &params, &signs, has_return, req_caller, &caps);
         }
 
         let bytecode = self.assembler.build();

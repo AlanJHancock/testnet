@@ -92,6 +92,7 @@ impl Assembler {
         name: &str,
         address: u32,
         param_addresses: &[u32],
+        param_signs: &[bool],
         has_return: bool,
         requires_caller: bool,
         capabilities: &[String],
@@ -103,6 +104,12 @@ impl Assembler {
         self.data.extend_from_slice(&(param_addresses.len() as u32).to_le_bytes());
         for addr in param_addresses {
             self.data.extend_from_slice(&addr.to_le_bytes());
+        }
+        // Signed flags: 1 byte per param (0=unsigned, 1=signed i8..i64)
+        let default_sign = false;
+        for i in 0..param_addresses.len() {
+            let s = param_signs.get(i).unwrap_or(&default_sign);
+            self.data.push(if *s { 1 } else { 0 });
         }
         self.data.push(if has_return { 1 } else { 0 });
         self.data.push(if requires_caller { 1 } else { 0 });

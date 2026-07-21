@@ -168,6 +168,27 @@ impl Value {
     fn is_uint_compat(&self) -> bool {
         matches!(self, Value::U256(_) | Value::U128(_) | Value::I32(_) | Value::Bool(_) | Value::I64(_))
     }
+    fn is_signed(&self) -> bool { matches!(self, Value::I32(_) | Value::I64(_)) }
+    fn as_i128(&self) -> Result<i128, VMError> {
+        match self {
+            Value::I32(v)  => Ok(*v as i128),
+            Value::I64(v)  => Ok(*v as i128),
+            Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
+            Value::U128(v) if *v <= i128::MAX as u128 => Ok(*v as i128),
+            Value::U256(v) => {
+                let mx = U256::from(i128::MAX as u128);
+                if *v <= mx { Ok(v.wrapping_to::<u128>() as i128) }
+                else { Err(VMError::RuntimeError(format!("Value {} too large for signed arithmetic", v))) }
+            }
+            _ => Err(VMError::RuntimeError(format!("Cannot coerce {:?} to i128", self))),
+        }
+    }
+    fn from_i128_shrink(v: i128) -> Value {
+        if v >= i32::MIN as i128 && v <= i32::MAX as i128 { Value::I32(v as i32) }
+        else if v >= i64::MIN as i128 && v <= i64::MAX as i128 { Value::I64(v as i64) }
+        else if v >= 0 { Value::U128(v as u128) }
+        else { Value::I64(v as i64) }
+    }
 
     /// Convert to a canonical Value: shrink U256→U128→I32 when it fits.
     fn from_u256_shrink(v: U256) -> Value {
@@ -227,6 +248,7 @@ pub struct FunctionEntry {
     pub name: String,
     pub address: u32,
     pub param_addresses: Vec<u32>,
+    pub param_is_signed: Vec<bool>,
     pub has_return: bool,
     pub requires_caller: bool,
     pub capabilities: Vec<String>,
@@ -263,6 +285,11 @@ fn parse_function_table(data: &[u8]) -> Result<HashMap<String, FunctionEntry>, V
         for _ in 0..param_count {
             param_addresses.push(read_u32(data, &mut pos)?);
         }
+        let mut param_is_signed: Vec<bool> = Vec::with_capacity(param_count);
+        for _ in 0..param_count {
+            if pos < data.len() { param_is_signed.push(data[pos] != 0); pos += 1; }
+            else { param_is_signed.push(false); }
+        }
         if pos >= data.len() {
             return Err(VMError::InvalidBytecode("truncated has_return flag".to_string()));
         }
@@ -292,7 +319,7 @@ fn parse_function_table(data: &[u8]) -> Result<HashMap<String, FunctionEntry>, V
         }
 
         table.insert(name.clone(), FunctionEntry {
-            name, address, param_addresses, has_return, requires_caller, capabilities
+            name, address, param_addresses, param_is_signed, has_return, requires_caller, capabilities
         });
     }
 
@@ -356,7 +383,7 @@ impl QuantumVM {
 
             stack: Vec::new(),
             memory:             HashMap::new(),
-            max_memory_entries: 1024,
+            max_memory_entries: 4096,
             code: Vec::new(),
             data: Vec::new(),
             pc: 0,
@@ -420,9 +447,26 @@ impl QuantumVM {
         self.call_stack.clear();
         self.halted = false;
 
-        // Write params into memory
-        for (addr, value) in entry.param_addresses.iter().zip(args.iter()) {
-            self.memory.insert(*addr as usize, value.clone());
+        // Write params into memory — coerce to declared signedness
+        for ((addr, value), is_signed) in entry.param_addresses.iter()
+            .zip(args.iter())
+            .zip(entry.param_is_signed.iter().chain(std::iter::repeat(&false)))
+        {
+            let coerced = if *is_signed {
+                match value {
+                    Value::I32(_) | Value::I64(_) => value.clone(),
+                    Value::U128(v) if *v <= i32::MAX as u128 => Value::I32(*v as i32),
+                    Value::U128(v) if *v <= i64::MAX as u128 => Value::I64(*v as i64),
+                    _ => value.clone(),
+                }
+            } else {
+                match value {
+                    Value::I32(v) if *v >= 0 => Value::U128(*v as u128),
+                    Value::I64(v) if *v >= 0 => Value::U128(*v as u128),
+                    _ => value.clone(),
+                }
+            };
+            self.memory.insert(*addr as usize, coerced);
         }
 
         let sentinel = self.code.len();
@@ -522,138 +566,108 @@ impl QuantumVM {
 
             // ── Arithmetic — handles I32, U128, and U256 ───────────────────
             OpCode::Add => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                if a.is_uint_compat() && b.is_uint_compat() {
-                    let av = a.as_u256()?;
-                    let bv = b.as_u256()?;
-                    let result = av.checked_add(bv)
-                        .ok_or_else(|| VMError::RuntimeError(format!(
-                            "UInt256 overflow on Add: {} + {} exceeds 2²⁵⁶−1 (max UInt256)", av, bv)))?;
-                    self.push(Value::from_u256_shrink(result))?;
-                } else {
-                    return Err(VMError::RuntimeError("Add: expected numeric value".to_string()));
-                }
+                let b = self.pop()?; let a = self.pop()?;
+                if a.is_signed() || b.is_signed() {
+                    let av=a.as_i128()?;let bv=b.as_i128()?;let r=av.checked_add(bv).ok_or_else(||VMError::RuntimeError(format!("Signed overflow on Add: {}+{}",av,bv)))?;self.push(Value::from_i128_shrink(r))?;
+                } else if a.is_uint_compat() && b.is_uint_compat() {
+                    let av=a.as_u256()?;let bv=b.as_u256()?;let r=av.checked_add(bv).ok_or_else(||VMError::RuntimeError(format!("UInt256 overflow on Add: {}+{}",av,bv)))?;self.push(Value::from_u256_shrink(r))?;
+                } else { return Err(VMError::RuntimeError("Add: expected numeric".to_string())); }
             }
             OpCode::Sub => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                if a.is_uint_compat() && b.is_uint_compat() {
-                    let av = a.as_u256()?;
-                    let bv = b.as_u256()?;
-                    let result = av.checked_sub(bv)
-                        .ok_or_else(|| VMError::RuntimeError(
-                            format!("UInt256 underflow on Sub: {} - {} would be negative", av, bv)))?;
-                    self.push(Value::from_u256_shrink(result))?;
-                } else {
-                    return Err(VMError::RuntimeError("Sub: expected numeric value".to_string()));
-                }
+                let b = self.pop()?; let a = self.pop()?;
+                if a.is_signed() || b.is_signed() {
+                    let av=a.as_i128()?;let bv=b.as_i128()?;let r=av.checked_sub(bv).ok_or_else(||VMError::RuntimeError(format!("Signed overflow on Sub: {}-{}",av,bv)))?;self.push(Value::from_i128_shrink(r))?;
+                } else if a.is_uint_compat() && b.is_uint_compat() {
+                    let av=a.as_u256()?;let bv=b.as_u256()?;let r=av.checked_sub(bv).ok_or_else(||VMError::RuntimeError(format!("UInt256 underflow on Sub: {}-{} would be negative",av,bv)))?;self.push(Value::from_u256_shrink(r))?;
+                } else { return Err(VMError::RuntimeError("Sub: expected numeric".to_string())); }
             }
             OpCode::Mul => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                if a.is_uint_compat() && b.is_uint_compat() {
-                    let av = a.as_u256()?;
-                    let bv = b.as_u256()?;
-                    let result = av.checked_mul(bv)
-                        .ok_or_else(|| VMError::RuntimeError(format!(
-                            "UInt256 overflow on Mul: {} × {} exceeds 2²⁵⁶−1 (max UInt256)", av, bv)))?;
-                    self.push(Value::from_u256_shrink(result))?;
-                } else {
-                    return Err(VMError::RuntimeError("Mul: expected numeric value".to_string()));
-                }
+                let b = self.pop()?; let a = self.pop()?;
+                if a.is_signed() || b.is_signed() {
+                    let av=a.as_i128()?;let bv=b.as_i128()?;let r=av.checked_mul(bv).ok_or_else(||VMError::RuntimeError(format!("Signed overflow on Mul: {}×{}",av,bv)))?;self.push(Value::from_i128_shrink(r))?;
+                } else if a.is_uint_compat() && b.is_uint_compat() {
+                    let av=a.as_u256()?;let bv=b.as_u256()?;let r=av.checked_mul(bv).ok_or_else(||VMError::RuntimeError(format!("UInt256 overflow on Mul: {}×{}",av,bv)))?;self.push(Value::from_u256_shrink(r))?;
+                } else { return Err(VMError::RuntimeError("Mul: expected numeric".to_string())); }
             }
             OpCode::Div => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                if a.is_uint_compat() && b.is_uint_compat() {
-                    let av = a.as_u256()?;
-                    let bv = b.as_u256()?;
-                    if bv == U256::ZERO {
-                        return Err(VMError::RuntimeError(format!("Division by zero: {} / 0 is undefined", av)));
-                    }
-                    let result = av.checked_div(bv)
-                        .ok_or_else(|| VMError::RuntimeError(format!(
-                            "UInt256 Div error: {} / {} failed", av, bv)))?;
-                    self.push(Value::from_u256_shrink(result))?;
-                } else {
-                    return Err(VMError::RuntimeError("Div: expected numeric value".to_string()));
-                }
+                let b = self.pop()?; let a = self.pop()?;
+                if a.is_signed() || b.is_signed() {
+                    let av=a.as_i128()?;let bv=b.as_i128()?;
+                    if bv==0 {return Err(VMError::RuntimeError(format!("Div by zero: {} / 0",av)));}
+                    let r=av.checked_div(bv).ok_or_else(||VMError::RuntimeError(format!("Signed overflow on Div: {} / {}",av,bv)))?;
+                    self.push(Value::from_i128_shrink(r))?;
+                } else if a.is_uint_compat() && b.is_uint_compat() {
+                    let av=a.as_u256()?;let bv=b.as_u256()?;
+                    if bv==U256::ZERO {return Err(VMError::RuntimeError(format!("Div by zero: {} / 0",av)));}
+                    let r=av.checked_div(bv).ok_or_else(||VMError::RuntimeError(format!("UInt256 Div error: {} / {}",av,bv)))?;
+                    self.push(Value::from_u256_shrink(r))?;
+                } else {return Err(VMError::RuntimeError("Div: expected numeric".to_string()));}
             }
             OpCode::Rem => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                if a.is_uint_compat() && b.is_uint_compat() {
-                    let av = a.as_u256()?;
-                    let bv = b.as_u256()?;
-                    if bv == U256::ZERO {
-                        return Err(VMError::RuntimeError(format!("Remainder by zero: {} % 0 is undefined", av)));
-                    }
-                    let result = av.checked_rem(bv)
-                        .ok_or_else(|| VMError::RuntimeError(format!(
-                            "UInt256 Rem error: {} % {} failed", av, bv)))?;
-                    self.push(Value::from_u256_shrink(result))?;
-                } else {
-                    return Err(VMError::RuntimeError("Rem: expected numeric value".to_string()));
-                }
+                let b = self.pop()?; let a = self.pop()?;
+                if a.is_signed() || b.is_signed() {
+                    let av=a.as_i128()?;let bv=b.as_i128()?;
+                    if bv==0 {return Err(VMError::RuntimeError(format!("Rem by zero: {} % 0",av)));}
+                    let r=av.checked_rem(bv).ok_or_else(||VMError::RuntimeError(format!("Signed overflow on Rem: {} % {}",av,bv)))?;
+                    self.push(Value::from_i128_shrink(r))?;
+                } else if a.is_uint_compat() && b.is_uint_compat() {
+                    let av=a.as_u256()?;let bv=b.as_u256()?;
+                    if bv==U256::ZERO {return Err(VMError::RuntimeError(format!("Rem by zero: {} % 0",av)));}
+                    let r=av.checked_rem(bv).ok_or_else(||VMError::RuntimeError(format!("UInt256 Rem error: {} % {}",av,bv)))?;
+                    self.push(Value::from_u256_shrink(r))?;
+                } else {return Err(VMError::RuntimeError("Rem: expected numeric".to_string()));}
             }
 
             // ── Comparison ─────────────────────────────────────────────────
             OpCode::Eq => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                let result = if a.is_uint_compat() && b.is_uint_compat() {
-                    a.as_u256()? == b.as_u256()?
-                } else {
-                    matches!((&a, &b), (Value::Bool(x), Value::Bool(y)) if x == y)
-                };
+                let b = self.pop()?; let a = self.pop()?;
+                let result = if a.is_signed() || b.is_signed() { a.as_i128()? == b.as_i128()? }
+                    else if a.is_uint_compat() && b.is_uint_compat() { a.as_u256()? == b.as_u256()? }
+                    else if let (Value::Bool(x), Value::Bool(y)) = (&a, &b) { x == y }
+                    else if let (Value::Str(x), Value::Str(y)) = (&a, &b) { x == y }
+                    else { return Err(VMError::RuntimeError(format!("Eq: cannot compare {:?} and {:?}", a, b))); };
                 self.push(Value::Bool(result))?;
             }
             OpCode::Ne => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                let result = if a.is_uint_compat() && b.is_uint_compat() {
-                    a.as_u256()? != b.as_u256()?
-                } else {
-                    !matches!((&a, &b), (Value::Bool(x), Value::Bool(y)) if x == y)
-                };
+                let b = self.pop()?; let a = self.pop()?;
+                let result = if a.is_signed() || b.is_signed() { a.as_i128()? != b.as_i128()? }
+                    else if a.is_uint_compat() && b.is_uint_compat() { a.as_u256()? != b.as_u256()? }
+                    else if let (Value::Bool(x), Value::Bool(y)) = (&a, &b) { x != y }
+                    else if let (Value::Str(x), Value::Str(y)) = (&a, &b) { x != y }
+                    else { return Err(VMError::RuntimeError(format!("Ne: cannot compare {:?} and {:?}", a, b))); };
                 self.push(Value::Bool(result))?;
             }
             OpCode::Lt => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                if a.is_uint_compat() && b.is_uint_compat() {
+                let b = self.pop()?; let a = self.pop()?;
+                if a.is_signed() || b.is_signed() {
+                    self.push(Value::Bool(a.as_i128()? < b.as_i128()?))?;
+                } else if a.is_uint_compat() && b.is_uint_compat() {
                     self.push(Value::Bool(a.as_u256()? < b.as_u256()?))?;
-                } else {
-                    return Err(VMError::RuntimeError("Lt: expected numeric value".to_string()));
-                }
+                } else {return Err(VMError::RuntimeError("Lt: expected numeric".to_string()));}
             }
             OpCode::Le => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                if a.is_uint_compat() && b.is_uint_compat() {
+                let b = self.pop()?; let a = self.pop()?;
+                if a.is_signed() || b.is_signed() {
+                    self.push(Value::Bool(a.as_i128()? <= b.as_i128()?))?;
+                } else if a.is_uint_compat() && b.is_uint_compat() {
                     self.push(Value::Bool(a.as_u256()? <= b.as_u256()?))?;
-                } else {
-                    return Err(VMError::RuntimeError("Le: expected numeric value".to_string()));
-                }
+                } else {return Err(VMError::RuntimeError("Le: expected numeric".to_string()));}
             }
             OpCode::Gt => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                if a.is_uint_compat() && b.is_uint_compat() {
+                let b = self.pop()?; let a = self.pop()?;
+                if a.is_signed() || b.is_signed() {
+                    self.push(Value::Bool(a.as_i128()? > b.as_i128()?))?;
+                } else if a.is_uint_compat() && b.is_uint_compat() {
                     self.push(Value::Bool(a.as_u256()? > b.as_u256()?))?;
-                } else {
-                    return Err(VMError::RuntimeError("Gt: expected numeric value".to_string()));
-                }
+                } else {return Err(VMError::RuntimeError("Gt: expected numeric".to_string()));}
             }
             OpCode::Ge => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                if a.is_uint_compat() && b.is_uint_compat() {
+                let b = self.pop()?; let a = self.pop()?;
+                if a.is_signed() || b.is_signed() {
+                    self.push(Value::Bool(a.as_i128()? >= b.as_i128()?))?;
+                } else if a.is_uint_compat() && b.is_uint_compat() {
                     self.push(Value::Bool(a.as_u256()? >= b.as_u256()?))?;
-                } else {
-                    return Err(VMError::RuntimeError("Ge: expected numeric value".to_string()));
-                }
+                } else {return Err(VMError::RuntimeError("Ge: expected numeric".to_string()));}
             }
 
             // ── Control flow ───────────────────────────────────────────────
@@ -721,10 +735,27 @@ impl QuantumVM {
                 self.memory.insert(addr, value);
             }
             OpCode::LoadImm => {
-                // Raw bytes (strings, PQC keys)
+                // Raw bytes — may be a length-prefixed UTF-8 string or raw Bytes.
+                // String encoding from codegen: [outer_len:4LE][inner_len:4LE][utf8...]
+                // Detect: outer_len >= 4 AND first 4 bytes as LE == outer_len - 4.
                 let len = self.read_u32()? as usize;
                 let bytes = self.read_bytes(len)?;
-                self.push(Value::Bytes(bytes))?;
+                // Try to decode as length-prefixed string
+                let value = if len >= 4 {
+                    let inner_len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+                    if inner_len + 4 == len {
+                        // Matches string encoding — attempt UTF-8 decode
+                        match std::str::from_utf8(&bytes[4..]) {
+                            Ok(s) => Value::Str(s.to_string()),
+                            Err(_) => Value::Bytes(bytes),  // not valid UTF-8 — keep as Bytes
+                        }
+                    } else {
+                        Value::Bytes(bytes)
+                    }
+                } else {
+                    Value::Bytes(bytes)
+                };
+                self.push(value)?;
             }
             OpCode::LoadImm128 => {
                 // 16 big-endian bytes → Value::U128  (UInt256 literals ≤ 2^128)
