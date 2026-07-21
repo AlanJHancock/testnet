@@ -10,6 +10,7 @@ contract ComprehensiveToken {
   version:       UInt256;
   initialised:   UInt256;
   admin_count:   UInt256;
+  debug_mode:    UInt256;
 
   // Bootstrap: sign this call with your wallet — caller becomes the first admin.
   // No deployer arg needed; the signer IS the deployer.
@@ -21,6 +22,7 @@ contract ComprehensiveToken {
     feat_pqc            = 1;
     version             = 1;
     initialised         = 1;
+    debug_mode          = 0;
     return caller;
   }
 
@@ -102,10 +104,24 @@ contract ComprehensiveToken {
     return total_supply;
   }
 
-  // ── Diagnostics ────────────────────────────────────────────────────────────
-  function whoAmI() as caller       { return caller; }
+  // ── Debug control (admin only) ─────────────────────────────────────────────
+  function setDebugMode(enabled: UInt256) as caller {
+    require(admin_role[caller] == 1, "setDebugMode: not admin");
+    debug_mode = enabled;
+  }
+
+  // ── Diagnostics (gated -- call setDebugMode(1) to enable) ──────────────────
+  function whoAmI() as caller {
+    require(debug_mode == 1, "whoAmI: debug mode not enabled");
+    return caller;
+  }
+  function amIRegistered() as caller {
+    require(debug_mode == 1, "amIRegistered: debug mode not enabled");
+    return registered[caller];
+  }
+
+  // ── Identity helpers (always available) ─────────────────────────────────────
   function amIAdmin() as caller     { return admin_role[caller]; }
-  function amIRegistered() as caller { return registered[caller]; }
 
   // ── Queries ────────────────────────────────────────────────────────────────
   function isAdmin(who: UInt256)      { return admin_role[who]; }

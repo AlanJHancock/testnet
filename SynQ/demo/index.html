@@ -402,70 +402,135 @@
   var VAULT_LINES = [
     'pragma synq ^0.9;',
     '',
-    '// TokenVault -- primary entry point.',
-    '// Deploy this first, then deploy SimpleToken into the same workspace.',
-    'contract TokenVault {',
+    'contract ComprehensiveToken {',
+    '  total_supply:  UInt256;',
+    '  balances:      mapping<UInt256, UInt256>;',
+    '  admin_role:    mapping<UInt256, UInt256>;',
+    '  minter_role:   mapping<UInt256, UInt256>;',
+    '  registered:    mapping<UInt256, UInt256>;',
+    '  feat_pqc:      UInt256;',
+    '  version:       UInt256;',
+    '  initialised:   UInt256;',
+    '  admin_count:   UInt256;',
+    '  debug_mode:    UInt256;',
     '',
-    '  active:     UInt256;',
-    '  vaultOwner: UInt256;',
-    '  totalIn:    UInt256;',
-    '  totalOut:   UInt256;',
-    '',
-    '  // Initialise the vault -- caller becomes vault owner.',
+    '  // Bootstrap: sign this call with your wallet — caller becomes the first admin.',
+    '  // No deployer arg needed; the signer IS the deployer.',
     '  function init() as caller {',
-    '    require(active == 0, "TokenVault.init: already initialised");',
-    '    vaultOwner = caller;',
-    '    active     = 1;',
-    '    totalIn    = 0;',
-    '    totalOut   = 0;',
-    '    extern_call("SimpleToken", "init");',
+    '    require(initialised == 0, "init: already initialised");',
+    '    admin_role[caller]  = 1;',
+    '    registered[caller]  = 1;',
+    '    admin_count         = 1;',
+    '    feat_pqc            = 1;',
+    '    version             = 1;',
+    '    initialised         = 1;',
+    '    debug_mode          = 0;',
+    '    return caller;',
+    '  }',
+    '',
+    '  // ── Admin management ───────────────────────────────────────────────────────',
+    '  function grantAdmin(target: UInt256) as caller {',
+    '    require(admin_role[caller] == 1, "grantAdmin: not admin");',
+    '    require(target > 0,              "grantAdmin: invalid address");',
+    '    if (admin_role[target] == 0) {',
+    '      admin_count = admin_count + 1;',
+    '    }',
+    '    admin_role[target]  = 1;',
+    '    registered[target]  = 1;',
+    '  }',
+    '',
+    '  function revokeAdmin(target: UInt256) as caller {',
+    '    require(admin_role[caller] == 1, "revokeAdmin: not admin");',
+    '    require(target != caller,        "revokeAdmin: cannot revoke self");',
+    '    require(admin_count > 1,         "revokeAdmin: cannot remove last admin");',
+    '    if (admin_role[target] == 1) {',
+    '      admin_count = admin_count - 1;',
+    '    }',
+    '    admin_role[target] = 0;',
+    '  }',
+    '',
+    '  function grantMinter(target: UInt256) as caller {',
+    '    require(admin_role[caller] == 1, "grantMinter: not admin");',
+    '    require(target > 0,              "grantMinter: invalid address");',
+    '    minter_role[target]  = 1;',
+    '    registered[target]   = 1;',
+    '  }',
+    '',
+    '  function revokeMinter(target: UInt256) as caller {',
+    '    require(admin_role[caller] == 1, "revokeMinter: not admin");',
+    '    require(target != caller,        "revokeMinter: cannot revoke self");',
+    '    minter_role[target] = 0;',
+    '  }',
+    '',
+    '  // ── Explicit registration (admin only) ─────────────────────────────────────',
+    '  function register(target: UInt256) as caller {',
+    '    require(admin_role[caller] == 1, "register: not admin");',
+    '    require(target > 0,              "register: invalid address");',
+    '    registered[target] = 1;',
+    '  }',
+    '',
+    '  function deregister(target: UInt256) as caller {',
+    '    require(admin_role[caller] == 1,  "deregister: not admin");',
+    '    require(balances[target] == 0,    "deregister: target still holds tokens");',
+    '    registered[target] = 0;',
+    '  }',
+    '',
+    '  // ── Minting ────────────────────────────────────────────────────────────────',
+    '  function mint(to: UInt256, amount: UInt256) as caller {',
+    '    require(minter_role[caller] == 1 || admin_role[caller] == 1, "mint: not authorised");',
+    '    require(to > 0,     "mint: invalid recipient");',
+    '    require(amount > 0, "mint: positive");',
+    '    registered[to]   = 1;',
+    '    total_supply     = total_supply + amount;',
+    '    balances[to]     = balances[to] + amount;',
+    '    return total_supply;',
+    '  }',
+    '',
+    '  // ── Transfers ──────────────────────────────────────────────────────────────',
+    '  function transfer(to: UInt256, amount: UInt256) as caller {',
+    '    require(registered[caller] == 1,    "transfer: sender not registered");',
+    '    require(registered[to] == 1,        "transfer: recipient not registered");',
+    '    require(to > 0,                     "transfer: invalid recipient");',
+    '    require(to != caller,               "transfer: cannot transfer to self");',
+    '    require(balances[caller] >= amount, "transfer: insufficient balance");',
+    '    balances[caller] = balances[caller] - amount;',
+    '    balances[to]     = balances[to] + amount;',
     '    return 1;',
     '  }',
     '',
-    '  // Deposit: mint `amount` tokens into SimpleToken on behalf of the vault.',
-    '  function deposit(amount: UInt256) as caller {',
-    '    require(active == 1, "TokenVault.deposit: vault not active");',
-    '    require(amount > 0, "TokenVault.deposit: amount must be > 0");',
-    '    extern_call("SimpleToken", "mint", amount);',
-    '    totalIn = totalIn + amount;',
-    '    return totalIn - totalOut;',
+    '  function burn(from: UInt256, amount: UInt256) as caller {',
+    '    require(admin_role[caller] == 1,  "burn: not admin");',
+    '    require(balances[from] >= amount, "burn: amount exceeds balance");',
+    '    balances[from] = balances[from] - amount;',
+    '    total_supply   = total_supply - amount;',
+    '    return total_supply;',
     '  }',
     '',
-    '  // Withdraw: burn `amount` tokens from SimpleToken.',
-    '  function withdraw(amount: UInt256) as caller requires cap::Withdrawer {',
-    '    require(active == 1, "TokenVault.withdraw: vault not active");',
-    '    require(caller == vaultOwner, "TokenVault.withdraw: caller is not vault owner");',
-    '    require(amount > 0, "TokenVault.withdraw: amount must be > 0");',
-    '    require(totalIn >= totalOut + amount, "TokenVault.withdraw: amount exceeds available balance");',
-    '    extern_call("SimpleToken", "burn", amount);',
-    '    totalOut = totalOut + amount;',
-    '    return totalIn - totalOut;',
+    '  // ── Debug control (admin only) ─────────────────────────────────────────────',
+    '  function setDebugMode(enabled: UInt256) as caller {',
+    '    require(admin_role[caller] == 1, "setDebugMode: not admin");',
+    '    debug_mode = enabled;',
     '  }',
     '',
-    '  // Returns vault-tracked net inflow (totalIn - totalOut). Returns 0 if totalOut > totalIn.',
-    '  function netFlow() {',
-    '    require(totalIn >= totalOut, "TokenVault.netFlow: totalOut exceeds totalIn");',
-    '    return totalIn - totalOut;',
+    '  // ── Diagnostics (gated -- call setDebugMode(1) to enable) ──────────────────',
+    '  function whoAmI() as caller {',
+    '    require(debug_mode == 1, "whoAmI: debug mode not enabled");',
+    '    return caller;',
+    '  }',
+    '  function amIRegistered() as caller {',
+    '    require(debug_mode == 1, "amIRegistered: debug mode not enabled");',
+    '    return registered[caller];',
     '  }',
     '',
-    '  function getTotalIn()  { return totalIn; }',
-    '  function getTotalOut() { return totalOut; }',
+    '  // ── Identity helpers (always available) ─────────────────────────────────────',
+    '  function amIAdmin() as caller     { return admin_role[caller]; }',
     '',
-    '  // balance() -- vault-side net (totalIn - totalOut).',
-    '  function balance() {',
-    '    require(totalIn >= totalOut, "TokenVault.balance: totalOut exceeds totalIn");',
-    '    return totalIn - totalOut;',
-    '  }',
-    '',
-    '  // assertSync() -- cross-contract invariant check.',
-    '  // Confirms SimpleToken.total == TokenVault.(totalIn - totalOut).',
-    '  // Invariant: only deposit/withdraw mutate both sides atomically.',
-    '  // Will fail if SimpleToken was initialised with a non-zero supply,',
-    '  function assertSync() as caller {',
-    '    require(totalIn >= totalOut, "assertSync: totalOut exceeds totalIn");',
-    '    extern_call("SimpleToken", "assertBalance", totalIn - totalOut);',
-    '    return 1;',
-    '  }',
+    '  // ── Queries ────────────────────────────────────────────────────────────────',
+    '  function isAdmin(who: UInt256)      { return admin_role[who]; }',
+    '  function isMinter(who: UInt256)     { return minter_role[who]; }',
+    '  function isRegistered(who: UInt256) { return registered[who]; }',
+    '  function balanceOf(who: UInt256)    { return balances[who]; }',
+    '  function totalSupply()              { return total_supply; }',
     '}'
   ];
 
@@ -2123,45 +2188,67 @@
 
   function formatStateVal(name, v) {
     if (v === undefined || v === null) return '?';
-    // Mapping/set — v is already a JS object (from probeStateVars JSON.parse)
+
+    // ── Helpers ────────────────────────────────────────────────────────────
+    // Classify a variable name as a boolean-intent field
+    var BOOL_SCALARS = ['feat_pqc','initialised','paused','frozen','active','enabled'];
+    var BOOL_MAPS    = ['admin_role','minter_role','registered'];
+    function isBoolScalar(n) { return BOOL_SCALARS.indexOf(n) >= 0; }
+    function isBoolMap(n)    { return BOOL_MAPS.indexOf(n) >= 0; }
+
+    // Normalise a 32-byte big-endian hex key to a short address string
+    function safeKey(k) {
+      if (typeof k === 'string' && /^0x[0-9a-f]+$/i.test(k)) {
+        var hex = k.slice(2).replace(/^0+/, '') || '0';
+        if (hex.length % 2 !== 0) hex = '0' + hex;
+        while (hex.length < 40)   hex = '0' + hex;
+        var addr = '0x' + hex;
+        return addr.length > 14 ? addr.slice(0,8) + '\u2026' + addr.slice(-6) : addr;
+      }
+      // Guard: if name leaked a raw slot index as key, show it literally
+      return (typeof k === 'string' && k.length > 14) ? k.slice(0,6)+'\u2026'+k.slice(-4) : String(k);
+    }
+
+    // ── Mapping / set object ───────────────────────────────────────────────
     if (typeof v === 'object' && !Array.isArray(v)) {
       var keys = Object.keys(v);
-      if (keys.length === 0) return '{}';
-      // For role mappings: show "granted to N" or list of granted addresses
-      if (/^(admin_role|minter_role)$/.test(name)) {
+      if (keys.length === 0) return isBoolMap(name) ? 'false' : '{}';
+      if (isBoolMap(name)) {
+        // Show true if any entry is set to 1; false otherwise
         var granted = keys.filter(function(k) { return String(v[k]) === '1'; });
-        return granted.length > 0 ? 'true' : 'false';
+        return granted.length > 0 ? 'true (' + granted.length + ')' : 'false';
       }
-      // Generic mapping: show {key: val, ...} truncated
-      // Keys arrive as "0x" + 64 hex chars (32-byte BE). Strip leading zeros
-      // down to at most 40 hex chars (20-byte address), then truncate for display.
-      function safeKey(k) {
-        if (typeof k === 'string' && k.startsWith('0x')) {
-          var hex = k.slice(2).replace(/^0+/, '') || '0';
-          // pad to even length
-          if (hex.length % 2 !== 0) hex = '0' + hex;
-          // pad to at least 40 chars (address width)
-          while (hex.length < 40) hex = '0' + hex;
-          var addr = '0x' + hex;
-          return addr.length > 14 ? addr.slice(0,8) + '…' + addr.slice(-6) : addr;
-        }
-        return k.length > 14 ? k.slice(0,6)+'..'+k.slice(-4) : k;
-      }
+      // Generic mapping — up to 3 entries
       var pairs = keys.slice(0,3).map(function(k) {
         return safeKey(k) + ':' + v[k];
       });
-      return '{' + pairs.join(', ') + (keys.length > 3 ? ', …' : '') + '}';
+      return '{' + pairs.join(', ') + (keys.length > 3 ? ', \u2026' : '') + '}';
     }
+
     if (Array.isArray(v)) return '[' + v.length + ' items]';
+
     var s = String(v);
-    var boolVars = ['feat_pqc','initialised','paused','frozen','active','enabled'];
-    if (boolVars.indexOf(name) >= 0) return s === '?' ? '?' : (s === '1' ? 'true' : 'false');
-    if (/^(admin_role|minter_role)$/.test(name)) return s === '1' ? 'true' : 'false';
+
+    // ── Slot index leaked as name (edge case guard) ────────────────────────
+    // If the name is purely numeric the server returned a raw slot index
+    // instead of the declared variable name — show a fallback label.
+    if (/^\d+$/.test(name)) return 'slot[' + name + '] = ' + s;
+
+    // ── Scalar bool fields ─────────────────────────────────────────────────
+    if (isBoolScalar(name)) return s === '?' ? '?' : (s === '1' ? 'true' : 'false');
+
+    // ── Scalar bool-map (no entries yet — entire map not yet written) ──────
+    if (isBoolMap(name)) return (s === '0' || s === '?') ? 'false' : 'true';
+
+    // ── version ───────────────────────────────────────────────────────────
     if (name === 'version') return (s === '?' || s === '0') ? '0' : 'v' + s;
-    if (name === 'owner') {
+
+    // ── owner / address fields ─────────────────────────────────────────────
+    if (name === 'owner' || name === 'creator') {
       if (s === '0') return '(not set)';
       try { return '0x' + BigInt(s).toString(16).padStart(40,'0'); } catch(e) { return s; }
     }
+
     return s;
   }
 

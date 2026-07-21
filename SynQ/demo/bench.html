@@ -152,7 +152,10 @@ contract ComprehensiveToken {
   version:       UInt256;
   initialised:   UInt256;
   admin_count:   UInt256;
+  debug_mode:    UInt256;
 
+  // Bootstrap: sign this call with your wallet — caller becomes the first admin.
+  // No deployer arg needed; the signer IS the deployer.
   function init() as caller {
     require(initialised == 0, "init: already initialised");
     admin_role[caller]  = 1;
@@ -161,9 +164,11 @@ contract ComprehensiveToken {
     feat_pqc            = 1;
     version             = 1;
     initialised         = 1;
+    debug_mode          = 0;
     return caller;
   }
 
+  // ── Admin management ───────────────────────────────────────────────────────
   function grantAdmin(target: UInt256) as caller {
     require(admin_role[caller] == 1, "grantAdmin: not admin");
     require(target > 0,              "grantAdmin: invalid address");
@@ -197,6 +202,7 @@ contract ComprehensiveToken {
     minter_role[target] = 0;
   }
 
+  // ── Explicit registration (admin only) ─────────────────────────────────────
   function register(target: UInt256) as caller {
     require(admin_role[caller] == 1, "register: not admin");
     require(target > 0,              "register: invalid address");
@@ -209,6 +215,7 @@ contract ComprehensiveToken {
     registered[target] = 0;
   }
 
+  // ── Minting ────────────────────────────────────────────────────────────────
   function mint(to: UInt256, amount: UInt256) as caller {
     require(minter_role[caller] == 1 || admin_role[caller] == 1, "mint: not authorised");
     require(to > 0,     "mint: invalid recipient");
@@ -219,6 +226,7 @@ contract ComprehensiveToken {
     return total_supply;
   }
 
+  // ── Transfers ──────────────────────────────────────────────────────────────
   function transfer(to: UInt256, amount: UInt256) as caller {
     require(registered[caller] == 1,    "transfer: sender not registered");
     require(registered[to] == 1,        "transfer: recipient not registered");
@@ -238,9 +246,26 @@ contract ComprehensiveToken {
     return total_supply;
   }
 
-  function whoAmI() as caller       { return caller; }
+  // ── Debug control (admin only) ─────────────────────────────────────────────
+  function setDebugMode(enabled: UInt256) as caller {
+    require(admin_role[caller] == 1, "setDebugMode: not admin");
+    debug_mode = enabled;
+  }
+
+  // ── Diagnostics (gated -- call setDebugMode(1) to enable) ──────────────────
+  function whoAmI() as caller {
+    require(debug_mode == 1, "whoAmI: debug mode not enabled");
+    return caller;
+  }
+  function amIRegistered() as caller {
+    require(debug_mode == 1, "amIRegistered: debug mode not enabled");
+    return registered[caller];
+  }
+
+  // ── Identity helpers (always available) ─────────────────────────────────────
   function amIAdmin() as caller     { return admin_role[caller]; }
-  function amIRegistered() as caller { return registered[caller]; }
+
+  // ── Queries ────────────────────────────────────────────────────────────────
   function isAdmin(who: UInt256)      { return admin_role[who]; }
   function isMinter(who: UInt256)     { return minter_role[who]; }
   function isRegistered(who: UInt256) { return registered[who]; }
