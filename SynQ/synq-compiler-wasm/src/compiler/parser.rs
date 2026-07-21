@@ -541,6 +541,22 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
             pair.as_str().trim_matches('"').to_string()
         )),
         Rule::bool_literal => Expression::Literal(Literal::Bool(pair.as_str() == "true")),
+        Rule::map_index_expr => {
+            let mut inner = pair.into_inner();
+            let map_name = inner.next().unwrap().as_str().to_string();
+            let key_expr = parse_expression(inner.next().unwrap());
+            Expression::MapIndex(map_name, Box::new(key_expr))
+        }
+        Rule::method_call_expr => {
+            let mut inner = pair.into_inner();
+            let receiver = inner.next().unwrap().as_str().to_string();
+            let method = inner.next().unwrap().as_str().to_string();
+            let args: Vec<Expression> = if let Some(arg_list) = inner.next() {
+                arg_list.into_inner().map(parse_expression).collect()
+            } else { vec![] };
+            // Route to MapMethod for known map/set operations
+            Expression::MapMethod { map: receiver, method, args }
+        }
         Rule::IDENT => match pair.as_str() {
             "caller" => Expression::Caller,
             name     => Expression::Identifier(name.to_string()),
