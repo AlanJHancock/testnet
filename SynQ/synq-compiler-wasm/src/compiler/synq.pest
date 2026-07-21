@@ -91,6 +91,9 @@ statement = { return_statement
             | revert_statement
             | emit_statement
             | extern_call_statement
+            | while_statement
+            | break_statement
+            | continue_statement
             | if_statement
             | let_statement
             | map_assign_statement
@@ -106,6 +109,9 @@ extern_call_statement = { "extern_call" ~ "(" ~ string_literal ~ "," ~ string_li
                           ~ ("," ~ expression)* ~ ")" ~ ";" }
 if_statement          = { "if" ~ "(" ~ expression ~ ")" ~ block
                           ~ ("else" ~ (if_statement | block))? }
+while_statement       = { "while" ~ "(" ~ expression ~ ")" ~ block }
+break_statement       = { "break" ~ ";" }
+continue_statement    = { "continue" ~ ";" }
 let_statement         = { "let" ~ IDENT ~ (":" ~ type_decl)? ~ "=" ~ expression ~ ";" }
 assignment_statement  = { IDENT ~ "=" ~ expression ~ ";" }
 map_assign_statement  = { IDENT ~ "[" ~ expression ~ "]" ~ "=" ~ expression ~ ";" }
