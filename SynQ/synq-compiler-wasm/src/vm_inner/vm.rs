@@ -1,8 +1,6 @@
 use std::collections::{HashMap, BTreeMap, BTreeSet};
 use super::opcode::{OpCode, VMError};
 use ruint::aliases::U256;
-#[cfg(feature = "native")]
-use pqc_shims::{dilithium, kyber, falcon, sphincs};
 
 // ── PR-B constants ──────────────────────────────────────────────────────────
 
@@ -28,8 +26,49 @@ pub enum Value {
     U256(U256),
     Bytes(Vec<u8>),
     Bool(bool),
+    /// Map<key_bytes, Value> — heap-allocated per session address slot.
     Map(BTreeMap<Vec<u8>, Value>),
+    /// Set<value_bytes> — heap-allocated per session address slot.
     Set(BTreeSet<Vec<u8>>),
+}
+
+/// Coerce any Value to a stable byte key for map/set indexing.
+fn hex_encode(b: &[u8]) -> String { b.iter().map(|x| format!("{:02x}", x)).collect() }
+
+fn value_to_key(v: &Value) -> Result<Vec<u8>, VMError> {
+    // All key types normalised to 32-byte big-endian so that
+    // I32(0xDEAD) and U256(0xDEAD) produce the same map key.
+    let mut key = [0u8; 32];
+    match v {
+        Value::I32(n)  => {
+            // Sign-extend to i64, then treat as unsigned 32-byte BE
+            let u = *n as u64;
+            key[24..].copy_from_slice(&u.to_be_bytes());
+        }
+        Value::I64(n)  => {
+            let u = *n as u64;
+            key[24..].copy_from_slice(&u.to_be_bytes());
+        }
+        Value::U128(n) => {
+            key[16..].copy_from_slice(&n.to_be_bytes());
+        }
+        Value::U256(n) => {
+            let b = n.to_be_bytes::<32>();
+            key.copy_from_slice(&b);
+        }
+        Value::Bytes(b) => {
+            // Right-align bytes into 32-byte buffer (same as U256 BE)
+            if b.len() >= 32 {
+                key.copy_from_slice(&b[b.len()-32..]);
+            } else {
+                key[32-b.len()..].copy_from_slice(b);
+            }
+        }
+        Value::Bool(b) => { key[31] = *b as u8; }
+        Value::Map(_)  => return Err(VMError::RuntimeError("Map cannot be used as a map key".into())),
+        Value::Set(_)  => return Err(VMError::RuntimeError("Set cannot be used as a map key".into())),
+    }
+    Ok(key.to_vec())
 }
 
 impl Value {
@@ -93,7 +132,7 @@ impl Value {
 
     /// True if this value is a large uint or can be promoted to one.
     fn is_uint_compat(&self) -> bool {
-        matches!(self, Value::U256(_) | Value::U128(_) | Value::I32(_) | Value::Bool(_))
+        matches!(self, Value::U256(_) | Value::U128(_) | Value::I32(_) | Value::Bool(_) | Value::I64(_))
     }
 
     /// Convert to a canonical Value: shrink U256→U128→I32 when it fits.
@@ -180,7 +219,8 @@ fn parse_function_table(data: &[u8]) -> Result<HashMap<String, FunctionEntry>, V
         if pos + name_len > data.len() {
             return Err(VMError::InvalidBytecode("truncated function name".to_string()));
         }
-        let name = String::from_utf8_lossy(&data[pos..pos + name_len]).to_string();
+        let name = String::from_utf8(data[pos..pos + name_len].to_vec())
+            .map_err(|_| VMError::InvalidBytecode("function name is not valid UTF-8".to_string()))?;
         pos += name_len;
 
         let address = read_u32(data, &mut pos)?;
@@ -211,7 +251,8 @@ fn parse_function_table(data: &[u8]) -> Result<HashMap<String, FunctionEntry>, V
             if pos + cap_len > data.len() {
                 return Err(VMError::InvalidBytecode("truncated capability name".to_string()));
             }
-            let cap_name = String::from_utf8_lossy(&data[pos..pos + cap_len]).to_string();
+            let cap_name = String::from_utf8(data[pos..pos + cap_len].to_vec())
+            .map_err(|_| VMError::InvalidBytecode("capability name is not valid UTF-8".to_string()))?;
             pos += cap_len;
             capabilities.push(cap_name);
         }
@@ -243,19 +284,6 @@ struct CallFrame {
 }
 
 // The main VM struct
-pub fn value_to_key(v: &Value) -> Result<Vec<u8>, VMError> {
-    match v {
-        Value::I32(n)  => Ok(n.to_be_bytes().to_vec()),
-        Value::U128(n) => Ok(n.to_be_bytes().to_vec()),
-        Value::U256(n) => { let b = n.to_be_bytes::<32>(); Ok(b.to_vec()) }
-        Value::Bool(b) => Ok(vec![*b as u8]),
-        Value::Bytes(b)=> Ok(b.clone()),
-        Value::Map(_)  => Err(VMError::RuntimeError("Map cannot be a map key".into())),
-        Value::Set(_)  => Err(VMError::RuntimeError("Set cannot be a map key".into())),
-        _ => Err(VMError::RuntimeError("Unsupported key type".into())),
-    }
-}
-
 pub struct QuantumVM {
     pub extern_call_handler: Option<std::sync::Arc<dyn Fn(&str, &str, &[Value]) -> Result<Option<Value>, VMError> + Send + Sync>>,
     pub call_context: CallContext,
@@ -352,6 +380,12 @@ impl QuantumVM {
         // This matches EVM atomicity: a reverted transaction leaves no trace.
         let snapshot = self.memory.clone();
 
+        // Clear any residual stack state from a previous call so each
+        // top-level call_function invocation starts with a clean stack.
+        self.stack.clear();
+        self.call_stack.clear();
+        self.halted = false;
+
         // Write params into memory
         for (addr, value) in entry.param_addresses.iter().zip(args.iter()) {
             self.memory.insert(*addr as usize, value.clone());
@@ -363,6 +397,15 @@ impl QuantumVM {
         self.halted = false;
         // ── PR-B Item 3: reset step counter for this invocation ─────────────
         self.steps = 0;
+        eprintln!("[VM] call_function name={:?} pc={} code_len={} memory_slots={}",
+            name, self.pc, self.code.len(), self.memory.len());
+        // Dump 200 bytes starting at entry PC
+        let dump_end = (self.pc + 200).min(self.code.len());
+        if self.pc < self.code.len() {
+            let chunk = &self.code[self.pc..dump_end];
+            let hex: String = chunk.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+            eprintln!("[VM] bytecode[{}..{}] = {}", self.pc, dump_end, hex);
+        }
 
         let result = loop {
             if self.halted {
@@ -662,44 +705,202 @@ impl QuantumVM {
                 self.push(Value::from_u256_shrink(v))?;
             }
             OpCode::LoadCaller => {
+                // ── LoadCaller (0x50) — devnet: raw EVM signing address ────
+                //
+                // Pushes the authenticated caller's EVM address right-aligned
+                // as a 32-byte big-endian UInt256 (bytes 0..11 = zero,
+                // bytes 12..31 = 20-byte EVM address).
+                //
+                // DEVNET NOTE: In the full Synergy protocol the consensus layer
+                // resolves AuthorizationSignature → UMA identity root BEFORE
+                // the VM executes. LoadCaller will then push the stable UMA
+                // identity root (key-rotation-stable, ZK-anchored per the
+                // Synergy Security Specification v1.6).
+                //
+                // The keccak256("UMA:" || addr) derivation previously used here
+                // was removed because it was still key-tied and did not satisfy
+                // the UMA invariant of key-rotation-stability. Raw address is
+                // the correct devnet interim — consistent with the IDE's
+                // callerIdentity() helper and the /session/run ecrecover path.
+                //
+                // Migration: replace Self { caller: [u8; 20] } with
+                // Self { caller_uma: [u8; 32], signing_key: [u8; 20] } and
+                // read caller_uma here once the UMA registry is integrated.
                 let mut b = [0u8; 32];
                 b[12..32].copy_from_slice(&self.call_context.caller);
-                let addr_u256 = U256::from_be_bytes::<32>(b);
-                self.stack.push(Value::U256(addr_u256));
+                self.stack.push(Value::U256(U256::from_be_bytes::<32>(b)));
             }
 
             // ── PQC ────────────────────────────────────────────────────────
-#[cfg(feature = "native")]
-            OpCode::DilithiumVerify => {
-                let public_key = self.pop()?.as_bytes()?.to_vec();
-                let message    = self.pop()?.as_bytes()?.to_vec();
-                let signature  = self.pop()?.as_bytes()?.to_vec();
-                let result = dilithium::verify(&message, &signature, &public_key);
-                self.push(Value::Bool(result))?;
+            // ── Map operations ──────────────────────────────────────────────
+            // MapNew: reads inline name, initialises an empty Map at the named
+            // state address and pushes that address (I32) as the handle.
+            OpCode::MapNew => {
+                if self.pc + 4 > self.code.len() {
+                    return Err(VMError::InvalidBytecode("MapNew: truncated name_len".into()));
+                }
+                let nlen = u32::from_le_bytes(self.code[self.pc..self.pc+4].try_into().unwrap()) as usize;
+                self.pc += 4;
+                if self.pc + nlen > self.code.len() {
+                    return Err(VMError::InvalidBytecode("MapNew: truncated name".into()));
+                }
+                self.pc += nlen; // name is for debugging only; handle is the addr on stack
+                // The address is already on the stack (pushed by LoadImm/Push before MapNew)
+                // MapNew just confirms and ensures the slot holds a Map value.
+                let addr_val = self.pop()?;
+                let addr = addr_val.as_i32()? as usize;
+                self.memory.entry(addr).or_insert_with(|| Value::Map(BTreeMap::new()));
+                self.push(Value::I32(addr as i32))?;
             }
-#[cfg(feature = "native")]
-            OpCode::KyberKeyExchange => {
-                let private_key = self.pop()?.as_bytes()?.to_vec();
-                let ciphertext  = self.pop()?.as_bytes()?.to_vec();
-                let shared_secret = kyber::decaps(&ciphertext, &private_key)
-                    .map_err(VMError::RuntimeError)?;
-                self.push(Value::Bytes(shared_secret))?;
+            OpCode::MapGet => {
+                let map_addr = self.pop()?.as_i32()? as usize;
+                let key_val  = self.pop()?;
+                let key = value_to_key(&key_val)?;
+                eprintln!("[VM] MapGet slot={} key_type={} key_hex={}",
+                    map_addr,
+                    match &key_val { Value::U256(_) => "U256", Value::Bytes(_) => "Bytes",
+                        Value::U128(_) => "U128", Value::I32(_) => "I32", _ => "other" },
+                    key.iter().map(|b| format!("{:02x}", b)).collect::<String>());
+                match self.memory.get(&map_addr) {
+                    Some(Value::Map(m)) => {
+                        let v = m.get(&key).cloned().unwrap_or(Value::I32(0));
+                        eprintln!("[VM] MapGet slot={} result={:?}", map_addr, v);
+                        self.push(v)?;
+                    }
+                    None => { self.push(Value::I32(0))?; eprintln!("[VM] MapGet slot={} empty memory", map_addr); }
+                    _ => return Err(VMError::RuntimeError("MapGet: slot is not a Map".into())),
+                }
             }
-#[cfg(feature = "native")]
-            OpCode::FalconVerify => {
-                let public_key = self.pop()?.as_bytes()?.to_vec();
-                let message    = self.pop()?.as_bytes()?.to_vec();
-                let signature  = self.pop()?.as_bytes()?.to_vec();
-                let result = falcon::verify(&message, &signature, &public_key);
-                self.push(Value::Bool(result))?;
+            OpCode::MapSet => {
+                let map_addr = self.pop()?.as_i32()? as usize;
+                let key_val  = self.pop()?;
+                let val      = self.pop()?;
+                let key = value_to_key(&key_val)?;
+                eprintln!("[VM] MapSet slot={} key_type={} key_hex={} val={:?}",
+                    map_addr,
+                    match &key_val { Value::U256(_) => "U256", Value::Bytes(_) => "Bytes",
+                        Value::U128(_) => "U128", Value::I32(_) => "I32", _ => "other" },
+                    key.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+                    val);
+                match self.memory.entry(map_addr).or_insert_with(|| Value::Map(BTreeMap::new())) {
+                    Value::Map(m) => { m.insert(key, val); }
+                    _ => return Err(VMError::RuntimeError("MapSet: slot is not a Map".into())),
+                }
             }
-#[cfg(feature = "native")]
-            OpCode::SphincsVerify => {
-                let public_key = self.pop()?.as_bytes()?.to_vec();
-                let message    = self.pop()?.as_bytes()?.to_vec();
-                let signature  = self.pop()?.as_bytes()?.to_vec();
-                let result = sphincs::verify(&message, &signature, &public_key);
-                self.push(Value::Bool(result))?;
+            OpCode::MapContains => {
+                let map_addr = self.pop()?.as_i32()? as usize;
+                let key_val  = self.pop()?;
+                let key = value_to_key(&key_val)?;
+                let found = match self.memory.get(&map_addr) {
+                    Some(Value::Map(m)) => m.contains_key(&key),
+                    _ => false,
+                };
+                self.push(Value::Bool(found))?;
+            }
+            OpCode::MapRemove => {
+                let map_addr = self.pop()?.as_i32()? as usize;
+                let key_val  = self.pop()?;
+                let key = value_to_key(&key_val)?;
+                if let Some(Value::Map(m)) = self.memory.get_mut(&map_addr) {
+                    m.remove(&key);
+                }
+            }
+            OpCode::MapLen => {
+                let map_addr = self.pop()?.as_i32()? as usize;
+                let len = match self.memory.get(&map_addr) {
+                    Some(Value::Map(m)) => m.len() as i32,
+                    _ => 0,
+                };
+                self.push(Value::I32(len))?;
+            }
+
+            // ── Set operations ───────────────────────────────────────────────
+            OpCode::SetNew => {
+                if self.pc + 4 > self.code.len() {
+                    return Err(VMError::InvalidBytecode("SetNew: truncated name_len".into()));
+                }
+                let nlen = u32::from_le_bytes(self.code[self.pc..self.pc+4].try_into().unwrap()) as usize;
+                self.pc += 4;
+                if self.pc + nlen > self.code.len() {
+                    return Err(VMError::InvalidBytecode("SetNew: truncated name".into()));
+                }
+                self.pc += nlen;
+                let addr_val = self.pop()?;
+                let addr = addr_val.as_i32()? as usize;
+                self.memory.entry(addr).or_insert_with(|| Value::Set(BTreeSet::new()));
+                self.push(Value::I32(addr as i32))?;
+            }
+            OpCode::SetAdd => {
+                let set_addr = self.pop()?.as_i32()? as usize;
+                let val      = self.pop()?;
+                let key = value_to_key(&val)?;
+                match self.memory.entry(set_addr).or_insert_with(|| Value::Set(BTreeSet::new())) {
+                    Value::Set(s) => { s.insert(key); }
+                    _ => return Err(VMError::RuntimeError("SetAdd: slot is not a Set".into())),
+                }
+            }
+            OpCode::SetContains => {
+                let set_addr = self.pop()?.as_i32()? as usize;
+                let val      = self.pop()?;
+                let key = value_to_key(&val)?;
+                let found = match self.memory.get(&set_addr) {
+                    Some(Value::Set(s)) => s.contains(&key),
+                    _ => false,
+                };
+                self.push(Value::Bool(found))?;
+            }
+            OpCode::SetRemove => {
+                let set_addr = self.pop()?.as_i32()? as usize;
+                let val      = self.pop()?;
+                let key = value_to_key(&val)?;
+                if let Some(Value::Set(s)) = self.memory.get_mut(&set_addr) {
+                    s.remove(&key);
+                }
+            }
+            OpCode::SetLen => {
+                let set_addr = self.pop()?.as_i32()? as usize;
+                let len = match self.memory.get(&set_addr) {
+                    Some(Value::Set(s)) => s.len() as i32,
+                    _ => 0,
+                };
+                self.push(Value::I32(len))?;
+            }
+
+            // ── String operations ────────────────────────────────────────────
+            // Strings are stored as Value::Bytes(UTF-8 bytes) — LoadImm already does this.
+            OpCode::StrLen => {
+                let addr_val = self.pop()?;
+                let len = match &addr_val {
+                    Value::Bytes(b) => b.len() as i32,
+                    Value::I32(a) => {
+                        match self.memory.get(&(*a as usize)) {
+                            Some(Value::Bytes(b)) => b.len() as i32,
+                            _ => 0,
+                        }
+                    }
+                    _ => return Err(VMError::RuntimeError("StrLen: expected Bytes or address".into())),
+                };
+                self.push(Value::I32(len))?;
+            }
+            OpCode::StrConcat => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let mut ab = a.as_bytes()?.to_vec();
+                ab.extend_from_slice(b.as_bytes()?);
+                self.push(Value::Bytes(ab))?;
+            }
+            OpCode::StrEq => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let eq = a.as_bytes()? == b.as_bytes()?;
+                self.push(Value::Bool(eq))?;
+            }
+
+            OpCode::DilithiumVerify | OpCode::KyberKeyExchange |
+            OpCode::FalconVerify   | OpCode::SphincsVerify => {
+                // PQC opcodes are native-only — not available in WASM build.
+                let _ = self.pop(); let _ = self.pop(); let _ = self.pop();
+                return Err(VMError::RuntimeError("PQC opcodes not supported in WASM build".into()));
             }
 #[cfg(not(feature = "native"))]
             OpCode::DilithiumVerify | OpCode::KyberKeyExchange |
@@ -710,15 +911,19 @@ impl QuantumVM {
             }
             // ── ExternCall (0x60): call function on another workspace contract ─────
             OpCode::ExternCall => {
+                let _ec_start_pc = self.pc - 1;
+                eprintln!("[SynQ EC] at pc={} code_len={} stack_len={}", _ec_start_pc, self.code.len(), self.stack.len());
                 if self.pc + 4 > self.code.len() {
                     return Err(VMError::InvalidBytecode("ExternCall: truncated contract_len".into()));
                 }
                 let clen = u32::from_le_bytes(self.code[self.pc..self.pc+4].try_into().unwrap()) as usize;
+                eprintln!("[SynQ EC] clen={} bytes_at_pc={:?}", clen, &self.code[self.pc..std::cmp::min(self.pc+16,self.code.len())]);
                 self.pc += 4;
                 if self.pc + clen > self.code.len() {
                     return Err(VMError::InvalidBytecode("ExternCall: truncated contract name".into()));
                 }
-                let contract_name = String::from_utf8_lossy(&self.code[self.pc..self.pc+clen]).into_owned();
+                let contract_name = String::from_utf8(self.code[self.pc..self.pc+clen].to_vec())
+            .map_err(|_| VMError::InvalidBytecode("ExternCall: contract name is not valid UTF-8".to_string()))?;
                 self.pc += clen;
                 if self.pc + 4 > self.code.len() {
                     return Err(VMError::InvalidBytecode("ExternCall: truncated fn_len".into()));
@@ -728,7 +933,8 @@ impl QuantumVM {
                 if self.pc + flen > self.code.len() {
                     return Err(VMError::InvalidBytecode("ExternCall: truncated fn name".into()));
                 }
-                let fn_name = String::from_utf8_lossy(&self.code[self.pc..self.pc+flen]).into_owned();
+                let fn_name = String::from_utf8(self.code[self.pc..self.pc+flen].to_vec())
+            .map_err(|_| VMError::InvalidBytecode("ExternCall: fn name is not valid UTF-8".to_string()))?;
                 self.pc += flen;
                 if self.pc >= self.code.len() {
                     return Err(VMError::InvalidBytecode("ExternCall: missing arg_count".into()));
@@ -736,8 +942,14 @@ impl QuantumVM {
                 let arg_count = self.code[self.pc] as usize;
                 self.pc += 1;
                 let mut args: Vec<Value> = Vec::with_capacity(arg_count);
-                for _ in 0..arg_count { args.push(self.stack.pop().ok_or(VMError::StackUnderflow)?); }
+                for _ in 0..arg_count {
+                    args.push(self.stack.pop().ok_or_else(|| {
+                        eprintln!("[SynQ debug] ExternCall StackUnderflow: contract='{}' fn='{}' argc={} stack_len={} pc={}", contract_name, fn_name, arg_count, self.stack.len(), self.pc);
+                        VMError::StackUnderflow
+                    })?);
+                }
                 args.reverse();
+                eprintln!("[EC] calling {}.{}({:?})", contract_name, fn_name, args);
                 let result = match &self.extern_call_handler {
                     Some(h) => h(&contract_name, &fn_name, &args)?,
                     None    => return Err(VMError::RuntimeError(format!(
@@ -746,81 +958,7 @@ impl QuantumVM {
                 self.stack.push(result.unwrap_or(Value::I32(0)));
             }
 
-            OpCode::MapNew => {
-                if self.pc+4>self.code.len(){return Err(VMError::InvalidBytecode("MapNew:truncated".into()));}
-                let nlen=u32::from_le_bytes(self.code[self.pc..self.pc+4].try_into().unwrap()) as usize; self.pc+=4;
-                if self.pc+nlen>self.code.len(){return Err(VMError::InvalidBytecode("MapNew:name".into()));} self.pc+=nlen;
-                let addr=self.pop()?.as_i32()? as usize;
-                self.memory.entry(addr).or_insert_with(||Value::Map(BTreeMap::new()));
-                self.push(Value::I32(addr as i32))?;
-            }
-            OpCode::MapGet => {
-                let map_addr=self.pop()?.as_i32()? as usize;
-                let key=value_to_key(&self.pop()?)?;
-                match self.memory.get(&map_addr){
-                    Some(Value::Map(m))=>{let v=m.get(&key).cloned().unwrap_or(Value::I32(0));self.push(v)?;}
-                    None=>{self.push(Value::I32(0))?;}
-                    _=>return Err(VMError::RuntimeError("MapGet:not a Map".into())),
-                }
-            }
-            OpCode::MapSet => {
-                let map_addr=self.pop()?.as_i32()? as usize;
-                let key=value_to_key(&self.pop()?)?;
-                let val=self.pop()?;
-                match self.memory.entry(map_addr).or_insert_with(||Value::Map(BTreeMap::new())){
-                    Value::Map(m)=>{m.insert(key,val);}
-                    _=>return Err(VMError::RuntimeError("MapSet:not a Map".into())),
-                }
-            }
-            OpCode::MapContains => {
-                let map_addr=self.pop()?.as_i32()? as usize;
-                let key=value_to_key(&self.pop()?)?;
-                let f=match self.memory.get(&map_addr){Some(Value::Map(m))=>m.contains_key(&key),_=>false};
-                self.push(Value::Bool(f))?;
-            }
-            OpCode::MapRemove => {
-                let map_addr=self.pop()?.as_i32()? as usize;
-                let key=value_to_key(&self.pop()?)?;
-                if let Some(Value::Map(m))=self.memory.get_mut(&map_addr){m.remove(&key);}
-            }
-            OpCode::MapLen => {
-                let map_addr=self.pop()?.as_i32()? as usize;
-                let len=match self.memory.get(&map_addr){Some(Value::Map(m))=>m.len() as i32,_=>0};
-                self.push(Value::I32(len))?;
-            }
-            OpCode::SetNew => {
-                if self.pc+4>self.code.len(){return Err(VMError::InvalidBytecode("SetNew:truncated".into()));}
-                let nlen=u32::from_le_bytes(self.code[self.pc..self.pc+4].try_into().unwrap()) as usize; self.pc+=4;
-                if self.pc+nlen>self.code.len(){return Err(VMError::InvalidBytecode("SetNew:name".into()));} self.pc+=nlen;
-                let addr=self.pop()?.as_i32()? as usize;
-                self.memory.entry(addr).or_insert_with(||Value::Set(BTreeSet::new()));
-                self.push(Value::I32(addr as i32))?;
-            }
-            OpCode::SetAdd => {
-                let set_addr=self.pop()?.as_i32()? as usize;
-                let key=value_to_key(&self.pop()?)?;
-                match self.memory.entry(set_addr).or_insert_with(||Value::Set(BTreeSet::new())){
-                    Value::Set(s)=>{s.insert(key);}
-                    _=>return Err(VMError::RuntimeError("SetAdd:not a Set".into())),
-                }
-            }
-            OpCode::SetContains => {
-                let set_addr=self.pop()?.as_i32()? as usize;
-                let key=value_to_key(&self.pop()?)?;
-                let f=match self.memory.get(&set_addr){Some(Value::Set(s))=>s.contains(&key),_=>false};
-                self.push(Value::Bool(f))?;
-            }
-            OpCode::SetRemove => {
-                let set_addr=self.pop()?.as_i32()? as usize;
-                let key=value_to_key(&self.pop()?)?;
-                if let Some(Value::Set(s))=self.memory.get_mut(&set_addr){s.remove(&key);}
-            }
-            OpCode::SetLen => {
-                let set_addr=self.pop()?.as_i32()? as usize;
-                let len=match self.memory.get(&set_addr){Some(Value::Set(s))=>s.len() as i32,_=>0};
-                self.push(Value::I32(len))?;
-            }
-                        OpCode::Print => {
+            OpCode::Print => {
                 let value = self.pop()?;
                 println!("{:?}", value);
             }
@@ -832,7 +970,8 @@ impl QuantumVM {
                 // Rollback is handled by the call_function() wrapper (PR-B Item 2).
                 let msg_len = self.read_u32()? as usize;
                 let msg_bytes = self.read_bytes(msg_len)?;
-                let msg = String::from_utf8_lossy(&msg_bytes).into_owned();
+                let msg = String::from_utf8(msg_bytes.to_vec())
+            .unwrap_or_else(|e| format!("revert(0x{})", hex::encode(&msg_bytes[..e.utf8_error().valid_up_to()])));
                 return Err(VMError::Reverted(msg));
             }
         }
@@ -849,7 +988,10 @@ impl QuantumVM {
     }
 
     fn pop(&mut self) -> Result<Value, VMError> {
-        self.stack.pop().ok_or(VMError::StackUnderflow)
+        self.stack.pop().ok_or_else(|| {
+            eprintln!("[SynQ debug] StackUnderflow at pc={} stack_len={}", self.pc, self.stack.len());
+            VMError::StackUnderflow
+        })
     }
 
     fn peek(&self) -> Result<&Value, VMError> {
