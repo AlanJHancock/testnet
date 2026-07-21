@@ -143,7 +143,8 @@ impl CodeGenerator {
 
         // Emit the function dispatch table (in the data section) now that
         // every function's real code address is known.
-        let functions: Vec<String> = self.function_addresses.keys().cloned().collect();
+        let mut functions: Vec<String> = self.function_addresses.keys().cloned().collect();
+        functions.sort(); // deterministic dispatch table order
         for name in functions {
             let address = self.function_addresses[&name];
             let params = self.function_param_addrs.get(&name).cloned().unwrap_or_default();
