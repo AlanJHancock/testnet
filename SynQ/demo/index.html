@@ -3187,11 +3187,14 @@
   function switchToContract(sid) {
     var c = workspaceContracts.find(function(x){ return x.session_id === sid; });
     if (!c) return;
-    currentBytecode     = c.bytecode;
-    currentContractName = c.name;
+    currentBytecode        = c.bytecode;
+    currentContractName    = c.name;
     currentContractAddress = c.address;
-    currentStateVars    = c.stateVars || [];
-    sessionId           = c.session_id;
+    currentStateVars       = c.stateVars       || [];
+    currentStateVarTypes   = c.stateVarTypes   || {};
+    currentFnReturnTypes   = c.fnReturnTypes   || {};
+    compileFunctions       = c.compileFunctions || [];
+    sessionId              = c.session_id;
     updateSessionBadge();
     renderWorkspacePanel();
     // Show vmCard and re-render pills for the newly selected contract
@@ -3263,7 +3266,10 @@
             :                              workspaceContracts.length;
     if (existing >= 0) workspaceContracts.splice(existing, 1);
     workspaceContracts.push({ name: name, session_id: sid, address: address,
-                              bytecode: bytecode, stateVars: stateVars, deploy_index: idx });
+                              bytecode: bytecode, stateVars: stateVars, deploy_index: idx,
+                              stateVarTypes: currentStateVarTypes,
+                              fnReturnTypes: currentFnReturnTypes,
+                              compileFunctions: compileFunctions });
     workspaceContracts.sort(function(a, b){ return a.deploy_index - b.deploy_index; });
     renderWorkspacePanel();
     // Re-evaluate the deps hint now that workspace membership has changed.
