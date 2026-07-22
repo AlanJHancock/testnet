@@ -358,6 +358,7 @@
   var currentBytecode         = null;
   var currentSidecar          = null;
   var currentStateVars        = [];
+  var currentStateVarTypes    = {};
   var currentFnReturnTypes    = {};
   var currentContractName     = null;  // from compile response
   var currentContractAddress  = null;  // keccak256("SynQ:"+name)[12..] — used in EIP-712 domain
@@ -480,7 +481,7 @@
     '    require(!initialised, "init: contract already initialised");',
     '    require(total == 0, "init: cannot reinitialise with live supply");',
     '    owner = caller;',
-    '    paused = 0;',
+    '    paused = false;',
     '    initialised = true;',
     '    return 1;',
     '  }',
@@ -1082,7 +1083,7 @@
       }
     })();
     parsedFunctions = []; selectedFunc = null;
-    stateVarNames = []; stateSnapshot = {}; currentStateVars = []; currentFnReturnTypes = {};
+    stateVarNames = []; stateSnapshot = {}; currentStateVars = []; currentStateVarTypes = {}; currentFnReturnTypes = {};
     var sp = document.getElementById('statePanel');
     if (sp) sp.style.display = 'none';
     document.getElementById('resultsSection').classList.remove('show');
@@ -1264,6 +1265,7 @@
       currentBytecode        = data.bytecode;
       currentSidecar         = data.signature_sidecar || null;
       currentStateVars       = data.state_vars        || [];
+      currentStateVarTypes    = data.state_var_types   || {};
       currentFnReturnTypes    = (data.functions || []).reduce(function(m,f){ if(f.return_type) m[f.name]=f.return_type; return m; }, {});
       currentContractName    = data.contract_name     || null;
       currentExternContracts = data.extern_contracts  || [];
@@ -2264,10 +2266,17 @@
 
     // ── Helpers ────────────────────────────────────────────────────────────
     // Classify a variable name as a boolean-intent field
+    // Compiler type wins; fall back to name heuristic for legacy contracts
     var BOOL_SCALARS = ['feat_pqc','initialised','paused','frozen','active','enabled'];
     var BOOL_MAPS    = ['admin_role','minter_role','registered'];
-    function isBoolScalar(n) { return BOOL_SCALARS.indexOf(n) >= 0; }
-    function isBoolMap(n)    { return BOOL_MAPS.indexOf(n) >= 0; }
+    function isBoolScalar(n) {
+      if (currentStateVarTypes && currentStateVarTypes[n]) return currentStateVarTypes[n] === 'bool';
+      return BOOL_SCALARS.indexOf(n) >= 0;
+    }
+    function isBoolMap(n) {
+      if (currentStateVarTypes && currentStateVarTypes[n]) return currentStateVarTypes[n] === 'bool';
+      return BOOL_MAPS.indexOf(n) >= 0;
+    }
 
     // Normalise a 32-byte big-endian hex key to a short address string
     function safeKey(k) {

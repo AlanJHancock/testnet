@@ -611,6 +611,7 @@ struct CompileResponse {
     errors:             Vec<String>,
     warnings:           Vec<String>,
     functions:          Vec<FunctionMeta>,
+    state_var_types:    std::collections::HashMap<String, String>,
 }
 
 /// Convert AST Type to a canonical string name for IDE use
@@ -637,6 +638,7 @@ async fn compile_handler(
             success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None,
             extern_contracts: vec![], errors: vec![format!("rate limit exceeded — retry in {}s", wait)], warnings: vec![],
             functions:        Vec::new(),
+            state_var_types:  std::collections::HashMap::new(),
         }));
     }
     if req.source.len() > MAX_SOURCE_BYTES {
@@ -645,6 +647,7 @@ async fn compile_handler(
             errors: vec![format!("Source too large: {} bytes (max {})", req.source.len(), MAX_SOURCE_BYTES)],
             warnings: vec![],
             functions:        Vec::new(),
+            state_var_types:  std::collections::HashMap::new(),
         }));
     }
 
@@ -654,6 +657,7 @@ async fn compile_handler(
             success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
             errors: vec![format!("Parse error: {}", e)], warnings: vec![],
             functions:        Vec::new(),
+            state_var_types:  std::collections::HashMap::new(),
         })),
     };
 
@@ -717,6 +721,7 @@ async fn compile_handler(
             success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
             errors: vec![format!("Codegen error: {}", e)], warnings: vec![],
             functions:        Vec::new(),
+            state_var_types:  std::collections::HashMap::new(),
         })),
     };
 
@@ -729,7 +734,7 @@ async fn compile_handler(
                 Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(CompileResponse {
                     success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
                     errors: vec![format!("PQC signing failed: {}", e)], warnings: vec![],
-                    functions:        Vec::new(),
+                    functions:        Vec::new(), state_var_types: std::collections::HashMap::new(),
                 })),
             };
             json!({
@@ -749,7 +754,7 @@ async fn compile_handler(
                 Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(CompileResponse {
                     success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
                     errors: vec![format!("PQC keygen failed: {}", e)], warnings: vec![],
-                    functions:        Vec::new(),
+                    functions:        Vec::new(), state_var_types: std::collections::HashMap::new(),
                 })),
             };
             let sig = match pqc.sign_message(&keypair.private_key, &bytecode, SIGNING_ALGORITHM) {
@@ -757,7 +762,7 @@ async fn compile_handler(
                 Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(CompileResponse {
                     success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
                     errors: vec![format!("PQC signing failed: {}", e)], warnings: vec![],
-                    functions:        Vec::new(),
+                    functions:        Vec::new(), state_var_types: std::collections::HashMap::new(),
                 })),
             };
             json!({
@@ -798,6 +803,19 @@ async fn compile_handler(
         bytecode: Some(format!("0x{}", hex::encode(&bytecode))),
         signature_sidecar: Some(sidecar),
         state_vars,
+        state_var_types: {
+            let mut svm: std::collections::HashMap<String,String> = std::collections::HashMap::new();
+            for unit in &ast {
+                if let synq_compiler::ast::SourceUnit::Contract(con) = unit {
+                    for part in &con.parts {
+                        if let synq_compiler::ast::ContractPart::StateVariable(sv) = part {
+                            svm.insert(sv.name.clone(), type_name(&sv.ty));
+                        }
+                    }
+                }
+            }
+            svm
+        },
         contract_name:    contract_name.clone(),
         contract_address: contract_address.clone(),
         extern_contracts: {
@@ -836,7 +854,7 @@ async fn compile_handler(
                             wasm_ec, &ec
                         )],
                         warnings: vec![],
-                        functions:        Vec::new(),
+                        functions:        Vec::new(), state_var_types: std::collections::HashMap::new(),
                     }));
                 }
             }
@@ -1050,6 +1068,7 @@ async fn sign_source_handler(
                 state_vars: vec![], contract_name: None, contract_address: None,
                 extern_contracts: vec![], errors: vec![$err.into()], warnings: vec![],
                 functions:        Vec::new(),
+            state_var_types:  std::collections::HashMap::new(),
             }))
         };
     }
@@ -1089,6 +1108,7 @@ async fn sign_source_handler(
             extern_contracts: vec![],
             errors: vec![format!("Parse error: {}", e)], warnings: vec![],
             functions:        Vec::new(),
+            state_var_types:  std::collections::HashMap::new(),
         })),
     };
     let contract_name: Option<String> = ast.iter().find_map(|unit| match unit {
@@ -1164,6 +1184,7 @@ async fn sign_source_handler(
             extern_contracts: vec![],
             errors: vec![format!("Codegen error: {}", e)], warnings: compile_warnings,
             functions:        Vec::new(),
+            state_var_types:  std::collections::HashMap::new(),
         })),
     };
     let bytecode_hash_bytes: [u8; 32] = Keccak256::digest(&bytecode).into();
@@ -1258,6 +1279,19 @@ async fn sign_source_handler(
         bytecode:          Some(hex_encode(&bytecode)),
         signature_sidecar: Some(sidecar),
         state_vars:        state_var_names,
+        state_var_types: {
+            let mut svm: std::collections::HashMap<String,String> = std::collections::HashMap::new();
+            for unit in &ast {
+                if let synq_compiler::ast::SourceUnit::Contract(con) = unit {
+                    for part in &con.parts {
+                        if let synq_compiler::ast::ContractPart::StateVariable(sv) = part {
+                            svm.insert(sv.name.clone(), type_name(&sv.ty));
+                        }
+                    }
+                }
+            }
+            svm
+        },
         contract_name,
         contract_address,
         extern_contracts:  server_extern,
