@@ -1149,18 +1149,11 @@
     var wb = document.getElementById('wasmBadge'); if (wb) wb.style.display = 'none';
     var _db = document.getElementById('deployBtn'); if (_db) { _db.style.visibility = 'hidden'; _db.style.pointerEvents = 'none'; }
     if (sessionId) {
-      // Always delete the session when clearing results — stale initialised state
-      // must not survive template switches. If it was in the workspace, evict it
-      // from the workspace list too (deploy will re-register a fresh session).
-      fetch(SESSION_DEL_URL + sessionId, { method: 'DELETE' }).catch(function(){});
-      var _wsEntry = workspaceContracts.find(function(c){ return c.session_id === sessionId; });
-      if (_wsEntry && workspaceId) {
-        workspaceContracts = workspaceContracts.filter(function(c){ return c.session_id !== sessionId; });
-        fetch(WORKSPACE_URL + '/' + workspaceId + '/remove', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_id: sessionId, contract_name: _wsEntry.name })
-        }).catch(function(){});
-      }
+      // Only delete server session if it is NOT registered in the workspace.
+      // Workspace contracts must survive template switches — they are only
+      // evicted explicitly via evictWorkspaceContractByName() on template load.
+      var _inWs = workspaceContracts.some(function(c){ return c.session_id === sessionId; });
+      if (!_inWs) fetch(SESSION_DEL_URL + sessionId, { method: 'DELETE' }).catch(function(){});
       sessionId = null;
     }
     currentBytecode = null; currentSidecar = null; currentContractName = null; currentContractAddress = null;
@@ -3270,15 +3263,9 @@
         dh.style.color = 'rgba(0,206,209,0.75)';
       }
     })();
-    // Always ensure the index-0 contract is the active session.
-    // On first deploy (only 1 contract): activate immediately.
-    // On subsequent deploys: if the current sessionId is not index-0, switch back to it.
-    if (workspaceContracts.length > 0) {
-      var _idx0 = workspaceContracts[0];
-      if (!sessionId || sessionId !== _idx0.session_id) {
-        switchToContract(_idx0.session_id);
-      }
-    }
+    // The newly deployed contract is already active (sessionId set by caller).
+    // Just re-highlight its badge in the workspace panel.
+    renderWorkspacePanel();
   }
 
   window.doCompile      = doCompile;
