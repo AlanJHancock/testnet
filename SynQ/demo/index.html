@@ -2457,32 +2457,44 @@
       return strEmpty();
     }
 
-    // Str type: server may return a plain decimal integer (big-endian bytes as uint256).
-    // Convert decimal → 0x hex so the decode path below can handle it.
-    if (_declType === 'str' && typeof v === 'string' && /^\d+$/.test(v) && v !== '0') {
-      try {
-        var _bigi = BigInt(v);
-        var _hexRaw = _bigi.toString(16);
-        if (_hexRaw.length % 2 !== 0) _hexRaw = '0' + _hexRaw;
-        v = '0x' + _hexRaw.padStart(64, '0');
-      } catch(_e) {}
+    // Str type: decode hex bytes → quoted ASCII string.
+    // Server returns Value::Bytes as "0x<hex>". Decimal fallback handles legacy paths.
+    if (_declType === 'str') {
+      var _sv = String(v);
+      // Decimal integer → convert to 0x hex first
+      if (/^\d+$/.test(_sv) && _sv !== '0') {
+        try {
+          var _bigi = BigInt(_sv);
+          var _hexRaw = _bigi.toString(16);
+          if (_hexRaw.length % 2 !== 0) _hexRaw = '0' + _hexRaw;
+          _sv = '0x' + _hexRaw;
+        } catch(_e) {}
+      }
+      // 0x hex → decode bytes to UTF-8 string
+      if (/^0x[0-9a-fA-F]{2,}$/.test(_sv)) {
+        var _hx = _sv.slice(2).replace(/^(00)+/, '');
+        if (_hx.length === 0) return strEmpty();
+        if (_hx.length % 2 === 0) {
+          try {
+            var _ba = [];
+            for (var _i = 0; _i < _hx.length; _i += 2)
+              _ba.push(parseInt(_hx.substr(_i, 2), 16));
+            var _ss = new TextDecoder('utf-8', {fatal: true}).decode(new Uint8Array(_ba));
+            if (/^[\x20-\x7E]{1,32}$/.test(_ss)) return strDisplay(_ss);
+          } catch(_e) {}
+        }
+      }
+      // Already a plain string (shouldn't happen but guard it)
+      if (typeof v === 'string' && !/^0x/.test(v) && v.length > 0) return strDisplay(v);
+      return strEmpty();
     }
 
-    // Hex-encoded Bytes/str → decode to quoted ASCII
+    // Hex-encoded Bytes (non-str) → skip decode, fall through to numeric display
     if (typeof v === 'string' && /^0x[0-9a-fA-F]{2,64}$/.test(v)
         && _declType !== 'u256' && _declType !== 'i256'
         && _declType !== 'address' && _declType !== 'bool') {
-      var _hx = v.slice(2).replace(/^(00)+/, '');
-      if (_hx.length === 0) return strEmpty();
-      if (_hx.length > 0 && _hx.length % 2 === 0 && _hx.length <= 64) {
-        try {
-          var _ba = [];
-          for (var _i = 0; _i < _hx.length; _i += 2)
-            _ba.push(parseInt(_hx.substr(_i, 2), 16));
-          var _ss = new TextDecoder('utf-8', {fatal: true}).decode(new Uint8Array(_ba));
-          if (/^[\x20-\x7E]{1,32}$/.test(_ss)) return strDisplay(_ss);
-        } catch(_e) {}
-      }
+      var _hx2 = v.slice(2).replace(/^(00)+/, '');
+      if (_hx2.length === 0) return '0x0';
     }
 
     // Mapping / set
@@ -2552,6 +2564,11 @@
           ? _probeVars.map(function(sv) { return sv[0]; })
           : Object.keys(data.state);
         stateVarNames = names;
+        // Restore captured type metadata — prevents stale/cleared currentStateVarTypes
+        // from causing str/bool fields to render as raw numbers after a redeploy.
+        if (Object.keys(_probeVarTypes).length > 0) {
+          currentStateVarTypes = _probeVarTypes;
+        }
         names.forEach(function(n) {
           var raw = data.state[n];
           if (raw === undefined || raw === null) { stateSnapshot[n] = '?'; }
