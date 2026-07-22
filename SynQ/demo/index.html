@@ -481,7 +481,7 @@
     '    require(!initialised, "init: contract already initialised");',
     '    require(total == 0, "init: cannot reinitialise with live supply");',
     '    owner = caller;',
-    '    paused = false;',
+    '    paused = 0;',
     '    initialised = true;',
     '    return 1;',
     '  }',
