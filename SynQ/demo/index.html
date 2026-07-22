@@ -1129,13 +1129,37 @@
     document.getElementById('lineNums').textContent = nums.join('\n');
   }
 
+  // Evict a named contract from the workspace (fires-and-forgets server call).
+  // Called before template load so the next Deploy always starts fresh.
+  function evictWorkspaceContractByName(name) {
+    var entry = workspaceContracts.find(function(c){ return c.name === name; });
+    if (!entry) return;
+    workspaceContracts = workspaceContracts.filter(function(c){ return c.name !== name; });
+    fetch(SESSION_DEL_URL + entry.session_id, { method: 'DELETE' }).catch(function(){});
+    if (workspaceId) {
+      fetch(WORKSPACE_URL + '/' + workspaceId + '/remove', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: entry.session_id, contract_name: name })
+      }).catch(function(){});
+    }
+    renderWorkspacePanel();
+  }
+
   function clearResults() {
     var wb = document.getElementById('wasmBadge'); if (wb) wb.style.display = 'none';
     var _db = document.getElementById('deployBtn'); if (_db) { _db.style.visibility = 'hidden'; _db.style.pointerEvents = 'none'; }
     if (sessionId) {
-      var _inWorkspace = workspaceContracts.some(function(c){ return c.session_id === sessionId; });
-      if (!_inWorkspace) {
-        fetch(SESSION_DEL_URL + sessionId, { method: 'DELETE' }).catch(function(){});
+      // Always delete the session when clearing results — stale initialised state
+      // must not survive template switches. If it was in the workspace, evict it
+      // from the workspace list too (deploy will re-register a fresh session).
+      fetch(SESSION_DEL_URL + sessionId, { method: 'DELETE' }).catch(function(){});
+      var _wsEntry = workspaceContracts.find(function(c){ return c.session_id === sessionId; });
+      if (_wsEntry && workspaceId) {
+        workspaceContracts = workspaceContracts.filter(function(c){ return c.session_id !== sessionId; });
+        fetch(WORKSPACE_URL + '/' + workspaceId + '/remove', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: sessionId, contract_name: _wsEntry.name })
+        }).catch(function(){});
       }
       sessionId = null;
     }
@@ -1176,6 +1200,7 @@
   }
 
   function loadDemo() {
+    evictWorkspaceContractByName('SimpleToken');
     document.getElementById('editor').value = DEMO_LINES.join('\n');
     updateLineNums(); clearResults(); syncCompileBtn();
     setStatus('Step 2 of 2 — Compile SimpleToken, then Deploy into the same workspace.', 'info');
@@ -1220,6 +1245,7 @@
   }
 
   function loadVault() {
+    evictWorkspaceContractByName('TokenVault');
     document.getElementById('editor').value = VAULT_LINES.join('\n');
     updateLineNums(); clearResults(); syncCompileBtn();
     setStatus('Step 1 of 2 — Compile TokenVault, then Deploy. Then load SimpleToken for step 2.', 'info');
@@ -2500,9 +2526,9 @@
     if (!panel || !el) return;
     if (stateVarNames.length === 0) { panel.style.display = 'none'; return; }
     panel.style.display = 'block';
-    el.textContent = stateVarNames.map(function(n) {
+    el.innerHTML = stateVarNames.map(function(n) {
       return n + ' = ' + formatStateVal(n, stateSnapshot[n]);
-    }).join('  │  ');
+    }).join('  <span style="opacity:0.35;">│</span>  ');
   }
 
   // Call after every successful function run to probe known state vars
