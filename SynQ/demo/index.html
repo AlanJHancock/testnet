@@ -2430,9 +2430,7 @@
           for (var _i=0;_i<_hx.length;_i+=2) _ba.push(parseInt(_hx.substr(_i,2),16));
           var _str = new TextDecoder('utf-8',{fatal:true}).decode(new Uint8Array(_ba));
           if (/^[\x20-\x7E]{1,32}$/.test(_str)) {
-            return '<span style="color:rgba(180,230,180,1);font-weight:600;">&ldquo;'
-              + _str.replace(/&/g,'&amp;').replace(/</g,'&lt;')
-              + '&rdquo;</span><span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:5px;">str</span>';
+            return '“' + _str.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '” <span style="font-size:0.72rem;color:rgba(255,255,255,0.4);">(str)</span>';
           }
         } catch(e) {}
       }
@@ -2449,8 +2447,7 @@
           v === '0' || v === 0 || v === '0x0'
           || (typeof v === 'string' && /^0x0+$/.test(v))
        )) {
-      return '<span style="color:rgba(180,230,180,0.5);font-weight:600;">&ldquo;&rdquo;</span>'
-        + '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:5px;">str</span>';
+      return '“” <span style="font-size:0.72rem;color:rgba(255,255,255,0.4);">(str)</span>';
     }
     if (typeof v === 'string' && /^0x[0-9a-fA-F]{2,64}$/.test(v)
         && _dclT !== 'u256' && _dclT !== 'i256'
