@@ -3246,16 +3246,13 @@
   window.loadVault      = loadVault;
 
 
-  async function loadTypeTest() {
-    await evictWorkspaceContractByName('TypeTestContract');
-    clearResults('TypeTestContract');
-    var ed = document.getElementById('editor');
-    if (ed) ed.value = TT_LINES.join('\n');
-    currentContractName = 'TypeTestContract';
-    currentBytecode     = null;
-    updateSessionBadge();
-    document.getElementById('vmCard').classList.remove('show');
-    await compileContract();
+  function loadTypeTest() {
+    evictWorkspaceContractByName('TypeTestContract');
+    document.getElementById('editor').value = TT_LINES.join('\n');
+    updateLineNums();
+    clearResults();
+    syncCompileBtn();
+    setStatus('TypeTestContract loaded — Compile, Deploy, then call init() to begin testing all types and operators.', 'info');
   }
   window.loadTypeTest = loadTypeTest;
 })();
