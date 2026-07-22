@@ -2366,8 +2366,12 @@
     // big-endian slot and serialised as 0x hex by /state.  Decode them back.
     var _dclT = (typeof currentStateVarTypes !== 'undefined' && currentStateVarTypes)
                  ? (currentStateVarTypes[name] || '') : '';
-    // Unset str slot returns integer 0 (Value::I32(0)) before first write
-    if ((_dclT === 'str') && (v === '0' || v === 0)) {
+    // Unset str slot: VM returns I32(0) or '0' before first write.
+    // Also catches '0x0' and '0x00...00' (all-zero 32-byte slot).
+    if (_dclT === 'str' && (
+          v === '0' || v === 0 || v === '0x0'
+          || (typeof v === 'string' && /^0x0+$/.test(v))
+       )) {
       return '<span style="color:rgba(180,230,180,0.5);font-weight:600;">&ldquo;&rdquo;</span>'
         + '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:5px;">str</span>';
     }
@@ -2528,8 +2532,12 @@
           // 4. Update local state
           var ci = workspaceContracts.findIndex(function(w){ return w.name === c.name; });
           if (ci >= 0) workspaceContracts[ci].session_id = newSid;
-          // If this is the active contract, update sessionId too
-          if (c.name === currentContractName) {
+          // Update active sessionId if this contract is the active one.
+          // Match on name OR on old session_id (covers single-contract flow
+          // where c.name may be undefined or currentContractName unset).
+          if (c.name === currentContractName
+              || c.session_id === sessionId
+              || toReset.length === 1) {
             sessionId = newSid;
             updateSessionBadge();
           }
@@ -2551,7 +2559,11 @@
     // Clear param inputs
     for (var p = 0; p < (selectedFunc ? selectedFunc.paramCount : 0); p++) {
       var el = document.getElementById('param_' + p);
-      if (el) el.value = '0';
+      if (el) {
+        // Reset str params to blank, numeric params to 0
+        var _isStr = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'str';
+        el.value = _isStr ? '' : '0';
+      }
     }
 
     // Refresh state panel immediately so it shows zeros, not stale values
