@@ -62,6 +62,8 @@ struct FunctionScope {
     /// name -> memory address, local to this function (params + any
     /// future locals). Looked up before falling back to state variables.
     locals: HashMap<String, u32>,
+    /// Parameter types for type-aware codegen (e.g. str + str → StrConcat).
+    local_types: HashMap<String, crate::compiler::ast::Type>,
     /// Reserved for future local-variable declarations (not yet supported
     /// by the grammar -- only params are locals today).
     #[allow(dead_code)]
@@ -265,7 +267,13 @@ impl CodeGenerator {
             let idx = self.function_addresses.len() as u32 - 1;
             FUNCTION_LOCAL_BASE + idx * FUNCTION_LOCAL_STRIDE
         });
-        let mut scope = FunctionScope { locals, next_local_addr, break_patches: Vec::new(), continue_targets: Vec::new() };
+        let mut scope = FunctionScope {
+            locals,
+            local_types: f.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect(),
+            next_local_addr,
+            break_patches: Vec::new(),
+            continue_targets: Vec::new(),
+        };
 
         // ── G1: Authority enforcement pre-pass ─────────────────────────────
         // Per §20.2.1: "There is no implicit authority derived from call
@@ -750,6 +758,14 @@ impl CodeGenerator {
                 }
                 self.gen_expression(lhs, scope)?;
                 self.gen_expression(rhs, scope)?;
+                // If either operand is a str literal or str-typed local, use StrConcat
+                let str_lhs = Self::expr_is_str(lhs, scope);
+                let str_rhs = Self::expr_is_str(rhs, scope);
+                if matches!(op, BinaryOperator::Add) && (str_lhs || str_rhs) {
+                    // Ensure both sides are on the stack (already emitted above)
+                    self.assembler.emit_op(OpCode::StrConcat);
+                    return Ok(());
+                }
                 let opcode = match op {
                     BinaryOperator::Add => OpCode::Add,
                     BinaryOperator::Sub => OpCode::Sub,
@@ -772,6 +788,19 @@ impl CodeGenerator {
                 Ok(())
             }
             Expression::Call(name, args) => self.gen_call(name, args, scope),
+        }
+    }
+
+
+    /// Returns true if `expr` is a string literal or a local variable declared as `str`.
+    fn expr_is_str(expr: &Expression, scope: &FunctionScope) -> bool {
+        match expr {
+            Expression::Literal(Literal::String(_)) => true,
+            Expression::Identifier(name) => {
+                // Check function parameter types
+                scope.local_types.get(name).map_or(false, |t| matches!(t, crate::compiler::ast::Type::Str))
+            }
+            _ => false,
         }
     }
 
