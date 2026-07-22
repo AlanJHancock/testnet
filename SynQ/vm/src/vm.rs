@@ -163,6 +163,11 @@ impl Value {
         match self {
             Value::Bytes(b) => Ok(b),
             Value::Str(s)   => Ok(s.as_bytes()),
+            // Uninitialised str/bytes slot loads as I32(0) — treat as empty.
+            Value::I32(0)   => Ok(&[]),
+            Value::Bool(_) | Value::I32(_) | Value::I64(_)
+                | Value::U128(_) | Value::U256(_)
+                => Err(VMError::RuntimeError(format!("Expected bytes, got {:?}", std::mem::discriminant(self)))),
             _ => Err(VMError::RuntimeError(format!("Expected bytes, got {:?}", std::mem::discriminant(self)))),
         }
     }
@@ -973,11 +978,14 @@ impl QuantumVM {
                 let a = self.pop()?;
                 let mut ab = a.as_bytes()?.to_vec();
                 ab.extend_from_slice(b.as_bytes()?);
-                self.push(Value::Bytes(ab))?;
+                // Produce Str so callers get a proper string value (not raw bytes).
+                let s = String::from_utf8(ab).unwrap_or_default();
+                self.push(Value::Str(s))?;
             }
             OpCode::StrEq => {
                 let b = self.pop()?;
                 let a = self.pop()?;
+                // Compare as str slices; I32(0) treated as empty via as_bytes().
                 let eq = a.as_bytes()? == b.as_bytes()?;
                 self.push(Value::Bool(eq))?;
             }
