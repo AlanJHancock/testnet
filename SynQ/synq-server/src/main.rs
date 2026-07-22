@@ -101,13 +101,16 @@ const MAX_BODY_BYTES: usize    = 128 * 1024;
 // ─── Session store ────────────────────────────────────────────────────────────
 
 struct Session {
-    vm:            QuantumVM,
-    last_used:     Instant,
-    state_vars:    Vec<(String, u32)>,
-    contract_name: Option<String>,      // from compile — used to derive EIP-712 verifyingContract
-    workspace_id:  Option<String>,      // workspace this session belongs to (if any)
-    pending_nonce: Option<String>,      // server-issued one-time nonce, cleared after use
-    used_nonces:   std::collections::HashSet<String>,  // consumed nonces (replay guard)
+    vm:              QuantumVM,
+    last_used:       Instant,
+    state_vars:      Vec<(String, u32)>,
+    contract_name:   Option<String>,      // from compile — used to derive EIP-712 verifyingContract
+    workspace_id:    Option<String>,      // workspace this session belongs to (if any)
+    pending_nonce:   Option<String>,      // server-issued one-time nonce, cleared after use
+    used_nonces:     std::collections::HashSet<String>,  // consumed nonces (replay guard)
+    /// Declared return type per function ("bool", "str", "u256" etc.) — used
+    /// to coerce I32(0) from uninitialised slots into the correct JSON form.
+    fn_return_types: std::collections::HashMap<String, String>,
 }
 
 // ─── PR-G: Persistent compiler-attestation key ───────────────────────────────
@@ -484,6 +487,23 @@ fn value_to_json(v: &Value) -> serde_json::Value {
         Value::SynqOption(Some(v))  => json!({"type": "Option", "value": value_to_json(v)}),
         Value::SynqResult(true, v)  => json!({"type": "Result", "variant": "Ok",  "value": value_to_json(v)}),
         Value::SynqResult(false, v) => json!({"type": "Result", "variant": "Err", "value": value_to_json(v)}),
+    }
+}
+
+/// Type-aware JSON serialisation.  When the VM returns I32(0) for an
+/// uninitialised bool/str slot we coerce it using the declared return type.
+fn value_to_json_typed(v: &Value, ret_type: Option<&str>) -> serde_json::Value {
+    match (v, ret_type) {
+        // Uninitialised bool slot: I32(0) → false
+        (Value::I32(0), Some("bool")) =>
+            json!({"type": "Bool", "value": "false"}),
+        // Uninitialised str slot: I32(0) → ""
+        (Value::I32(0), Some("str")) =>
+            json!({"type": "String", "value": ""}),
+        // Promote I32(n)→Bool when declared bool and n==1 (shouldn't happen but be safe)
+        (Value::I32(1), Some("bool")) =>
+            json!({"type": "Bool", "value": "true"}),
+        _ => value_to_json(v),
     }
 }
 
@@ -1442,10 +1462,11 @@ async fn attest_handler(
 
 #[derive(Deserialize)]
 struct NewSessionRequest {
-    bytecode:      String,
-    state_vars:    Vec<(String, u32)>,
-    contract_name: Option<String>,
-    workspace_id:  Option<String>,   // if set, register contract into this workspace
+    bytecode:        String,
+    state_vars:      Vec<(String, u32)>,
+    contract_name:   Option<String>,
+    workspace_id:    Option<String>,
+    fn_return_types: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(serde::Serialize)]
@@ -1650,6 +1671,7 @@ async fn session_new_handler(
             workspace_id: wid.clone(),
             pending_nonce: None,
             used_nonces: std::collections::HashSet::new(),
+            fn_return_types: req.fn_return_types.unwrap_or_default(),
         });
         // Register contract in workspace if workspace_id provided
         if let (Some(wid), Some(cname)) = (wid, cname) {
@@ -1913,13 +1935,16 @@ async fn session_run_handler(
     session.vm.call_context = synq_vm::CallContext::anonymous();
     let raw_log = std::mem::take(&mut session.vm.print_log);
     session.last_used = Instant::now();
+    // Extract return-type hint before session is moved into the store.
+    let declared_ret_owned: Option<String> = session.fn_return_types.get(&req.function).cloned();
     { state.sessions.lock().unwrap().insert(req.session_id, session); }
     let event_logs = parse_event_logs(&raw_log);
 
     match call_result {
         Ok(maybe_val) => {
+            let declared_ret = declared_ret_owned.as_deref();
             let (result_json, output) = match &maybe_val {
-                Some(v) => (Some(value_to_json(v)), format!("Return value: {}", value_display(v))),
+                Some(v) => (Some(value_to_json_typed(v, declared_ret)), format!("Return value: {}", value_display(v))),
                 None    => (None, "Function completed (no return value)".to_string()),
             };
             (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None }))
