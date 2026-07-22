@@ -358,6 +358,7 @@
   var currentBytecode         = null;
   var currentSidecar          = null;
   var currentStateVars        = [];
+  var currentFnReturnTypes    = {};
   var currentContractName     = null;  // from compile response
   var currentContractAddress  = null;  // keccak256("SynQ:"+name)[12..] — used in EIP-712 domain
   var walletAddress   = null;
@@ -380,7 +381,8 @@
   }
   // Legacy alias — kept so any stray callers still work during transition
   function computeUma(evmAddress) { return callerIdentity(evmAddress); }
-  var parsedFunctions = [];
+  var parsedFunctions   = [];
+  var compileFunctions  = [];  // [{name, params:[{name,ty}], has_return, return_type}] from server
   var selectedFunc    = null;
   var sessionId       = null;
   var workspaceId     = null;   // current workspace id
@@ -882,6 +884,9 @@
         if (off + 4 > bytes.length) break;
         paramAddrs.push(readU32LE(bytes, off)); off += 4;
       }
+      // Skip param_signs: 1 byte per param (0=unsigned, 1=signed) — must consume
+      // these bytes or the offset drifts and all subsequent functions parse garbage.
+      off += paramCount;
 
       if (off >= bytes.length) break;
       var hasReturn = bytes[off]; off += 1;
@@ -1067,7 +1072,7 @@
       }
     })();
     parsedFunctions = []; selectedFunc = null;
-    stateVarNames = []; stateSnapshot = {}; currentStateVars = [];
+    stateVarNames = []; stateSnapshot = {}; currentStateVars = []; currentFnReturnTypes = {};
     var sp = document.getElementById('statePanel');
     if (sp) sp.style.display = 'none';
     document.getElementById('resultsSection').classList.remove('show');
@@ -1249,9 +1254,11 @@
       currentBytecode        = data.bytecode;
       currentSidecar         = data.signature_sidecar || null;
       currentStateVars       = data.state_vars        || [];
+      currentFnReturnTypes    = (data.functions || []).reduce(function(m,f){ if(f.return_type) m[f.name]=f.return_type; return m; }, {});
       currentContractName    = data.contract_name     || null;
       currentExternContracts = data.extern_contracts  || [];
       currentContractAddress = data.contract_address  || null;
+      compileFunctions       = data.functions         || [];
       stateVarNames = currentStateVars.map(function(sv) { return sv[0]; });
       stateSnapshot = {};
 
@@ -1772,7 +1779,12 @@
         var lbl = document.createElement('label');
         var pName = (selectedFunc.paramNames && selectedFunc.paramNames[p]) ? selectedFunc.paramNames[p] : ('param_' + p);
         // paramTypeHint set after isBoolParam detection below
-        lbl.innerHTML = pName; // updated after bool detection
+        // Append type hint to label if available
+        var pTypeHint = (selectedFunc.paramTypes && selectedFunc.paramTypes[p])
+          ? selectedFunc.paramTypes[p] : '';
+        var pTypeLabel = (pTypeHint && pTypeHint !== 'u256' && pTypeHint !== 'bool')
+          ? ' <span style="color:rgba(255,255,255,0.28);font-size:0.7rem;">(' + pTypeHint + ')</span>' : '';
+        lbl.innerHTML = pName + pTypeLabel; // updated after bool detection
         // Detect bool-domain params: name starts with is/has/enabled/paused/flag/active
         // or param name is exactly 'flag' — render a True/False select instead of free text
         var boolHints = /^(is[A-Z_]|has[A-Z_]|enabled|paused|flag|active|frozen|allow|deny)/;
@@ -1799,17 +1811,20 @@
         } else {
           inp = document.createElement('input');
           inp.type = 'text';
-          inp.inputMode = 'numeric';
+          var isStrParam = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'str';
+          if (!isStrParam) inp.inputMode = 'numeric';
           inp.id = 'param_' + p;
-          inp.value = '0';
-          inp.placeholder = '0';
+          inp.value = isStrParam ? '' : '0';
+          inp.placeholder = isStrParam ? 'text…' : '0';
           inp.autocomplete = 'off';
           inp.spellcheck = false;
+          inp.dataset.paramType = isStrParam ? 'str' : 'num';
           inp.style.fontFamily = 'ui-monospace,monospace';
           inp.style.letterSpacing = '0.02em';
           inp.addEventListener('input', function() {
-            var v = this.value.trim();
-            this.style.borderColor = (v === '' || /^\d+$/.test(v)) ? '' : '#f87171';
+            var v = this.value;
+            if (this.dataset.paramType === 'str') { this.style.borderColor = ''; return; }
+            this.style.borderColor = (v.trim() === '' || /^\d+$/.test(v.trim())) ? '' : '#f87171';
           });
         }
         // UMA address hint + "My UMA" button for identity params
@@ -1912,25 +1927,30 @@
     var argError = null;
     for (var p = 0; p < selectedFunc.paramCount; p++) {
       var el = document.getElementById('param_' + p);
-      var raw = el ? el.value.trim() : '';
-      if (raw === '') {
-        argError = selectedFunc.params && selectedFunc.params[p]
-          ? 'Enter a value for “' + selectedFunc.params[p] + '”'
+      var paramIsStr = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'str';
+      var raw = el ? (paramIsStr ? el.value : el.value.trim()) : '';
+      if (!paramIsStr && raw === '') {
+        argError = selectedFunc.paramNames && selectedFunc.paramNames[p]
+          ? 'Enter a value for "' + selectedFunc.paramNames[p] + '"'
           : 'Enter a value for parameter ' + p;
         break;
       }
-      // Validate: unsigned integers only (SynQ has no signed types)
-      if (!/^\d+$/.test(raw)) {
-        argError = 'param_' + p + ': "' + raw + '" must be a non-negative integer (all SynQ types are unsigned).';
-        break;
-      }
-      // Safe JS integer? Send as number. Otherwise send as string so the
-      // full decimal string reaches the server without float rounding.
-      var isSafe = raw.length < 16 || (raw.charAt(0) !== '-' && raw.length <= 15);
-      if (isSafe) {
-        args.push(Number(raw));
+      if (paramIsStr) {
+        // String params sent as-is; server parse_arg handles utf-8 bytes
+        args.push(raw);
       } else {
-        args.push(raw);   // quoted decimal string — server parses as u128
+        // Validate: unsigned integers only (SynQ has no signed types)
+        if (!/^\d+$/.test(raw)) {
+          argError = 'param_' + p + ': "' + raw + '" must be a non-negative integer (all SynQ types are unsigned).';
+          break;
+        }
+        // Safe JS integer? Send as number; else send quoted decimal string.
+        var isSafe = raw.length < 16 || (raw.charAt(0) !== '-' && raw.length <= 15);
+        if (isSafe) {
+          args.push(Number(raw));
+        } else {
+          args.push(raw);   // quoted decimal string — server parses as u128
+        }
       }
     }
     if (argError) {
@@ -2092,7 +2112,8 @@
           var type = (typeof rv === 'object' && rv.type) ? rv.type : '';
           // Bool decoration: any UInt256 0/1 return gets a true/false badge
           var boolBadge = '';
-          if (val === '0' || val === '1') {
+          var isStringResult = (type === 'String');
+          if (!isStringResult && (val === '0' || val === '1')) {
             var isBool = val === '1';
             var badgeColor = isBool ? 'rgba(100,220,150,0.9)' : 'rgba(255,120,100,0.85)';
             var badgeText  = isBool ? 'true' : 'false';
@@ -2101,9 +2122,15 @@
               + 'padding:1px 6px;margin-left:8px;font-weight:700;vertical-align:middle;">'
               + badgeText + '</span>';
           }
-          display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;">' + val + '</span>';
-          if (type) display += '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;">' + type + '</span>';
-          display += boolBadge + '\n';
+          if (isStringResult) {
+            // String result — render with quote marks and a muted type badge
+            display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;color:rgba(180,230,180,1);">&ldquo;' + val.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '&rdquo;</span>';
+            display += '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;">str</span>\n';
+          } else {
+            display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;">' + val + '</span>';
+            if (type) display += '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;">' + type + '</span>';
+            display += boolBadge + '\n';
+          }
         } else {
           // void return — probe state, then diff against pre-call snapshot
           await probeStateVars();
@@ -2141,7 +2168,28 @@
             display += '<span class="ok" style="font-size:0.85rem;">void</span>';
           }
         }
-        // ── Line 4: capabilities (if any, subtle) ────────────────────────
+        // ── Line 4: events (if any) ──────────────────────────────────────
+        if (data.events && data.events.length > 0) {
+          display += '<div style="margin-top:8px;border-top:1px solid rgba(255,255,255,0.08);padding-top:6px;">';
+          data.events.forEach(function(ev) {
+            var argStrs = (ev.args || []).map(function(a) {
+              if (typeof a === 'object' && a !== null) return JSON.stringify(a);
+              var s = String(a);
+              // Reformat 32-byte zero-padded hex as trimmed address
+              if (/^0{24}[0-9a-f]{40}$/i.test(s)) return '0x' + s.slice(24);
+              if (s === '0') return '0x0';
+              return s;
+            });
+            display += '<div style="font-size:0.75rem;font-family:ui-monospace,monospace;'
+              + 'color:rgba(255,255,255,0.55);line-height:1.7;">'
+              + '<span style="color:rgba(150,220,255,0.85);font-weight:600;">&#x2605; ' + ev.name + '</span>'
+              + '<span style="color:rgba(255,255,255,0.3);"> (</span>'
+              + '<span style="color:rgba(255,220,150,0.85);">' + argStrs.join('<span style="color:rgba(255,255,255,0.3);">, </span>') + '</span>'
+              + '<span style="color:rgba(255,255,255,0.3);">)</span></div>';
+          });
+          display += '</div>';
+        }
+        // ── Line 5: capabilities (if any, subtle) ────────────────────────
         if (selectedFunc && selectedFunc.capabilities && selectedFunc.capabilities.length > 0) {
           display += '<div style="font-size:0.68rem;color:rgba(255,255,255,0.22);margin-top:4px;">requires cap::' + selectedFunc.capabilities.join(', cap::') + '</div>';
         }
@@ -2490,6 +2538,36 @@
         });
       });
     })(document.getElementById('editor').value, parsedFunctions);
+
+    // Enrich parsedFunctions with paramTypes from server compile metadata
+    // Falls back to regex parsing from source for WASM compile path
+    (function enrichParamTypes(cfns, fns, src) {
+      var byName = {};
+      cfns.forEach(function(cf) { byName[cf.name] = cf; });
+      fns.forEach(function(fn) {
+        var cf = byName[fn.name];
+        if (cf) {
+          fn.paramTypes = cf.params.map(function(p) { return p.ty; });
+          fn.paramNames = fn.paramNames && fn.paramNames.length
+            ? fn.paramNames : cf.params.map(function(p) { return p.name; });
+          fn.returnType = cf.return_type;
+        } else {
+          // Fallback: parse types from source regex  function fname(p: type, ...) 
+          var re = new RegExp('function\\s+' + fn.name + '\\s*\\(([^)]*)\\)', 'i');
+          var m = src ? src.match(re) : null;
+          fn.paramTypes = [];
+          fn.paramNames = fn.paramNames || [];
+          if (m && m[1].trim()) {
+            m[1].split(',').forEach(function(part, i) {
+              var kv = part.trim().split(/\s*:\s*/);
+              fn.paramNames[i] = fn.paramNames[i] || (kv[0] ? kv[0].trim() : ('p' + i));
+              fn.paramTypes[i] = kv[1] ? kv[1].trim().split(/[\s<{(]/)[0].toLowerCase() : 'u256';
+            });
+          }
+          fn.returnType = null;
+        }
+      });
+    })(compileFunctions, parsedFunctions, document.getElementById('editor') && document.getElementById('editor').value);
 
     // Sort pills: init first, then setters, then getters, then alphabetical
     var PILL_ORDER = ['init', 'deposit', 'withdraw', 'netFlow', 'balance', 'assertSync', 'getTotalIn', 'getTotalOut', 'getTotal', 'assertBalance', 'getOwner', 'getPaused', 'mint', 'burn', 'setPaused'];
