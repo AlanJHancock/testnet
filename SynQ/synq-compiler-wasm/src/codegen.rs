@@ -260,7 +260,13 @@ impl CodeGenerator {
             let idx = self.function_addresses.len() as u32 - 1;
             FUNCTION_LOCAL_BASE + idx * FUNCTION_LOCAL_STRIDE
         });
-        let mut scope = FunctionScope { locals, local_types: HashMap::new(), next_local_addr, break_patches: Vec::new(), continue_targets: Vec::new() };
+        // Pre-populate local_types with function parameter types so
+        // type-aware codegen (e.g. str + str → StrConcat) can inspect them.
+        let mut param_types: HashMap<String, crate::ast::Type> = HashMap::new();
+        for param in &f.params {
+            param_types.insert(param.name.clone(), param.ty.clone());
+        }
+        let mut scope = FunctionScope { locals, local_types: param_types, next_local_addr, break_patches: Vec::new(), continue_targets: Vec::new() };
 
         // ── G1: Authority enforcement pre-pass ─────────────────────────────
         // Per §20.2.1: "There is no implicit authority derived from call
@@ -777,6 +783,14 @@ impl CodeGenerator {
                 }
                 self.gen_expression(lhs, scope)?;
                 self.gen_expression(rhs, scope)?;
+                // If either operand is a str literal or str-typed local, use StrConcat
+                let str_lhs = Self::expr_is_str(lhs, scope);
+                let str_rhs = Self::expr_is_str(rhs, scope);
+                if matches!(op, BinaryOperator::Add) && (str_lhs || str_rhs) {
+                    // Ensure both sides are on the stack (already emitted above)
+                    self.assembler.emit_op(OpCode::StrConcat);
+                    return Ok(());
+                }
                 let opcode = match op {
                     BinaryOperator::Add => OpCode::Add,
                     BinaryOperator::Sub => OpCode::Sub,
@@ -799,6 +813,19 @@ impl CodeGenerator {
                 Ok(())
             }
             Expression::Call(name, args) => self.gen_call(name, args, scope),
+        }
+    }
+
+
+    /// Returns true if `expr` is a string literal or a local variable declared as `str`.
+    fn expr_is_str(expr: &Expression, scope: &FunctionScope) -> bool {
+        match expr {
+            Expression::Literal(Literal::String(_)) => true,
+            Expression::Identifier(name) => {
+                // Check function parameter types
+                scope.local_types.get(name).map_or(false, |t| matches!(t, crate::ast::Type::Str))
+            }
+            _ => false,
         }
     }
 
