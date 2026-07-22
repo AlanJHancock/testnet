@@ -324,6 +324,9 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
                     BinaryOperator::Sub,
                     Box::new(operand),
                 )
+            } else if first.as_str() == "!" {
+                let operand = parse_expression(inner.next().unwrap());
+                Expression::UnaryOp(UnaryOperator::Not, Box::new(operand))
             } else {
                 parse_expression(first)
             }
