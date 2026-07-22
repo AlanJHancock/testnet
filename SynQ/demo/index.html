@@ -2391,11 +2391,10 @@
   function formatStateVal(name, v) {
     if (v === undefined || v === null) return '?';
 
-    // ── Helpers ────────────────────────────────────────────────────────────
-    // Classify a variable name as a boolean-intent field
-    // Compiler type wins; fall back to name heuristic for legacy contracts
     var BOOL_SCALARS = ['feat_pqc','initialised','paused','frozen','active','enabled'];
     var BOOL_MAPS    = ['admin_role','minter_role','registered'];
+    var _declType    = (currentStateVarTypes && currentStateVarTypes[name]) || '';
+
     function isBoolScalar(n) {
       if (currentStateVarTypes && currentStateVarTypes[n]) return currentStateVarTypes[n] === 'bool';
       return BOOL_SCALARS.indexOf(n) >= 0;
@@ -2405,115 +2404,70 @@
       return BOOL_MAPS.indexOf(n) >= 0;
     }
 
-    // Normalise a 32-byte big-endian hex key to a short address string
     function safeKey(k) {
       if (typeof k === 'string' && /^0x[0-9a-f]+$/i.test(k)) {
         var hex = k.slice(2).replace(/^0+/, '') || '0';
         if (hex.length % 2 !== 0) hex = '0' + hex;
-        while (hex.length < 40)   hex = '0' + hex;
+        while (hex.length < 40) hex = '0' + hex;
         var addr = '0x' + hex;
         return addr.length > 14 ? addr.slice(0,8) + '\u2026' + addr.slice(-6) : addr;
       }
-      // Guard: if name leaked a raw slot index as key, show it literally
       return (typeof k === 'string' && k.length > 14) ? k.slice(0,6)+'\u2026'+k.slice(-4) : String(k);
     }
 
-    // ── Bytes/str: hex → quoted ASCII ──────────────────────────────────────
-    var _declType = (currentStateVarTypes && currentStateVarTypes[name]) || '';
-    if (typeof v === 'string' && /^0x[0-9a-fA-F]{2,64}$/.test(v)
-        && _declType !== 'u256' && _declType !== 'i256'
-        && _declType !== 'address' && _declType !== 'bool') {
-      var _hx = v.slice(2).replace(/^(00)+/,'');
-      if (_hx.length > 0 && _hx.length % 2 === 0) {
-        try {
-          var _ba = [];
-          for (var _i=0;_i<_hx.length;_i+=2) _ba.push(parseInt(_hx.substr(_i,2),16));
-          var _str = new TextDecoder('utf-8',{fatal:true}).decode(new Uint8Array(_ba));
-          if (/^[\x20-\x7E]{1,32}$/.test(_str)) {
-            return '“' + _str.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '” <span style="font-size:0.72rem;color:rgba(255,255,255,0.4);">(str)</span>';
-          }
-        } catch(e) {}
-      }
-    }
+    // ── Str rendering helpers — plain-text-safe Unicode quotes ────────────
+    var STR_BADGE = '<span style="font-size:0.72rem;color:rgba(255,255,255,0.4);margin-left:3px;">(str)</span>';
+    function strEmpty()      { return '\u201c\u201d\u00a0' + STR_BADGE; }
+    function strDisplay(txt) { return '\u201c' + txt.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '\u201d\u00a0' + STR_BADGE; }
 
-    // ── str / Bytes: hex-encoded slot → quoted ASCII ─────────────────────
-    // Compact strings (<=32 chars) are stored right-aligned in a 32-byte
-    // big-endian slot and serialised as 0x hex by /state.  Decode them back.
-    var _dclT = (typeof currentStateVarTypes !== 'undefined' && currentStateVarTypes)
-                 ? (currentStateVarTypes[name] || '') : '';
-    // Unset str slot: VM returns I32(0) or '0' before first write.
-    // Also catches '0x0' and '0x00...00' (all-zero 32-byte slot).
-    if (_dclT === 'str' && (
+    // Unset str slot — VM returns I32(0) before any write
+    if (_declType === 'str' && (
           v === '0' || v === 0 || v === '0x0'
           || (typeof v === 'string' && /^0x0+$/.test(v))
        )) {
-      return '“” <span style="font-size:0.72rem;color:rgba(255,255,255,0.4);">(str)</span>';
+      return strEmpty();
     }
+
+    // Hex-encoded Bytes/str → decode to quoted ASCII
     if (typeof v === 'string' && /^0x[0-9a-fA-F]{2,64}$/.test(v)
-        && _dclT !== 'u256' && _dclT !== 'i256'
-        && _dclT !== 'address' && _dclT !== 'bool') {
+        && _declType !== 'u256' && _declType !== 'i256'
+        && _declType !== 'address' && _declType !== 'bool') {
       var _hx = v.slice(2).replace(/^(00)+/, '');
-      // All-zero slot (unset str) → show as empty string with str badge
-      if (_hx.length === 0) {
-        return '<span style="color:rgba(180,230,180,0.5);font-weight:600;">“”</span>'
-          + '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:5px;">str</span>';
-      }
+      if (_hx.length === 0) return strEmpty();
       if (_hx.length > 0 && _hx.length % 2 === 0 && _hx.length <= 64) {
         try {
           var _ba = [];
-          for (var _ii = 0; _ii < _hx.length; _ii += 2)
-            _ba.push(parseInt(_hx.substr(_ii, 2), 16));
+          for (var _i = 0; _i < _hx.length; _i += 2)
+            _ba.push(parseInt(_hx.substr(_i, 2), 16));
           var _ss = new TextDecoder('utf-8', {fatal: true}).decode(new Uint8Array(_ba));
-          if (/^[\x20-\x7E]{1,32}$/.test(_ss)) {
-            return '<span style="color:rgba(180,230,180,1);font-weight:600;">“'
-              + _ss.replace(/&/g, '&amp;').replace(/</g, '&lt;')
-              + '”</span>'
-              + '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:5px;">str</span>';
-          }
-        } catch (_e) {}
+          if (/^[\x20-\x7E]{1,32}$/.test(_ss)) return strDisplay(_ss);
+        } catch(_e) {}
       }
     }
 
-    // ── Mapping / set object ───────────────────────────────────────────────
+    // Mapping / set
     if (typeof v === 'object' && !Array.isArray(v)) {
       var keys = Object.keys(v);
       if (keys.length === 0) return isBoolMap(name) ? 'false' : '{}';
       if (isBoolMap(name)) {
-        // Show true if any entry is set to 1; false otherwise
         var granted = keys.filter(function(k) { return String(v[k]) === '1'; });
         return granted.length > 0 ? 'true (' + granted.length + ')' : 'false';
       }
-      // Generic mapping — up to 3 entries
-      var pairs = keys.slice(0,3).map(function(k) {
-        return safeKey(k) + ':' + v[k];
-      });
+      var pairs = keys.slice(0,3).map(function(k) { return safeKey(k) + ':' + v[k]; });
       return '{' + pairs.join(', ') + (keys.length > 3 ? ', \u2026' : '') + '}';
     }
 
     if (Array.isArray(v)) return '[' + v.length + ' items]';
 
     var s = String(v);
-
-    // ── Slot index leaked as name (edge case guard) ────────────────────────
-    // If the name is purely numeric the server returned a raw slot index
-    // instead of the declared variable name — show a fallback label.
     if (/^\d+$/.test(name)) return 'slot[' + name + '] = ' + s;
-
-    // ── Scalar bool fields ─────────────────────────────────────────────────
-    if (isBoolScalar(name)) return s === '?' ? '?' : (s === '1' ? 'true' : 'false');
-
-    // ── Scalar bool-map (no entries yet — entire map not yet written) ──────
-    if (isBoolMap(name)) return (s === '0' || s === '?') ? 'false' : 'true';
-
-    // ── version ───────────────────────────────────────────────────────────
+    if (isBoolScalar(name)) return s === '?' ? '?' : (s === '1' || s === 'true' ? 'true' : 'false');
+    if (isBoolMap(name))    return (s === '0' || s === '?') ? 'false' : 'true';
     if (name === 'version') return (s === '?' || s === '0') ? '0' : 'v' + s;
-
-    // ── owner / address fields ─────────────────────────────────────────────
     if (name === 'owner' || name === 'creator') {
       if (s === '0') return '(not set)';
       try { return '0x' + BigInt(s).toString(16).padStart(40,'0'); } catch(e) { return s; }
     }
-
     return s;
   }
 
