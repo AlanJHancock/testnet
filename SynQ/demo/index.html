@@ -2127,7 +2127,7 @@
           var type = (typeof rv === 'object' && rv.type) ? rv.type : '';
           // Bool decoration: any UInt256 0/1 return gets a true/false badge
           var boolBadge = '';
-          var isStringResult = (type === 'String' || type === 'Str');
+          var isStringResult = (type === 'String' || type === 'Str' || type === 'str');
           var isBoolResult   = (type === 'Bool');
           if (isBoolResult) {
             var isBT = (val === 'true' || val === '1');
@@ -2145,7 +2145,21 @@
               + (isBT ? 'true' : 'false') + '</span>';
           }
           if (isStringResult) {
-            display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;color:rgba(180,230,180,1);">&ldquo;' + val.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '&rdquo;</span>';
+            display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;color:rgba(180,230,180,1);">&ldquo;'
+              + (function(_v){
+                  if(/^0x[0-9a-fA-F]+$/.test(_v)){
+                    try{
+                      var _h=_v.slice(2).replace(/^(00)+/,'');
+                      if(_h.length%2!==0)_h='0'+_h;
+                      var _b=[];
+                      for(var _k=0;_k<_h.length;_k+=2)_b.push(parseInt(_h.substr(_k,2),16));
+                      var _s=new TextDecoder('utf-8',{fatal:true}).decode(new Uint8Array(_b));
+                      if(/^[\x20-\x7E]+$/.test(_s))return _s;
+                    }catch(e){}
+                  }
+                  return _v;
+                })(val).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+              + '&rdquo;</span>';
             display += '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;">str</span>\n';
           } else if (isBoolResult) {
             display += boolBadge + '\n';
@@ -2289,6 +2303,26 @@
       }
       // Guard: if name leaked a raw slot index as key, show it literally
       return (typeof k === 'string' && k.length > 14) ? k.slice(0,6)+'\u2026'+k.slice(-4) : String(k);
+    }
+
+    // ── Bytes/str: hex → quoted ASCII ──────────────────────────────────────
+    var _declType = (currentStateVarTypes && currentStateVarTypes[name]) || '';
+    if (typeof v === 'string' && /^0x[0-9a-fA-F]{2,64}$/.test(v)
+        && _declType !== 'u256' && _declType !== 'i256'
+        && _declType !== 'address' && _declType !== 'bool') {
+      var _hx = v.slice(2).replace(/^(00)+/,'');
+      if (_hx.length > 0 && _hx.length % 2 === 0) {
+        try {
+          var _ba = [];
+          for (var _i=0;_i<_hx.length;_i+=2) _ba.push(parseInt(_hx.substr(_i,2),16));
+          var _str = new TextDecoder('utf-8',{fatal:true}).decode(new Uint8Array(_ba));
+          if (/^[\x20-\x7E]{1,32}$/.test(_str)) {
+            return '<span style="color:rgba(180,230,180,1);font-weight:600;">&ldquo;'
+              + _str.replace(/&/g,'&amp;').replace(/</g,'&lt;')
+              + '&rdquo;</span><span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:5px;">str</span>';
+          }
+        } catch(e) {}
+      }
     }
 
     // ── Mapping / set object ───────────────────────────────────────────────
