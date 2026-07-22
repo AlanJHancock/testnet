@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
   <!-- js-sha3: battle-tested Keccak-256 matching Ethereum's keccak256 opcode -->
   <script src="https://cdn.jsdelivr.net/npm/js-sha3@0.8.0/src/sha3.min.js"></script>
+  <!-- noble/secp256k1: ephemeral devnet signing (EIP-712 compatible) -->
+  <script src="https://cdn.jsdelivr.net/npm/@noble/secp256k1@2.1.0/lib/index.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SynQ IDE — Powered by Synergy Network</title>
 <style>
@@ -318,6 +320,15 @@
 <script>
 (function () {
   'use strict';
+
+  /* ── keccak256Bytes: returns Uint8Array from any input ─────────────────── */
+  // js-sha3@0.8.0 exposes window.keccak256(data) → hex string (correct EVM keccak)
+  function keccak256Bytes(data) {
+    var hex = keccak256.create().update(data).hex();
+    var out = new Uint8Array(32);
+    for (var i = 0; i < 32; i++) out[i] = parseInt(hex.substr(i*2, 2), 16);
+    return out;
+  }
 
   var COMPILE_URL       = 'https://hanksweb.co.uk/synq/compile';
   var SIGN_SOURCE_URL   = 'https://hanksweb.co.uk/synq/compile/sign-source';
