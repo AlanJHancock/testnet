@@ -188,6 +188,7 @@
     <span class="wallet-mode persistent" id="sigMode">Compiler-Attested PQC</span>
     <span class="sig-note" id="sigNote">Signing: ML-DSA-65 · key_id —</span>
     <button class="btn-wallet" id="walletBtn" onclick="connectWallet()">Connect Synergy Wallet</button>
+        <label class="btn-wallet" style="cursor:pointer;font-size:0.78rem;padding:4px 10px;opacity:0.75;" title="Import Synergy device-link JSON">Import device link<input type="file" accept=".json" style="display:none" onchange="(function(e){var f=e.target.files[0];if(!f)return;var r=new FileReader();r.onload=function(ev){importDeviceLink(ev.target.result);};r.readAsText(f);})(event)"></label>
   </div>
 </div>
 
@@ -392,6 +393,121 @@
   // On load: eth_accounts (no prompt) silently restores an already-approved session.
   // On button: eth_requestAccounts triggers the Synergy approval popup.
   // Both EIP-712 sign paths use window.ethereum.eth_signTypedData_v4.
+
+  /* ── Ephemeral secp256k1 key (default signing path) ─────────────────────── */
+  // generateEphemeralKey() — creates a random secp256k1 keypair in the browser.
+  // The derived EVM address becomes walletAddress and `caller` in contracts.
+  async function generateEphemeralKey() {
+    var _noble = (typeof nobleSecp256k1 !== 'undefined') ? nobleSecp256k1
+               : (typeof secp !== 'undefined') ? secp : null;
+    if (!_noble || !_noble.utils) {
+      console.warn('[SynQ] @noble/secp256k1 not ready');
+      return false;
+    }
+    _ephemeralPrivKey = _noble.utils.randomPrivateKey();
+    var pubKeyUncomp  = _noble.getPublicKey(_ephemeralPrivKey, false);
+    var pubKeyBody    = pubKeyUncomp.slice(1);
+    var addrBytes     = keccak256Bytes(pubKeyBody).slice(-20);
+    walletAddress     = '0x' + Array.from(addrBytes).map(function(b){
+      return b.toString(16).padStart(2,'0');
+    }).join('');
+    _walletMode = 'ephemeral';
+    console.log('[SynQ] Ephemeral devnet address:', walletAddress);
+    return true;
+  }
+
+  async function regenerateKey() {
+    await generateEphemeralKey();
+    updateWalletUI();
+    sessionId = null; workspaceId = null; workspaceContracts = [];
+    if (typeof populateFunctionPicker === 'function') populateFunctionPicker();
+  }
+  window.regenerateKey = regenerateKey;
+
+  /* ── Import Synergy device-link JSON ─────────────────────────────────────── */
+  // Sets walletAddress to the real Synergy EVM address for display.
+  // Signing still uses the ephemeral key — so the server recovers the ephemeral
+  // address. For devnet this is fine: caller = ephemeral addr is consistent.
+  // When the Synergy extension gains origin approval, connectWallet() will
+  // upgrade automatically to real signing.
+  function importDeviceLink(jsonText) {
+    try {
+      var dl = JSON.parse(jsonText);
+      if (!dl.publicProfile || !dl.publicProfile.eip155Address) {
+        showWalletError('Device link missing EVM address.'); return;
+      }
+      var evmAddr = dl.publicProfile.eip155Address;
+      var sns     = dl.publicProfile.snsName || dl.publicProfile.label || evmAddr;
+      walletAddress = evmAddr;
+      _walletMode   = 'ephemeral';
+      walletUma     = callerIdentity(evmAddr);
+      updateWalletUI();
+      var out = document.getElementById('vmOutput');
+      if (out) out.innerHTML =
+        '<span class="ok">Identity imported: ' + sns + ' (' + evmAddr.slice(0,8) + '…)<br>' +
+        '<span style="color:rgba(255,200,80,0.9)">⚠ Display identity set. ' +
+        'Contract <code>caller</code> will be the ephemeral signing key until the Synergy extension is approved for this origin.</span></span>';
+      setStatus('Device link imported — ' + sns, 'ok');
+    } catch(e) { showWalletError('Device link parse error: ' + e.message); }
+  }
+  window.importDeviceLink = importDeviceLink;
+
+  /* ── EIP-712 ephemeral signer ─────────────────────────────────────────────── */
+  async function signEIP712Ephemeral(typedDataJson) {
+    var _noble = (typeof nobleSecp256k1 !== 'undefined') ? nobleSecp256k1
+               : (typeof secp !== 'undefined') ? secp : null;
+    if (!_noble || !_ephemeralPrivKey) throw new Error('Ephemeral key not initialised');
+    var td = (typeof typedDataJson === 'string') ? JSON.parse(typedDataJson) : typedDataJson;
+    function encodeType(typeName, types) {
+      var deps = [];
+      function collect(t) {
+        (types[t]||[]).forEach(function(f){
+          if (types[f.type] && !deps.includes(f.type)){ deps.push(f.type); collect(f.type); }
+        });
+      }
+      collect(typeName);
+      return typeName+'('+(types[typeName]||[]).map(function(f){return f.type+' '+f.name;}).join(',')+')'
+        + deps.sort().map(function(d){return d+'('+(types[d]||[]).map(function(f){return f.type+' '+f.name;}).join(',')+')'}).join('');
+    }
+    function typeHash(n,t){ return keccak256Bytes(new TextEncoder().encode(encodeType(n,t))); }
+    function encodePrimitive(type,value){
+      var buf=new Uint8Array(32);
+      if(type==='address'){var h=value.toLowerCase().replace(/^0x/,'').padStart(40,'0');for(var i=0;i<20;i++)buf[12+i]=parseInt(h.substr(i*2,2),16);}
+      else if(type==='bytes32'){var hx=(typeof value==='string'?value:'0x').replace(/^0x/,'').padEnd(64,'0');for(var i=0;i<32;i++)buf[i]=parseInt(hx.substr(i*2,2),16);}
+      else if(type==='uint256'){var n=BigInt(value);var hx2=n.toString(16).padStart(64,'0');for(var i=0;i<32;i++)buf[i]=parseInt(hx2.substr(i*2,2),16);}
+      else if(type==='string'||type==='bytes'){return keccak256Bytes(new TextEncoder().encode(value));}
+      else if(type==='bool'){buf[31]=value?1:0;}
+      return buf;
+    }
+    function hashStruct(typeName,value,types){
+      var th=typeHash(typeName,types);var parts=[th];
+      (types[typeName]||[]).forEach(function(f){
+        parts.push(types[f.type]?hashStruct(f.type,value[f.name],types):encodePrimitive(f.type,value[f.name]));
+      });
+      var combined=new Uint8Array(parts.reduce(function(s,p){return s+p.length;},0));
+      var off=0;parts.forEach(function(p){combined.set(p,off);off+=p.length;});
+      return keccak256Bytes(combined);
+    }
+    var domainHash=hashStruct('EIP712Domain',td.domain,td.types);
+    var messageHash=hashStruct(td.primaryType,td.message,td.types);
+    var digest=new Uint8Array(66);digest[0]=0x19;digest[1]=0x01;
+    digest.set(domainHash,2);digest.set(messageHash,34);
+    var digestHash=keccak256Bytes(digest);
+    var sig=await _noble.sign(digestHash,_ephemeralPrivKey,{lowS:true});
+    var r=sig.r.toString(16).padStart(64,'0');
+    var s=sig.s.toString(16).padStart(64,'0');
+    var v=(sig.recovery+27).toString(16).padStart(2,'0');
+    return '0x'+r+s+v;
+  }
+
+  /* ── Master signing dispatcher ────────────────────────────────────────────── */
+  async function getSignature(typedData) {
+    if (_walletMode === 'synergy' && window.ethereum) {
+      var json = typeof typedData === 'string' ? typedData : JSON.stringify(typedData);
+      return await window.ethereum.request({ method: 'eth_signTypedData_v4', params: [walletAddress, json] });
+    }
+    return await signEIP712Ephemeral(typedData);
+  }
 
   async function connectWallet() {
     // Try Synergy extension first; fall back to ephemeral if not available/approved
