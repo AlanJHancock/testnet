@@ -1121,6 +1121,12 @@
     }).catch(function(err) { console.error("Wallet error:", err); });
   }
 
+
+  function showWalletError(msg) {
+    var out = document.getElementById('vmOutput');
+    if (out) out.innerHTML = '<span class="err">' + msg + '</span>';
+    setStatus(msg, 'error');
+  }
   function attachEthereumListeners() {
     if (attachEthereumListeners._done) return;
     attachEthereumListeners._done = true;
@@ -1161,22 +1167,13 @@
       label.textContent = 'Connected:';
       addr.textContent  = walletAddress.slice(0,6) + '...' + walletAddress.slice(-4);
       var _isSyn = (_walletMode === 'synergy');
-      var _isEph = (_walletMode === 'ephemeral' && _ephemeralPrivKey);
-      mode.textContent  = _isSyn ? 'Synergy Wallet'
-                        : _isEph ? 'Devnet Keypair (in-browser)'
-                        : 'EVM Wallet';
-      mode.className    = _isSyn ? 'wallet-mode hybrid'
-                        : _isEph ? 'wallet-mode ephemeral'
-                        : 'wallet-mode hybrid';
-      note.textContent  = _isSyn ? 'Signing: Synergy Wallet · EIP-712 · chainId 1264'
-                        : _isEph ? 'Signing: ephemeral secp256k1 — page memory only · chainId 1337'
-                        : 'Signing: EVM wallet · EIP-712';
-      btn.textContent   = (_walletMode === 'synergy') ? 'Disconnect Synergy'
-                        : _ephemeralPrivKey            ? 'New Devnet Key'
-                        : 'Disconnect';
-      btn.onclick       = (_walletMode === 'synergy') ? disconnectWallet
-                        : _ephemeralPrivKey            ? regenerateKey
-                        : disconnectWallet;
+      mode.textContent  = _isSyn ? 'Synergy Wallet' : 'EVM Wallet';
+      mode.className    = 'wallet-mode hybrid';
+      note.textContent  = _isSyn
+        ? 'Signing: Synergy Wallet · EIP-712 · ' + walletAddress.slice(0,8) + '…'
+        : 'Signing: EIP-712';
+      btn.textContent   = 'Disconnect Synergy';
+      btn.onclick       = disconnectWallet;
       // Compute + display UMA in wallet bar
       try {
         walletUma = callerIdentity(walletAddress);
@@ -1229,8 +1226,7 @@
         mode.className   = 'wallet-mode ephemeral';
         note.textContent = 'Signing: ephemeral ML-DSA-65';
       }
-      btn.textContent   = (window.synergy && window.synergy.isSynergyWallet)
-                         ? 'Connect Synergy Wallet' : 'Connect Wallet';
+      btn.textContent   = 'Connect Synergy Wallet';
       btn.onclick       = connectWallet;
     }
   }
@@ -1241,27 +1237,21 @@
     });
   }
 
-  // Auto-connect on page load:
-  // If Synergy Wallet extension is present → request accounts and use it.
-  // Otherwise generate an ephemeral devnet keypair (no wallet needed).
+  // Auto-connect: use eth_accounts (no prompt) to silently restore
+  // if this origin is already approved in Synergy Wallet.
+  // If not approved yet, the user clicks 'Connect Synergy Wallet'.
   (async function autoInitKey() {
-    if (window.synergy && window.synergy.isSynergyWallet) {
-      try {
-        var accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-        if (accounts && accounts.length) {
-          walletAddress = accounts[0];
-          _ephemeralPrivKey = null;
-          _walletMode = 'synergy';
-          updateWalletUI();
-          attachEthereumListeners();
-          console.log('[SynQ] Synergy Wallet auto-connected:', walletAddress);
-          return;
-        }
-      } catch(e) { console.warn('[SynQ] Synergy auto-connect failed, falling back to ephemeral:', e); }
-    }
-    // No Synergy extension — generate ephemeral key
-    var ok = await generateEphemeralKey();
-    if (ok) { _walletMode = 'ephemeral'; updateWalletUI(); }
+    if (!window.ethereum) return;
+    try {
+      var accounts = await window.ethereum.request({ method: 'eth_accounts' });
+      if (accounts && accounts.length) {
+        walletAddress = accounts[0];
+        _walletMode = (window.synergy && window.synergy.isSynergyWallet) ? 'synergy' : 'ethereum';
+        updateWalletUI();
+        attachEthereumListeners();
+        console.log('[SynQ] Auto-connected:', walletAddress);
+      }
+    } catch(e) { console.warn('[SynQ] Auto-connect skipped:', e.message); }
   })();
 
   /* ── Editor ──────────────────────────────────────────────────────────────── */
@@ -1584,15 +1574,11 @@
           // 4. Sign — ephemeral in-browser key (preferred) or injected wallet
           setStatus('Signing source commit...', 'info');
           var evmSig;
-          if (_walletMode === 'ephemeral' && _ephemeralPrivKey) {
-            evmSig = await signEIP712Ephemeral(typedData);
-          } else {
-            setStatus('Waiting for Synergy Wallet signature...', 'info');
-            evmSig = await window.ethereum.request({
-              method: 'eth_signTypedData_v4',
-              params: [walletAddress, typedData]
-            });
-          }
+          setStatus('Waiting for Synergy Wallet signature...', 'info');
+          evmSig = await window.ethereum.request({
+            method: 'eth_signTypedData_v4',
+            params: [walletAddress, typedData]
+          });
 
           // 5. POST /compile/sign-source — server re-compiles + binds author → source → bytecode
           setStatus('Source signed — generating PQC SourceCommit...', 'info');
@@ -2300,15 +2286,10 @@
 
         var signature;
         try {
-          if (_walletMode === 'ephemeral' && _ephemeralPrivKey) {
-            signature = await signEIP712Ephemeral(callTypedData);
-          } else {
-            // Synergy Wallet or MetaMask — both inject window.ethereum
-            signature = await window.ethereum.request({
-              method: 'eth_signTypedData_v4',
-              params: [walletAddress, callTypedData]
-            });
-          }
+          signature = await window.ethereum.request({
+            method: 'eth_signTypedData_v4',
+            params: [walletAddress, callTypedData]
+          });
           console.log('[SynQ auth] signature:', signature);
         } catch (sigErr) {
           var sigErrMsg;
