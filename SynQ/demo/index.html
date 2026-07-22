@@ -2439,12 +2439,23 @@
     function strEmpty()      { return '\u201c\u201d\u00a0' + STR_BADGE; }
     function strDisplay(txt) { return '\u201c' + txt.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '\u201d\u00a0' + STR_BADGE; }
 
-    // Unset str slot — VM returns I32(0) before any write
+    // Unset str slot — VM returns I32(0) or 0x0 before any write
     if (_declType === 'str' && (
           v === '0' || v === 0 || v === '0x0'
           || (typeof v === 'string' && /^0x0+$/.test(v))
        )) {
       return strEmpty();
+    }
+
+    // Str type: server may return a plain decimal integer (big-endian bytes as uint256).
+    // Convert decimal → 0x hex so the decode path below can handle it.
+    if (_declType === 'str' && typeof v === 'string' && /^\d+$/.test(v) && v !== '0') {
+      try {
+        var _bigi = BigInt(v);
+        var _hexRaw = _bigi.toString(16);
+        if (_hexRaw.length % 2 !== 0) _hexRaw = '0' + _hexRaw;
+        v = '0x' + _hexRaw.padStart(64, '0');
+      } catch(_e) {}
     }
 
     // Hex-encoded Bytes/str → decode to quoted ASCII
