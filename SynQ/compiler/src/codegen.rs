@@ -451,9 +451,11 @@ impl CodeGenerator {
             Statement::SetOp { set, op, value } => {
                 let addr = *self.state_vars.get(set.as_str())
                     .ok_or_else(|| format!("SetOp: unknown set '{}'", set))?;
+                // Push order: value first, then set_addr last.
+                // VM pops set_addr first (top of stack), then value — so addr must be on top.
+                self.gen_expression(value, scope)?;
                 self.assembler.emit_op(OpCode::Push);
                 self.assembler.emit_i32(addr as i32);
-                self.gen_expression(value, scope)?;
                 match op {
                     SetOpKind::Add    => self.assembler.emit_op(OpCode::SetAdd),
                     SetOpKind::Remove => self.assembler.emit_op(OpCode::SetRemove),
