@@ -1983,9 +1983,14 @@
 
           (function(inputEl, btn) {
             btn.addEventListener('click', function() {
-              if (!walletAddress) { btn.style.display = 'none'; return; }
+              if (!walletAddress && !_ephemeralAddress) { btn.style.display = 'none'; return; }
               try {
-                var uma = callerIdentity(walletAddress);
+                // Always use the signing address — the actual address the VM sees as caller.
+                // In ephemeral mode walletAddress may show a display identity that differs
+                // from the secp256k1 key used to sign, causing auth mismatches.
+                var _signingAddr = (_walletMode === 'ephemeral' && _ephemeralAddress)
+                  ? _ephemeralAddress : walletAddress;
+                var uma = callerIdentity(_signingAddr);
                 inputEl.value = uma;
                 inputEl.style.borderColor = 'rgba(0,206,209,0.6)';
                 var orig = btn.textContent;
@@ -2493,6 +2498,10 @@
     if (!panel || !el) return;
     if (stateVarNames.length === 0) { panel.style.display = 'none'; return; }
     panel.style.display = 'block';
+    // Show contract name in the state label
+    var lbl = document.getElementById('stateLabel');
+    if (lbl) lbl.innerHTML = (currentContractName ? currentContractName + ' ' : 'contract ')
+      + 'state &nbsp;&#x25B8;&nbsp;';
     el.innerHTML = stateVarNames.map(function(n) {
       return n + ' = ' + formatStateVal(n, stateSnapshot[n]);
     }).join('  <span style="opacity:0.35;">│</span>  ');
