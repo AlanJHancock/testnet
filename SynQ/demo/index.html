@@ -1308,6 +1308,12 @@
                 setStatus('\u26a0 Security: WASM compile output was tampered with. Bytecode rejected.', 'error');
                 data = null; btn.disabled = false; syncCompileBtn(); return;
               }
+              // Use server bytecode as the authoritative deploy payload.
+              // This ensures the deployed bytecode is always the server-compiled
+              // version, regardless of WASM build age or browser module cache.
+              if (_xdat.success && _xdat.bytecode) {
+                data.bytecode = _xdat.bytecode;
+              }
               // Also pick up the PQC sidecar from the server response
               if (_xdat.success && _xdat.signature_sidecar) {
                 data.signature_sidecar = _xdat.signature_sidecar;
