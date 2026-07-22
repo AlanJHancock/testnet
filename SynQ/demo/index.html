@@ -912,9 +912,14 @@
 
   /* ── EIP-712 ephemeral signer ─────────────────────────────────────────────── */
   async function signEIP712Ephemeral(typedDataJson) {
-    var _noble = (typeof nobleSecp256k1 !== 'undefined') ? nobleSecp256k1
-               : (typeof secp !== 'undefined') ? secp : null;
-    if (!_noble || !_ephemeralPrivKey) throw new Error('Ephemeral key not initialised');
+    // Await noble CDN + auto-generate key if not yet ready
+    if (!_ephemeralPrivKey) {
+      var _ok = await generateEphemeralKey();
+      if (!_ok) throw new Error('@noble/secp256k1 CDN failed to load — reload the page.');
+      updateWalletUI();
+    }
+    var _noble = await waitForNoble();
+    if (!_ephemeralPrivKey) throw new Error('Ephemeral key not initialised');
     var td = (typeof typedDataJson === 'string') ? JSON.parse(typedDataJson) : typedDataJson;
     function encodeType(typeName, types) {
       var deps = [];
