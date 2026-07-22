@@ -1,4 +1,4 @@
-var __noble = (() => {
+(() => {
   var __defProp = Object.defineProperty;
   var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
   var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -1234,19 +1234,20 @@ var __noble = (() => {
   var secp = (init_secp256k1(), __toCommonJS(secp256k1_exports));
   var { sha256 } = require_sha256();
   var { hmac } = require_hmac();
-  secp.utils.hmacSha256Sync = (key, ...msgs) => {
+  var hmacFn = (key, ...msgs) => {
     const h = hmac.create(sha256, key);
     msgs.forEach((m) => h.update(m));
     return h.digest();
   };
+  if (secp.etc) secp.etc.hmacSha256Sync = hmacFn;
+  if (secp.utils) secp.utils.hmacSha256Sync = hmacFn;
   globalThis.nobleSecp256k1 = {
     utils: {
       randomPrivateKey: () => secp.utils.randomPrivateKey()
     },
     getPublicKey: (privKey, compressed) => secp.getPublicKey(privKey, compressed),
-    // v2 sign() is async — return the Promise; IDE already awaits it
     sign: async (digest, privKey, opts) => {
-      return await secp.sign(digest, privKey, { lowS: opts && opts.lowS });
+      return await secp.sign(digest, privKey, { lowS: !!(opts && opts.lowS) });
     }
   };
 })();
