@@ -2175,7 +2175,9 @@
           btn.disabled = false; btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Function';
           return;
         }
-        callBody.evm_address   = walletAddress;
+        // Use the key-derived address when signing ephemerally — walletAddress
+        // may show a display identity (e.g. imported Synergy addr) that differs.
+        callBody.evm_address   = (_walletMode === 'ephemeral' && _ephemeralAddress) ? _ephemeralAddress : walletAddress;
         callBody.evm_signature = signature;
         callBody.call_nonce    = callNonce;
       }
