@@ -190,7 +190,7 @@
   <div class="wallet-right">
     <span class="wallet-mode persistent" id="sigMode">Compiler-Attested PQC</span>
     <span class="sig-note" id="sigNote">Signing: ML-DSA-65 · key_id —</span>
-    <button class="btn-wallet" id="walletBtn" onclick="connectWallet()">Connect EVM Wallet</button>
+    <button class="btn-wallet" id="walletBtn" onclick="connectWallet()">Connect Synergy Wallet</button>
   </div>
 </div>
 
@@ -442,7 +442,70 @@
     } catch(e) { console.warn('[SynQ] Auto-connect skipped:', e.message); }
   })();
 
-  /* ── Editor ──────────────────────────────────────────────────────────────── */
+  
+  function updateWalletUI() {
+    var dot   = document.getElementById('walletDot');
+    var label = document.getElementById('walletLabel');
+    var addr  = document.getElementById('walletAddress');
+    var mode  = document.getElementById('sigMode');
+    var note  = document.getElementById('sigNote');
+    var btn   = document.getElementById('walletBtn');
+    if (!dot || !btn) return;
+    if (walletAddress) {
+      dot.classList.add('connected');
+      label.textContent = 'Connected:';
+      addr.textContent  = walletAddress.slice(0,6) + '...' + walletAddress.slice(-4);
+      var _isSyn = (_walletMode === 'synergy');
+      mode.textContent  = _isSyn ? 'Synergy Wallet' : 'EVM Wallet';
+      mode.className    = 'wallet-mode hybrid';
+      note.textContent  = _isSyn
+        ? 'Signing: Synergy Wallet · EIP-712 · ' + walletAddress.slice(0,8) + '…'
+        : 'Signing: EIP-712';
+      btn.textContent   = 'Disconnect Synergy';
+      btn.onclick       = disconnectWallet;
+      // UMA display
+      try {
+        walletUma = callerIdentity(walletAddress);
+        var umaRow = document.getElementById('umaRow');
+        var umaDisp = document.getElementById('umaDisplay');
+        var umaCopyBtn = document.getElementById('umaCopyBtn');
+        if (umaRow && umaDisp) { umaDisp.textContent = walletUma; umaRow.style.display = 'flex'; }
+        if (umaCopyBtn) {
+          umaCopyBtn.onclick = function() {
+            if (navigator.clipboard) {
+              navigator.clipboard.writeText(walletUma).then(function() {
+                umaCopyBtn.textContent = '✓ copied';
+                setTimeout(function(){ umaCopyBtn.textContent = 'copy'; }, 1500);
+              });
+            }
+          };
+        }
+      } catch(e) { console.warn('UMA compute failed:', e); }
+      var runBtn = document.getElementById('runBtn');
+      if (runBtn && currentBytecode) runBtn.disabled = false;
+      if (currentBytecode && typeof populateFunctionPicker === 'function') populateFunctionPicker();
+    } else {
+      dot.classList.remove('connected');
+      label.textContent = 'No wallet connected';
+      addr.textContent  = '';
+      walletUma = null;
+      var umaRow = document.getElementById('umaRow');
+      if (umaRow) umaRow.style.display = 'none';
+      if (compilerTrust === 'compiler-attested' && compilerKeyId) {
+        mode.textContent = 'Compiler-Attested PQC';
+        mode.className   = 'wallet-mode persistent';
+        note.textContent = 'Signing: ML-DSA-65 · key_id ' + compilerKeyId;
+      } else {
+        mode.textContent = 'PQC signing';
+        mode.className   = 'wallet-mode ephemeral';
+        note.textContent = 'Signing: ML-DSA-65 (compiler-attested)';
+      }
+      btn.textContent   = 'Connect Synergy Wallet';
+      btn.onclick       = connectWallet;
+    }
+  }
+
+/* ── Editor ──────────────────────────────────────────────────────────────── */
   function updateLineNums() {
     var lines = document.getElementById('editor').value.split('\n').length;
     var nums = []; for (var i = 1; i <= lines; i++) nums.push(i);
