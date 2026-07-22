@@ -1,6 +1,8 @@
 use std::collections::{HashMap, BTreeMap, BTreeSet};
 use super::opcode::{OpCode, VMError};
 use ruint::aliases::U256;
+#[cfg(feature = "native")]
+use pqc_shims::{dilithium, kyber, falcon, sphincs};
 
 // ── PR-B constants ──────────────────────────────────────────────────────────
 
@@ -641,7 +643,9 @@ impl QuantumVM {
             // ── Comparison ─────────────────────────────────────────────────
             OpCode::Eq => {
                 let b = self.pop()?; let a = self.pop()?;
-                let result = if a.is_signed() || b.is_signed() { a.as_i128()? == b.as_i128()? }
+                // Use signed path only when BOTH operands are signed ints.
+                // If either is a large uint (U128/U256), promote both to U256.
+                let result = if a.is_signed() && b.is_signed() { a.as_i128()? == b.as_i128()? }
                     else if a.is_uint_compat() && b.is_uint_compat() { a.as_u256()? == b.as_u256()? }
                     else if let (Value::Bool(x), Value::Bool(y)) = (&a, &b) { x == y }
                     else if let (Value::Str(x), Value::Str(y)) = (&a, &b) { x == y }
@@ -650,7 +654,7 @@ impl QuantumVM {
             }
             OpCode::Ne => {
                 let b = self.pop()?; let a = self.pop()?;
-                let result = if a.is_signed() || b.is_signed() { a.as_i128()? != b.as_i128()? }
+                let result = if a.is_signed() && b.is_signed() { a.as_i128()? != b.as_i128()? }
                     else if a.is_uint_compat() && b.is_uint_compat() { a.as_u256()? != b.as_u256()? }
                     else if let (Value::Bool(x), Value::Bool(y)) = (&a, &b) { x != y }
                     else if let (Value::Str(x), Value::Str(y)) = (&a, &b) { x != y }
@@ -659,7 +663,7 @@ impl QuantumVM {
             }
             OpCode::Lt => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     self.push(Value::Bool(a.as_i128()? < b.as_i128()?))?;
                 } else if a.is_uint_compat() && b.is_uint_compat() {
                     self.push(Value::Bool(a.as_u256()? < b.as_u256()?))?;
@@ -667,7 +671,7 @@ impl QuantumVM {
             }
             OpCode::Le => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     self.push(Value::Bool(a.as_i128()? <= b.as_i128()?))?;
                 } else if a.is_uint_compat() && b.is_uint_compat() {
                     self.push(Value::Bool(a.as_u256()? <= b.as_u256()?))?;
@@ -675,7 +679,7 @@ impl QuantumVM {
             }
             OpCode::Gt => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     self.push(Value::Bool(a.as_i128()? > b.as_i128()?))?;
                 } else if a.is_uint_compat() && b.is_uint_compat() {
                     self.push(Value::Bool(a.as_u256()? > b.as_u256()?))?;
@@ -683,7 +687,7 @@ impl QuantumVM {
             }
             OpCode::Ge => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     self.push(Value::Bool(a.as_i128()? >= b.as_i128()?))?;
                 } else if a.is_uint_compat() && b.is_uint_compat() {
                     self.push(Value::Bool(a.as_u256()? >= b.as_u256()?))?;
@@ -790,13 +794,29 @@ impl QuantumVM {
                 self.push(Value::from_u256_shrink(v))?;
             }
             OpCode::LoadCaller => {
-                // Devnet: signing key right-aligned; Mainnet: uma_ref.
-                // See vm/src/uma.rs for the UMA registry interface.
+                // ── LoadCaller (0x50) ─────────────────────────────────────
+                //
+                // Pushes the caller identity as a 32-byte UInt256.
+                //
+                // Devnet:   signing_key (EVM address) right-aligned in 32 bytes
+                //           — bytes 0..11 zero, bytes 12..31 = 20-byte address.
+                //
+                // Mainnet:  consensus-resolved UMA reference (32 bytes).
+                //           The consensus layer populates CallContext.uma_ref
+                //           BEFORE the VM executes (U-8: resolution must not
+                //           influence consensus ordering).  The VM never
+                //           derives or resolves UMA itself (U-13).
+                //
+                // `caller_value()` encapsulates the devnet/mainnet switch.
+                // No code change is needed here when the UMA registry is
+                // wired — only CallContext construction at the call site
+                // (synq-server /session/run) needs updating.
                 let b = self.call_context.caller_value();
                 self.stack.push(Value::U256(U256::from_be_bytes::<32>(b)));
             }
 
             // ── PQC ────────────────────────────────────────────────────────
+#[cfg(feature = "native")]
             // ── Map operations ──────────────────────────────────────────────
             // MapNew: reads inline name, initialises an empty Map at the named
             // state address and pushes that address (I32) as the handle.
@@ -823,8 +843,8 @@ impl QuantumVM {
                 let key = value_to_key(&key_val)?;
                 eprintln!("[VM] MapGet slot={} key_type={} key_hex={}",
                     map_addr,
-                    match &key_val { Value::U256(_) => "U256", Value::Bytes(_) => "Bytes",
-                        Value::U128(_) => "U128", Value::I32(_) => "I32", _ => "other" },
+                    match &key_val { crate::Value::U256(_) => "U256", crate::Value::Bytes(_) => "Bytes",
+                        crate::Value::U128(_) => "U128", crate::Value::I32(_) => "I32", _ => "other" },
                     key.iter().map(|b| format!("{:02x}", b)).collect::<String>());
                 match self.memory.get(&map_addr) {
                     Some(Value::Map(m)) => {
@@ -843,8 +863,8 @@ impl QuantumVM {
                 let key = value_to_key(&key_val)?;
                 eprintln!("[VM] MapSet slot={} key_type={} key_hex={} val={:?}",
                     map_addr,
-                    match &key_val { Value::U256(_) => "U256", Value::Bytes(_) => "Bytes",
-                        Value::U128(_) => "U128", Value::I32(_) => "I32", _ => "other" },
+                    match &key_val { crate::Value::U256(_) => "U256", crate::Value::Bytes(_) => "Bytes",
+                        crate::Value::U128(_) => "U128", crate::Value::I32(_) => "I32", _ => "other" },
                     key.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
                     val);
                 match self.memory.entry(map_addr).or_insert_with(|| Value::Map(BTreeMap::new())) {
@@ -937,6 +957,7 @@ impl QuantumVM {
                 let addr_val = self.pop()?;
                 let len = match &addr_val {
                     Value::Bytes(b) => b.len() as i32,
+                    Value::Str(s)   => s.len() as i32,
                     Value::I32(a) => {
                         match self.memory.get(&(*a as usize)) {
                             Some(Value::Bytes(b)) => b.len() as i32,
@@ -961,11 +982,33 @@ impl QuantumVM {
                 self.push(Value::Bool(eq))?;
             }
 
-            OpCode::DilithiumVerify | OpCode::KyberKeyExchange |
-            OpCode::FalconVerify   | OpCode::SphincsVerify => {
-                // PQC opcodes are native-only — not available in WASM build.
-                let _ = self.pop(); let _ = self.pop(); let _ = self.pop();
-                return Err(VMError::RuntimeError("PQC opcodes not supported in WASM build".into()));
+            OpCode::DilithiumVerify => {
+                let public_key = self.pop()?.as_bytes()?.to_vec();
+                let message    = self.pop()?.as_bytes()?.to_vec();
+                let signature  = self.pop()?.as_bytes()?.to_vec();
+                let result = dilithium::verify(&message, &signature, &public_key);
+                self.push(Value::Bool(result))?;
+            }
+            OpCode::KyberKeyExchange => {
+                let private_key = self.pop()?.as_bytes()?.to_vec();
+                let ciphertext  = self.pop()?.as_bytes()?.to_vec();
+                let shared_secret = kyber::decaps(&ciphertext, &private_key)
+                    .map_err(VMError::RuntimeError)?;
+                self.push(Value::Bytes(shared_secret))?;
+            }
+            OpCode::FalconVerify => {
+                let public_key = self.pop()?.as_bytes()?.to_vec();
+                let message    = self.pop()?.as_bytes()?.to_vec();
+                let signature  = self.pop()?.as_bytes()?.to_vec();
+                let result = falcon::verify(&message, &signature, &public_key);
+                self.push(Value::Bool(result))?;
+            }
+            OpCode::SphincsVerify => {
+                let public_key = self.pop()?.as_bytes()?.to_vec();
+                let message    = self.pop()?.as_bytes()?.to_vec();
+                let signature  = self.pop()?.as_bytes()?.to_vec();
+                let result = sphincs::verify(&message, &signature, &public_key);
+                self.push(Value::Bool(result))?;
             }
 #[cfg(not(feature = "native"))]
             OpCode::DilithiumVerify | OpCode::KyberKeyExchange |
@@ -1028,7 +1071,7 @@ impl QuantumVM {
                 if self.stack.len() < count { return Err(VMError::StackUnderflow); }
                 let mut elems = Vec::with_capacity(count);
                 for _ in 0..count { elems.push(self.stack.pop().ok_or(VMError::StackUnderflow)?); }
-                elems.reverse();
+                elems.reverse(); // restore push order
                 self.stack.push(Value::Tuple(elems));
             }
             OpCode::TupleUnpack => {
@@ -1051,7 +1094,9 @@ impl QuantumVM {
                 let v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
                 self.stack.push(Value::SynqOption(Some(Box::new(v))));
             }
-            OpCode::OptionNone => { self.stack.push(Value::SynqOption(None)); }
+            OpCode::OptionNone => {
+                self.stack.push(Value::SynqOption(None));
+            }
             OpCode::OptionUnwrap => {
                 let v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
                 if let Value::SynqOption(Some(inner)) = v { self.stack.push(*inner); }
@@ -1072,11 +1117,13 @@ impl QuantumVM {
             }
             OpCode::IsOk => {
                 let v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
-                self.stack.push(Value::I32(if matches!(v, Value::SynqResult(true, _)) { 1 } else { 0 }));
+                let ok = matches!(v, Value::SynqResult(true, _));
+                self.stack.push(Value::I32(if ok { 1 } else { 0 }));
             }
             OpCode::IsSome => {
                 let v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
-                self.stack.push(Value::I32(if matches!(v, Value::SynqOption(Some(_))) { 1 } else { 0 }));
+                let some = matches!(v, Value::SynqOption(Some(_)));
+                self.stack.push(Value::I32(if some { 1 } else { 0 }));
             }
             OpCode::Print => {
                 let value = self.pop()?;
@@ -1149,21 +1196,54 @@ impl QuantumVM {
 }
 
 #[derive(Clone, Debug, Default)]
+/// Identity context supplied to the VM before each function call.
+///
+/// # Devnet vs mainnet semantics
+///
+/// `signing_key` — the 20-byte EVM address recovered from the EIP-712
+/// signature on the call.  This is the ONLY field populated on devnet.
+///
+/// `uma_ref` — the 32-byte Universal Meta-Address reference resolved by the
+/// Synergy consensus layer *before* the VM executes.  On devnet this is
+/// always `None`.  On mainnet the consensus layer will resolve the signing
+/// key to a stable UMA and populate this field; `LoadCaller` (0x50) will
+/// then push `uma_ref` rather than `signing_key`, satisfying invariants
+/// U-2, U-3, and U-4 from the Synergy Security Specification v1.6.
+///
+/// Resolution is performed outside the VM (U-8: must not influence
+/// consensus ordering) and failures must be handled upstream (U-14: must
+/// not halt execution).  The VM itself MUST NOT attempt UMA derivation —
+/// that would violate U-13 (no contract-specific semantics in the UMA
+/// layer).
 pub struct CallContext {
+    /// Raw 20-byte EVM signing address — devnet identity proxy.
     pub signing_key: [u8; 20],
+    /// Consensus-resolved UMA reference (32 bytes).  `None` on devnet.
+    /// When `Some`, `LoadCaller` pushes this value instead of `signing_key`.
     pub uma_ref: Option<[u8; 32]>,
 }
 
 impl CallContext {
+    /// Construct a devnet call context from a recovered EVM address.
+    /// `uma_ref` is set to `None` — UMA resolution is not yet wired.
     pub fn from_address(addr: [u8; 20]) -> Self {
         Self { signing_key: addr, uma_ref: None }
     }
+
+    /// Construct a mainnet-ready call context with a resolved UMA reference.
+    /// The signing key is retained for audit / logging purposes.
     pub fn from_uma(uma: [u8; 32], signing_key: [u8; 20]) -> Self {
         Self { signing_key, uma_ref: Some(uma) }
     }
+
+    /// Anonymous context — no authenticated caller.
     pub fn anonymous() -> Self {
         Self { signing_key: [0u8; 20], uma_ref: None }
     }
+
+    /// Returns the 32-byte value that `LoadCaller` pushes onto the stack.
+    /// Devnet (uma_ref = None): signing key right-aligned in 32 bytes.
+    /// Mainnet (uma_ref = Some): the resolved UMA reference directly.
     pub fn caller_value(&self) -> [u8; 32] {
         match self.uma_ref {
             Some(uma) => uma,

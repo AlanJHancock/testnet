@@ -643,7 +643,9 @@ impl QuantumVM {
             // ── Comparison ─────────────────────────────────────────────────
             OpCode::Eq => {
                 let b = self.pop()?; let a = self.pop()?;
-                let result = if a.is_signed() || b.is_signed() { a.as_i128()? == b.as_i128()? }
+                // Use signed path only when BOTH operands are signed ints.
+                // If either is a large uint (U128/U256), promote both to U256.
+                let result = if a.is_signed() && b.is_signed() { a.as_i128()? == b.as_i128()? }
                     else if a.is_uint_compat() && b.is_uint_compat() { a.as_u256()? == b.as_u256()? }
                     else if let (Value::Bool(x), Value::Bool(y)) = (&a, &b) { x == y }
                     else if let (Value::Str(x), Value::Str(y)) = (&a, &b) { x == y }
@@ -652,7 +654,7 @@ impl QuantumVM {
             }
             OpCode::Ne => {
                 let b = self.pop()?; let a = self.pop()?;
-                let result = if a.is_signed() || b.is_signed() { a.as_i128()? != b.as_i128()? }
+                let result = if a.is_signed() && b.is_signed() { a.as_i128()? != b.as_i128()? }
                     else if a.is_uint_compat() && b.is_uint_compat() { a.as_u256()? != b.as_u256()? }
                     else if let (Value::Bool(x), Value::Bool(y)) = (&a, &b) { x != y }
                     else if let (Value::Str(x), Value::Str(y)) = (&a, &b) { x != y }
@@ -661,7 +663,7 @@ impl QuantumVM {
             }
             OpCode::Lt => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     self.push(Value::Bool(a.as_i128()? < b.as_i128()?))?;
                 } else if a.is_uint_compat() && b.is_uint_compat() {
                     self.push(Value::Bool(a.as_u256()? < b.as_u256()?))?;
@@ -669,7 +671,7 @@ impl QuantumVM {
             }
             OpCode::Le => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     self.push(Value::Bool(a.as_i128()? <= b.as_i128()?))?;
                 } else if a.is_uint_compat() && b.is_uint_compat() {
                     self.push(Value::Bool(a.as_u256()? <= b.as_u256()?))?;
@@ -677,7 +679,7 @@ impl QuantumVM {
             }
             OpCode::Gt => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     self.push(Value::Bool(a.as_i128()? > b.as_i128()?))?;
                 } else if a.is_uint_compat() && b.is_uint_compat() {
                     self.push(Value::Bool(a.as_u256()? > b.as_u256()?))?;
@@ -685,7 +687,7 @@ impl QuantumVM {
             }
             OpCode::Ge => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     self.push(Value::Bool(a.as_i128()? >= b.as_i128()?))?;
                 } else if a.is_uint_compat() && b.is_uint_compat() {
                     self.push(Value::Bool(a.as_u256()? >= b.as_u256()?))?;
