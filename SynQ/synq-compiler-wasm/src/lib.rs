@@ -53,6 +53,23 @@ pub struct CompileResult {
 }
 
 
+/// Helper: convert AST Type to the string the IDE expects.
+fn type_name(ty: &Type) -> String {
+    match ty {
+        Type::Bool    => "bool".to_string(),
+        Type::Str     => "str".to_string(),
+        Type::Address => "address".to_string(),
+        Type::UInt8   => "u8".to_string(),
+        Type::UInt16  => "u16".to_string(),
+        Type::UInt32  => "u32".to_string(),
+        Type::UInt64  => "u64".to_string(),
+        Type::UInt128 => "u128".to_string(),
+        Type::UInt256 => "u256".to_string(),
+        Type::Bytes   => "bytes".to_string(),
+        _             => "u256".to_string(),
+    }
+}
+
 /// Top-level compile entry point.
 /// Returns `Err(String)` for hard errors, `Ok(CompileResult)` with warnings for soft issues.
 pub fn compile(source: &str) -> Result<CompileResult, String> {
@@ -373,6 +390,20 @@ use wasm_bindgen::prelude::*;
 use serde::Serialize;
 
 #[derive(Serialize)]
+struct WasmParamInfo {
+    name: String,
+    ty:   String,
+}
+
+#[derive(Serialize)]
+struct WasmFunctionInfo {
+    name:        String,
+    params:      Vec<WasmParamInfo>,
+    return_type: Option<String>,
+    argc:        usize,
+}
+
+#[derive(Serialize)]
 struct WasmCompileResult {
     success:           bool,
     bytecode:          Option<String>,
@@ -380,22 +411,56 @@ struct WasmCompileResult {
     warnings:          Vec<String>,
     errors:            Vec<String>,
     /// Contract names this contract calls via extern_call.
-    /// Returned to the frontend so it can be sent to the server for cross-validation.
     extern_contracts:  Vec<String>,
+    /// Function metadata — param names, types, return types.
+    functions:         Vec<WasmFunctionInfo>,
+    /// Per-state-variable type names for IDE rendering.
+    state_var_types:   std::collections::HashMap<String, String>,
 }
 
 /// Compile a SynQ source string in-browser. Returns JSON.
 /// Bytecode is lowercase hex. Call POST /synq/sign to attach ML-DSA-65 sidecar.
 #[wasm_bindgen]
 pub fn compile_synq(source: &str) -> String {
+    // Parse AST separately so we can extract metadata even when compile() succeeds
+    let ast = parser::parse(source).unwrap_or_default();
     let result = match compile(source) {
-        Ok(cr) => WasmCompileResult {
-            success:          true,
-            bytecode:         Some(hex::encode(&cr.bytecode)),
-            state_vars:       cr.state_vars,
-            warnings:         cr.warnings,
-            errors:           vec![],
-            extern_contracts: cr.extern_contracts,
+        Ok(cr) => {
+            // Extract function metadata from the AST for the IDE
+            let mut functions: Vec<WasmFunctionInfo> = Vec::new();
+            let mut state_var_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+            for unit in &ast {
+                if let SourceUnit::Contract(c) = unit {
+                    for part in &c.parts {
+                        if let ContractPart::Function(f) = part {
+                            let params: Vec<WasmParamInfo> = f.params.iter().map(|p| WasmParamInfo {
+                                name: p.name.clone(),
+                                ty:   type_name(&p.ty),
+                            }).collect();
+                            let argc = params.len();
+                            functions.push(WasmFunctionInfo {
+                                name:        f.name.clone(),
+                                params,
+                                return_type: f.returns.as_ref().map(|t| type_name(t)),
+                                argc,
+                            });
+                        }
+                        if let ContractPart::StateVariable(sv) = part {
+                            state_var_types.insert(sv.name.clone(), type_name(&sv.ty));
+                        }
+                    }
+                }
+            }
+            WasmCompileResult {
+                success:          true,
+                bytecode:         Some(hex::encode(&cr.bytecode)),
+                state_vars:       cr.state_vars,
+                warnings:         cr.warnings,
+                errors:           vec![],
+                extern_contracts: cr.extern_contracts,
+                functions,
+                state_var_types,
+            }
         },
         Err(e) => WasmCompileResult {
             success:          false,
@@ -404,6 +469,8 @@ pub fn compile_synq(source: &str) -> String {
             warnings:         vec![],
             errors:           vec![e],
             extern_contracts: vec![],
+            functions:        vec![],
+            state_var_types:  std::collections::HashMap::new(),
         },
     };
     serde_json::to_string(&result)

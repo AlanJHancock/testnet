@@ -1340,6 +1340,10 @@
       currentExternContracts = data.extern_contracts  || [];
       currentContractAddress = data.contract_address  || null;
       compileFunctions       = data.functions         || [];
+      // WASM path now returns state_var_types too — merge it in
+      if (data.state_var_types && Object.keys(data.state_var_types).length > 0) {
+        currentStateVarTypes = data.state_var_types;
+      }
       stateVarNames = currentStateVars.map(function(sv) { return sv[0]; });
       stateSnapshot = {};
 
@@ -2025,7 +2029,9 @@
       } else {
         // Validate: unsigned integers only (SynQ has no signed types)
         if (!/^\d+$/.test(raw)) {
-          argError = 'param_' + p + ': "' + raw + '" must be a non-negative integer (all SynQ types are unsigned).';
+          // Skip validation for str-typed params
+        if (selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'str') break;
+        argError = 'param_' + p + ': "' + raw + '" must be a non-negative integer (all SynQ types are unsigned).';
           break;
         }
         // Safe JS integer? Send as number; else send quoted decimal string.
