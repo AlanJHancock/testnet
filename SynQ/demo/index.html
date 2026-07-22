@@ -397,6 +397,8 @@
       else showWalletError('Wallet error: ' + (e.message || String(e)));
     }
   }
+  // Expose early so onclick attributes can call it before the IIFE bottom runs
+  window.connectWallet = connectWallet;
 
   function showWalletError(msg) {
     var out = document.getElementById('vmOutput');
@@ -424,6 +426,7 @@
     walletAddress = null; _walletMode = 'none'; updateWalletUI();
     document.getElementById('attestPanel').classList.remove('show');
   }
+  window.disconnectWallet = disconnectWallet;
 
   function regenerateKey() { /* no-op */ }
 
