@@ -160,7 +160,8 @@ impl Value {
     pub fn as_bytes(&self) -> Result<&[u8], VMError> {
         match self {
             Value::Bytes(b) => Ok(b),
-            _ => Err(VMError::RuntimeError("Expected bytes".to_string())),
+            Value::Str(s)   => Ok(s.as_bytes()),
+            _ => Err(VMError::RuntimeError(format!("Expected bytes, got {:?}", std::mem::discriminant(self)))),
         }
     }
 
@@ -360,6 +361,8 @@ pub struct QuantumVM {
     call_stack: Vec<CallFrame>,
     halted: bool,
     functions: HashMap<String, FunctionEntry>,
+    /// Captured Print/emit output — drained by caller after call_function().
+    pub print_log: Vec<String>,
 
     // ── PR-B Item 3: step limit ─────────────────────────────────────────────
     /// Steps executed in the current call_function() invocation.
@@ -373,6 +376,21 @@ pub struct QuantumVM {
     /// Hard limit on call_stack depth enforced at the Call opcode.
     /// Default: DEFAULT_MAX_CALL_DEPTH.
     pub max_call_depth: usize,
+}
+
+/// Format a VM Value for Print/emit output.
+fn vm_value_display(v: &Value) -> String {
+    match v {
+        Value::I32(n)   => n.to_string(),
+        Value::I64(n)   => n.to_string(),
+        Value::U128(n)  => n.to_string(),
+        Value::U256(n)  => n.to_string(),
+        Value::Bool(b)  => b.to_string(),
+        Value::Bytes(b) => String::from_utf8(b.clone())
+                              .unwrap_or_else(|_| format!("0x{}", b.iter().map(|x| format!("{:02x}", x)).collect::<String>())),
+        Value::Str(s)   => s.clone(),
+        _               => "[complex]".to_string(),
+    }
 }
 
 impl QuantumVM {
@@ -390,6 +408,7 @@ impl QuantumVM {
             call_stack: Vec::new(),
             halted: false,
             functions: HashMap::new(),
+            print_log: Vec::new(),
             steps: 0,
             max_steps: DEFAULT_MAX_STEPS,
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
@@ -446,6 +465,7 @@ impl QuantumVM {
         self.stack.clear();
         self.call_stack.clear();
         self.halted = false;
+        self.print_log.clear();
 
         // Write params into memory — coerce to declared signedness
         for ((addr, value), is_signed) in entry.param_addresses.iter()
@@ -1060,7 +1080,7 @@ impl QuantumVM {
             }
             OpCode::Print => {
                 let value = self.pop()?;
-                println!("{:?}", value);
+                self.print_log.push(vm_value_display(&value));
             }
             OpCode::Halt => {
                 self.halted = true;

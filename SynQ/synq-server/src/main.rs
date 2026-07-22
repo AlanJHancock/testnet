@@ -472,7 +472,11 @@ fn value_to_json(v: &Value) -> serde_json::Value {
         Value::U128(n)  => json!({"type": "UInt256", "value": n.to_string()}),
         Value::U256(n)  => json!({"type": "UInt256", "value": n.to_string()}),
         Value::Bool(b)  => json!({"type": "Bool", "value": if *b { "true" } else { "false" }}),
-        Value::Bytes(b) => json!({"type": "Bytes","value": hex_encode(b)}),
+        Value::Bytes(b) => {
+            if let Ok(s) = std::str::from_utf8(b) { json!({"type": "String", "value": s}) }
+            else { json!({"type": "Bytes", "value": hex_encode(b)}) }
+        },
+        Value::Str(s) => json!({"type": "String", "value": s}),
         Value::Map(_)        => json!({"type": "Map",   "value": "[map]"}),
         Value::Set(_)        => json!({"type": "Set",   "value": "[set]"}),
         Value::Str(s)        => json!({"type": "String", "value": s}),
@@ -519,6 +523,8 @@ fn parse_arg(v: &serde_json::Value) -> Result<Value, String> {
         }
         serde_json::Value::String(s) => {
             let s = s.trim();
+            // Empty string → UTF-8 string param (not numeric zero)
+            if s.is_empty() { return Ok(Value::Bytes(vec![])); }
             if s.starts_with('-') {
                 if let Ok(i) = s.parse::<i64>() {
                     return Ok(if i >= i32::MIN as i64 { Value::I32(i as i32) } else { Value::I64(i) });
@@ -528,9 +534,21 @@ fn parse_arg(v: &serde_json::Value) -> Result<Value, String> {
             if let Ok(u) = s.parse::<u128>() {
                 return Ok(if u <= i32::MAX as u128 { Value::I32(u as i32) } else { Value::U128(u) });
             }
+            // Hex addresses (0x...) → Bytes
+            if s.starts_with("0x") || s.starts_with("0X") {
+                let hex = if s.len() > 2 { &s[2..] } else { "" };
+                // Pad to 32 bytes (64 hex chars) for addresses
+                let padded = format!("{:0>64}", hex);
+                return match hex::decode(&padded) {
+                    Ok(b)  => Ok(Value::Bytes(b)),
+                    Err(_) => Err(format!("Invalid hex address: {}", s)),
+                };
+            }
+            // Try U256 for large decimal literals
             match s.parse::<U256>() {
                 Ok(v)  => Ok(Value::U256(v)),
-                Err(_) => Err(format!("Cannot parse {:?} as UInt256", s)),
+                // Non-numeric, non-hex → treat as UTF-8 string (str param)
+                Err(_) => Ok(Value::Bytes(s.as_bytes().to_vec())),
             }
         }
         other => Err(format!("Expected number or string, got {}", other)),
@@ -1598,12 +1616,48 @@ struct SessionRunRequest {
     call_signature: Option<String>,  // "functionName(arg0, arg1, ...)" — must match frontend
 }
 
+#[derive(Debug, serde::Serialize)]
+struct EventLog {
+    name: String,
+    args: Vec<serde_json::Value>,
+}
+
 #[derive(serde::Serialize)]
 struct RunResponse {
     success: bool,
     result:  Option<serde_json::Value>,
     output:  String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    events:  Vec<EventLog>,
     error:   Option<String>,
+}
+
+
+/// Parse structured EventLog entries from raw Print output.
+/// emit codegen emits: Print("event:Name") then Print(arg0), Print(arg1), ...
+fn parse_event_logs(log: &[String]) -> Vec<EventLog> {
+    let mut events: Vec<EventLog> = Vec::new();
+    let mut i = 0;
+    while i < log.len() {
+        if let Some(name) = log[i].strip_prefix("event:") {
+            let event_name = name.to_string();
+            let mut args: Vec<serde_json::Value> = Vec::new();
+            i += 1;
+            while i < log.len() && !log[i].starts_with("event:") {
+                let s = &log[i];
+                let v = if let Ok(n) = s.parse::<i64>() { serde_json::json!(n) }
+                        else if s == "true"  { serde_json::json!(true)  }
+                        else if s == "false" { serde_json::json!(false) }
+                        else { serde_json::Value::String(s.clone()) };
+                args.push(v);
+                i += 1;
+            }
+            events.push(EventLog { name: event_name, args });
+        } else {
+            i += 1;
+        }
+    }
+    events
 }
 
 async fn session_run_handler(
@@ -1612,7 +1666,7 @@ async fn session_run_handler(
     Json(req): Json<SessionRunRequest>,
 ) -> (StatusCode, RespJson<RunResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), error: Some("rate limit exceeded — retry later".into()) }));
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), events: Vec::new(), error: Some("rate limit exceeded — retry later".into()) }));
     }
     let mut vm_args: Vec<Value> = Vec::new();
     // Build call_sig before args are moved — used in EIP-712 digest if wallet auth is present.
@@ -1636,6 +1690,7 @@ async fn session_run_handler(
             Ok(v)  => vm_args.push(v),
             Err(e) => return (StatusCode::OK, RespJson(RunResponse {
                 success: false, result: None, output: String::new(),
+                events: Vec::new(),
                 error: Some(format!("arg[{}]: {}", i, e)),
             })),
         }
@@ -1647,6 +1702,7 @@ async fn session_run_handler(
             Some(s) => s,
             None    => return (StatusCode::OK, RespJson(RunResponse {
                 success: false, result: None, output: String::new(),
+                events: Vec::new(),
                 error: Some(format!("Session '{}' not found or expired", req.session_id)),
             })),
         }
@@ -1662,6 +1718,7 @@ async fn session_run_handler(
                 { state.sessions.lock().unwrap().insert(req.session_id.clone(), session); }
                 return (StatusCode::UNAUTHORIZED, RespJson(RunResponse {
                     success: false, result: None, output: String::new(),
+                    events: Vec::new(),
                     error: Some("caller auth: no pending nonce — call GET /session/:id/nonce first".into()),
                 }));
             }
@@ -1669,6 +1726,7 @@ async fn session_run_handler(
                 { state.sessions.lock().unwrap().insert(req.session_id.clone(), session); }
                 return (StatusCode::UNAUTHORIZED, RespJson(RunResponse {
                     success: false, result: None, output: String::new(),
+                    events: Vec::new(),
                     error: Some("caller auth: nonce mismatch — nonces are single-use, request a new one".into()),
                 }));
             }
@@ -1679,6 +1737,7 @@ async fn session_run_handler(
             { state.sessions.lock().unwrap().insert(req.session_id.clone(), session); }
             return (StatusCode::UNAUTHORIZED, RespJson(RunResponse {
                 success: false, result: None, output: String::new(),
+                events: Vec::new(),
                 error: Some("caller auth: nonce already used — replay attack rejected".into()),
             }));
         }
@@ -1706,7 +1765,7 @@ async fn session_run_handler(
             Err(e) => {
                 { state.sessions.lock().unwrap().insert(req.session_id.clone(), session); }
                 return (StatusCode::BAD_REQUEST, RespJson(RunResponse {
-                    success: false, result: None, output: String::new(), error: Some(e),
+                    success: false, result: None, output: String::new(), events: Vec::new(), error: Some(e),
                 }));
             }
         };
@@ -1719,6 +1778,7 @@ async fn session_run_handler(
                 { state.sessions.lock().unwrap().insert(req.session_id.clone(), session); }
                 return (StatusCode::UNAUTHORIZED, RespJson(RunResponse {
                     success: false, result: None, output: String::new(),
+                    events: Vec::new(),
                     error: Some(format!("caller auth: ecrecover failed: {}", e)),
                 }));
             }
@@ -1730,6 +1790,7 @@ async fn session_run_handler(
             { state.sessions.lock().unwrap().insert(req.session_id.clone(), session); }
             return (StatusCode::UNAUTHORIZED, RespJson(RunResponse {
                 success: false, result: None, output: String::new(),
+                events: Vec::new(),
                 error: Some("caller auth: signature does not match claimed evm_address".into()),
             }));
         }
@@ -1742,6 +1803,7 @@ async fn session_run_handler(
         { state.sessions.lock().unwrap().insert(req.session_id.clone(), session); }
         return (StatusCode::BAD_REQUEST, RespJson(RunResponse {
             success: false, result: None, output: String::new(),
+            events: Vec::new(),
             error: Some("caller auth: evm_address, evm_signature, and call_nonce must all be provided together".into()),
         }));
     } else {
@@ -1788,8 +1850,10 @@ async fn session_run_handler(
     let call_result = session.vm.call_function(&req.function, &vm_args);
     eprintln!("[RUN] result={:?}", call_result);
     session.vm.call_context = synq_vm::CallContext::anonymous();
+    let raw_log = std::mem::take(&mut session.vm.print_log);
     session.last_used = Instant::now();
     { state.sessions.lock().unwrap().insert(req.session_id, session); }
+    let event_logs = parse_event_logs(&raw_log);
 
     match call_result {
         Ok(maybe_val) => {
@@ -1797,14 +1861,16 @@ async fn session_run_handler(
                 Some(v) => (Some(value_to_json(v)), format!("Return value: {}", value_display(v))),
                 None    => (None, "Function completed (no return value)".to_string()),
             };
-            (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, error: None }))
+            (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None }))
         }
         Err(synq_vm::VMError::Reverted(msg)) => (StatusCode::OK, RespJson(RunResponse {
             success: false, result: None, output: String::new(),
+            events: Vec::new(),
             error: Some(format!("require failed: {}", msg)),
         })),
         Err(e) => (StatusCode::OK, RespJson(RunResponse {
             success: false, result: None, output: String::new(),
+            events: Vec::new(),
             error: Some(format!("{}", e)),
         })),
     }

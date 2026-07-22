@@ -776,6 +776,25 @@ impl CodeGenerator {
     }
 
     fn gen_call(&mut self, name: &str, args: &[Expression], scope: &mut FunctionScope) -> Result<(), String> {
+        // ── String builtins ───────────────────────────────────────────────────
+        if name == "str_concat" && args.len() == 2 {
+            self.gen_expression(&args[0], scope)?;
+            self.gen_expression(&args[1], scope)?;
+            self.assembler.emit_op(OpCode::StrConcat);
+            return Ok(());
+        }
+        if name == "str_len" && args.len() == 1 {
+            self.gen_expression(&args[0], scope)?;
+            self.assembler.emit_op(OpCode::StrLen);
+            return Ok(());
+        }
+        if name == "str_eq" && args.len() == 2 {
+            self.gen_expression(&args[0], scope)?;
+            self.gen_expression(&args[1], scope)?;
+            self.assembler.emit_op(OpCode::StrEq);
+            return Ok(());
+        }
+        // ── End string builtins ───────────────────────────────────────────────
         if let Some(opcode) = pqc_builtin_opcode(name) {
             // PQC/KEM builtins: argument push order matches the VM
             // opcode handler's pop order exactly (see vm.rs), which is
