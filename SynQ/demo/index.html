@@ -410,8 +410,21 @@
       updateWalletUI();
       attachEthereumListeners();
     } catch(e) {
-      if (e.code === 4001) showWalletError('Connection rejected — approve in Synergy Wallet to sign calls.');
-      else showWalletError('Wallet error: ' + (e.message || String(e)));
+      // "message channel closed before a response" = extension installed but
+      // hanksweb.co.uk is not whitelisted in Synergy Wallet — user must add
+      // the origin in the extension settings and reload.
+      var msg = e.message || String(e);
+      if (e.code === 4001) {
+        showWalletError('Connection rejected — approve in Synergy Wallet to sign calls.');
+      } else if (msg.toLowerCase().indexOf('message channel') >= 0 ||
+                 msg.toLowerCase().indexOf('closed before') >= 0) {
+        showWalletError(
+          'Synergy Wallet extension did not respond. ' +
+          'Open the extension → Settings → Allowed Sites and add hanksweb.co.uk, then reload.'
+        );
+      } else {
+        showWalletError('Wallet error: ' + msg);
+      }
     }
   }
   // Expose early so onclick attributes can call it before the IIFE bottom runs
@@ -438,6 +451,21 @@
       } else { walletAddress = accs[0]; updateWalletUI(); }
     });
   }
+
+  /* ── Auto-restore approved wallet session on reload ─────────────────────── */
+  // eth_accounts (no popup) silently returns already-approved accounts.
+  // Only fires if the extension has already whitelisted this origin.
+  (function autoRestoreWallet() {
+    if (!window.ethereum) return;
+    window.ethereum.request({ method: 'eth_accounts' }).then(function(accs) {
+      if (accs && accs.length) {
+        walletAddress = accs[0];
+        _walletMode = (window.synergy && window.synergy.isSynergyWallet) ? 'synergy' : 'ethereum';
+        updateWalletUI();
+        attachEthereumListeners();
+      }
+    }).catch(function() { /* extension not ready — ignore */ });
+  })();
 
   function disconnectWallet() {
     walletAddress = null; _walletMode = 'none'; updateWalletUI();
