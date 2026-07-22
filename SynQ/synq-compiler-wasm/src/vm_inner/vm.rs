@@ -2,6 +2,7 @@ use std::collections::{HashMap, BTreeMap, BTreeSet};
 use super::opcode::{OpCode, VMError};
 use ruint::aliases::U256;
 #[cfg(feature = "native")]
+#[cfg(feature = "native")]
 use pqc_shims::{dilithium, kyber, falcon, sphincs};
 
 // ── PR-B constants ──────────────────────────────────────────────────────────
@@ -589,7 +590,7 @@ impl QuantumVM {
             // ── Arithmetic — handles I32, U128, and U256 ───────────────────
             OpCode::Add => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     let av=a.as_i128()?;let bv=b.as_i128()?;let r=av.checked_add(bv).ok_or_else(||VMError::RuntimeError(format!("Signed overflow on Add: {}+{}",av,bv)))?;self.push(Value::from_i128_shrink(r))?;
                 } else if a.is_uint_compat() && b.is_uint_compat() {
                     let av=a.as_u256()?;let bv=b.as_u256()?;let r=av.checked_add(bv).ok_or_else(||VMError::RuntimeError(format!("UInt256 overflow on Add: {}+{}",av,bv)))?;self.push(Value::from_u256_shrink(r))?;
@@ -597,7 +598,7 @@ impl QuantumVM {
             }
             OpCode::Sub => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     let av=a.as_i128()?;let bv=b.as_i128()?;let r=av.checked_sub(bv).ok_or_else(||VMError::RuntimeError(format!("Signed overflow on Sub: {}-{}",av,bv)))?;self.push(Value::from_i128_shrink(r))?;
                 } else if a.is_uint_compat() && b.is_uint_compat() {
                     let av=a.as_u256()?;let bv=b.as_u256()?;let r=av.checked_sub(bv).ok_or_else(||VMError::RuntimeError(format!("UInt256 underflow on Sub: {}-{} would be negative",av,bv)))?;self.push(Value::from_u256_shrink(r))?;
@@ -605,7 +606,7 @@ impl QuantumVM {
             }
             OpCode::Mul => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     let av=a.as_i128()?;let bv=b.as_i128()?;let r=av.checked_mul(bv).ok_or_else(||VMError::RuntimeError(format!("Signed overflow on Mul: {}×{}",av,bv)))?;self.push(Value::from_i128_shrink(r))?;
                 } else if a.is_uint_compat() && b.is_uint_compat() {
                     let av=a.as_u256()?;let bv=b.as_u256()?;let r=av.checked_mul(bv).ok_or_else(||VMError::RuntimeError(format!("UInt256 overflow on Mul: {}×{}",av,bv)))?;self.push(Value::from_u256_shrink(r))?;
@@ -613,7 +614,7 @@ impl QuantumVM {
             }
             OpCode::Div => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     let av=a.as_i128()?;let bv=b.as_i128()?;
                     if bv==0 {return Err(VMError::RuntimeError(format!("Div by zero: {} / 0",av)));}
                     let r=av.checked_div(bv).ok_or_else(||VMError::RuntimeError(format!("Signed overflow on Div: {} / {}",av,bv)))?;
@@ -627,7 +628,7 @@ impl QuantumVM {
             }
             OpCode::Rem => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     let av=a.as_i128()?;let bv=b.as_i128()?;
                     if bv==0 {return Err(VMError::RuntimeError(format!("Rem by zero: {} % 0",av)));}
                     let r=av.checked_rem(bv).ok_or_else(||VMError::RuntimeError(format!("Signed overflow on Rem: {} % {}",av,bv)))?;
@@ -816,7 +817,7 @@ impl QuantumVM {
             }
 
             // ── PQC ────────────────────────────────────────────────────────
-#[cfg(feature = "native")]
+
             // ── Map operations ──────────────────────────────────────────────
             // MapNew: reads inline name, initialises an empty Map at the named
             // state address and pushes that address (I32) as the handle.
@@ -843,8 +844,8 @@ impl QuantumVM {
                 let key = value_to_key(&key_val)?;
                 eprintln!("[VM] MapGet slot={} key_type={} key_hex={}",
                     map_addr,
-                    match &key_val { crate::Value::U256(_) => "U256", crate::Value::Bytes(_) => "Bytes",
-                        crate::Value::U128(_) => "U128", crate::Value::I32(_) => "I32", _ => "other" },
+                    match &key_val { Value::U256(_) => "U256", Value::Bytes(_) => "Bytes",
+                        Value::U128(_) => "U128", Value::I32(_) => "I32", _ => "other" },
                     key.iter().map(|b| format!("{:02x}", b)).collect::<String>());
                 match self.memory.get(&map_addr) {
                     Some(Value::Map(m)) => {
@@ -863,8 +864,8 @@ impl QuantumVM {
                 let key = value_to_key(&key_val)?;
                 eprintln!("[VM] MapSet slot={} key_type={} key_hex={} val={:?}",
                     map_addr,
-                    match &key_val { crate::Value::U256(_) => "U256", crate::Value::Bytes(_) => "Bytes",
-                        crate::Value::U128(_) => "U128", crate::Value::I32(_) => "I32", _ => "other" },
+                    match &key_val { Value::U256(_) => "U256", Value::Bytes(_) => "Bytes",
+                        Value::U128(_) => "U128", Value::I32(_) => "I32", _ => "other" },
                     key.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
                     val);
                 match self.memory.entry(map_addr).or_insert_with(|| Value::Map(BTreeMap::new())) {
@@ -982,6 +983,7 @@ impl QuantumVM {
                 self.push(Value::Bool(eq))?;
             }
 
+#[cfg(feature = "native")]
             OpCode::DilithiumVerify => {
                 let public_key = self.pop()?.as_bytes()?.to_vec();
                 let message    = self.pop()?.as_bytes()?.to_vec();
@@ -989,6 +991,7 @@ impl QuantumVM {
                 let result = dilithium::verify(&message, &signature, &public_key);
                 self.push(Value::Bool(result))?;
             }
+#[cfg(feature = "native")]
             OpCode::KyberKeyExchange => {
                 let private_key = self.pop()?.as_bytes()?.to_vec();
                 let ciphertext  = self.pop()?.as_bytes()?.to_vec();
@@ -996,6 +999,7 @@ impl QuantumVM {
                     .map_err(VMError::RuntimeError)?;
                 self.push(Value::Bytes(shared_secret))?;
             }
+#[cfg(feature = "native")]
             OpCode::FalconVerify => {
                 let public_key = self.pop()?.as_bytes()?.to_vec();
                 let message    = self.pop()?.as_bytes()?.to_vec();
@@ -1003,6 +1007,7 @@ impl QuantumVM {
                 let result = falcon::verify(&message, &signature, &public_key);
                 self.push(Value::Bool(result))?;
             }
+#[cfg(feature = "native")]
             OpCode::SphincsVerify => {
                 let public_key = self.pop()?.as_bytes()?.to_vec();
                 let message    = self.pop()?.as_bytes()?.to_vec();
