@@ -2372,7 +2372,7 @@
         } else if (errMsg.includes('underflow on Sub')) {
           errMsg += ' — burn amount exceeds current supply. Call getTotal() to check the remaining balance before burning.';
         } else if (errMsg.includes('out of sync with vault')) {
-          errMsg += ' Make sure SimpleToken was initialised with init() (no supply argument) before depositing.';
+          errMsg += ' Make sure SimpleToken was initialised with init(name, symbol) and that both contracts are in the same workspace before depositing.';
         } else if (errMsg.includes('extern_call') && errMsg.includes('not in workspace')) {
           var _cnm = errMsg.match(/contract '([^']+)'/);
           var _missing = _cnm ? _cnm[1] : 'the target contract';
