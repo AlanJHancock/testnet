@@ -470,58 +470,86 @@
   var DEMO_LINES = [
     'pragma synq ^0.9;',
     '',
+    '// SimpleToken — fungible token with configurable name and symbol.',
+    '//',
+    '// State variables:',
+    '//   token_name   : str  — token long name,  e.g. "Test Token"  (max 32 ASCII chars)',
+    '//   token_symbol : str  — ticker symbol,     e.g. "TEST"        (max  4 ASCII chars)',
+    '//   total        : UInt256 — circulating supply (raw units, no decimals)',
+    '//   owner        : UInt256 — 32-byte padded EVM address of the deployer',
+    '//   paused       : bool    — when true, mint and burn are blocked',
+    '//   initialised  : bool    — set to true by init(); prevents re-initialisation',
+    '',
     'contract SimpleToken {',
     '',
-    '  total:       UInt256;',
-    '  owner:       UInt256;',
-    '  paused:      bool;',
-    '  initialised: bool;',
+    '  token_name:   str;',
+    '  token_symbol: str;',
+    '  total:        UInt256;',
+    '  owner:        UInt256;',
+    '  paused:       bool;',
+    '  initialised:  bool;',
     '',
-    '  function init() as caller {',
+    '  // init(name, symbol) — one-shot initialiser; caller becomes owner.',
+    '  //',
+    '  // Parameters:',
+    '  //   name   : str  — ASCII string, max 32 bytes.  Enter without quotes.',
+    '  //                   Example: TestToken',
+    '  //   symbol : str  — ASCII ticker, max 32 bytes.  Enter without quotes.',
+    '  //                   Example: TEST',
+    '  //',
+    '  // Stored as right-aligned bytes in a 32-byte big-endian slot.',
+    '  // The state panel decodes and displays them as quoted strings automatically.',
+    '  //',
+    '  // Requires: contract not yet initialised, total supply is zero.',
+    '  function init(name: str, symbol: str) as caller {',
     '    require(!initialised, "init: contract already initialised");',
     '    require(total == 0, "init: cannot reinitialise with live supply");',
-    '    owner = caller;',
-    '    paused = 0;',
-    '    initialised = true;',
+    '    token_name   = name;',
+    '    token_symbol = symbol;',
+    '    owner        = caller;',
+    '    paused       = 0;',
+    '    initialised  = true;',
     '    return 1;',
     '  }',
     '',
-    '  // vault-internal: only TokenVault may call mint/burn via extern_call.',
-    '  // Direct calls bypass vault accounting -- use TokenVault.deposit/withdraw.',
+    '  // mint(amount) — increases total supply by amount.',
+    '  // Caller must hold cap::Minter (granted by TokenVault).',
+    '  // In production, call via TokenVault.deposit — do not call directly.',
     '  function mint(amount: UInt256) as caller requires cap::Minter {',
     '    require(!paused, "mint: contract is paused");',
     '    total = total + amount;',
     '    return total;',
     '  }',
     '',
+    '  // burn(amount) — decreases total supply by amount.',
+    '  // Caller must hold cap::Burner (granted by TokenVault).',
     '  function burn(amount: UInt256) as caller requires cap::Burner {',
     '    require(!paused, "burn: contract is paused");',
-    '    require(total >= amount, "burn: amount exceeds current supply");',
+    '    require(total >= amount, "burn: insufficient supply");',
     '    total = total - amount;',
     '    return total;',
     '  }',
     '',
+    '  // setPaused(flag) — pause or unpause mint/burn.',
+    '  // Parameter: flag : bool — pass 1 to pause, 0 to unpause.',
+    '  // Caller must hold cap::Admin.',
     '  function setPaused(flag: bool) as caller requires cap::Admin {',
     '    paused = flag;',
     '    return paused;',
     '  }',
     '',
-    '  function getPaused() -> bool {',
-    '    return paused;',
-    '  }',
+    '  // ── View functions ───────────────────────────────────────────────',
     '',
-    '  function getOwner() {',
-    '    return owner;',
-    '  }',
+    '  function getPaused()  -> bool { return paused; }',
+    '  function getName()    -> str  { return token_name; }',
+    '  function getSymbol()  -> str  { return token_symbol; }',
+    '  function getOwner()          { return owner; }',
+    '  function getTotal()          { return total; }',
     '',
-    '  function getTotal() {',
-    '    return total;',
-    '  }',
-    '',
-    '  // assertBalance(expected) -- called by TokenVault.assertSync().',
-    '  // Verifies SimpleToken total == vault net (totalIn - totalOut).',
+    '  // assertBalance(expected) — called by TokenVault.assertSync().',
+    '  // Reverts if token total != expected (vault accounting mismatch).',
     '  function assertBalance(expected: UInt256) {',
-    '    require(total == expected, "assertBalance: token total out of sync with vault");',
+    '    require(total == expected, "assertBalance: out of sync with vault");',
     '    return total;',
     '  }',
     '}'
@@ -2322,6 +2350,31 @@
               + '&rdquo;</span><span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:5px;">str</span>';
           }
         } catch(e) {}
+      }
+    }
+
+    // ── str / Bytes: hex-encoded slot → quoted ASCII ─────────────────────
+    // Compact strings (<=32 chars) are stored right-aligned in a 32-byte
+    // big-endian slot and serialised as 0x hex by /state.  Decode them back.
+    var _dclT = (typeof currentStateVarTypes !== 'undefined' && currentStateVarTypes)
+                 ? (currentStateVarTypes[name] || '') : '';
+    if (typeof v === 'string' && /^0x[0-9a-fA-F]{2,64}$/.test(v)
+        && _dclT !== 'u256' && _dclT !== 'i256'
+        && _dclT !== 'address' && _dclT !== 'bool') {
+      var _hx = v.slice(2).replace(/^(00)+/, '');
+      if (_hx.length > 0 && _hx.length % 2 === 0 && _hx.length <= 64) {
+        try {
+          var _ba = [];
+          for (var _ii = 0; _ii < _hx.length; _ii += 2)
+            _ba.push(parseInt(_hx.substr(_ii, 2), 16));
+          var _ss = new TextDecoder('utf-8', {fatal: true}).decode(new Uint8Array(_ba));
+          if (/^[\x20-\x7E]{1,32}$/.test(_ss)) {
+            return '<span style="color:rgba(180,230,180,1);font-weight:600;">&ldquo;'
+              + _ss.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+              + '&rdquo;</span>'
+              + '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:5px;">str</span>';
+          }
+        } catch (_e) {}
       }
     }
 
