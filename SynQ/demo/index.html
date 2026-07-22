@@ -4,8 +4,8 @@
 <meta charset="UTF-8">
   <!-- js-sha3: battle-tested Keccak-256 matching Ethereum's keccak256 opcode -->
   <script src="https://cdn.jsdelivr.net/npm/js-sha3@0.8.0/src/sha3.min.js"></script>
-  <!-- noble/secp256k1: ephemeral devnet signing (EIP-712 compatible) -->
-  <script src="https://cdn.jsdelivr.net/npm/@noble/secp256k1@2.1.0/lib/index.js"></script>
+  <!-- noble/secp256k1: self-hosted bundle (CDN-free, includes @noble/hashes) -->
+  <script src="/demo/noble-secp256k1.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SynQ IDE — Powered by Synergy Network</title>
 <style>
@@ -849,10 +849,14 @@
     return new Promise(function(resolve, reject) {
       var attempts = 0;
       function check() {
-        var n = (typeof nobleSecp256k1 !== 'undefined') ? nobleSecp256k1
-              : (typeof secp !== 'undefined') ? secp : null;
-        if (n && n.utils) { resolve(n); return; }
-        if (++attempts > 50) { reject(new Error('@noble/secp256k1 CDN did not load within 5s — reload the page.')); return; }
+        // Self-hosted bundle sets globalThis.nobleSecp256k1 synchronously on load
+        if (typeof nobleSecp256k1 !== 'undefined' && nobleSecp256k1.utils) {
+          resolve(nobleSecp256k1); return;
+        }
+        if (++attempts > 50) {
+          reject(new Error('noble-secp256k1.js failed to load — check /demo/noble-secp256k1.js is served correctly.'));
+          return;
+        }
         setTimeout(check, 100);
       }
       check();
