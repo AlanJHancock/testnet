@@ -1763,16 +1763,12 @@
       const deployedBytecode   = currentBytecode;
       const deployedStateVars  = currentStateVars.slice();
 
-      // Only take the active session if there is no workspace index-0 contract
-      // already active — subsequent deploys (index 1, 2…) should not steal focus.
-      var _hasIndex0Active = workspaceId &&
-        workspaceContracts.length > 0 &&
-        workspaceContracts[0].session_id !== deployedSessionId;
-      if (!_hasIndex0Active) {
-        sessionId = deployedSessionId;
-        updateSessionBadge();
-        probeStateVars();
-      }
+      // Always update sessionId to the freshly deployed session.
+      // The old guard prevented re-deploys from updating sessionId when a
+      // workspace was active, causing init() to fire against a stale session.
+      sessionId = deployedSessionId;
+      updateSessionBadge();
+      probeStateVars();
 
       // Register into workspace (pre-created at compile time)
       if (workspaceId) {
