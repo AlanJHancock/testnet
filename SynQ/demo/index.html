@@ -397,7 +397,8 @@
   var walletAddress   = null;
   var walletUma       = null;
   var _walletMode = "none"; // "synergy" | "ethereum" | "none"
-  var _ephemeralPrivKey = null;        // Uint8Array — secp256k1 private key
+  var _ephemeralPrivKey  = null;
+  var _ephemeralAddress  = null; // always the address derived from _ephemeralPrivKey        // Uint8Array — secp256k1 private key
 
   /* ── Wallet — Synergy extension integration ─────────────────────────────── */
   // The Synergy browser extension injects window.ethereum (EIP-1193 compatible)
@@ -871,9 +872,11 @@
     var pubKeyUncomp  = _noble.getPublicKey(_ephemeralPrivKey, false);
     var pubKeyBody    = pubKeyUncomp.slice(1);
     var addrBytes     = keccak256Bytes(pubKeyBody).slice(-20);
-    walletAddress     = '0x' + Array.from(addrBytes).map(function(b){
+    var _addrHex = '0x' + Array.from(addrBytes).map(function(b){
       return b.toString(16).padStart(2,'0');
     }).join('');
+    _ephemeralAddress = _addrHex; // canonical signing address for this key
+    walletAddress     = _addrHex;
     _walletMode = 'ephemeral';
     console.log('[SynQ] Ephemeral devnet address:', walletAddress);
     return true;
@@ -1452,7 +1455,7 @@
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               source:        source,
-              evm_address:   walletAddress,
+              evm_address:   (_walletMode === 'ephemeral' && _ephemeralAddress) ? _ephemeralAddress : walletAddress,
               evm_signature: evmSig,
               nonce:         sourceNonce,
               wasm_extern_contracts: data.extern_contracts || []
