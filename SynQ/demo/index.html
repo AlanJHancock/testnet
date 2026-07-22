@@ -1032,19 +1032,7 @@
   function regenerateKey() { /* no-op */ }
 
   // Auto-restore already-approved connection (no user prompt)
-  (async function autoInitKey() {
-    if (!window.ethereum) return;
-    try {
-      var accounts = await window.ethereum.request({ method: 'eth_accounts' });
-      if (accounts && accounts.length) {
-        walletAddress = accounts[0];
-        _walletMode = (window.synergy && window.synergy.isSynergyWallet) ? 'synergy' : 'ethereum';
-        updateWalletUI();
-        attachEthereumListeners();
-        console.log('[SynQ] Auto-connected:', walletAddress);
-      }
-    } catch(e) { console.warn('[SynQ] Auto-connect skipped:', e.message); }
-  })();
+  // (stale autoInitKey removed — ephemeral-first autoInitKey above handles this)
 
   
   function updateWalletUI() {
@@ -1426,14 +1414,11 @@
             }
           });
 
-          // 4. Sign — ephemeral in-browser key (preferred) or injected wallet
+          // 4. Sign — ephemeral key or Synergy Wallet via getSignature dispatcher
           setStatus('Signing source commit...', 'info');
           var evmSig;
-          setStatus('Waiting for Synergy Wallet signature...', 'info');
-          evmSig = await window.ethereum.request({
-            method: 'eth_signTypedData_v4',
-            params: [walletAddress, typedData]
-          });
+          setStatus('Signing with ' + (_walletMode === 'synergy' ? 'Synergy Wallet' : 'ephemeral devnet key') + '...', 'info');
+          evmSig = await getSignature(typedData);
 
           // 5. POST /compile/sign-source — server re-compiles + binds author → source → bytecode
           setStatus('Source signed — generating PQC SourceCommit...', 'info');
@@ -2066,14 +2051,17 @@
       };
 
       if (walletAddress) {
-        var liveAccounts = await window.ethereum.request({ method: 'eth_accounts' });
-        if (!liveAccounts || liveAccounts.length === 0) {
-          walletAddress = null; updateWalletUI();
-          setVMOutput('<span class="err">Wallet disconnected — reconnect to call authenticated functions.</span>');
-          btn.disabled = false; btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Function';
-          return;
+        // Liveness check: only needed for extension wallet; ephemeral key is always valid
+        if (_walletMode === 'synergy' && window.ethereum) {
+          var liveAccounts = await window.ethereum.request({ method: 'eth_accounts' });
+          if (!liveAccounts || liveAccounts.length === 0) {
+            walletAddress = null; updateWalletUI();
+            setVMOutput('<span class="err">Wallet disconnected — reconnect to call authenticated functions.</span>');
+            btn.disabled = false; btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Function';
+            return;
+          }
+          walletAddress = liveAccounts[0];
         }
-        walletAddress = liveAccounts[0];
 
         if (!sessionId) {
           setVMOutput('<span class="err">No active session — deploy the contract first, then run.</span>');
@@ -2141,10 +2129,7 @@
 
         var signature;
         try {
-          signature = await window.ethereum.request({
-            method: 'eth_signTypedData_v4',
-            params: [walletAddress, callTypedData]
-          });
+          signature = await getSignature(callTypedData);
           console.log('[SynQ auth] signature:', signature);
         } catch (sigErr) {
           var sigErrMsg;
