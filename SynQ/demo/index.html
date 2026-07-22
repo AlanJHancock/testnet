@@ -413,6 +413,82 @@
   }
   function computeUma(evmAddress) { return callerIdentity(evmAddress); }
 
+  function hexToBytes(hex) {
+    var h = hex.startsWith('0x') ? hex.slice(2) : hex;
+    var out = new Uint8Array(h.length / 2);
+    for (var i = 0; i < out.length; i++) {
+      out[i] = parseInt(h.substr(i * 2, 2), 16);
+    }
+    return out;
+  }
+
+  function readU32LE(bytes, off) {
+    return (bytes[off] | (bytes[off+1]<<8) | (bytes[off+2]<<16) | (bytes[off+3]<<24)) >>> 0;
+  }
+
+  function formatBytecode(hex) {
+    var bytes = hexToBytes(hex);
+    var lines = [];
+    if (bytes.length < 15) { lines.push(hex); return lines.join('\n'); }
+
+    // Header: 4 magic + 1 version + 2 hdrLen + 4 codeLen + 4 dataLen = 15 bytes
+    var magic   = Array.from(bytes.slice(0,4)).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
+    var ver     = bytes[4];
+    var hdrLen  = bytes[5] | (bytes[6]<<8);
+    var codeLen = readU32LE(bytes, 7);
+    var dataLen = readU32LE(bytes, 11);
+
+    lines.push('; QVM Bytecode -- ' + bytes.length + ' bytes');
+    lines.push('; Magic: 0x' + magic.toUpperCase() + '  Version: ' + ver);
+    lines.push('; Header: ' + hdrLen + 'B  Code: ' + codeLen + 'B  Data: ' + dataLen + 'B');
+    lines.push('');
+    lines.push('; === CODE SECTION ===');
+
+    var codeStart = hdrLen;
+    var codeEnd   = codeStart + codeLen;
+    var pc = codeStart, instrNum = 0;
+    while (pc < codeEnd && instrNum < 300) {
+      var op     = bytes[pc];
+      var opName = OPS[op] || ('0x' + op.toString(16).padStart(2,'0'));
+      var addr   = pc.toString(16).padStart(4,'0');
+      if (op === 0x01) {                // Push i32
+        if (pc + 4 < codeEnd) {
+          var buf = new ArrayBuffer(4);
+          new Uint8Array(buf).set(bytes.slice(pc+1, pc+5));
+          var val = new Int32Array(buf)[0];
+          lines.push('  [' + addr + ']  Push     ' + val); pc += 5;
+        } else { lines.push('  [' + addr + ']  Push     <truncated>'); pc++; }
+      } else if (op === 0x30 || op === 0x31 || op === 0x32) { // Jump / JumpIf / Call
+        if (pc + 4 < codeEnd) {
+          var tgt = readU32LE(bytes, pc+1);
+          lines.push('  [' + addr + ']  ' + opName.padEnd(9) + '-> 0x' + tgt.toString(16).padStart(4,'0').toUpperCase());
+          pc += 5;
+        } else { pc++; }
+      } else if (op === 0x42) {         // LoadImm (raw bytes)
+        if (pc + 4 < codeEnd) {
+          var len = readU32LE(bytes, pc+1);
+          lines.push('  [' + addr + ']  LoadImm  ' + len + ' bytes'); pc += 5 + len;
+        } else { pc++; }
+      } else if (op === 0x43) {         // LoadImm128 (16-byte u128)
+        if (pc + 16 <= codeEnd) {
+          var hexVal = Array.from(bytes.slice(pc+1, pc+17)).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
+          lines.push('  [' + addr + ']  LoadImm128  0x' + hexVal); pc += 17;
+        } else { pc++; }
+      } else {
+        lines.push('  [' + addr + ']  ' + opName); pc++;
+      }
+      instrNum++;
+    }
+
+    if (dataLen > 0) {
+      lines.push(''); lines.push('; === DATA SECTION (dispatch table) ===');
+      var db = bytes.slice(codeEnd, codeEnd + Math.min(dataLen, 128));
+      lines.push('  ' + Array.from(db).map(function(b){return b.toString(16).padStart(2,'0');}).join(' ') + (dataLen > 128 ? ' ...' : ''));
+    }
+    lines.push(''); lines.push('; Raw: ' + hex);
+    return lines.join('\n');
+  }
+
   /* ── Ephemeral secp256k1 key (default signing path) ─────────────────────── */
   // generateEphemeralKey() — creates a random secp256k1 keypair in the browser.
   // The derived EVM address becomes walletAddress and `caller` in contracts.
