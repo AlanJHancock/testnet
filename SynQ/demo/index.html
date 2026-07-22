@@ -285,7 +285,7 @@
     </button>
     <button class="btn btn-reset" onclick="resetVM()">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.5"/></svg>
-      Reset VM
+      Reset Virtual Machine (VM)
     </button>
   </div>
 
@@ -1832,8 +1832,13 @@
         var boolHints = /^(is[A-Z_]|has[A-Z_]|enabled|paused|flag|active|frozen|allow|deny)/;
         var isBoolParam = (declaredType === 'bool')
           || (!declaredType && (boolHints.test(pName) || pName === 'flag' || pName === 'enabled' || pName === 'paused'));
-        var paramTypeHint = isBoolParam ? 'Bool' : 'UInt256';
-        lbl.innerHTML = pName + ' <span style="font-size:0.65rem;color:#888;font-weight:400;">(' + paramTypeHint + ')</span>';
+        var _pRawType = (selectedFunc.paramTypes && selectedFunc.paramTypes[p]) || '';
+        var paramTypeHint = isBoolParam ? 'Bool'
+          : (_pRawType === 'str'                           ? 'str'
+          : (_pRawType && _pRawType !== 'u256' && _pRawType !== 'i32' ? _pRawType : ''));
+        lbl.innerHTML = pName + (paramTypeHint
+          ? ' <span style="font-size:0.65rem;color:#888;font-weight:400;">(' + paramTypeHint + ')</span>'
+          : '');
         var inp;
         if (isBoolParam) {
           inp = document.createElement('select');
@@ -2152,7 +2157,14 @@
         // ── Line 3: return value (prominent) ─────────────────────────────
         if (rv !== null && rv !== undefined) {
           var val  = (typeof rv === 'object' && rv.value !== undefined) ? rv.value : JSON.stringify(rv);
-          var type = (typeof rv === 'object' && rv.type) ? rv.type : '';
+          var _rvType = (typeof rv === 'object' && rv.type) ? rv.type : '';
+          // Compiler-declared return type overrides VM runtime type
+          // (VM emits 'UInt256' for Bytes/str slots; compiler knows the declared type)
+          var _declRet = (currentFnReturnTypes && selectedFunc)
+                       ? (currentFnReturnTypes[selectedFunc.name] || '') : '';
+          var type = (_declRet === 'str')  ? 'str'
+                   : (_declRet === 'bool') ? 'Bool'
+                   : _rvType;
           // Bool decoration: any UInt256 0/1 return gets a true/false badge
           var boolBadge = '';
           var isStringResult = (type === 'String' || type === 'Str' || type === 'str');
@@ -2358,10 +2370,20 @@
     // big-endian slot and serialised as 0x hex by /state.  Decode them back.
     var _dclT = (typeof currentStateVarTypes !== 'undefined' && currentStateVarTypes)
                  ? (currentStateVarTypes[name] || '') : '';
+    // Unset str slot returns integer 0 (Value::I32(0)) before first write
+    if ((_dclT === 'str') && (v === '0' || v === 0)) {
+      return '<span style="color:rgba(180,230,180,0.5);font-weight:600;">&ldquo;&rdquo;</span>'
+        + '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:5px;">str</span>';
+    }
     if (typeof v === 'string' && /^0x[0-9a-fA-F]{2,64}$/.test(v)
         && _dclT !== 'u256' && _dclT !== 'i256'
         && _dclT !== 'address' && _dclT !== 'bool') {
       var _hx = v.slice(2).replace(/^(00)+/, '');
+      // All-zero slot (unset str) → show as empty string with str badge
+      if (_hx.length === 0) {
+        return '<span style="color:rgba(180,230,180,0.5);font-weight:600;">&ldquo;&rdquo;</span>'
+          + '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:5px;">str</span>';
+      }
       if (_hx.length > 0 && _hx.length % 2 === 0 && _hx.length <= 64) {
         try {
           var _ba = [];
