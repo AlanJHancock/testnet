@@ -2125,28 +2125,32 @@
           var type = (typeof rv === 'object' && rv.type) ? rv.type : '';
           // Bool decoration: any UInt256 0/1 return gets a true/false badge
           var boolBadge = '';
-          var isStringResult = (type === 'String');
-          if (!isStringResult && (val === '0' || val === '1')) {
-            var isBool = val === '1';
-            var badgeColor = isBool ? 'rgba(100,220,150,0.9)' : 'rgba(255,120,100,0.85)';
-            var badgeText  = isBool ? 'true' : 'false';
+          var isStringResult = (type === 'String' || type === 'Str');
+          var isBoolResult   = (type === 'Bool');
+          if (isBoolResult) {
+            var isBT = (val === 'true' || val === '1');
+            var bc = isBT ? 'rgba(100,220,150,0.9)' : 'rgba(255,120,100,0.85)';
             boolBadge = '<span style="font-size:0.78rem;font-family:ui-monospace,monospace;'
-              + 'background:' + badgeColor + ';color:#111;border-radius:3px;'
-              + 'padding:1px 6px;margin-left:8px;font-weight:700;vertical-align:middle;">'
-              + badgeText + '</span>';
+              + 'background:' + bc + ';color:#111;border-radius:3px;'
+              + 'padding:1px 6px;font-weight:700;vertical-align:middle;'>'
+              + (isBT ? 'true' : 'false') + '</span>';
+          } else if (!isStringResult && type !== 'UInt256' && type !== 'u256' && (val === '0' || val === '1')) {
+            var isBT = val === '1';
+            var bc = isBT ? 'rgba(100,220,150,0.9)' : 'rgba(255,120,100,0.85)';
+            boolBadge = '<span style="font-size:0.78rem;font-family:ui-monospace,monospace;'
+              + 'background:' + bc + ';color:#111;border-radius:3px;'
+              + 'padding:1px 6px;margin-left:8px;font-weight:700;vertical-align:middle;'>'
+              + (isBT ? 'true' : 'false') + '</span>';
           }
           if (isStringResult) {
-            // String result — render with quote marks and a muted type badge
             display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;color:rgba(180,230,180,1);">&ldquo;' + val.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '&rdquo;</span>';
             display += '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;">str</span>\n';
+          } else if (isBoolResult) {
+            display += boolBadge + '\n';
           } else {
-            // Format UInt256 as hex address when it looks like one (>= 20 hex digits)
             var dispVal = val;
             if ((type === 'UInt256' || type === 'u256') && /^\d+$/.test(val) && BigInt(val) > 0n) {
-              try {
-                var hex = BigInt(val).toString(16);
-                if (hex.length >= 20) dispVal = '0x' + hex.padStart(40,'0');
-              } catch(e) {}
+              try { var h = BigInt(val).toString(16); if (h.length >= 20) dispVal = '0x' + h.padStart(40,'0'); } catch(e) {}
             }
             display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;">' + dispVal + '</span>';
             if (type) display += '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;">' + type + '</span>';
