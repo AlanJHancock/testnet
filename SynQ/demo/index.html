@@ -2140,7 +2140,15 @@
             display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;color:rgba(180,230,180,1);">&ldquo;' + val.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '&rdquo;</span>';
             display += '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;">str</span>\n';
           } else {
-            display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;">' + val + '</span>';
+            // Format UInt256 as hex address when it looks like one (>= 20 hex digits)
+            var dispVal = val;
+            if ((type === 'UInt256' || type === 'u256') && /^\d+$/.test(val) && BigInt(val) > 0n) {
+              try {
+                var hex = BigInt(val).toString(16);
+                if (hex.length >= 20) dispVal = '0x' + hex.padStart(40,'0');
+              } catch(e) {}
+            }
+            display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;">' + dispVal + '</span>';
             if (type) display += '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;">' + type + '</span>';
             display += boolBadge + '\n';
           }
