@@ -473,40 +473,39 @@
     '',
     '  total:       UInt256;',
     '  owner:       UInt256;',
-    '  paused:      UInt256;',
-    '  initialised: UInt256;',
+    '  paused:      bool;',
+    '  initialised: bool;',
     '',
     '  function init() as caller {',
-    '    require(initialised == 0, "init: contract already initialised");',
+    '    require(!initialised, "init: contract already initialised");',
     '    require(total == 0, "init: cannot reinitialise with live supply");',
     '    owner = caller;',
     '    paused = 0;',
-    '    initialised = 1;',
+    '    initialised = true;',
     '    return 1;',
     '  }',
     '',
     '  // vault-internal: only TokenVault may call mint/burn via extern_call.',
     '  // Direct calls bypass vault accounting -- use TokenVault.deposit/withdraw.',
     '  function mint(amount: UInt256) as caller requires cap::Minter {',
-    '    require(paused == 0, "mint: contract is paused");',
+    '    require(!paused, "mint: contract is paused");',
     '    total = total + amount;',
     '    return total;',
     '  }',
     '',
     '  function burn(amount: UInt256) as caller requires cap::Burner {',
-    '    require(paused == 0, "burn: contract is paused");',
+    '    require(!paused, "burn: contract is paused");',
     '    require(total >= amount, "burn: amount exceeds current supply");',
     '    total = total - amount;',
     '    return total;',
     '  }',
     '',
-    '  function setPaused(flag: UInt256) as caller requires cap::Admin {',
-    '    require(flag == 0 || flag == 1, "setPaused: flag must be 0 or 1");',
+    '  function setPaused(flag: bool) as caller requires cap::Admin {',
     '    paused = flag;',
     '    return paused;',
     '  }',
     '',
-    '  function getPaused() {',
+    '  function getPaused() -> bool {',
     '    return paused;',
     '  }',
     '',
@@ -1798,8 +1797,11 @@
         lbl.innerHTML = pName + pTypeLabel; // updated after bool detection
         // Detect bool-domain params: name starts with is/has/enabled/paused/flag/active
         // or param name is exactly 'flag' — render a True/False select instead of free text
+        // Compiler type wins; name heuristic only when no type declared
+        var declaredType = selectedFunc.paramTypes && selectedFunc.paramTypes[p];
         var boolHints = /^(is[A-Z_]|has[A-Z_]|enabled|paused|flag|active|frozen|allow|deny)/;
-        var isBoolParam = boolHints.test(pName) || pName === 'flag' || pName === 'enabled' || pName === 'paused';
+        var isBoolParam = (declaredType === 'bool')
+          || (!declaredType && (boolHints.test(pName) || pName === 'flag' || pName === 'enabled' || pName === 'paused'));
         var paramTypeHint = isBoolParam ? 'Bool' : 'UInt256';
         lbl.innerHTML = pName + ' <span style="font-size:0.65rem;color:#888;font-weight:400;">(' + paramTypeHint + ')</span>';
         var inp;
