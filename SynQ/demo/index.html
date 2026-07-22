@@ -1320,6 +1320,16 @@
               if (_xdat.success && _xdat.signature_sidecar) {
                 data.signature_sidecar = _xdat.signature_sidecar;
               }
+              // Server is authoritative for metadata too — always prefer its
+              // state_var_types, state_vars, and functions over WASM output.
+              if (_xdat.success) {
+                if (_xdat.state_var_types && Object.keys(_xdat.state_var_types).length > 0)
+                  data.state_var_types = _xdat.state_var_types;
+                if (_xdat.state_vars && _xdat.state_vars.length > 0)
+                  data.state_vars = _xdat.state_vars;
+                if (_xdat.functions && _xdat.functions.length > 0)
+                  data.functions = _xdat.functions;
+              }
             } catch(_xErr) {
               console.warn('[SynQ] extern_contracts cross-check unavailable (offline?):', _xErr);
             }
