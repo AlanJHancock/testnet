@@ -2258,7 +2258,7 @@
               + (isBT ? 'true' : 'false') + '</span>';
           }
           if (isStringResult) {
-            display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;color:rgba(180,230,180,1);">&ldquo;'
+            display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;color:rgba(180,230,180,1);">“'
               + (function(_v){
                   if(/^0x[0-9a-fA-F]+$/.test(_v)){
                     try{
@@ -2272,7 +2272,7 @@
                   }
                   return _v;
                 })(val).replace(/&/g,'&amp;').replace(/</g,'&lt;')
-              + '&rdquo;</span>';
+              + '”</span>';
             display += '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;">str</span>\n';
           } else if (isBoolResult) {
             display += boolBadge + '\n';
@@ -2455,7 +2455,7 @@
       var _hx = v.slice(2).replace(/^(00)+/, '');
       // All-zero slot (unset str) → show as empty string with str badge
       if (_hx.length === 0) {
-        return '<span style="color:rgba(180,230,180,0.5);font-weight:600;">&ldquo;&rdquo;</span>'
+        return '<span style="color:rgba(180,230,180,0.5);font-weight:600;">“”</span>'
           + '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:5px;">str</span>';
       }
       if (_hx.length > 0 && _hx.length % 2 === 0 && _hx.length <= 64) {
@@ -2465,9 +2465,9 @@
             _ba.push(parseInt(_hx.substr(_ii, 2), 16));
           var _ss = new TextDecoder('utf-8', {fatal: true}).decode(new Uint8Array(_ba));
           if (/^[\x20-\x7E]{1,32}$/.test(_ss)) {
-            return '<span style="color:rgba(180,230,180,1);font-weight:600;">&ldquo;'
+            return '<span style="color:rgba(180,230,180,1);font-weight:600;">“'
               + _ss.replace(/&/g, '&amp;').replace(/</g, '&lt;')
-              + '&rdquo;</span>'
+              + '”</span>'
               + '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:5px;">str</span>';
           }
         } catch (_e) {}
