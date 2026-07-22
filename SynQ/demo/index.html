@@ -360,6 +360,26 @@
   var currentStateVars        = [];
   var currentStateVarTypes    = {};
   var currentFnReturnTypes    = {};
+
+  var parsedFunctions         = [];
+  var compileFunctions        = [];  // [{name, params:[{name,ty}], has_return, return_type}]
+  var selectedFunc            = null;
+  var sessionId               = null;
+  var workspaceId             = null;   // current workspace id
+  var workspaceNum            = 0;      // sequential workspace counter (1-based)
+  var workspaceContracts      = [];     // [{name, session_id, address, bytecode, stateVars, deploy_index}]
+  var currentExternContracts  = [];     // contracts this one calls via extern_call
+
+  /* ── Opcode names for disassembler ───────────────────────────────────────── */
+  var OPS = {
+    0x01:'Push', 0x02:'Pop', 0x03:'Dup', 0x04:'Swap',
+    0x10:'Add', 0x11:'Sub', 0x12:'Mul', 0x13:'Div',
+    0x20:'Eq', 0x21:'Ne', 0x22:'Lt', 0x23:'Le', 0x24:'Gt', 0x25:'Ge',
+    0x30:'Jump', 0x31:'JumpIf', 0x32:'Call', 0x33:'Return',
+    0x40:'Load', 0x41:'Store', 0x42:'LoadImm', 0x43:'LoadImm128', 0x50:'LoadCaller',
+    0x80:'ML-DSA-65 Verify', 0x81:'ML-KEM-768 KeyExchange', 0x82:'FN-DSA-512 Verify', 0x83:'SPHINCS+ Verify',
+    0xF0:'Print', 0xFF:'Halt'
+  };
   var currentContractName     = null;  // from compile response
   var currentContractAddress  = null;  // keccak256("SynQ:"+name)[12..] — used in EIP-712 domain
   var walletAddress   = null;
