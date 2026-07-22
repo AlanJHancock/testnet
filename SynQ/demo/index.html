@@ -397,6 +397,7 @@
   var walletAddress   = null;
   var walletUma       = null;
   var _walletMode = "none"; // "synergy" | "ethereum" | "none"
+  var _ephemeralPrivKey = null;        // Uint8Array — secp256k1 private key
 
   /* ── Wallet — Synergy extension integration ─────────────────────────────── */
   // The Synergy browser extension injects window.ethereum (EIP-1193 compatible)
