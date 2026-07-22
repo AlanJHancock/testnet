@@ -479,7 +479,6 @@ fn value_to_json(v: &Value) -> serde_json::Value {
         Value::Str(s) => json!({"type": "String", "value": s}),
         Value::Map(_)        => json!({"type": "Map",   "value": "[map]"}),
         Value::Set(_)        => json!({"type": "Set",   "value": "[set]"}),
-        Value::Str(s)        => json!({"type": "String", "value": s}),
         Value::Tuple(elems)  => json!({"type": "Tuple",  "value": elems.iter().map(value_to_json).collect::<Vec<_>>()}),
         Value::SynqOption(None)     => json!({"type": "Option", "value": null}),
         Value::SynqOption(Some(v))  => json!({"type": "Option", "value": value_to_json(v)}),
@@ -566,6 +565,19 @@ struct CompileRequest {
     wasm_extern_contracts: Option<Vec<String>>,
 }
 
+#[derive(serde::Serialize, Clone)]
+struct ParamMeta {
+    name: String,
+    ty:   String,
+}
+#[derive(serde::Serialize, Clone)]
+struct FunctionMeta {
+    name:        String,
+    params:      Vec<ParamMeta>,
+    has_return:  bool,
+    return_type: Option<String>,
+}
+
 #[derive(serde::Serialize)]
 struct CompileResponse {
     success:            bool,
@@ -578,6 +590,21 @@ struct CompileResponse {
     extern_contracts:   Vec<String>,
     errors:             Vec<String>,
     warnings:           Vec<String>,
+    functions:          Vec<FunctionMeta>,
+}
+
+/// Convert AST Type to a canonical string name for IDE use
+fn type_name(ty: &synq_compiler::ast::Type) -> String {
+    use synq_compiler::ast::Type::*;
+    match ty {
+        Str                  => "str".to_string(),
+        Bool                 => "bool".to_string(),
+        Address              => "address".to_string(),
+        Bytes                => "bytes".to_string(),
+        UInt8  | UInt16 | UInt32 | UInt64 | UInt128 | UInt256 => "u256".to_string(),
+        Int8   | Int16  | Int32 | Int64 | Int128 | Int256      => "i256".to_string(),
+        _                    => "u256".to_string(),
+    }
 }
 
 async fn compile_handler(
@@ -589,6 +616,7 @@ async fn compile_handler(
         return (StatusCode::TOO_MANY_REQUESTS, RespJson(CompileResponse {
             success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None,
             extern_contracts: vec![], errors: vec![format!("rate limit exceeded — retry in {}s", wait)], warnings: vec![],
+            functions:        Vec::new(),
         }));
     }
     if req.source.len() > MAX_SOURCE_BYTES {
@@ -596,6 +624,7 @@ async fn compile_handler(
             success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
             errors: vec![format!("Source too large: {} bytes (max {})", req.source.len(), MAX_SOURCE_BYTES)],
             warnings: vec![],
+            functions:        Vec::new(),
         }));
     }
 
@@ -604,6 +633,7 @@ async fn compile_handler(
         Err(e) => return (StatusCode::OK, RespJson(CompileResponse {
             success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
             errors: vec![format!("Parse error: {}", e)], warnings: vec![],
+            functions:        Vec::new(),
         })),
     };
 
@@ -666,6 +696,7 @@ async fn compile_handler(
         Err(e) => return (StatusCode::OK, RespJson(CompileResponse {
             success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
             errors: vec![format!("Codegen error: {}", e)], warnings: vec![],
+            functions:        Vec::new(),
         })),
     };
 
@@ -678,6 +709,7 @@ async fn compile_handler(
                 Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(CompileResponse {
                     success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
                     errors: vec![format!("PQC signing failed: {}", e)], warnings: vec![],
+                    functions:        Vec::new(),
                 })),
             };
             json!({
@@ -697,6 +729,7 @@ async fn compile_handler(
                 Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(CompileResponse {
                     success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
                     errors: vec![format!("PQC keygen failed: {}", e)], warnings: vec![],
+                    functions:        Vec::new(),
                 })),
             };
             let sig = match pqc.sign_message(&keypair.private_key, &bytecode, SIGNING_ALGORITHM) {
@@ -704,6 +737,7 @@ async fn compile_handler(
                 Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(CompileResponse {
                     success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
                     errors: vec![format!("PQC signing failed: {}", e)], warnings: vec![],
+                    functions:        Vec::new(),
                 })),
             };
             json!({
@@ -717,6 +751,27 @@ async fn compile_handler(
             })
         }
     };
+
+    // Build function metadata for IDE param types
+    let functions: Vec<FunctionMeta> = ast.iter()
+        .find_map(|unit| match unit {
+            synq_compiler::ast::SourceUnit::Contract(c) if contract_name.as_deref() == Some(c.name.as_str()) => {
+                Some(c.parts.iter().filter_map(|p| match p {
+                    synq_compiler::ast::ContractPart::Function(f) => Some(FunctionMeta {
+                        name:        f.name.clone(),
+                        params:      f.params.iter().map(|p| ParamMeta {
+                            name: p.name.clone(),
+                            ty:   type_name(&p.ty),
+                        }).collect(),
+                        has_return:  f.returns.is_some(),
+                        return_type: f.returns.as_ref().map(type_name),
+                    }),
+                    _ => None,
+                }).collect())
+            },
+            _ => None,
+        })
+        .unwrap_or_default();
 
     (StatusCode::OK, RespJson(CompileResponse {
         success: true,
@@ -761,12 +816,14 @@ async fn compile_handler(
                             wasm_ec, &ec
                         )],
                         warnings: vec![],
+                        functions:        Vec::new(),
                     }));
                 }
             }
             ec
         },
         errors: vec![], warnings: compile_warnings,
+        functions,
     }))
 }
 
@@ -972,6 +1029,7 @@ async fn sign_source_handler(
                 success: false, bytecode: None, signature_sidecar: None,
                 state_vars: vec![], contract_name: None, contract_address: None,
                 extern_contracts: vec![], errors: vec![$err.into()], warnings: vec![],
+                functions:        Vec::new(),
             }))
         };
     }
@@ -1010,6 +1068,7 @@ async fn sign_source_handler(
             state_vars: vec![], contract_name: None, contract_address: None,
             extern_contracts: vec![],
             errors: vec![format!("Parse error: {}", e)], warnings: vec![],
+            functions:        Vec::new(),
         })),
     };
     let contract_name: Option<String> = ast.iter().find_map(|unit| match unit {
@@ -1084,6 +1143,7 @@ async fn sign_source_handler(
             state_vars: vec![], contract_name: None, contract_address: None,
             extern_contracts: vec![],
             errors: vec![format!("Codegen error: {}", e)], warnings: compile_warnings,
+            functions:        Vec::new(),
         })),
     };
     let bytecode_hash_bytes: [u8; 32] = Keccak256::digest(&bytecode).into();
@@ -1183,6 +1243,7 @@ async fn sign_source_handler(
         extern_contracts:  server_extern,
         errors:            vec![],
         warnings:          compile_warnings,
+        functions:        Vec::new(),
     }))
 }
 
@@ -2011,6 +2072,7 @@ async fn bench_compile_handler(
             success: false, parse_ns: t0.elapsed().as_nanos() as u64,
             codegen_ns: 0, total_ns: t0.elapsed().as_nanos() as u64,
             bytecode_bytes: 0, error: Some(format!("Parse error: {}", e)),
+
         }),
     };
     let parse_ns = t0.elapsed().as_nanos() as u64;
@@ -2023,6 +2085,7 @@ async fn bench_compile_handler(
             codegen_ns: t1.elapsed().as_nanos() as u64,
             total_ns: t0.elapsed().as_nanos() as u64,
             bytecode_bytes: 0, error: Some(format!("Codegen error: {}", e)),
+
         }),
     };
     let codegen_ns = t1.elapsed().as_nanos() as u64;
@@ -2034,6 +2097,7 @@ async fn bench_compile_handler(
         total_ns: parse_ns + codegen_ns,
         bytecode_bytes: bytecode.len(),
         error: None,
+
     })
 }
 
