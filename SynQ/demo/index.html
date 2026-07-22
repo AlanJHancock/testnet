@@ -489,6 +489,357 @@
     return lines.join('\n');
   }
 
+  function parseDispatchTable(hex) {
+    var bytes = hexToBytes(hex);
+    if (bytes.length < 15) return [];
+
+    // QVM header layout (confirmed from assembler.rs build()):
+    // [0..3]  magic   — u32 LE  (4 bytes: 0x004d5651 "QVM\0")
+    // [4]     version — u8      (1 byte,  always 1)
+    // [5..6]  hdrLen  — u16 LE  (2 bytes, always 15)
+    // [7..10] codeLen — u32 LE  (4 bytes)
+    // [11..14] dataLen — u32 LE (4 bytes)
+    // code section starts at byte hdrLen (= 15)
+    // data section starts at hdrLen + codeLen
+    var hdrLen  = bytes[5] | (bytes[6] << 8);          // always 15
+    var codeLen = readU32LE(bytes, 7);
+    var dataLen = readU32LE(bytes, 11);
+
+    var dataStart = hdrLen + codeLen;
+    if (dataStart + 4 > bytes.length || dataLen < 4) return [];
+
+    var off = dataStart;
+    var funcCount = readU32LE(bytes, off); off += 4;
+    var funcs = [];
+
+    for (var i = 0; i < funcCount; i++) {
+      if (off + 4 > bytes.length) break;
+      var nameLen = readU32LE(bytes, off); off += 4;
+      if (off + nameLen > bytes.length) break;
+      var nameBytes = bytes.slice(off, off + nameLen);
+      var name = new TextDecoder('utf-8').decode(nameBytes);
+      off += nameLen;
+
+      if (off + 8 > bytes.length) break;
+      var address    = readU32LE(bytes, off); off += 4;
+      var paramCount = readU32LE(bytes, off); off += 4;
+
+      var paramAddrs = [];
+      for (var p = 0; p < paramCount; p++) {
+        if (off + 4 > bytes.length) break;
+        paramAddrs.push(readU32LE(bytes, off)); off += 4;
+      }
+      // Skip param_signs: 1 byte per param (0=unsigned, 1=signed) — must consume
+      // these bytes or the offset drifts and all subsequent functions parse garbage.
+      off += paramCount;
+
+      if (off >= bytes.length) break;
+      var hasReturn = bytes[off]; off += 1;
+
+      // New fields from extended dispatch table format:
+      if (off >= bytes.length) break;
+      var requiresCaller = bytes[off]; off += 1;
+
+      if (off + 4 > bytes.length) break;
+      var capCount = readU32LE(bytes, off); off += 4;
+
+      var caps = [];
+      for (var c = 0; c < capCount; c++) {
+        if (off + 4 > bytes.length) break;
+        var capLen = readU32LE(bytes, off); off += 4;
+        if (off + capLen > bytes.length) break;
+        var capBytes = bytes.slice(off, off + capLen);
+        var capName = new TextDecoder('utf-8').decode(capBytes);
+        caps.push(capName);
+        off += capLen;
+      }
+
+      funcs.push({
+        name: name,
+        address: address,
+        paramCount: paramCount,
+        paramAddrs: paramAddrs,
+        hasReturn: hasReturn,
+        requiresCaller: requiresCaller,
+        capabilities: caps
+      });
+    }
+    return funcs;
+  }
+
+  function parseDispatchTable(hex) {
+    var bytes = hexToBytes(hex);
+    if (bytes.length < 15) return [];
+
+    // QVM header layout (confirmed from assembler.rs build()):
+    // [0..3]  magic   — u32 LE  (4 bytes: 0x004d5651 "QVM\0")
+    // [4]     version — u8      (1 byte,  always 1)
+    // [5..6]  hdrLen  — u16 LE  (2 bytes, always 15)
+    // [7..10] codeLen — u32 LE  (4 bytes)
+    // [11..14] dataLen — u32 LE (4 bytes)
+    // code section starts at byte hdrLen (= 15)
+    // data section starts at hdrLen + codeLen
+    var hdrLen  = bytes[5] | (bytes[6] << 8);          // always 15
+    var codeLen = readU32LE(bytes, 7);
+    var dataLen = readU32LE(bytes, 11);
+
+    var dataStart = hdrLen + codeLen;
+    if (dataStart + 4 > bytes.length || dataLen < 4) return [];
+
+    var off = dataStart;
+    var funcCount = readU32LE(bytes, off); off += 4;
+    var funcs = [];
+
+    for (var i = 0; i < funcCount; i++) {
+      if (off + 4 > bytes.length) break;
+      var nameLen = readU32LE(bytes, off); off += 4;
+      if (off + nameLen > bytes.length) break;
+      var nameBytes = bytes.slice(off, off + nameLen);
+      var name = new TextDecoder('utf-8').decode(nameBytes);
+      off += nameLen;
+
+      if (off + 8 > bytes.length) break;
+      var address    = readU32LE(bytes, off); off += 4;
+      var paramCount = readU32LE(bytes, off); off += 4;
+
+      var paramAddrs = [];
+      for (var p = 0; p < paramCount; p++) {
+        if (off + 4 > bytes.length) break;
+        paramAddrs.push(readU32LE(bytes, off)); off += 4;
+      }
+      // Skip param_signs: 1 byte per param (0=unsigned, 1=signed) — must consume
+      // these bytes or the offset drifts and all subsequent functions parse garbage.
+      off += paramCount;
+
+      if (off >= bytes.length) break;
+      var hasReturn = bytes[off]; off += 1;
+
+      // New fields from extended dispatch table format:
+      if (off >= bytes.length) break;
+      var requiresCaller = bytes[off]; off += 1;
+
+      if (off + 4 > bytes.length) break;
+      var capCount = readU32LE(bytes, off); off += 4;
+
+      var caps = [];
+      for (var c = 0; c < capCount; c++) {
+        if (off + 4 > bytes.length) break;
+        var capLen = readU32LE(bytes, off); off += 4;
+        if (off + capLen > bytes.length) break;
+        var capBytes = bytes.slice(off, off + capLen);
+        var capName = new TextDecoder('utf-8').decode(capBytes);
+        caps.push(capName);
+        off += capLen;
+      }
+
+      funcs.push({
+        name: name,
+        address: address,
+        paramCount: paramCount,
+        paramAddrs: paramAddrs,
+        hasReturn: hasReturn,
+        requiresCaller: requiresCaller,
+        capabilities: caps
+      });
+    }
+    return funcs;
+  }
+
+  function removeFromWorkspace(sid) {
+    // Find the contract before filtering so we can tell the server
+    var removing = workspaceContracts.find(function(c){ return c.session_id === sid; });
+    workspaceContracts = workspaceContracts.filter(function(c){ return c.session_id !== sid; });
+
+    // If the removed contract was the active session, clear it
+    if (sessionId === sid) {
+      sessionId = null;
+      updateSessionBadge();
+      // Auto-switch to the first remaining workspace contract
+      if (workspaceContracts.length > 0) {
+        switchToContract(workspaceContracts[0].session_id);
+      }
+    }
+
+    // Tell the server to un-register this session from the workspace.
+    // This prevents stale entries from re-appearing if the workspace state
+    // is fetched again (e.g. after wallet reconnect).
+    if (workspaceId && removing) {
+      fetch(WORKSPACE_URL + '/' + workspaceId + '/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sid, contract_name: removing.name })
+      }).catch(function(e) { console.warn('[workspace] remove error:', e); });
+    }
+
+    renderWorkspacePanel();
+  }
+
+  async function resetVM() {
+    var out = document.getElementById('vmOutput');
+    out.innerHTML = '<span class="dim">Resetting all VM sessions...</span>';
+
+    // ── Reset every contract in the workspace, not just the active one ──────
+    // This ensures all contracts (e.g. SimpleToken) start with clean state
+    // so TokenVault.init() can call extern_call("SimpleToken","init") fresh.
+    var toReset = workspaceContracts.length > 0
+      ? workspaceContracts.slice()   // copy — reset all workspace members
+      : (currentBytecode ? [{ name: currentContractName, session_id: sessionId,
+                               bytecode: currentBytecode, state_vars: currentStateVars }] : []);
+
+    if (toReset.length === 0) {
+      out.innerHTML = '<span class="dim">No bytecode loaded — compile a contract first.</span>';
+      return;
+    }
+
+    var failed = [];
+    for (var ri = 0; ri < toReset.length; ri++) {
+      var c = toReset[ri];
+      // 1. Delete the old session
+      if (c.session_id) {
+        try { await fetch(SESSION_DEL_URL + c.session_id, { method: 'DELETE' }); } catch(e){}
+      }
+      // 2. Create a fresh session
+      var resetBody = { bytecode: c.bytecode, state_vars: c.state_vars || [] };
+      if (c.name)      resetBody.contract_name = c.name;
+      if (workspaceId) resetBody.workspace_id  = workspaceId;
+      try {
+        var res  = await fetch(SESSION_NEW_URL, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(resetBody)
+        });
+        var data = await res.json();
+        if (data.success) {
+          var newSid = data.session_id;
+          // 3. Re-register into workspace
+          if (workspaceId && c.name) {
+            try {
+              await fetch(WORKSPACE_URL + '/' + workspaceId + '/join', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: newSid, contract_name: c.name })
+              });
+            } catch(we) { console.warn('[resetVM] workspace re-join failed for', c.name, we); }
+          }
+          // 4. Update local state
+          var ci = workspaceContracts.findIndex(function(w){ return w.name === c.name; });
+          if (ci >= 0) workspaceContracts[ci].session_id = newSid;
+          // Update active sessionId if this contract is the active one.
+          // Match on name OR on old session_id (covers single-contract flow
+          // where c.name may be undefined or currentContractName unset).
+          if (c.name === currentContractName
+              || c.session_id === sessionId
+              || toReset.length === 1) {
+            sessionId = newSid;
+            updateSessionBadge();
+          }
+        } else {
+          failed.push(c.name + ': ' + (data.error || 'unknown'));
+        }
+      } catch(e) { failed.push(c.name + ': ' + e.message); }
+    }
+
+    renderWorkspacePanel();
+
+    if (failed.length > 0) {
+      out.innerHTML = '<span class="err">Reset partial — failed: ' + failed.join(', ') + '</span>';
+    } else {
+      var names = toReset.map(function(c){ return c.name; }).join(', ');
+      out.innerHTML = '<span class="ok">All sessions reset (' + names + '). All state back to zero — call init() to reinitialise.</span>';
+    }
+
+    // Clear param inputs
+    for (var p = 0; p < (selectedFunc ? selectedFunc.paramCount : 0); p++) {
+      var el = document.getElementById('param_' + p);
+      if (el) {
+        // Reset str params to blank, numeric params to 0
+        var _isStr = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'str';
+        el.value = _isStr ? '' : '0';
+      }
+    }
+
+    // Refresh state panel immediately so it shows zeros, not stale values
+    stateSnapshot = {};
+    await probeStateVars();
+  }
+
+  function updateWalletUI() {
+    var dot   = document.getElementById('walletDot');
+    var label = document.getElementById('walletLabel');
+    var addr  = document.getElementById('walletAddress');
+    var mode  = document.getElementById('sigMode');
+    var note  = document.getElementById('sigNote');
+    var btn   = document.getElementById('walletBtn');
+    if (walletAddress) {
+      dot.classList.add('connected');
+      label.textContent = 'Connected:';
+      addr.textContent  = walletAddress.slice(0,6) + '...' + walletAddress.slice(-4);
+      mode.textContent  = 'Hybrid PQC + EVM signing';
+      mode.className    = 'wallet-mode hybrid';
+      note.textContent  = 'Signing: EVM wallet + ML-DSA-65 wrapper';
+      btn.textContent   = 'Disconnect';
+      btn.onclick       = disconnectWallet;
+      // Compute + display UMA in wallet bar
+      try {
+        walletUma = callerIdentity(walletAddress);
+        var umaRow = document.getElementById('umaRow');
+        var umaDisp = document.getElementById('umaDisplay');
+        var umaCopyBtn = document.getElementById('umaCopyBtn');
+        if (umaRow && umaDisp) {
+          umaDisp.textContent = walletUma;
+          umaRow.style.display = 'flex';
+        }
+        if (umaCopyBtn) {
+          umaCopyBtn.onclick = function() {
+            if (navigator.clipboard) {
+              navigator.clipboard.writeText(walletUma).then(function() {
+                umaCopyBtn.textContent = '✓ copied';
+                setTimeout(function(){ umaCopyBtn.textContent = 'copy'; }, 1500);
+              });
+            } else {
+              // fallback
+              var ta = document.createElement('textarea');
+              ta.value = walletUma; ta.style.position='fixed'; ta.style.opacity='0';
+              document.body.appendChild(ta); ta.select();
+              try { document.execCommand('copy'); umaCopyBtn.textContent = '✓ copied'; } catch(e){}
+              document.body.removeChild(ta);
+              setTimeout(function(){ umaCopyBtn.textContent = 'copy'; }, 1500);
+            }
+          };
+        }
+      } catch(e) { console.warn('UMA compute failed:', e); }
+      // Enable Run button now wallet is connected
+      var runBtn = document.getElementById('runBtn');
+      if (runBtn && currentBytecode) runBtn.disabled = false;
+      // Re-populate param inputs so 'My UMA' buttons appear now that wallet is live
+      if (currentBytecode && typeof populateFunctionPicker === 'function') {
+        populateFunctionPicker();
+      }
+    } else {
+      dot.classList.remove('connected');
+      label.textContent = 'No wallet connected';
+      addr.textContent  = '';
+      walletUma = null;
+      var umaRow = document.getElementById('umaRow');
+      if (umaRow) umaRow.style.display = 'none';
+      if (compilerTrust === 'compiler-attested' && compilerKeyId) {
+        mode.textContent = 'Compiler-Attested PQC';
+        mode.className   = 'wallet-mode persistent';
+        note.textContent = 'Signing: ML-DSA-65 · key_id ' + compilerKeyId;
+      } else {
+        mode.textContent = 'Ephemeral PQC signing';
+        mode.className   = 'wallet-mode ephemeral';
+        note.textContent = 'Signing: ephemeral ML-DSA-65';
+      }
+      btn.textContent   = 'Connect EVM Wallet';
+      btn.onclick       = connectWallet;
+    }
+  }
+
+  if (window.ethereum) {
+    window.ethereum.on('accountsChanged', function(accounts) {
+      walletAddress = accounts.length ? accounts[0] : null; updateWalletUI();
+    });
+  }
+
   /* ── Ephemeral secp256k1 key (default signing path) ─────────────────────── */
   // generateEphemeralKey() — creates a random secp256k1 keypair in the browser.
   // The derived EVM address becomes walletAddress and `caller` in contracts.
