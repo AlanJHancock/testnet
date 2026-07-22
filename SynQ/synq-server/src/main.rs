@@ -2050,6 +2050,7 @@ async fn session_state_handler(
             Some(Value::U128(v))  => json!(v.to_string()),
             Some(Value::U256(v))  => json!(v.to_string()),
             Some(Value::Bool(b))  => json!(b),
+            Some(Value::Str(s))   => json!(format!("0x{}", hex::encode(s.as_bytes()))),
             Some(Value::Bytes(b)) => json!(format!("0x{}", hex::encode(b))),
             Some(Value::Map(m))   => {
                 let obj: serde_json::Map<String,serde_json::Value> = m.iter().map(|(k,v)| {
@@ -2065,6 +2066,7 @@ async fn session_state_handler(
                         Value::U128(n)  => json!(n.to_string()),
                         Value::U256(n)  => json!(n.to_string()),
                         Value::Bool(b)  => json!(b),
+                        Value::Str(s)   => json!(format!("0x{}", hex::encode(s.as_bytes()))),
                         Value::Bytes(b) => json!(hex_encode(b)),
                         _               => json!(null),
                     };
