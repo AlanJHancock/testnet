@@ -3,9 +3,9 @@
  */
 
 import init, { compile_synq, synq_version }
-    from '/demo/wasm/synq_compiler_wasm.95568bfd541ee592.js';
+    from '/demo/wasm/synq_compiler_wasm.e4ff66711fe1c77c.js';
 
-const _ready = init('/demo/wasm/synq_compiler_wasm_bg.31f9742157044464.wasm');
+const _ready = init('/demo/wasm/synq_compiler_wasm_bg.e4ff66711fe1c77c.wasm');
 
 window.SynQWasm = {
     ready: _ready,
@@ -22,8 +22,4 @@ window.SynQWasm = {
     },
 };
 
-_ready.then(() => {
-    console.log('[SynQ WASM] compiler ready —', synq_version());
-}).catch(err => {
-    console.error('[SynQ WASM] init failed:', err);
-});
+_ready.then(() => console.log('[SynQ WASM] compiler ready'));
