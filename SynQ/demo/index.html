@@ -2475,9 +2475,14 @@
     if (isBoolScalar(name)) return s === '?' ? '?' : (s === '1' || s === 'true' ? 'true' : 'false');
     if (isBoolMap(name))    return (s === '0' || s === '?') ? 'false' : 'true';
     if (name === 'version') return (s === '?' || s === '0') ? '0' : 'v' + s;
-    if (name === 'owner' || name === 'creator') {
-      if (s === '0') return '(not set)';
-      try { return '0x' + BigInt(s).toString(16).padStart(40,'0'); } catch(e) { return s; }
+    // EVM address fields — render as 0x-prefixed hex, truncated
+    if (name === 'owner' || name === 'creator' || name === 'vaultOwner'
+        || (_declType === 'u256' && /[Oo]wner$|[Aa]ddress$|[Cc]aller$/.test(name))) {
+      if (s === '0' || s === '0x0') return '(not set)';
+      try {
+        var hex40 = BigInt(s).toString(16).padStart(40, '0');
+        return '0x' + hex40.slice(0, 6) + '…' + hex40.slice(-4);
+      } catch(e) { return s; }
     }
     return s;
   }
@@ -2496,30 +2501,35 @@
   // Call after every successful function run to probe known state vars
   async function probeStateVars() {
     if (!sessionId) return;
+    // Snapshot the session and state schema at call time so an async race
+    // (e.g. switching contracts while a probe is in-flight) does not mix up
+    // one contract's values with another's variable names.
+    var _probeSid      = sessionId;
+    var _probeVars     = currentStateVars     ? currentStateVars.slice()   : [];
+    var _probeVarTypes = currentStateVarTypes ? Object.assign({}, currentStateVarTypes) : {};
     try {
-      var res  = await fetch(SESSION_DEL_URL + sessionId + '/state');
+      var res  = await fetch(SESSION_DEL_URL + _probeSid + '/state');
       var data = await res.json();
+      // Discard if the user switched to a different contract while the fetch was in-flight
+      if (_probeSid !== sessionId) return;
       if (data.success && data.state) {
         stateSnapshot = {};
-        // Preserve insertion order from state_vars layout
-        // Always use the compiler-declared order so display is stable.
-        // Only fall back to server key order if we have no schema at all.
-        var names = (currentStateVars && currentStateVars.length > 0)
-          ? currentStateVars.map(function(sv) { return sv[0]; })
+        // Use the schema captured at call time — never the current global
+        var names = (_probeVars.length > 0)
+          ? _probeVars.map(function(sv) { return sv[0]; })
           : Object.keys(data.state);
         stateVarNames = names;
         names.forEach(function(n) {
           var raw = data.state[n];
           if (raw === undefined || raw === null) { stateSnapshot[n] = '?'; }
           else if (typeof raw === 'object') {
-            // Mapping/set — keep as object so formatStateVal can inspect keys/values
             stateSnapshot[n] = Array.isArray(raw) ? raw : (raw.value !== undefined ? String(raw.value) : raw);
           } else {
             stateSnapshot[n] = String(raw);
           }
         });
         updateStateDisplay();
-      syncInitPillHint();
+        syncInitPillHint();
       }
     } catch(e) {}
   }
