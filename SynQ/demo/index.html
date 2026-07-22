@@ -843,13 +843,25 @@
   /* ── Ephemeral secp256k1 key (default signing path) ─────────────────────── */
   // generateEphemeralKey() — creates a random secp256k1 keypair in the browser.
   // The derived EVM address becomes walletAddress and `caller` in contracts.
+  // waitForNoble() — returns the noble secp256k1 module, polling up to 5s for CDN load
+  function waitForNoble() {
+    return new Promise(function(resolve, reject) {
+      var attempts = 0;
+      function check() {
+        var n = (typeof nobleSecp256k1 !== 'undefined') ? nobleSecp256k1
+              : (typeof secp !== 'undefined') ? secp : null;
+        if (n && n.utils) { resolve(n); return; }
+        if (++attempts > 50) { reject(new Error('@noble/secp256k1 CDN did not load within 5s — reload the page.')); return; }
+        setTimeout(check, 100);
+      }
+      check();
+    });
+  }
+
   async function generateEphemeralKey() {
-    var _noble = (typeof nobleSecp256k1 !== 'undefined') ? nobleSecp256k1
-               : (typeof secp !== 'undefined') ? secp : null;
-    if (!_noble || !_noble.utils) {
-      console.warn('[SynQ] @noble/secp256k1 not ready');
-      return false;
-    }
+    var _noble;
+    try { _noble = await waitForNoble(); }
+    catch(e) { console.error('[SynQ]', e.message); return false; }
     _ephemeralPrivKey = _noble.utils.randomPrivateKey();
     var pubKeyUncomp  = _noble.getPublicKey(_ephemeralPrivKey, false);
     var pubKeyBody    = pubKeyUncomp.slice(1);
