@@ -745,7 +745,7 @@
       out.innerHTML = '<span class="err">Reset partial — failed: ' + failed.join(', ') + '</span>';
     } else {
       var names = toReset.map(function(c){ return c.name; }).join(', ');
-      out.innerHTML = '<span class="ok">All sessions reset (' + names + '). All state back to zero — call init() to reinitialise.</span>';
+      out.innerHTML = '<span class="ok">All sessions reset (' + names + '). ' + 'State cleared — the <b>init</b> pill will glow amber on each contract that needs initialising.</span>';
     }
 
     // Clear param inputs
@@ -2501,6 +2501,7 @@
           }
         });
         updateStateDisplay();
+      syncInitPillHint();
       }
     } catch(e) {}
   }
@@ -3008,6 +3009,46 @@
   window.loadComprehensive = loadComprehensive;
 
   /* ── Workspace helpers ───────────────────────────────────────────────────── */
+
+  // Highlight or grey-out the init pill based on current state snapshot.
+  // Called after every probeStateVars() so the UI reflects live VM state.
+  function syncInitPillHint() {
+    var pills = document.getElementById('funcPills');
+    if (!pills) return;
+    var initPill = null;
+    var allPills = pills.getElementsByClassName('func-pill');
+    for (var i = 0; i < allPills.length; i++) {
+      if (allPills[i].textContent.replace(/\s/g,'').startsWith('init')) {
+        initPill = allPills[i]; break;
+      }
+    }
+    if (!initPill) return;
+    // Check: does state have an 'initialised' slot?
+    var initVal = stateSnapshot['initialised'];
+    var isInitialised = (initVal === '1' || initVal === 'true' || initVal === 1 || initVal === true);
+    var hasInitSlot   = ('initialised' in stateSnapshot);
+    if (hasInitSlot && isInitialised) {
+      // Already initialised — grey out + tooltip
+      initPill.style.opacity      = '0.35';
+      initPill.style.cursor       = 'not-allowed';
+      initPill.title              = 'Contract already initialised — call Reset VM to start fresh';
+      initPill.style.outline      = '';
+    } else if (hasInitSlot && !isInitialised) {
+      // Needs init — pulse amber to guide user
+      initPill.style.opacity      = '1';
+      initPill.style.cursor       = 'pointer';
+      initPill.title              = 'Call init() to initialise this contract';
+      initPill.style.outline      = '2px solid rgba(255,180,0,0.8)';
+      initPill.style.outlineOffset = '1px';
+    } else {
+      // No initialised slot — leave as-is
+      initPill.style.opacity      = '';
+      initPill.style.cursor       = '';
+      initPill.title              = '';
+      initPill.style.outline      = '';
+    }
+  }
+
   function renderWorkspacePanel() {
     var panel = document.getElementById('workspacePanel');
     var list  = document.getElementById('workspaceContracts');
@@ -3152,6 +3193,7 @@
     document.getElementById('vmOutput').innerHTML = '<span class="dim">Select a function above and press Run.</span>';
     document.getElementById('paramsSection').style.display = 'none';
     document.getElementById('paramsGrid').innerHTML = '';
+    syncInitPillHint();
   }
 
   function switchToContract(sid) {
