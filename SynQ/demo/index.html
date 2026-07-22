@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
   <!-- js-sha3: battle-tested Keccak-256 matching Ethereum's keccak256 opcode -->
   <script src="https://cdn.jsdelivr.net/npm/js-sha3@0.8.0/src/sha3.min.js"></script>
+  <!-- @noble/hashes (SHA-256 for EIP-712) and @noble/secp256k1 (in-browser signing) -->
+  <script src="https://cdn.jsdelivr.net/npm/@noble/hashes@1.4.0/sha256.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@noble/secp256k1@2.1.0/lib/index.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SynQ IDE — Powered by Synergy Network</title>
 <style>
@@ -364,6 +367,115 @@
   var currentContractAddress  = null;  // keccak256("SynQ:"+name)[12..] — used in EIP-712 domain
   var walletAddress   = null;
   var walletUma       = null;
+  var _ephemeralPrivKey = null;   // Uint8Array — devnet ephemeral secp256k1 key
+
+  // ── Ephemeral keypair (devnet) ──────────────────────────────────────────
+  // Generates a fresh secp256k1 keypair in the browser using @noble/secp256k1.
+  // The derived EVM address is used as the caller identity for all contract
+  // calls on chainId 1337 (SynQ Devnet).  The key lives only in page memory
+  // — it is regenerated on each page load (or by clicking "New Devnet Key").
+  // No browser extension or external wallet required.
+  async function generateEphemeralKey() {
+    // Wait for noble to be ready (loaded via CDN <script>)
+    var _noble = (typeof nobleSecp256k1 !== "undefined") ? nobleSecp256k1
+               : (typeof secp !== "undefined") ? secp
+               : (typeof nobleHashes !== "undefined") ? null : null;
+    if (!_noble || !_noble.utils) {
+      console.warn("[SynQ] @noble/secp256k1 not ready — falling back to window.ethereum");
+      return false;
+    }
+    _ephemeralPrivKey = _noble.utils.randomPrivateKey();
+    var pubKeyUncomp = _noble.getPublicKey(_ephemeralPrivKey, false); // 65-byte uncompressed
+    // Keccak-256 of the 64 public-key bytes (skip 0x04 prefix) → last 20 bytes = EVM address
+    var pubKeyBody = pubKeyUncomp.slice(1); // 64 bytes
+    var addrBytes  = keccak256Bytes(pubKeyBody).slice(-20);
+    walletAddress  = "0x" + Array.from(addrBytes).map(function(b){ return b.toString(16).padStart(2,"0"); }).join("");
+    console.log("[SynQ] Ephemeral devnet address:", walletAddress);
+    return true;
+  }
+
+  // keccak256Bytes — returns Uint8Array hash (uses js-sha3)
+  function keccak256Bytes(input) {
+    var hex = sha3.keccak256(input instanceof Uint8Array ? input : new TextEncoder().encode(input));
+    var arr = new Uint8Array(hex.length / 2);
+    for (var i = 0; i < arr.length; i++) arr[i] = parseInt(hex.substr(i*2, 2), 16);
+    return arr;
+  }
+
+  // ── In-page EIP-712 signer ───────────────────────────────────────────────
+  // Signs EIP-712 typed data using the ephemeral secp256k1 key.
+  // Returns a 65-byte hex signature (r + s + v) matching eth_signTypedData_v4.
+  async function signEIP712Ephemeral(typedDataJson) {
+    var _noble = (typeof nobleSecp256k1 !== "undefined") ? nobleSecp256k1
+               : (typeof secp !== "undefined") ? secp : null;
+    if (!_noble || !_ephemeralPrivKey) throw new Error("Ephemeral key not initialised");
+
+    var td = (typeof typedDataJson === "string") ? JSON.parse(typedDataJson) : typedDataJson;
+
+    // Build EIP-712 domain separator
+    function encodeType(typeName, types) {
+      var deps = [];
+      function collect(t) {
+        (types[t] || []).forEach(function(f) { if (types[f.type] && !deps.includes(f.type)) { deps.push(f.type); collect(f.type); } });
+      }
+      collect(typeName);
+      var enc = typeName + "(" + (types[typeName]||[]).map(function(f){ return f.type+" "+f.name; }).join(",") + ")";
+      return enc + deps.sort().map(function(d){ return d+"("+(types[d]||[]).map(function(f){ return f.type+" "+f.name; }).join(",")+")"; }).join("");
+    }
+
+    function typeHash(typeName, types) {
+      return keccak256Bytes(new TextEncoder().encode(encodeType(typeName, types)));
+    }
+
+    function encodePrimitive(type, value) {
+      var buf = new Uint8Array(32);
+      if (type === "address") {
+        var h = value.toLowerCase().replace(/^0x/,"").padStart(40,"0");
+        for (var i = 0; i < 20; i++) buf[12+i] = parseInt(h.substr(i*2,2),16);
+      } else if (type === "bytes32") {
+        var hx = (typeof value === "string" ? value : "0x").replace(/^0x/,"").padEnd(64,"0");
+        for (var i = 0; i < 32; i++) buf[i] = parseInt(hx.substr(i*2,2),16);
+      } else if (type === "uint256") {
+        var n = BigInt(value); var hx2 = n.toString(16).padStart(64,"0");
+        for (var i = 0; i < 32; i++) buf[i] = parseInt(hx2.substr(i*2,2),16);
+      } else if (type === "string" || type === "bytes") {
+        return keccak256Bytes(new TextEncoder().encode(value));
+      } else if (type === "bool") {
+        buf[31] = value ? 1 : 0;
+      }
+      return buf;
+    }
+
+    function hashStruct(typeName, value, types) {
+      var th = typeHash(typeName, types);
+      var parts = [th];
+      (types[typeName]||[]).forEach(function(f) {
+        if (types[f.type]) { parts.push(hashStruct(f.type, value[f.name], types)); }
+        else { parts.push(encodePrimitive(f.type, value[f.name])); }
+      });
+      var combined = new Uint8Array(parts.reduce(function(s,p){ return s+p.length; }, 0));
+      var off = 0; parts.forEach(function(p){ combined.set(p,off); off+=p.length; });
+      return keccak256Bytes(combined);
+    }
+
+    var domainHash  = hashStruct("EIP712Domain",  td.domain,  td.types);
+    var messageHash = hashStruct(td.primaryType,  td.message, td.types);
+
+    // Final digest: 0x1901 ++ domainHash ++ messageHash
+    var digest = new Uint8Array(2 + 32 + 32);
+    digest[0] = 0x19; digest[1] = 0x01;
+    digest.set(domainHash,  2);
+    digest.set(messageHash, 34);
+    var digestHash = keccak256Bytes(digest);
+
+    // Sign with noble — returns { r, s, recovery }
+    var sig = await _noble.sign(digestHash, _ephemeralPrivKey, { lowS: true });
+    var r   = sig.r.toString(16).padStart(64,"0");
+    var s   = sig.s.toString(16).padStart(64,"0");
+    var v   = (sig.recovery + 27).toString(16).padStart(2,"0");
+    return "0x" + r + s + v;
+  }
+
 
   // callerIdentity(evmAddress) — returns the EVM address as a decimal UInt256.
   //
@@ -972,11 +1084,22 @@
     return Promise.resolve(keccak_256(bytes));
   }
 
-  /* ── Wallet ──────────────────────────────────────────────────────────────── */
-  function connectWallet() {
-    if (!window.ethereum) { alert('No EVM wallet detected. Install MetaMask, Coinbase Wallet, or any EIP-1193 wallet and reload.'); return; }
+  /* ── Wallet / Devnet Keypair ──────────────────────────────────────────────── */
+  // connectWallet: prefers the ephemeral devnet key; falls back to window.ethereum
+  // (MetaMask / any EIP-1193 wallet) if noble is unavailable.
+  async function connectWallet() {
+    var ok = await generateEphemeralKey();
+    if (ok) {
+      updateWalletUI();
+      var runBtn = document.getElementById("runBtn");
+      if (runBtn && currentBytecode) runBtn.disabled = false;
+      if (currentBytecode && typeof populateFunctionPicker === "function") populateFunctionPicker();
+      return;
+    }
+    // noble not available — fall back to injected wallet
+    if (!window.ethereum) { alert('No signing method available. Please reload — the in-browser devnet key failed to initialise.'); return; }
     window.ethereum.request({ method: 'eth_requestAccounts' }).then(function(accounts) {
-      walletAddress = accounts[0];
+      walletAddress = accounts[0]; _ephemeralPrivKey = null;
       updateWalletUI();
       if (!connectWallet._listening) {
         connectWallet._listening = true;
@@ -987,7 +1110,7 @@
             updateWalletUI();
             document.getElementById('attestPanel').classList.remove('show');
             var out = document.getElementById('vmOutput');
-            if (out) out.innerHTML = '<span class="err">Wallet disconnected — reconnect to call authenticated functions.</span>';
+            if (out) out.innerHTML = '<span class="err">Wallet disconnected.</span>';
           } else { walletAddress = accs[0]; updateWalletUI(); }
         });
       }
@@ -995,8 +1118,15 @@
   }
 
   function disconnectWallet() {
-    walletAddress = null; updateWalletUI();
+    walletAddress = null; _ephemeralPrivKey = null; updateWalletUI();
     document.getElementById('attestPanel').classList.remove('show');
+  }
+
+  async function regenerateKey() {
+    await generateEphemeralKey();
+    updateWalletUI();
+    // clear session state so new key starts fresh
+    if (currentBytecode && typeof populateFunctionPicker === "function") populateFunctionPicker();
   }
 
   function updateWalletUI() {
@@ -1010,11 +1140,13 @@
       dot.classList.add('connected');
       label.textContent = 'Connected:';
       addr.textContent  = walletAddress.slice(0,6) + '...' + walletAddress.slice(-4);
-      mode.textContent  = 'Hybrid PQC + EVM signing';
-      mode.className    = 'wallet-mode hybrid';
-      note.textContent  = 'Signing: EVM wallet + ML-DSA-65 wrapper';
-      btn.textContent   = 'Disconnect';
-      btn.onclick       = disconnectWallet;
+      mode.textContent  = _ephemeralPrivKey ? 'Devnet Keypair (in-browser)' : 'Hybrid PQC + EVM signing';
+      mode.className    = _ephemeralPrivKey ? 'wallet-mode ephemeral' : 'wallet-mode hybrid';
+      note.textContent  = _ephemeralPrivKey
+        ? 'Signing: ephemeral secp256k1 — page memory only · chainId 1337'
+        : 'Signing: EVM wallet + ML-DSA-65 wrapper';
+      btn.textContent   = _ephemeralPrivKey ? 'New Devnet Key' : 'Disconnect';
+      btn.onclick       = _ephemeralPrivKey ? regenerateKey : disconnectWallet;
       // Compute + display UMA in wallet bar
       try {
         walletUma = callerIdentity(walletAddress);
@@ -1067,7 +1199,7 @@
         mode.className   = 'wallet-mode ephemeral';
         note.textContent = 'Signing: ephemeral ML-DSA-65';
       }
-      btn.textContent   = 'Connect EVM Wallet';
+      btn.textContent   = 'Connect Wallet';
       btn.onclick       = connectWallet;
     }
   }
@@ -1077,6 +1209,14 @@
       walletAddress = accounts.length ? accounts[0] : null; updateWalletUI();
     });
   }
+
+  // Auto-generate devnet keypair on page load — no user action required.
+  // Runs after DOM ready; noble scripts are synchronous CDN loads so they
+  // should be available by the time this executes.
+  (async function autoInitKey() {
+    var ok = await generateEphemeralKey();
+    if (ok) updateWalletUI();
+  })();
 
   /* ── Editor ──────────────────────────────────────────────────────────────── */
   function updateLineNums() {
@@ -1395,12 +1535,18 @@
             }
           });
 
-          // 4. Wallet signs
-          setStatus('Waiting for wallet signature...', 'info');
-          var evmSig = await window.ethereum.request({
-            method: 'eth_signTypedData_v4',
-            params: [walletAddress, typedData]
-          });
+          // 4. Sign — ephemeral in-browser key (preferred) or injected wallet
+          setStatus('Signing source commit...', 'info');
+          var evmSig;
+          if (_ephemeralPrivKey) {
+            evmSig = await signEIP712Ephemeral(typedData);
+          } else {
+            setStatus('Waiting for wallet signature...', 'info');
+            evmSig = await window.ethereum.request({
+              method: 'eth_signTypedData_v4',
+              params: [walletAddress, typedData]
+            });
+          }
 
           // 5. POST /compile/sign-source — server re-compiles + binds author → source → bytecode
           setStatus('Source signed — generating PQC SourceCommit...', 'info');
@@ -2108,11 +2254,15 @@
 
         var signature;
         try {
-          signature = await window.ethereum.request({
-            method: 'eth_signTypedData_v4',
-                    params: [walletAddress, callTypedData]
-          });
-          console.log('[SynQ auth] signature from wallet:', signature);
+          if (_ephemeralPrivKey) {
+            signature = await signEIP712Ephemeral(callTypedData);
+          } else {
+            signature = await window.ethereum.request({
+              method: 'eth_signTypedData_v4',
+              params: [walletAddress, callTypedData]
+            });
+          }
+          console.log('[SynQ auth] signature:', signature);
         } catch (sigErr) {
           var sigErrMsg;
           if (sigErr.code === 4001 || sigErr.code === 'ACTION_REJECTED') {
