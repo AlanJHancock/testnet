@@ -526,7 +526,8 @@ fn value_display(v: &Value) -> String {
     }
 }
 
-fn parse_arg(v: &serde_json::Value) -> Result<Value, String> {
+fn parse_arg(v: &serde_json::Value) -> Result<Value, String> { parse_arg_typed(v, "") }
+fn parse_arg_typed(v: &serde_json::Value, ty_hint: &str) -> Result<Value, String> {
     match v {
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
@@ -544,6 +545,11 @@ fn parse_arg(v: &serde_json::Value) -> Result<Value, String> {
             let s = s.trim();
             // Empty string → UTF-8 string param (not numeric zero)
             if s.is_empty() { return Ok(Value::Bytes(vec![])); }
+            // If the caller declared this param as str/string, treat any value as bytes
+            // even if it looks numeric — "33" as a label should be Bytes, not I32.
+            if ty_hint == "str" || ty_hint == "string" {
+                return Ok(Value::Bytes(s.as_bytes().to_vec()));
+            }
             if s.starts_with('-') {
                 if let Ok(i) = s.parse::<i64>() {
                     return Ok(if i >= i32::MIN as i64 { Value::I32(i as i32) } else { Value::I64(i) });
@@ -1731,6 +1737,7 @@ struct SessionRunRequest {
     evm_signature:  Option<String>,
     call_nonce:     Option<String>,
     call_signature: Option<String>,  // "functionName(arg0, arg1, ...)" — must match frontend
+    param_types:    Option<Vec<String>>,  // declared types per arg ("str","u256","bool")
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1802,8 +1809,10 @@ async fn session_run_handler(
             format!("{}({})", req.function, arg_strs.join(", "))
         }
     };
+    let param_types_hint: Vec<String> = req.param_types.unwrap_or_default();
     for (i, raw) in req.args.unwrap_or_default().iter().enumerate() {
-        match parse_arg(raw) {
+        let ty_hint = param_types_hint.get(i).map(|s| s.as_str()).unwrap_or("");
+        match parse_arg_typed(raw, ty_hint) {
             Ok(v)  => vm_args.push(v),
             Err(e) => return (StatusCode::OK, RespJson(RunResponse {
                 success: false, result: None, output: String::new(),
