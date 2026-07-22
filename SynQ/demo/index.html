@@ -405,6 +405,14 @@
   // On button: eth_requestAccounts triggers the Synergy approval popup.
   // Both EIP-712 sign paths use window.ethereum.eth_signTypedData_v4.
 
+
+  // callerIdentity(evmAddress) — EVM address as decimal UInt256 (matches LoadCaller 0x50)
+  function callerIdentity(evmAddress) {
+    var addrHex = evmAddress.toLowerCase().replace(/^0x/, '');
+    return BigInt('0x' + addrHex).toString(10);
+  }
+  function computeUma(evmAddress) { return callerIdentity(evmAddress); }
+
   /* ── Ephemeral secp256k1 key (default signing path) ─────────────────────── */
   // generateEphemeralKey() — creates a random secp256k1 keypair in the browser.
   // The derived EVM address becomes walletAddress and `caller` in contracts.
