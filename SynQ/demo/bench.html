@@ -164,7 +164,28 @@
   <div class="log" id="log"></div>
 </div>
 
-<script src="/demo/wasm/synq-wasm-loader.js" type="module"></script>
+<script>
+// Inline WASM loader — dynamic import() sets window.SynQWasm synchronously
+// as a promise, so classic scripts can await it without the module-defer race.
+window.SynQWasm = (function() {
+  var _ready = import('/demo/wasm/synq_compiler_wasm.e4ff66711fe1c77c.js')
+    .then(function(mod) {
+      return mod.default({ module_or_path: '/demo/wasm/synq_compiler_wasm_bg.e4ff66711fe1c77c.wasm' })
+        .then(function() { return mod; });
+    });
+  return {
+    ready: _ready,
+    compile: async function(source) {
+      var mod = await _ready;
+      return JSON.parse(mod.compile_synq(source));
+    },
+    version: async function() {
+      var mod = await _ready;
+      return mod.synq_version();
+    }
+  };
+})();
+</script>
 <script>
 // ── WASM boot diagnostic ─────────────────────────────────────────────────
   // Fires once on page load. Shows version string + a test compile byte count
