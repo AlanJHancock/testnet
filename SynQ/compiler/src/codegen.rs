@@ -729,15 +729,29 @@ impl CodeGenerator {
                     }
                     "contains" => {
                         if args.len() != 1 { return Err("map.contains expects 1 arg".into()); }
+                        // Dispatch to SetContains if the target is a Set state var.
+                        // The parser emits MapMethod for .contains() regardless of type;
+                        // codegen must correct this by checking set_vars.
+                        let is_set = self.set_vars.contains_key(map.as_str());
                         self.gen_expression(&args[0], scope)?;
                         self.assembler.emit_op(OpCode::Push);
                         self.assembler.emit_i32(addr as i32);
-                        self.assembler.emit_op(OpCode::MapContains);
+                        if is_set {
+                            self.assembler.emit_op(OpCode::SetContains);
+                        } else {
+                            self.assembler.emit_op(OpCode::MapContains);
+                        }
                     }
                     "len" => {
+                        // Same dispatch: SetLen if target is a Set.
+                        let is_set = self.set_vars.contains_key(map.as_str());
                         self.assembler.emit_op(OpCode::Push);
                         self.assembler.emit_i32(addr as i32);
-                        self.assembler.emit_op(OpCode::MapLen);
+                        if is_set {
+                            self.assembler.emit_op(OpCode::SetLen);
+                        } else {
+                            self.assembler.emit_op(OpCode::MapLen);
+                        }
                     }
                     "remove" => {
                         if args.len() != 1 { return Err("map.remove expects 1 arg".into()); }

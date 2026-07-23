@@ -385,7 +385,12 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
                 vec![]
             };
             match method.as_str() {
-                "get" | "contains" | "len" => Expression::MapMethod { map: obj_name, method, args },
+                "get" => Expression::MapMethod { map: obj_name, method, args },
+                "contains" | "len" => {
+                    // Route to SetMethod if the object is a Set state var;
+                    // otherwise treat as MapMethod (maps also support contains/len).
+                    Expression::MapMethod { map: obj_name, method, args }
+                },
                 "add" | "remove"           => Expression::SetMethod { set: obj_name, method, args },
                 _                          => Expression::MapMethod { map: obj_name, method, args },
             }
