@@ -471,11 +471,11 @@
           new Uint8Array(buf).set(bytes.slice(pc+1, pc+5));
           var val = new Int32Array(buf)[0];
           lines.push('  [' + addr + ']  Push     ' + val); pc += 5;
-        } else { lines.push('  [' + addr + ']  Push     <truncated>'); pc++; }
+        } else { lines.push('  [' + addr + ']  Push     \u003Ctruncated\u003E'); pc++; }
       } else if (op === 0x30 || op === 0x31 || op === 0x32) { // Jump / JumpIf / Call
         if (pc + 4 < codeEnd) {
           var tgt = readU32LE(bytes, pc+1);
-          lines.push('  [' + addr + ']  ' + opName.padEnd(9) + '-> 0x' + tgt.toString(16).padStart(4,'0').toUpperCase());
+          lines.push('  [' + addr + ']  ' + opName.padEnd(9) + '-\u003E 0x' + tgt.toString(16).padStart(4,'0').toUpperCase());
           pc += 5;
         } else { pc++; }
       } else if (op === 0x42) {         // LoadImm (raw bytes)
@@ -690,7 +690,7 @@
 
   async function resetVM() {
     var out = document.getElementById('vmOutput');
-    out.innerHTML = '<span class="dim">Resetting all VM sessions...</span>';
+    out.innerHTML = '\u003Cspan class="dim"\u003EResetting all VM sessions...\u003C/span\u003E';
 
     // ── Reset every contract in the workspace, not just the active one ──────
     // This ensures all contracts (e.g. SimpleToken) start with clean state
@@ -701,7 +701,7 @@
                                bytecode: currentBytecode, state_vars: currentStateVars }] : []);
 
     if (toReset.length === 0) {
-      out.innerHTML = '<span class="dim">No bytecode loaded — compile a contract first.</span>';
+      out.innerHTML = '\u003Cspan class="dim"\u003ENo bytecode loaded — compile a contract first.\u003C/span\u003E';
       return;
     }
 
@@ -755,10 +755,10 @@
     renderWorkspacePanel();
 
     if (failed.length > 0) {
-      out.innerHTML = '<span class="err">Reset partial — failed: ' + failed.join(', ') + '</span>';
+      out.innerHTML = '\u003Cspan class="err"\u003EReset partial — failed: ' + failed.join(', ') + '\u003C/span\u003E';
     } else {
       var names = toReset.map(function(c){ return c.name; }).join(', ');
-      out.innerHTML = '<span class="ok">All sessions reset (' + names + '). ' + 'State cleared — the <b>init</b> pill will glow amber on each contract that needs initialising.</span>';
+      out.innerHTML = '\u003Cspan class="ok"\u003EAll sessions reset (' + names + '). ' + 'State cleared — the \u003Cb\u003Einit\u003C/b\u003E pill will glow amber on each contract that needs initialising.\u003C/span\u003E';
     }
 
       // Immediately zero stateSnapshot so panel shows clean VM, not stale '?'
@@ -980,9 +980,9 @@
       updateWalletUI();
       var out = document.getElementById('vmOutput');
       if (out) out.innerHTML =
-        '<span class="ok">Identity imported: ' + sns + ' (' + evmAddr.slice(0,8) + '…)<br>' +
-        '<span style="color:rgba(255,200,80,0.9)">⚠ Display identity set. ' +
-        'Contract <code>caller</code> will be the ephemeral signing key until the Synergy extension is approved for this origin.</span></span>';
+        '\u003Cspan class="ok"\u003EIdentity imported: ' + sns + ' (' + evmAddr.slice(0,8) + '…)\u003Cbr\u003E' +
+        '\u003Cspan style="color:rgba(255,200,80,0.9)"\u003E⚠ Display identity set. ' +
+        'Contract \u003Ccode\u003Ecaller\u003C/code\u003E will be the ephemeral signing key until the Synergy extension is approved for this origin.\u003C/span\u003E\u003C/span\u003E';
       setStatus('Device link imported — ' + sns, 'ok');
     } catch(e) { showWalletError('Device link parse error: ' + e.message); }
   }
@@ -1080,7 +1080,7 @@
 
   function showWalletError(msg) {
     var out = document.getElementById('vmOutput');
-    if (out) out.innerHTML = '<span class="err">' + msg + '</span>';
+    if (out) out.innerHTML = '\u003Cspan class="err"\u003E' + msg + '\u003C/span\u003E';
     setStatus(msg, 'error');
   }
 
@@ -1095,7 +1095,7 @@
         updateWalletUI();
         document.getElementById('attestPanel').classList.remove('show');
         var out = document.getElementById('vmOutput');
-        if (out) out.innerHTML = '<span class="err">Synergy Wallet disconnected — reconnect to authenticate calls.</span>';
+        if (out) out.innerHTML = '\u003Cspan class="err"\u003ESynergy Wallet disconnected — reconnect to authenticate calls.\u003C/span\u003E';
       } else { walletAddress = accs[0]; updateWalletUI(); }
     });
   }
@@ -1254,7 +1254,7 @@
     document.getElementById('paramsSection').style.display = 'none';
     document.getElementById('paramsGrid').innerHTML = '';
     document.getElementById('runBtn').disabled = true;
-    document.getElementById('vmOutput').innerHTML = '<span class="dim">Select a function and press Run.</span>';
+    document.getElementById('vmOutput').innerHTML = '\u003Cspan class="dim"\u003ESelect a function and press Run.\u003C/span\u003E';
   }
 
   function setStatus(msg, type) {
@@ -1358,7 +1358,7 @@
                    || document.getElementById('editor').value || '';
     var _previewName = (_previewSrc.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/) || [])[1] || '';
     btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> Compiling' + (_previewName ? ' ' + _previewName : '') + '...';
+    btn.innerHTML = '\u003Cspan class="spinner"\u003E\u003C/span\u003E Compiling' + (_previewName ? ' ' + _previewName : '') + '...';
     clearResults();
 
     try {
@@ -1416,11 +1416,11 @@
               // Server is authoritative for metadata too — always prefer its
               // state_var_types, state_vars, and functions over WASM output.
               if (_xdat.success) {
-                if (_xdat.state_var_types && Object.keys(_xdat.state_var_types).length > 0)
+                if (_xdat.state_var_types && Object.keys(_xdat.state_var_types).length \u003E 0)
                   data.state_var_types = _xdat.state_var_types;
-                if (_xdat.state_vars && _xdat.state_vars.length > 0)
+                if (_xdat.state_vars && _xdat.state_vars.length \u003E 0)
                   data.state_vars = _xdat.state_vars;
-                if (_xdat.functions && _xdat.functions.length > 0)
+                if (_xdat.functions && _xdat.functions.length \u003E 0)
                   data.functions = _xdat.functions;
               }
             } catch(_xErr) {
@@ -1474,7 +1474,7 @@
       currentContractAddress = data.contract_address  || null;
       compileFunctions       = data.functions         || [];
       // WASM path now returns state_var_types too — merge it in
-      if (data.state_var_types && Object.keys(data.state_var_types).length > 0) {
+      if (data.state_var_types && Object.keys(data.state_var_types).length \u003E 0) {
         currentStateVarTypes = data.state_var_types;
       }
       stateVarNames = currentStateVars.map(function(sv) { return sv[0]; });
@@ -1654,8 +1654,8 @@
         if (!ec || !ec.length) { dh.style.visibility = 'hidden'; dh.textContent = '\u00a0'; return; }
         var deployed = workspaceContracts.map(function(c){ return c.name; });
         var missing  = ec.filter(function(n){ return !deployed.includes(n); });
-        var wsLabel  = workspaceNum > 0 ? 'Workspace ' + workspaceNum : 'the workspace';
-        if (missing.length > 0) {
+        var wsLabel  = workspaceNum \u003E 0 ? 'Workspace ' + workspaceNum : 'the workspace';
+        if (missing.length \u003E 0) {
           // Suppress until first contract deployed — no workspace context yet
           if (workspaceContracts.length === 0) {
             dh.style.visibility = 'hidden'; dh.textContent = '\u00a0'; return;
@@ -1689,7 +1689,7 @@
     var isHybrid  = !!(evmAddr);
 
     function hexUp(s) { return s ? s.toLowerCase() : s; }
-    function trunc(s, n) { return s ? (s.slice(0, n) + (s.length > n ? '…' : '')) : '—'; }
+    function trunc(s, n) { return s ? (s.slice(0, n) + (s.length \u003E n ? '…' : '')) : '—'; }
 
     var modeLabel = isHybrid ? 'Hybrid (EVM + ML-DSA-65)' : 'Compiler-Attested PQC (ML-DSA-65)';
     var kid       = hexUp(pqc.key_id    || sidecar.key_id    || compilerKeyId || '') || '—';
@@ -1783,10 +1783,10 @@
                 'color:rgba(255,255,255,0.35);cursor:pointer;font-size:9px;' +
                 'padding:1px 6px;line-height:1.5;transition:color .15s,border-color .15s;" ' +
               'onmouseover="this.style.color=\'rgba(255,90,90,0.85)\';this.style.borderColor=\'rgba(255,90,90,0.4)\'" ' +
-              'onmouseout="this.style.color=\'rgba(255,255,255,0.35)\';this.style.borderColor=\'rgba(255,255,255,0.15)\'">' +
+              'onmouseout="this.style.color=\'rgba(255,255,255,0.35)\';this.style.borderColor=\'rgba(255,255,255,0.15)\'"\u003E' +
               '\u00d7 hide from view' +
-            '</button>' +
-          '</div>' +
+            '\u003C/button\u003E' +
+          '\u003C/div\u003E' +
 
           // ── Author — truncated by default, click to reveal full address ──
           // Only the EVM address has meaningful operational-security sensitivity
@@ -1796,41 +1796,41 @@
               ? scAuthor.slice(0,6) + '…' + scAuthor.slice(-4)
               : scAuthor;
             var revealId = 'scAuthorReveal_' + Date.now();
-            return '<div class="attest-row">' +
-              '<span class="attest-key">Author</span>' +
-              '<span id="' + revealId + '">' +
+            return '\u003Cdiv class="attest-row"\u003E' +
+              '\u003Cspan class="attest-key"\u003EAuthor\u003C/span\u003E' +
+              '\u003Cspan id="' + revealId + '"\u003E' +
                 // ── Masked state (default) ─────────────────────────────────
-                '<span class="sc-author-masked" ' +
+                '\u003Cspan class="sc-author-masked" ' +
                   'onclick="' +
                     'var el=document.getElementById(\'' + revealId + '\');' +
                     'el.querySelector(\'.sc-author-masked\').style.display=\'none\';' +
                     'el.querySelector(\'.sc-author-full\').style.display=\'inline\'" ' +
                   'title="Click to reveal full address" ' +
-                  'style="cursor:pointer;">' +
-                  '<span style="font-family:monospace;font-size:11px;letter-spacing:.3px;">' + short + '</span>' +
-                  '<span style="margin-left:6px;font-size:9px;color:rgba(255,255,255,0.3);' +
+                  'style="cursor:pointer;"\u003E' +
+                  '\u003Cspan style="font-family:monospace;font-size:11px;letter-spacing:.3px;"\u003E' + short + '\u003C/span\u003E' +
+                  '\u003Cspan style="margin-left:6px;font-size:9px;color:rgba(255,255,255,0.3);' +
                     'border:1px solid rgba(255,255,255,0.15);border-radius:3px;' +
-                    'padding:1px 5px;vertical-align:middle;">' +
+                    'padding:1px 5px;vertical-align:middle;"\u003E' +
                     'reveal ↓' +
-                  '</span>' +
-                '</span>' +
+                  '\u003C/span\u003E' +
+                '\u003C/span\u003E' +
                 // ── Revealed state (hidden until clicked) ─────────────────
-                '<span class="sc-author-full" style="display:none;">' +
-                  '<span style="font-family:monospace;font-size:11px;' +
-                    'word-break:break-all;letter-spacing:.3px;">' + scAuthor + '</span>' +
-                  '<span ' +
+                '\u003Cspan class="sc-author-full" style="display:none;"\u003E' +
+                  '\u003Cspan style="font-family:monospace;font-size:11px;' +
+                    'word-break:break-all;letter-spacing:.3px;"\u003E' + scAuthor + '\u003C/span\u003E' +
+                  '\u003Cspan ' +
                     'onclick="' +
                       'var el=document.getElementById(\'' + revealId + '\');' +
                       'el.querySelector(\'.sc-author-full\').style.display=\'none\';' +
                       'el.querySelector(\'.sc-author-masked\').style.display=\'inline\'" ' +
                     'style="margin-left:6px;font-size:9px;color:rgba(255,255,255,0.3);' +
                       'border:1px solid rgba(255,255,255,0.15);border-radius:3px;' +
-                      'padding:1px 5px;vertical-align:middle;cursor:pointer;">' +
+                      'padding:1px 5px;vertical-align:middle;cursor:pointer;"\u003E' +
                     'hide ↑' +
-                  '</span>' +
-                '</span>' +
-              '</span>' +
-            '</div>';
+                  '\u003C/span\u003E' +
+                '\u003C/span\u003E' +
+              '\u003C/span\u003E' +
+            '\u003C/div\u003E';
           })() +
 
           // ── Source hash — truncated, full in tooltip ──────────────────────
@@ -1846,7 +1846,7 @@
           row('PQC\u202fkey\u202fID', scKeyId !== '\u2014' ? trunc(scKeyId, 16) : '\u2014', 'attest-val pqc', scKeyId) +
           row('PQC\u202falgorithm', scAlgo, 'attest-val pqc') +
 
-        '</div>';
+        '\u003C/div\u003E';
     }
 
     document.getElementById('attestRows').innerHTML = rows;
@@ -1883,7 +1883,7 @@
           ' via extern_call — deploy ' + missing.join(' & ') + ' into this workspace too.', 'warning');
       }
     }
-    if (deployBtn) { deployBtn.disabled = true; deployBtn.innerHTML = '<span class="spinner"></span> Deploying...'; }
+    if (deployBtn) { deployBtn.disabled = true; deployBtn.innerHTML = '\u003Cspan class="spinner"\u003E\u003C/span\u003E Deploying...'; }
     setStatus('Deploying to QVM...', 'info');
 
     // Destroy previous session only if it is not part of the workspace.
@@ -1978,15 +1978,15 @@
 
     // Update pill active state
     var pills = document.getElementById('funcPills').getElementsByClassName('func-pill');
-    for (var i = 0; i < pills.length; i++) {
+    for (var i = 0; i \u003C pills.length; i++) {
       pills[i].classList.toggle('active', i === idx);
     }
 
     // Build param inputs
     var grid = document.getElementById('paramsGrid');
     grid.innerHTML = '';
-    if (selectedFunc.paramCount > 0) {
-      for (var p = 0; p < selectedFunc.paramCount; p++) {
+    if (selectedFunc.paramCount \u003E 0) {
+      for (var p = 0; p \u003C selectedFunc.paramCount; p++) {
         var group = document.createElement('div');
         group.className = 'param-group';
         var lbl = document.createElement('label');
@@ -2056,7 +2056,7 @@
           'identity','wallet','holder','spender','operator','beneficiary',
           'key','id','agent','delegate','source','dest'
         ];
-        if (!isBoolParam && umaNames.indexOf(pName) >= 0) {
+        if (!isBoolParam && umaNames.indexOf(pName) \u003E= 0) {
           // Row: input + wallet button
           var inputRow = document.createElement('div');
           inputRow.style.cssText = 'display:flex;gap:6px;align-items:stretch;margin-top:4px;';
@@ -2163,7 +2163,7 @@
     // JS float precision loss. Server parse_arg() accepts both.
     var args = [];
     var argError = null;
-    for (var p = 0; p < selectedFunc.paramCount; p++) {
+    for (var p = 0; p \u003C selectedFunc.paramCount; p++) {
       var el = document.getElementById('param_' + p);
       var paramIsStr = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'str';
       var raw = el ? (paramIsStr ? el.value : el.value.trim()) : '';
@@ -2185,7 +2185,7 @@
           break;
         }
         // Safe JS integer? Send as number; else send quoted decimal string.
-        var isSafe = raw.length < 16 || (raw.charAt(0) !== '-' && raw.length <= 15);
+        var isSafe = raw.length \u003C 16 || (raw.charAt(0) !== '-' && raw.length \u003C= 15);
         if (isSafe) {
           args.push(Number(raw));
         } else {
@@ -2305,9 +2305,9 @@
         });
         console.log('[SynQ auth] EIP-712 typed data:', callTypedData);
         console.log('[SynQ auth] wallet addr:', walletAddress);
-        setVMOutput('<span style="color:rgba(255,255,255,0.6);font-size:0.85rem;">'
-          + '&#x1F510; Sign the <strong>' + selectedFunc.name + '()</strong> call in your wallet to authenticate as the contract caller.'
-          + '</span>');
+        setVMOutput('\u003Cspan style="color:rgba(255,255,255,0.6);font-size:0.85rem;"\u003E'
+          + '&#x1F510; Sign the \u003Cstrong\u003E' + selectedFunc.name + '()\u003C/strong\u003E call in your wallet to authenticate as the contract caller.'
+          + '\u003C/span\u003E');
 
         var signature;
         try {
@@ -2322,8 +2322,8 @@
           } else {
             sigErrMsg = 'Signing error: ' + (sigErr.message || sigErr.toString());
           }
-          setVMOutput('<span class="err">' + sigErrMsg + '</span>');
-          btn.disabled = false; btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Function';
+          setVMOutput('\u003Cspan class="err"\u003E' + sigErrMsg + '\u003C/span\u003E');
+          btn.disabled = false; btn.innerHTML = '\u003Csvg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"\u003E\u003Cpolygon points="5 3 19 12 5 21 5 3"/\u003E\u003C/svg\u003E Run Function';
           return;
         }
         // Use the key-derived address when signing ephemerally — walletAddress
@@ -2347,10 +2347,10 @@
         var fnLabel = (selectedFunc && selectedFunc.name) ? selectedFunc.name : (req.function || '');
         // Show passed args in the header so the output is self-documenting
         var fnArgs = (typeof args !== 'undefined' && args.length) ? args.join(', ') : '';
-        display += '<div style="font-size:0.72rem;font-family:ui-monospace,monospace;color:rgba(255,255,255,0.28);margin-bottom:5px;">' + fnLabel + '(' + fnArgs + ')</div>';
+        display += '\u003Cdiv style="font-size:0.72rem;font-family:ui-monospace,monospace;color:rgba(255,255,255,0.28);margin-bottom:5px;"\u003E' + fnLabel + '(' + fnArgs + ')\u003C/div\u003E';
         // ── Line 2: caller badge (wallet-signed calls only) ───────────────
         if (typeof callBody !== 'undefined' && callBody.evm_address) {
-          display += '<div style="font-size:0.7rem;font-family:ui-monospace,monospace;color:rgba(147,210,147,0.75);margin-bottom:5px;">&#x2713; ' + callBody.evm_address + '</div>';
+          display += '\u003Cdiv style="font-size:0.7rem;font-family:ui-monospace,monospace;color:rgba(147,210,147,0.75);margin-bottom:5px;"\u003E&#x2713; ' + callBody.evm_address + '\u003C/div\u003E';
         }
         // ── Line 3: return value (prominent) ─────────────────────────────
         if (rv !== null && rv !== undefined) {
@@ -2370,20 +2370,20 @@
           if (isBoolResult) {
             var isBT = (val === 'true' || val === '1');
             var bc = isBT ? 'rgba(100,220,150,0.9)' : 'rgba(255,120,100,0.85)';
-            boolBadge = '<span style="font-size:0.78rem;font-family:ui-monospace,monospace;'
+            boolBadge = '\u003Cspan style="font-size:0.78rem;font-family:ui-monospace,monospace;'
               + 'background:' + bc + ';color:#111;border-radius:3px;'
-              + 'padding:1px 6px;font-weight:700;vertical-align:middle;">'
-              + (isBT ? 'true' : 'false') + '</span>';
+              + 'padding:1px 6px;font-weight:700;vertical-align:middle;"\u003E'
+              + (isBT ? 'true' : 'false') + '\u003C/span\u003E';
           } else if (!isStringResult && type !== 'UInt256' && type !== 'u256' && (val === '0' || val === '1')) {
             var isBT = val === '1';
             var bc = isBT ? 'rgba(100,220,150,0.9)' : 'rgba(255,120,100,0.85)';
-            boolBadge = '<span style="font-size:0.78rem;font-family:ui-monospace,monospace;'
+            boolBadge = '\u003Cspan style="font-size:0.78rem;font-family:ui-monospace,monospace;'
               + 'background:' + bc + ';color:#111;border-radius:3px;'
-              + 'padding:1px 6px;margin-left:8px;font-weight:700;vertical-align:middle;">'
-              + (isBT ? 'true' : 'false') + '</span>';
+              + 'padding:1px 6px;margin-left:8px;font-weight:700;vertical-align:middle;"\u003E'
+              + (isBT ? 'true' : 'false') + '\u003C/span\u003E';
           }
           if (isStringResult) {
-            display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;color:rgba(180,230,180,1);">“'
+            display += '\u003Cspan class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;color:rgba(180,230,180,1);"\u003E“'
               + (function(_v){
                   if(/^0x[0-9a-fA-F]+$/.test(_v)){
                     try{
@@ -2397,8 +2397,8 @@
                   }
                   return _v;
                 })(val).replace(/&/g,'&amp;').replace(/</g,'&lt;')
-              + '”</span>';
-            display += '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;">str</span>\n';
+              + '”\u003C/span\u003E';
+            display += '\u003Cspan style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;"\u003Estr\u003C/span\u003E\n';
           } else if (isBoolResult) {
             display += boolBadge + '\n';
           } else {
@@ -2406,8 +2406,8 @@
             if ((type === 'UInt256' || type === 'u256') && /^\d+$/.test(val) && BigInt(val) > 0n) {
               try { var h = BigInt(val).toString(16); if (h.length >= 20) dispVal = '0x' + h.padStart(40,'0'); } catch(e) {}
             }
-            display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;">' + dispVal + '</span>';
-            if (type) display += '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;">' + type + '</span>';
+            display += '\u003Cspan class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;"\u003E' + dispVal + '\u003C/span\u003E';
+            if (type) display += '\u003Cspan style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;"\u003E' + type + '\u003C/span\u003E';
             display += boolBadge + '\n';
           }
         } else {
@@ -2442,7 +2442,7 @@
               );
             }
           });
-          if (diffLines.length > 0) {
+          if (diffLines.length \u003E 0) {
             display += '<div style="line-height:1.8;margin-top:2px;font-size:0.82rem;font-family:ui-monospace,monospace;">'
               + diffLines.join('<br>') + '</div>';
           } else {
@@ -2450,7 +2450,7 @@
           }
         }
         // ── Line 4: events (if any) ──────────────────────────────────────
-        if (data.events && data.events.length > 0) {
+        if (data.events && data.events.length \u003E 0) {
           display += '<div style="margin-top:8px;border-top:1px solid rgba(255,255,255,0.08);padding-top:6px;">';
           data.events.forEach(function(ev) {
             var argStrs = (ev.args || []).map(function(a) {
@@ -2471,7 +2471,7 @@
           display += '</div>';
         }
         // ── Line 5: capabilities (if any, subtle) ────────────────────────
-        if (selectedFunc && selectedFunc.capabilities && selectedFunc.capabilities.length > 0) {
+        if (selectedFunc && selectedFunc.capabilities && selectedFunc.capabilities.length \u003E 0) {
           display += '<div style="font-size:0.68rem;color:rgba(255,255,255,0.22);margin-top:4px;">requires cap::' + selectedFunc.capabilities.join(', cap::') + '</div>';
         }
         // data.output intentionally omitted — server echoes 'Return value: X'
@@ -2500,14 +2500,14 @@
         } else if (errMsg.includes('StackUnderflow')) {
           errMsg = 'Stack underflow: a cross-contract call failed internally — ensure all required contracts are deployed in the same workspace before calling this function.';
         }
-        out.innerHTML = '<span class="err">' + errMsg + '</span>';
+        out.innerHTML = '\u003Cspan class="err"\u003E' + errMsg + '\u003C/span\u003E';
         probeStateVars();
       }
     } catch (err) {
-      out.innerHTML = '<span class="err">Network error: ' + err.message + '</span>';
+      out.innerHTML = '\u003Cspan class="err"\u003ENetwork error: ' + err.message + '\u003C/span\u003E';
     } finally {
       btn.disabled = false;
-      btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Function';
+      btn.innerHTML = '\u003Csvg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"\u003E\u003Cpolygon points="5 3 19 12 5 21 5 3"/\u003E\u003C/svg\u003E Run Function';
     }
   }
 
@@ -2543,7 +2543,7 @@
     }
 
     // ── Str rendering helpers — plain-text-safe Unicode quotes ────────────
-    var STR_BADGE = '<span style="font-size:0.72rem;color:rgba(255,255,255,0.4);margin-left:3px;">(str)</span>';
+    var STR_BADGE = '\u003Cspan style="font-size:0.72rem;color:rgba(255,255,255,0.4);margin-left:3px;"\u003E(str)\u003C/span\u003E';
     function strEmpty()      { return '\u201c\u201d\u00a0' + STR_BADGE; }
     function strDisplay(txt) { return '\u201c' + txt.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '\u201d\u00a0' + STR_BADGE; }
 
@@ -2583,7 +2583,7 @@
         }
       }
       // Already a plain string (shouldn't happen but guard it)
-      if (typeof v === 'string' && !/^0x/.test(v) && v.length > 0) return strDisplay(v);
+      if (typeof v === 'string' && !/^0x/.test(v) && v.length \u003E 0) return strDisplay(v);
       return strEmpty();
     }
 
@@ -2601,10 +2601,10 @@
       if (keys.length === 0) return isBoolMap(name) ? 'false' : '{}';
       if (isBoolMap(name)) {
         var granted = keys.filter(function(k) { return String(v[k]) === '1'; });
-        return granted.length > 0 ? 'true (' + granted.length + ')' : 'false';
+        return granted.length \u003E 0 ? 'true (' + granted.length + ')' : 'false';
       }
       var pairs = keys.slice(0,3).map(function(k) { return safeKey(k) + ':' + v[k]; });
-      return '{' + pairs.join(', ') + (keys.length > 3 ? ', \u2026' : '') + '}';
+      return '{' + pairs.join(', ') + (keys.length \u003E 3 ? ', \u2026' : '') + '}';
     }
 
     if (Array.isArray(v)) return '[' + v.length + ' items]';
@@ -2660,10 +2660,10 @@
       if (_probeSid !== sessionId) return;
       // Session lost (e.g. server restart) — surface a clear hint instead of silent '?'
       if (!data.success && data.error && data.error.toLowerCase().includes('not found')) {
-        var names = (_probeVars.length > 0)
+        var names = (_probeVars.length \u003E 0)
           ? _probeVars.map(function(sv) { return sv[0]; })
           : [];
-        if (names.length > 0) {
+        if (names.length \u003E 0) {
           stateSnapshot = {};
           names.forEach(function(n) { stateSnapshot[n] = '0'; });
           stateVarNames = names;
@@ -2679,13 +2679,13 @@
       if (data.success && data.state) {
         stateSnapshot = {};
         // Use the schema captured at call time — never the current global
-        var names = (_probeVars.length > 0)
+        var names = (_probeVars.length \u003E 0)
           ? _probeVars.map(function(sv) { return sv[0]; })
           : Object.keys(data.state);
         stateVarNames = names;
         // Restore captured type metadata — prevents stale/cleared currentStateVarTypes
         // from causing str/bool fields to render as raw numbers after a redeploy.
-        if (Object.keys(_probeVarTypes).length > 0) {
+        if (Object.keys(_probeVarTypes).length \u003E 0) {
           currentStateVarTypes = _probeVarTypes;
         }
         names.forEach(function(n) {
@@ -2712,7 +2712,7 @@
     // ── Reset every contract in the workspace, not just the active one ──────
     // This ensures all contracts (e.g. SimpleToken) start with clean state
     // so TokenVault.init() can call extern_call("SimpleToken","init") fresh.
-    var toReset = workspaceContracts.length > 0
+    var toReset = workspaceContracts.length \u003E 0
       ? workspaceContracts.slice()   // copy — reset all workspace members
       : (currentBytecode ? [{ name: currentContractName, session_id: sessionId,
                                bytecode: currentBytecode, state_vars: currentStateVars }] : []);
@@ -2723,7 +2723,7 @@
     }
 
     var failed = [];
-    for (var ri = 0; ri < toReset.length; ri++) {
+    for (var ri = 0; ri \u003C toReset.length; ri++) {
       var c = toReset[ri];
       // 1. Delete the old session
       if (c.session_id) {
@@ -2753,7 +2753,7 @@
           }
           // 4. Update local state
           var ci = workspaceContracts.findIndex(function(w){ return w.name === c.name; });
-          if (ci >= 0) workspaceContracts[ci].session_id = newSid;
+          if (ci \u003E= 0) workspaceContracts[ci].session_id = newSid;
           // Update active sessionId if this contract is the active one.
           // Match on name OR on old session_id (covers single-contract flow
           // where c.name may be undefined or currentContractName unset).
@@ -2771,7 +2771,7 @@
 
     renderWorkspacePanel();
 
-    if (failed.length > 0) {
+    if (failed.length \u003E 0) {
       out.innerHTML = '<span class="err">Reset partial — failed: ' + failed.join(', ') + '</span>';
     } else {
       var names = toReset.map(function(c){ return c.name; }).join(', ');
@@ -2780,7 +2780,7 @@
 
       // Immediately zero stateSnapshot so panel shows clean VM, not stale '?'
       stateSnapshot = {};
-      if (stateVarNames && stateVarNames.length > 0) {
+      if (stateVarNames && stateVarNames.length \u003E 0) {
         stateVarNames.forEach(function(n) { stateSnapshot[n] = '0'; });
       }
       window._sessionLostHinted = false;
@@ -2788,7 +2788,7 @@
       syncInitPillHint();
 
     // Clear param inputs
-    for (var p = 0; p < (selectedFunc ? selectedFunc.paramCount : 0); p++) {
+    for (var p = 0; p \u003C (selectedFunc ? selectedFunc.paramCount : 0); p++) {
       var el = document.getElementById('param_' + p);
       if (el) {
         // Reset str params to blank, numeric params to 0
@@ -2799,7 +2799,7 @@
 
     // Inline state fetch after reset — guarantees sessionId is the fresh one.
     // probeStateVars() can race if called before sessionId propagates; this avoids that.
-    if (sessionId && currentStateVars && currentStateVars.length > 0) {
+    if (sessionId && currentStateVars && currentStateVars.length \u003E 0) {
       try {
         var _rr = await fetch(SESSION_DEL_URL + sessionId + '/state');
         var _rd = await _rr.json();
@@ -2876,7 +2876,7 @@
     '  // Deposit: mint `amount` tokens into SimpleToken on behalf of the vault.',
     '  function deposit(amount: UInt256) as caller {',
     '    require(active == 1, "TokenVault.deposit: vault not active");',
-    '    require(amount > 0, "TokenVault.deposit: amount must be > 0");',
+    '    require(amount \u003E 0, "TokenVault.deposit: amount must be \u003E 0");',
     '    extern_call("SimpleToken", "mint", amount);',
     '    totalIn = totalIn + amount;',
     '    return totalIn;',
@@ -2886,16 +2886,16 @@
     '  function withdraw(amount: UInt256) as caller requires cap::Withdrawer {',
     '    require(active == 1, "TokenVault.withdraw: vault not active");',
     '    require(caller == vaultOwner, "TokenVault.withdraw: caller is not vault owner");',
-    '    require(amount > 0, "TokenVault.withdraw: amount must be > 0");',
-    '    require(totalIn >= totalOut + amount, "TokenVault.withdraw: amount exceeds available balance");',
+    '    require(amount \u003E 0, "TokenVault.withdraw: amount must be \u003E 0");',
+    '    require(totalIn \u003E= totalOut + amount, "TokenVault.withdraw: amount exceeds available balance");',
     '    extern_call("SimpleToken", "burn", amount);',
     '    totalOut = totalOut + amount;',
     '    return totalOut;',
     '  }',
     '',
-    '  // Returns vault-tracked net inflow (totalIn - totalOut). Returns 0 if totalOut > totalIn.',
+    '  // Returns vault-tracked net inflow (totalIn - totalOut). Returns 0 if totalOut \u003E totalIn.',
     '  function netFlow() {',
-    '    require(totalIn >= totalOut, "TokenVault.netFlow: totalOut exceeds totalIn");',
+    '    require(totalIn \u003E= totalOut, "TokenVault.netFlow: totalOut exceeds totalIn");',
     '    return totalIn - totalOut;',
     '  }',
     '',
@@ -2904,7 +2904,7 @@
     '',
     '  // balance() -- vault-side net (totalIn - totalOut).',
     '  function balance() {',
-    '    require(totalIn >= totalOut, "TokenVault.balance: totalOut exceeds totalIn");',
+    '    require(totalIn \u003E= totalOut, "TokenVault.balance: totalOut exceeds totalIn");',
     '    return totalIn - totalOut;',
     '  }',
     '',
@@ -2912,7 +2912,7 @@
     '  // Calls SimpleToken.assertBalance(totalIn - totalOut).',
     '  // Reverts if the two contracts have drifted out of sync.',
     '  function assertSync() as caller {',
-    '    require(totalIn >= totalOut, "assertSync: totalOut exceeds totalIn");',
+    '    require(totalIn \u003E= totalOut, "assertSync: totalOut exceeds totalIn");',
     '    extern_call("SimpleToken", "assertBalance", totalIn - totalOut);',
     '    return 1;',
     '  }',
@@ -2937,8 +2937,8 @@
     '    ready:      bool;',
     '    labelled:   bool;',
     '    op_count:   u256;',
-    '    balances:   map<u256, u256>;',
-    '    registered: set<u256>;',
+    '    balances:   map\u003Cu256, u256\u003E;',
+    '    registered: set\u003Cu256\u003E;',
     '  }',
     '',
     '  // ── Init ───────────────────────────────────────────────────────────────────',
@@ -2955,9 +2955,9 @@
     '  }',
     '',
     '  // ── u256 arithmetic (+  -  *  /  %) ───────────────────────────────────────',
-    '  function testArithmetic(a: u256, b: u256) -> u256 as caller {',
+    '  function testArithmetic(a: u256, b: u256) -\u003E u256 as caller {',
     '    require(ready, "not initialised");',
-    '    require(b > 0, "b must be > 0");',
+    '    require(b \u003E 0, "b must be \u003E 0");',
     '    let sum  = a + b;',
     '    let diff = sum - b;',
     '    let prod = a * b;',
@@ -2969,7 +2969,7 @@
     '  }',
     '',
     '  // ── i32 signed arithmetic ──────────────────────────────────────────────────',
-    '  function testSigned(x: i32, y: i32) -> i32 as caller {',
+    '  function testSigned(x: i32, y: i32) -\u003E i32 as caller {',
     '    require(ready, "not initialised");',
     '    let s = x + y;',
     '    let d = x - y;',
@@ -2979,15 +2979,15 @@
     '    return i_val;',
     '  }',
     '',
-    '  // ── Comparison operators (==  !=  <  <=  >  >=) ───────────────────────────',
-    '  function testCompare(a: u256, b: u256) -> bool as caller {',
+    '  // ── Comparison operators (==  !=  \u003C  \u003C=  \u003E  \u003E=) ───────────────────────────',
+    '  function testCompare(a: u256, b: u256) -\u003E bool as caller {',
     '    require(ready, "not initialised");',
     '    let eq = (a == b);',
     '    let ne = (a != b);',
-    '    let lt = (a < b);',
-    '    let le = (a <= b);',
-    '    let gt = (a > b);',
-    '    let ge = (a >= b);',
+    '    let lt = (a \u003C b);',
+    '    let le = (a \u003C= b);',
+    '    let gt = (a \u003E b);',
+    '    let ge = (a \u003E= b);',
     '    let ok = (eq == !ne);',
     '    b_val    = ok;',
     '    op_count = op_count + 1;',
@@ -2995,7 +2995,7 @@
     '  }',
     '',
     '  // ── Boolean operators (&&  ||  !) ─────────────────────────────────────────',
-    '  function testBool(p: bool, q: bool) -> bool as caller {',
+    '  function testBool(p: bool, q: bool) -\u003E bool as caller {',
     '    require(ready, "not initialised");',
     '    let and_r = p && q;',
     '    let or_r  = p || q;',
@@ -3007,11 +3007,11 @@
     '  }',
     '',
     '  // ── String operations (concat + strLen) ───────────────────────────────────',
-    '  function testString(a: str, b: str) -> str as caller {',
+    '  function testString(a: str, b: str) -\u003E str as caller {',
     '    require(ready, "not initialised");',
     '    let cat = a + b;',
     '    let len = str_len(cat);',
-    '    require(len > 0, "empty result");',
+    '    require(len \u003E 0, "empty result");',
     '    s_val    = cat;',
     '    op_count = op_count + 1;',
     '    return cat;',
@@ -3027,16 +3027,16 @@
     '  // ── Map operations ─────────────────────────────────────────────────────────',
     '  function testMapSet(key: u256, val: u256) as caller {',
     '    require(ready, "not initialised");',
-    '    require(key > 0, "key must be > 0");',
+    '    require(key \u003E 0, "key must be \u003E 0");',
     '    balances[key] = val;',
     '    op_count = op_count + 1;',
     '  }',
     '',
-    '  function testMapGet(key: u256) -> u256 {',
+    '  function testMapGet(key: u256) -\u003E u256 {',
     '    return balances[key];',
     '  }',
     '',
-    '  function testMapUpdate(key: u256, delta: u256) -> u256 as caller {',
+    '  function testMapUpdate(key: u256, delta: u256) -\u003E u256 as caller {',
     '    require(ready, "not initialised");',
     '    balances[key] = balances[key] + delta;',
     '    op_count = op_count + 1;',
@@ -3046,12 +3046,12 @@
     '  // ── Set operations ─────────────────────────────────────────────────────────',
     '  function testSetAdd(addr: u256) as caller {',
     '    require(ready, "not initialised");',
-    '    require(addr > 0, "invalid address");',
+    '    require(addr \u003E 0, "invalid address");',
     '    registered.add(addr);',
     '    op_count = op_count + 1;',
     '  }',
     '',
-    '  function testSetContains(addr: u256) -> bool {',
+    '  function testSetContains(addr: u256) -\u003E bool {',
     '    return registered.contains(addr);',
     '  }',
     '',
@@ -3062,10 +3062,10 @@
     '  }',
     '',
     '  // ── require guard paths ───────────────────────────────────────────────────',
-    '  function testRequirePass(x: u256) -> u256 as caller {',
+    '  function testRequirePass(x: u256) -\u003E u256 as caller {',
     '    require(ready,   "not initialised");',
-    '    require(x > 0,   "x must be > 0");',
-    '    require(x < 1000000, "x too large");',
+    '    require(x \u003E 0,   "x must be \u003E 0");',
+    '    require(x \u003C 1000000, "x too large");',
     '    op_count = op_count + 1;',
     '    return x * 2;',
     '  }',
@@ -3076,7 +3076,7 @@
     '  }',
     '',
     '  // ── Admin-gated function ───────────────────────────────────────────────────',
-    '  function adminOnly() -> u256 as caller {',
+    '  function adminOnly() -\u003E u256 as caller {',
     '    require(ready, "not initialised");',
     '    require(caller == admin, "not admin");',
     '    op_count = op_count + 1;',
@@ -3084,13 +3084,13 @@
     '  }',
     '',
     '  // ── Read-only getters ──────────────────────────────────────────────────────',
-    '  function getUVal()    -> u256 { return u_val;    }',
-    '  function getIVal()    -> i32  { return i_val;    }',
-    '  function getBVal()    -> bool { return b_val;    }',
-    '  function getSVal()    -> str  { return s_val;    }',
-    '  function getOpCount() -> u256 { return op_count; }',
-    '  function getAdmin()   -> u256 { return admin;    }',
-    '  function isReady()    -> bool { return ready;    }',
+    '  function getUVal()    -\u003E u256 { return u_val;    }',
+    '  function getIVal()    -\u003E i32  { return i_val;    }',
+    '  function getBVal()    -\u003E bool { return b_val;    }',
+    '  function getSVal()    -\u003E str  { return s_val;    }',
+    '  function getOpCount() -\u003E u256 { return op_count; }',
+    '  function getAdmin()   -\u003E u256 { return admin;    }',
+    '  function isReady()    -\u003E bool { return ready;    }',
     '}',
     '',
   ];
@@ -3170,7 +3170,7 @@
     panel.style.display = 'block';
     badge.textContent = 'Workspace ' + workspaceNum;
     if (!workspaceContracts.length) {
-      list.innerHTML = '<div class="workspace-empty">No contracts deployed yet.</div>';
+      list.innerHTML = '\u003Cdiv class="workspace-empty"\u003ENo contracts deployed yet.\u003C/div\u003E';
       return;
     }
     list.innerHTML = '';
@@ -3279,7 +3279,7 @@
     pills.innerHTML = '';
 
     if (parsedFunctions.length === 0) {
-      pills.innerHTML = '<span style="color:rgba(255,255,255,0.3);font-size:0.8rem;">No callable functions found in dispatch table.</span>';
+      pills.innerHTML = '\u003Cspan style="color:rgba(255,255,255,0.3);font-size:0.8rem;"\u003ENo callable functions found in dispatch table.\u003C/span\u003E';
     } else {
       parsedFunctions.forEach(function(fn, idx) {
         var pill = document.createElement('button');
@@ -3287,13 +3287,13 @@
         
         var innerHTML = '';
         if (fn.requiresCaller) {
-          innerHTML += '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0; margin-right: 4px;"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>';
+          innerHTML += '\u003Csvg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0; margin-right: 4px;"\u003E\u003Crect x="3" y="11" width="18" height="11" rx="2" ry="2"\u003E\u003C/rect\u003E\u003Cpath d="M7 11V7a5 5 0 0 1 10 0v4"\u003E\u003C/path\u003E\u003C/svg\u003E';
         }
         innerHTML += fn.name + '(' + (fn.paramCount > 0 ? fn.paramCount + ' arg' + (fn.paramCount > 1 ? 's' : '') : '') + ')';
         
         if (fn.capabilities && fn.capabilities.length > 0) {
           fn.capabilities.forEach(function(cap) {
-            innerHTML += '<span class="cap-badge" style="background: rgba(167,139,250,0.15); border: 1px solid rgba(167,139,250,0.4); color: #c084fc; font-size: 0.65rem; padding: 1px 5px; border-radius: 4px; margin-left: 6px; font-family: inherit; flex-shrink: 0; line-height: 1;">' + cap + '</span>';
+            innerHTML += '\u003Cspan class="cap-badge" style="background: rgba(167,139,250,0.15); border: 1px solid rgba(167,139,250,0.4); color: #c084fc; font-size: 0.65rem; padding: 1px 5px; border-radius: 4px; margin-left: 6px; font-family: inherit; flex-shrink: 0; line-height: 1;"\u003E' + cap + '\u003C/span\u003E';
           });
         }
         pill.innerHTML = innerHTML;
@@ -3303,7 +3303,7 @@
       });
     }
 
-    document.getElementById('vmOutput').innerHTML = '<span class="dim">Select a function above and press Run.</span>';
+    document.getElementById('vmOutput').innerHTML = '\u003Cspan class="dim"\u003ESelect a function above and press Run.\u003C/span\u003E';
     document.getElementById('paramsSection').style.display = 'none';
     document.getElementById('paramsGrid').innerHTML = '';
     syncInitPillHint();
@@ -3387,9 +3387,9 @@
     // otherwise use existing entry's index, otherwise append at end.
     var existing = workspaceContracts.findIndex(function(c){ return c.session_id === sid; });
     var idx = (forcedIndex !== undefined) ? forcedIndex
-            : (existing >= 0)            ? workspaceContracts[existing].deploy_index
+            : (existing \u003E= 0)            ? workspaceContracts[existing].deploy_index
             :                              workspaceContracts.length;
-    if (existing >= 0) workspaceContracts.splice(existing, 1);
+    if (existing \u003E= 0) workspaceContracts.splice(existing, 1);
     workspaceContracts.push({ name: name, session_id: sid, address: address,
                               bytecode: bytecode, stateVars: stateVars, deploy_index: idx,
                               stateVarTypes: currentStateVarTypes,
@@ -3406,8 +3406,8 @@
       if (!ec.length) { dh.style.visibility = 'hidden'; dh.textContent = '\u00a0'; return; }
       var deployed = workspaceContracts.map(function(c){ return c.name; });
       var missing  = ec.filter(function(n){ return !deployed.includes(n); });
-      var wsLabel  = workspaceNum > 0 ? 'Workspace ' + workspaceNum : 'the workspace';
-      if (missing.length > 0) {
+      var wsLabel  = workspaceNum \u003E 0 ? 'Workspace ' + workspaceNum : 'the workspace';
+      if (missing.length \u003E 0) {
         if (workspaceContracts.length === 0) { dh.style.visibility = 'hidden'; dh.textContent = '\u00a0'; return; }
         dh.style.visibility = 'visible';
         dh.textContent = '↳ ' + missing.join(', ') + ' required — load, compile and deploy into ' + wsLabel;
@@ -3445,6 +3445,6 @@
   }
   window.loadTypeTest = loadTypeTest;
 })();
-</script>
-</body>
-</html>
+\u003C/script\u003E
+\u003C/body\u003E
+\u003C/html\u003E
