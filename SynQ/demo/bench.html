@@ -555,13 +555,12 @@ async function runBench() {
       log((i+1) + ': WASM ERROR: ' + wasmErr);
     } else {
       var wasmHex = pw.bytecode || '';
-
-      wasmHexStr = wasmHex;
       var flipInfo = null;
       if (_flipEnabled && wasmHex.length > 20) {
         flipInfo = flipMidByte(wasmHex);
         wasmHex = flipInfo.mutated;
       }
+      wasmHexStr = wasmHex;
       wasmBc = wasmHex.startsWith('0x') ? Math.floor((wasmHex.length-2)/2) : Math.floor(wasmHex.length/2);
       wasmTimes.push(dtW);
       var flipTag = flipInfo ? ' [FLIP@' + flipInfo.byteOffset + ' ' + flipInfo.origNibble + '→' + flipInfo.newNibble + ']' : '';
