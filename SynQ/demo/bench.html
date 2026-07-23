@@ -13,6 +13,12 @@
   .pill { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
   .pill-green  { background: #1a7f37; color: #fff; }
   .pill-red    { background: #da3633; color: #fff; }
+  .btn-mock.warn { border-color: #d29922; color: #d29922; }
+  .btn-mock.warn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .fault-panel { border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-top: 12px; background: #161b22; font-size: 13px; line-height: 1.6; }
+  .fault-ok  { border-color: #1a7f37; background: #0d1f12; }
+  .fault-crash { border-color: #da3633; background: #1f0d0d; }
+  .fault-corrupt { border-color: #d29922; background: #1f1a0d; }
   .pill-purple { background: #8957e5; color: #fff; }
   .pill-blue   { background: #1f6feb; color: #fff; }
   .verdict-ok  { border-color: #1a7f37; background: #0d1f12; }
@@ -62,6 +68,7 @@
   <button class="btn" onclick="runBench()">▶ Run Benchmark (8 rounds)</button>
   <button class="btn btn-stop" onclick="stopBench()">■ Stop</button>
   <button class="btn-mock bad" id="flipBtn" onclick="toggleFlip()">Flip mid-byte: OFF</button>
+  <button class="btn-mock warn" id="rtFaultBtn" onclick="runRuntimeFault()">⚡ Runtime Fault Demo</button>
 </div>
 
 <div class="file-row">
@@ -101,6 +108,7 @@
 
 <div id="log"></div>
 <div id="verdict"></div>
+<div id="faultPanel"></div>
 
 <!-- Source code embedded as raw text — HTML parser won't touch angle brackets -->
 <script type="text/plain" id="ct-source">
@@ -772,6 +780,160 @@ function flipMidByte(hexStr) {
   return { original: hexStr, mutated: mutated, byteOffset: mid / 2, origNibble: orig, newNibble: flip };
 }
 
+// ── Runtime Fault Injection Demo ────────────────────────────────────────────
+// Deploys contract, calls clean, then calls again with mid-execution byte corruption
+async function runRuntimeFault() {
+  if (!_benchSource || !_benchName) {
+    log('\u26A0 Select a contract or load a .synq file first.');
+    return;
+  }
+  var btn = document.getElementById('rtFaultBtn');
+  btn.disabled = true;
+  btn.textContent = 'Running...';
+
+  var panel = document.getElementById('faultPanel');
+  panel.className = 'fault-panel';
+  panel.innerHTML = '<p style="color:#8b949e;">\u23F3 Deploying contract and running fault injection scenarios...</p>';
+
+  var logEl = document.getElementById('log');
+  logEl.textContent = '';
+  log('=== Runtime Fault Injection Demo ===');
+  log('Contract: ' + _benchName);
+  log('');
+
+  try {
+    // 1. Compile via HTTP
+    log('Compiling...');
+    var compileData = JSON.stringify({ source: _benchSource });
+    var compileResp = await fetch('/synq/compile', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: compileData
+    }).then(r => r.json());
+
+    if (!compileResp.success) {
+      log('Compile failed: ' + (compileResp.errors || []).join('; '));
+      panel.innerHTML = '<p style="color:#ff7b72;">\u2717 Compile failed</p>';
+      return;
+    }
+    var bytecode = compileResp.bytecode || '';
+    log('Compiled: ' + bytecode.length + ' chars');
+
+    // 2. Find first function with params
+    var fnName = 'init';
+    var fnArgs = [];
+    var fns = compileResp.functions || [];
+    for (var f of fns) {
+      if (f.params && f.params.length > 0) {
+        fnName = f.name;
+        fnArgs = f.params.map(function(p) { return p.type === 'u256' ? '100' : (p.type === 'bool' ? 'true' : 'hello'); });
+        break;
+      }
+    }
+    // Fallback: just call init() with no args
+    log('Using function: ' + fnName + '(' + fnArgs.join(', ') + ')');
+
+    // 3. Create session + deploy
+    log('Deploying...');
+    var sessionData = JSON.stringify({ source: _benchSource, bytecode: bytecode, state_vars: compileResp.state_vars || [] });
+    var sessionResp = await fetch('/synq/session/new', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: sessionData
+    }).then(r => r.json());
+    var sid = sessionResp.session_id;
+    log('Session: ' + sid.substring(0, 12) + '...');
+
+    // 4. Clean call
+    log('');
+    log('\u2500 Clean execution (no fault) \u2500');
+    var cleanData = JSON.stringify({ session_id: sid, function: fnName, args: fnArgs });
+    var cleanResp = await fetch('/synq/session/run', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: cleanData
+    }).then(r => r.json());
+    log('  success=' + cleanResp.success + '  result=' + JSON.stringify(cleanResp.result) + '  error=' + (cleanResp.error || 'none'));
+
+    // 5. Run fault scenarios — each needs a fresh session
+    var scenarios = [
+      { step: 1, offset: 0, mask: 0xFF, label: 'Corrupt first opcode (code[0])' },
+      { step: 1, offset: 1, mask: 0xFF, label: 'Corrupt first operand (code[1])' },
+      { step: 3, offset: 0, mask: 0x0F, label: 'Nibble flip at step 3 (code[0])' },
+      { step: 5, offset: 5, mask: 0xFF, label: 'Late injection at step 5 (code[5])' },
+    ];
+
+    var results = [];
+    for (var s of scenarios) {
+      await new Promise(function(r) { setTimeout(r, 400); }); // rate limit
+      // Fresh session
+      var sd = JSON.stringify({ source: _benchSource, bytecode: bytecode, state_vars: compileResp.state_vars || [] });
+      var sr = await fetch('/synq/session/new', {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: sd
+      }).then(r => r.json());
+
+      var fd = JSON.stringify({
+        session_id: sr.session_id, function: fnName, args: fnArgs,
+        fault_step: s.step, fault_byte_offset: s.offset, fault_xor_mask: s.mask
+      });
+      log('');
+      log('\u2500 ' + s.label + ' \u2500');
+      log('  step=' + s.step + ' byte_offset=' + s.offset + ' xor_mask=0x' + s.mask.toString(16).padStart(2, '0'));
+
+      try {
+        var fr = await fetch('/synq/session/run', {
+          method: 'POST', headers: {'Content-Type':'application/json'}, body: fd
+        }).then(r => r.json());
+        log('  success=' + fr.success + '  result=' + JSON.stringify(fr.result) + '  error=' + (fr.error || 'none'));
+        results.push({ label: s.label, step: s.step, offset: s.offset, mask: s.mask,
+                       success: fr.success, result: fr.result, error: fr.error,
+                       cleanResult: cleanResp.result, cleanSuccess: cleanResp.success });
+      } catch(ex) {
+        log('  HTTP ERROR: ' + ex);
+        results.push({ label: s.label, step: s.step, offset: s.offset, mask: s.mask,
+                       success: false, result: null, error: String(ex),
+                       cleanResult: cleanResp.result, cleanSuccess: cleanResp.success });
+      }
+    }
+
+    // 6. Render the panel
+    var html = '<p style="font-size:14px;font-weight:600;margin-bottom:12px;">\u26A1 Runtime Fault Injection Results</p>';
+    html += '<p style="color:#8b949e;font-size:12px;">Contract: <strong>' + _benchName + '</strong> \u00B7 Function: <code>' + fnName + '</code></p>';
+    html += '<p style="margin-top:8px;">Clean result: <strong>' + (cleanResp.success ? JSON.stringify(cleanResp.result) : 'ERROR: ' + cleanResp.error) + '</strong></p>';
+    html += '<div style="margin-top:12px;">';
+
+    for (var r of results) {
+      var cls, icon, outcome;
+      if (!r.success && r.error && r.error.indexOf('Invalid') >= 0) {
+        cls = 'fault-crash'; icon = '\u2717'; outcome = 'CRASH \u2014 VM caught the corrupted opcode';
+      } else if (r.success && r.cleanSuccess && JSON.stringify(r.result) !== JSON.stringify(r.cleanResult)) {
+        cls = 'fault-corrupt'; icon = '\u26A0'; outcome = 'SILENT CORRUPTION \u2014 wrong result, no error!';
+      } else if (!r.success) {
+        cls = 'fault-crash'; icon = '\u2717'; outcome = 'REVERT/ERROR \u2014 ' + (r.error || 'unknown');
+      } else {
+        cls = 'fault-ok'; icon = '\u2713'; outcome = 'No effect \u2014 corrupted byte was not in the execution path';
+      }
+      html += '<div class="fault-panel ' + cls + '" style="margin-top:8px;">';
+      html += '<p><strong>' + icon + ' ' + r.label + '</strong> \u2014 <code>step=' + r.step + ' byte=' + r.offset + ' mask=0x' + r.mask.toString(16).padStart(2,'0') + '</code></p>';
+      html += '<p>Result: ' + (r.result ? JSON.stringify(r.result) : (r.error || 'null')) + ' vs clean: ' + JSON.stringify(r.cleanResult) + '</p>';
+      html += '<p style="font-size:12px;">' + outcome + '</p>';
+      html += '</div>';
+    }
+
+    html += '</div>';
+    html += '<p style="margin-top:12px;color:#8b949e;font-size:12px;">\u{1F6E1}\uFE0F <strong>Security implication:</strong> The first two scenarios show the two most dangerous fault injection outcomes: ' +
+            'a <strong>crash</strong> (detected by the VM\'s opcode validation) and <strong>silent data corruption</strong> (wrong result with no error flag). ' +
+            'In production, the VM\'s transactional atomicity rolls back state on crashes, but silent corruption requires ' +
+            'application-level integrity checks (hash verification, redundant computation, or formal verification of critical paths).</p>';
+
+    panel.className = 'fault-panel';
+    panel.innerHTML = html;
+    log('');
+    log('=== Fault injection demo complete ===');
+
+  } catch(ex) {
+    log('Error: ' + ex);
+    panel.innerHTML = '<p style="color:#ff7b72;">\u2717 Error: ' + ex + '</p>';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '\u26A1 Runtime Fault Demo';
+  }
+}
+
 // Expose ALL functions to window for onclick handlers
 window.useCT = useCT;
 window.useTT = useTT;
@@ -781,6 +943,7 @@ window.runBench = runBench;
 window.stopBench = stopBench;
 window.flipMidByte = flipMidByte;
 window.toggleFlip = toggleFlip;
+window.runRuntimeFault = runRuntimeFault;
 </script>
 
 </body>
