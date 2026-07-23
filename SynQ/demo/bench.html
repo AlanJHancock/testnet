@@ -104,6 +104,13 @@
     <div class="bar-wrap"><div class="bar bar-srv" id="srvBar" style="width:0%"></div></div>
     <div class="sub" id="srvDetail">incl. network + PQC sign</div>
   </div>
+  <div class="card">
+    <div class="label">🟠 Wasmtime (server)</div>
+    <div class="big" id="wtMed">—</div>
+    <div class="sub" id="wtRange">min / avg / max</div>
+    <div class="bar-wrap"><div class="bar bar-wt" id="wtBar" style="width:0%"></div></div>
+    <div class="sub" id="wtDetail">server-side WASM sandbox</div>
+  </div>
 </div>
 
 <div id="log"></div>
@@ -504,7 +511,7 @@ function useCT() {
   _benchSource = document.getElementById('ct-source').textContent.trim();
   _benchName = 'ComprehensiveToken v2';
   document.getElementById('fileInfo').textContent = _benchName + ' (' + _benchSource.length + ' chars)';
-  document.getElementById('srcPreview').style.display = 'none';
+  var _p = document.getElementById('srcPreview'); _p.textContent = ''; _p.style.display = 'none';
   document.querySelector('.src-toggle').textContent = 'Show source';
   log('Loaded ' + _benchName + ' — ' + _benchSource.length + ' chars');
 }
@@ -513,7 +520,7 @@ function useTT() {
   _benchSource = document.getElementById('tt-source').textContent.trim();
   _benchName = 'TypeTestContract';
   document.getElementById('fileInfo').textContent = _benchName + ' (' + _benchSource.length + ' chars)';
-  document.getElementById('srcPreview').style.display = 'none';
+  var _p = document.getElementById('srcPreview'); _p.textContent = ''; _p.style.display = 'none';
   document.querySelector('.src-toggle').textContent = 'Show source';
   log('Loaded ' + _benchName + ' — ' + _benchSource.length + ' chars');
 }
@@ -523,21 +530,29 @@ function loadFile(event) {
   if (!file) return;
   var reader = new FileReader();
   reader.onload = function(e) {
-    _benchSource = e.target.result;
-    _benchName = file.name;
-    document.getElementById('fileInfo').textContent = file.name + ' — ' + _benchSource.length + ' chars';
-    document.getElementById('srcPreview').style.display = 'none';
+    var content = e.target.result || '';
+    if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
+    _benchSource = content;
+    _benchName = file.name.replace(/\.synq$|\.txt$/, '');
+    document.getElementById('fileInfo').textContent = file.name + ' \u2014 ' + _benchSource.length + ' chars';
+    var pre = document.getElementById('srcPreview');
+    pre.textContent = '';
+    pre.style.display = 'none';
     document.querySelector('.src-toggle').textContent = 'Show source';
-    log('Loaded ' + file.name + ' — ' + _benchSource.length + ' chars');
+    log('Loaded ' + file.name + ' \u2014 ' + _benchSource.length + ' chars');
   };
-  reader.readAsText(file);
+  reader.onerror = function() {
+    log('ERROR: Failed to read file ' + file.name);
+  };
+  reader.readAsText(file, 'UTF-8');
+  event.target.value = '';
 }
 
 function toggleSrc() {
   var pre = document.getElementById('srcPreview');
   var btn = document.querySelector('.src-toggle');
   if (pre.style.display === 'none' || !pre.style.display) {
-    pre.textContent = _benchSource;
+    pre.textContent = _benchSource || '(no source loaded)';
     pre.style.display = 'block';
     btn.textContent = 'Hide source';
   } else {
@@ -562,7 +577,7 @@ async function runBench() {
   _v.innerHTML = '<p style="color:#8b949e;">\u23F3 Running benchmark\u2026</p>';
 
   log('Contract: ' + (_benchName || 'unnamed') + ' — ' + _benchSource.length + ' chars · ' + _benchSource.split('\n').length + ' lines');
-  log('Rounds: ' + ROUNDS + '   (3 calls/round: WASM → loopback → HTTP)');
+  log('Rounds: ' + ROUNDS + '   (4 calls/round: WASM → loopback → HTTP → wasmtime)');
   log('');
 
   // Wait for WASM
@@ -571,8 +586,8 @@ async function runBench() {
   log('WASM ready — SynQ ' + ver);
   log('');
 
-  var wasmTimes=[], loopTimes=[], srvTimes=[];
-  var wasmBc=0, srvBc=0, loopBc=0; var wasmHexStr="", srvHexStr="";
+  var wasmTimes=[], loopTimes=[], srvTimes=[], wtTimes=[];
+  var wasmBc=0, srvBc=0, loopBc=0, wtBc=0; var wasmHexStr="", srvHexStr="", wtHexStr="";
 
   for (var i = 0; i < ROUNDS && _running; i++) {
     // ── WASM ──
@@ -654,6 +669,32 @@ async function runBench() {
       log((i+1) + ': HTTP        ' + dtS.toFixed(2).padStart(7) + ' ms  [bc=' + srvBc + 'B]');
     }
 
+    // ── Wasmtime (server-side WASM execution) ──
+    var t3 = performance.now();
+    var pwt;
+    try {
+      pwt = await fetch('/synq/compile-wasm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: _benchSource })
+      }).then(r => r.json());
+    } catch(ex) {
+      log((i+1) + ': Wasmtime ERROR: ' + ex);
+      pwt = { error: String(ex) };
+    }
+    var dtWt = performance.now() - t3;
+
+    if (pwt.error) {
+      log((i+1) + ': Wasmtime ERROR: ' + pwt.error);
+    } else if (pwt.success === false) {
+      log((i+1) + ': Wasmtime COMPILE ERROR: ' + (pwt.errors && pwt.errors[0] || 'unknown'));
+    } else {
+      wtHexStr = pwt.bytecode || '';
+      wtBc = wtHexStr.startsWith('0x') ? Math.floor((wtHexStr.length-2)/2) : (wtHexStr ? Math.floor(wtHexStr.length/2) : 0);
+      wtTimes.push(dtWt);
+      log((i+1) + ': Wasmtime    ' + dtWt.toFixed(2).padStart(7) + ' ms  [bc=' + wtBc + 'B]');
+    }
+
     log('');
     if (i < ROUNDS - 1 && _running) { await new Promise(r => setTimeout(r, 600)); }
   }
@@ -667,10 +708,15 @@ async function runBench() {
     var wMed=median(wasmTimes), wAvg=avg(wasmTimes), wMin=Math.min(...wasmTimes), wMax=Math.max(...wasmTimes);
     var lMed=median(loopTimes), lAvg=avg(loopTimes), lMin=Math.min(...loopTimes), lMax=Math.max(...loopTimes);
     var sMed=median(srvTimes), sAvg=avg(srvTimes), sMin=Math.min(...srvTimes), sMax=Math.max(...srvTimes);
+    var wtMed=0, wtAvg=0, wtMin=0, wtMax=0;
+    if (wtTimes.length) { wtMed=median(wtTimes); wtAvg=avg(wtTimes); wtMin=Math.min(...wtTimes); wtMax=Math.max(...wtTimes); }
 
     log('WASM     median ' + wMed.toFixed(3) + 'ms  min ' + wMin.toFixed(3) + '  avg ' + wAvg.toFixed(3) + '  max ' + wMax.toFixed(3));
     log('Loopback median ' + lMed.toFixed(3) + 'ms  min ' + lMin.toFixed(3) + '  avg ' + lAvg.toFixed(3) + '  max ' + lMax.toFixed(3));
     log('HTTP     median ' + sMed.toFixed(3) + 'ms  min ' + sMin.toFixed(3) + '  avg ' + sAvg.toFixed(3) + '  max ' + sMax.toFixed(3));
+    if (wtTimes.length) {
+      log('Wasmtime median ' + wtMed.toFixed(3) + 'ms  min ' + wtMin.toFixed(3) + '  avg ' + wtAvg.toFixed(3) + '  max ' + wtMax.toFixed(3));
+    }
     log('');
 
     var jitPenalty = (wMed / lMed).toFixed(1);
@@ -679,13 +725,21 @@ async function runBench() {
     // Compare actual hex content (normalize 0x prefix)
       var wHex = wasmHexStr.startsWith('0x') ? wasmHexStr.slice(2).toLowerCase() : wasmHexStr.toLowerCase();
       var sHex = srvHexStr.startsWith('0x') ? srvHexStr.slice(2).toLowerCase() : srvHexStr.toLowerCase();
+      var wHex = wasmHexStr.startsWith('0x') ? wasmHexStr.slice(2).toLowerCase() : wasmHexStr.toLowerCase();
+      var sHex = srvHexStr.startsWith('0x') ? srvHexStr.slice(2).toLowerCase() : srvHexStr.toLowerCase();
+      var wtHex = wtHexStr.startsWith('0x') ? wtHexStr.slice(2).toLowerCase() : wtHexStr.toLowerCase();
       var byteOk = (wasmBc > 0 && loopBc > 0 && srvBc > 0 && wasmBc === srvBc && loopBc === srvBc && wHex === sHex);
+      var wtOk = (wtTimes.length > 0 && wtBc > 0 && wtBc === srvBc && wtHex === sHex);
 
     log('JIT penalty:  ' + jitPenalty + 'x (WASM vs native)');
     log('Net overhead: ' + netOverhead + 'x (HTTP vs loopback)');
     log('WASM vs HTTP: ' + wasmVsHttp + 'x faster in-browser');
+    if (wtTimes.length) {
+      log('Wasmtime vs native: ' + (wtMed / lMed).toFixed(1) + 'x (server WASM sandbox)');
+      log('Wasmtime vs HTTP:   ' + (sMed / wtMed).toFixed(1) + 'x (sandbox vs full HTTP)');
+    }
     if (byteOk) {
-      log('Bytecode: ✓ identical (' + srvBc + ' bytes) — deterministic');
+      log('Bytecode: ✓ identical (' + srvBc + ' bytes) — deterministic' + (wtOk ? ' [wasmtime ✓]' : (wtTimes.length ? ' [wasmtime ✗]' : '')));
     } else {
       if (_flipEnabled && wasmHexStr && srvHexStr) {
         var w = wasmHexStr.startsWith('0x') ? wasmHexStr.slice(2) : wasmHexStr;
@@ -709,23 +763,33 @@ async function runBench() {
     document.getElementById('srvMed').textContent = sMed.toFixed(2) + ' ms';
     document.getElementById('srvRange').textContent = 'min ' + sMin.toFixed(2) + ' / avg ' + sAvg.toFixed(2) + ' / max ' + sMax.toFixed(2);
 
-    var scale = Math.max(wMed, lMed, sMed);
+    if (wtTimes.length) {
+      document.getElementById('wtMed').textContent = wtMed.toFixed(2) + ' ms';
+      document.getElementById('wtRange').textContent = 'min ' + wtMin.toFixed(2) + ' / avg ' + wtAvg.toFixed(2) + ' / max ' + wtMax.toFixed(2);
+    }
+
+    var scale = Math.max(wMed, lMed, sMed, wtTimes.length ? wtMed : 0);
     document.getElementById('wasmBar').style.width = (wMed/scale*100).toFixed(1) + '%';
     document.getElementById('wasmBar').textContent = wMed.toFixed(1) + 'ms';
     document.getElementById('loopBar').style.width = (lMed/scale*100).toFixed(1) + '%';
     document.getElementById('loopBar').textContent = lMed.toFixed(1) + 'ms';
     document.getElementById('srvBar').style.width = (sMed/scale*100).toFixed(1) + '%';
     document.getElementById('srvBar').textContent = sMed.toFixed(1) + 'ms';
+    if (wtTimes.length) {
+      document.getElementById('wtBar').style.width = (wtMed/scale*100).toFixed(1) + '%';
+      document.getElementById('wtBar').textContent = wtMed.toFixed(1) + 'ms';
+    }
 
     // Verdict
     var v = document.getElementById('verdict');
     if (byteOk) {
       v.className = 'verdict verdict-ok';
       v.innerHTML =
-        '<p><span class="pill pill-green">✓ MATCH</span> <strong>Deterministic bytecode across all three paths.</strong></p>' +
+        '<p><span class="pill pill-green">✓ MATCH</span> <strong>Deterministic bytecode across all paths.</strong></p>' +
         '<p style="color:#8b949e;font-size:12px;">Contract: <strong>' + (_benchName || 'unnamed') + '</strong></p>' +
-        '<p>WASM <code>' + wasmBc + 'B</code> · Loopback <code>' + loopBc + 'B</code> · HTTP <code>' + srvBc + 'B</code> — ' +
-        'all three compilation paths produced byte-identical output.</p>' +
+        '<p>WASM <code>' + wasmBc + 'B</code> · Loopback <code>' + loopBc + 'B</code> · HTTP <code>' + srvBc + 'B</code>' +
+        (wtTimes.length ? ' · Wasmtime <code>' + wtBc + 'B</code>' : '') + ' — ' +
+        'all compilation paths produced byte-identical output.</p>' +
         '<p>WASM is <strong>' + wasmVsHttp + 'x</strong> faster than the full HTTP path.</p>' +
         '<p style="margin-top:8px;color:#7ee787;font-size:12px;">🔒 <strong>Security implication:</strong> Deterministic compilation ' +
         'guarantees that the bytecode running on-chain matches what the compiler produced. ' +
