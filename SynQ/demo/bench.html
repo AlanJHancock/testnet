@@ -164,8 +164,10 @@
   <div class="log" id="log"></div>
 </div>
 
-<script type="module">
-import init, { compile_synq, synq_version } from '/demo/wasm/synq_compiler_wasm.e4ff66711fe1c77c.js';
+<script src="/demo/wasm/synq-wasm-loader.js" type="module"></script>
+<script>
+(function() {
+
 
 let _benchSource = `pragma synq ^0.9;
 
@@ -328,21 +330,20 @@ window.runBench = async () => {
   document.getElementById('prog').style.display = 'block';
 
   try {
-    await init('/demo/wasm/synq_compiler_wasm_bg.e4ff66711fe1c77c.wasm');
-
   // ── WASM boot diagnostic ─────────────────────────────────────────────────
   // Fires once on page load. Shows version string + a test compile byte count
   // so you can confirm the correct binary loaded WITHOUT running a full bench.
   (async () => {
     const logEl = document.getElementById('log');
     try {
-      const ver = synq_version();
-      const probe = JSON.parse(compile_synq(`pragma synq ^0.9;\ncontract _Probe { function ping() { return 1; } }`));
+      await window.SynQWasm.ready;
+      const ver   = await window.SynQWasm.version();
+      const probe = await window.SynQWasm.compile(`pragma synq ^0.9;\ncontract _Probe { function ping() { return 1; } }`);
       const rawLen = probe.bytecode
         ? (probe.bytecode.startsWith('0x') ? probe.bytecode.length - 2 : probe.bytecode.length) / 2
         : 0;
       logEl.textContent = `[WASM boot] version=${ver}  probe_bc=${rawLen}B\n`;
-      logEl.textContent += `[WASM boot] binary URL: /demo/wasm/synq_compiler_wasm_bg.e4ff66711fe1c77c.wasm\n`;
+      logEl.textContent += `[WASM boot] binary URL: loaded via synq-wasm-loader.js\n`;
       logEl.textContent += probe.success
         ? `[WASM boot] ✓ compiler functional\n\n`
         : `[WASM boot] ✗ compile error: ${probe.errors}\n\n`;
@@ -350,7 +351,7 @@ window.runBench = async () => {
       logEl.textContent = `[WASM boot] ERROR: ${e}\n\n`;
     }
   })();
-    const ver = synq_version ? synq_version() : '?';
+    const ver = synq_version ? (await window.SynQWasm.version()) : '?';
     log(`WASM ready — SynQ ${ver}`);
     log(`Source: ${_benchSource.length} chars · ${_benchSource.split('\n').length} lines`);
     log(`Rounds: ${ROUNDS}   (3 calls/round: WASM → loopback → HTTP)\n`);
@@ -369,7 +370,7 @@ window.runBench = async () => {
       let dtW = 0, pw = null;
       try {
         const t0w = performance.now();
-        const resW = compile_synq(_benchSource);
+        const resW = (await window.SynQWasm.compile(_benchSource));
         dtW = performance.now() - t0w;
         pw = JSON.parse(resW);
       } catch(wasmEx) {
@@ -652,6 +653,14 @@ window.runMockOk = () => {
     document.getElementById('log').innerHTML='';
   }
 
+  // Expose to global scope for onclick handlers
+  window.toggleSrc = toggleSrc;
+  window.stopBench = stopBench;
+  window.runBench = runBench;
+  window.runMock = runMock;
+  window.runMockOk = runMockOk;
+  window.resetDisplay = resetDisplay;
+})();
 </script>
 </body>
 </html>
