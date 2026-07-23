@@ -1972,7 +1972,7 @@ async fn session_run_handler(
         }));
     }
 
-    eprintln!("[RUN] sid={} signing_key={} fn={} args_len={}", &req.session_id[..8], hex_encode(&caller_addr), req.function, vm_args.len());
+    eprintln!("[RUN] sid={} signing_key={} fn={} args_len={}", &req.session_id, hex_encode(&caller_addr), req.function, vm_args.len());
     let call_result = session.vm.call_function(&req.function, &vm_args);
     eprintln!("[RUN] result={:?}", call_result);
     session.vm.call_context = synq_vm::CallContext::anonymous();
