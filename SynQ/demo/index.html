@@ -219,6 +219,16 @@
       </svg>
       Open File
     </button>
+    <button class="btn btn-secondary" onclick="saveToFile()"
+            title="Save editor contents as a .synq file"
+            style="display:flex;align-items:center;gap:4px;padding:4px 10px;flex-shrink:0;">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           style="flex-shrink:0;opacity:0.85;">
+        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+        <polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
+      </svg>
+      Save File
+    </button>
     <span style="font-size:0.8rem;font-weight:600;color:rgba(255,255,255,0.4);padding:0 2px;">|</span>
     <button class="btn btn-secondary" onclick="loadBlank()" title="Blank starter contract">New</button>
     <button class="btn btn-secondary" onclick="loadVault()" title="Step 1 — TokenVault (uses extern_call)">TokenVault</button>
@@ -703,9 +713,10 @@
         try { await fetch(SESSION_DEL_URL + c.session_id, { method: 'DELETE' }); } catch(e){}
       }
       // 2. Create a fresh session
-      var resetBody = { bytecode: c.bytecode, state_vars: c.state_vars || [] };
+      var resetBody = { bytecode: c.bytecode, state_vars: c.stateVars || c.state_vars || [] };
       if (c.name)      resetBody.contract_name = c.name;
-      if (workspaceId) resetBody.workspace_id  = workspaceId;
+      if (workspaceId)        resetBody.workspace_id    = workspaceId;
+      if (c.fnReturnTypes)   resetBody.fn_return_types = c.fnReturnTypes;
       try {
         var res  = await fetch(SESSION_NEW_URL, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -750,6 +761,15 @@
       out.innerHTML = '<span class="ok">All sessions reset (' + names + '). ' + 'State cleared — the <b>init</b> pill will glow amber on each contract that needs initialising.</span>';
     }
 
+      // Immediately zero stateSnapshot so panel shows clean VM, not stale '?'
+      stateSnapshot = {};
+      if (stateVarNames && stateVarNames.length > 0) {
+        stateVarNames.forEach(function(n) { stateSnapshot[n] = '0'; });
+      }
+      window._sessionLostHinted = false;
+      updateStateDisplay();
+      syncInitPillHint();
+
     // Clear param inputs
     for (var p = 0; p < (selectedFunc ? selectedFunc.paramCount : 0); p++) {
       var el = document.getElementById('param_' + p);
@@ -760,9 +780,25 @@
       }
     }
 
-    // Refresh state panel immediately so it shows zeros, not stale values
-    stateSnapshot = {};
-    await probeStateVars();
+    // Inline state fetch after reset — guarantees sessionId is the fresh one.
+    // probeStateVars() can race if called before sessionId propagates; this avoids that.
+    if (sessionId && currentStateVars && currentStateVars.length > 0) {
+      try {
+        var _rr = await fetch(SESSION_DEL_URL + sessionId + '/state');
+        var _rd = await _rr.json();
+        if (_rd.success && _rd.state) {
+          var _names = currentStateVars.map(function(sv){ return sv[0]; });
+          stateVarNames = _names;
+          stateSnapshot = {};
+          _names.forEach(function(n) {
+            var raw = _rd.state[n];
+            stateSnapshot[n] = (raw === undefined || raw === null) ? '0' : String(raw);
+          });
+          updateStateDisplay();
+          syncInitPillHint();
+        }
+      } catch(_re) {}
+    }
   }
 
   function updateWalletUI() {
@@ -866,26 +902,58 @@
     });
   }
 
-  async function generateEphemeralKey() {
+  // Persist ephemeral key in localStorage so address stays stable across page reloads.
+  // User can still cycle the key with the "Regen Devnet Key" button.
+  var EPHEMERAL_KEY_STORAGE = 'synq_devnet_ephemeral_key';
+
+  function _deriveAddress(privKey, _noble) {
+    var pubKeyUncomp = _noble.getPublicKey(privKey, false);
+    var pubKeyBody   = pubKeyUncomp.slice(1);
+    var addrBytes    = keccak256Bytes(pubKeyBody).slice(-20);
+    return '0x' + Array.from(addrBytes).map(function(b){
+      return b.toString(16).padStart(2,'0');
+    }).join('');
+  }
+
+  async function generateEphemeralKey(forceNew) {
     var _noble;
     try { _noble = await waitForNoble(); }
     catch(e) { console.error('[SynQ]', e.message); return false; }
+
+    if (!forceNew) {
+      // Try to restore persisted key
+      try {
+        var stored = localStorage.getItem(EPHEMERAL_KEY_STORAGE);
+        if (stored) {
+          var privBytes = new Uint8Array(JSON.parse(stored));
+          if (privBytes.length === 32) {
+            _ephemeralPrivKey = privBytes;
+            var _addrHex = _deriveAddress(_ephemeralPrivKey, _noble);
+            _ephemeralAddress = _addrHex;
+            walletAddress     = _addrHex;
+            _walletMode = 'ephemeral';
+            console.log('[SynQ] Restored ephemeral devnet address:', walletAddress);
+            return true;
+          }
+        }
+      } catch(e) { /* ignore — generate fresh */ }
+    }
+
+    // Generate a new random key
     _ephemeralPrivKey = _noble.utils.randomPrivateKey();
-    var pubKeyUncomp  = _noble.getPublicKey(_ephemeralPrivKey, false);
-    var pubKeyBody    = pubKeyUncomp.slice(1);
-    var addrBytes     = keccak256Bytes(pubKeyBody).slice(-20);
-    var _addrHex = '0x' + Array.from(addrBytes).map(function(b){
-      return b.toString(16).padStart(2,'0');
-    }).join('');
-    _ephemeralAddress = _addrHex; // canonical signing address for this key
+    // Persist to localStorage
+    try { localStorage.setItem(EPHEMERAL_KEY_STORAGE, JSON.stringify(Array.from(_ephemeralPrivKey))); }
+    catch(e) { /* storage unavailable — non-fatal */ }
+    var _addrHex = _deriveAddress(_ephemeralPrivKey, _noble);
+    _ephemeralAddress = _addrHex;
     walletAddress     = _addrHex;
     _walletMode = 'ephemeral';
-    console.log('[SynQ] Ephemeral devnet address:', walletAddress);
+    console.log('[SynQ] New ephemeral devnet address:', walletAddress);
     return true;
   }
 
   async function regenerateKey() {
-    await generateEphemeralKey();
+    await generateEphemeralKey(true);  // force new — discard persisted key
     updateWalletUI();
     sessionId = null; workspaceId = null; workspaceContracts = [];
     if (typeof populateFunctionPicker === 'function') populateFunctionPicker();
@@ -1238,6 +1306,31 @@
     };
     reader.readAsText(file);
   }
+  function saveToFile() {
+    var src = (typeof getCode === 'function' ? getCode() : null)
+              || document.getElementById('editor').value || '';
+    if (!src.trim()) {
+      setStatus('Nothing to save — editor is empty.', 'error');
+      return;
+    }
+    // Derive filename from contract name in source
+    var match = src.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
+    var name  = (match ? match[1] : (currentContractName || 'contract'));
+    var filename = name + '.synq';
+    var blob = new Blob([src], { type: 'text/plain' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function() {
+      URL.revokeObjectURL(a.href);
+      document.body.removeChild(a);
+    }, 1000);
+    setStatus('Saved ' + filename + ' (' + src.length + ' chars).', 'info');
+  }
+  window.saveToFile = saveToFile;
+
 
   function loadVault() {
     evictWorkspaceContractByName('TokenVault');
@@ -2118,7 +2211,10 @@
       }
     }
 
-    // Snapshot state BEFORE the call so we can diff on void returns
+    // Snapshot sessionId AND state BEFORE the call.
+    // sessionId can change between now and the post-run probe (e.g. Reset VM
+    // running concurrently), so we lock in the target session here.
+    var runSessionId    = sessionId;
     var preCallSnapshot = Object.assign({}, stateSnapshot);
     out.innerHTML = '<span class="dim">Calling ' + selectedFunc.name + '(' + args.join(', ') + ') on QVM...</span>';
 
@@ -2315,8 +2411,10 @@
             display += boolBadge + '\n';
           }
         } else {
-          // void return — probe state, then diff against pre-call snapshot
-          await probeStateVars();
+          // void return — probe state using the session this run was sent to,
+          // not the global sessionId (which may have been overwritten by a
+          // concurrent Reset VM between the run and this probe).
+          await probeStateVars(runSessionId);
           var diffLines = [];
           // Build a set of mapping/set slot names — their /state value is just
           // the compile-time slot index (not enumerable), so skip them in diffs.
@@ -2379,7 +2477,7 @@
         // data.output intentionally omitted — server echoes 'Return value: X'
         // which duplicates the rv line already rendered above.
         out.innerHTML = display;
-        probeStateVars();
+        probeStateVars(runSessionId);
       } else {
         var errMsg = data.error || 'unknown error';
         console.log('[SynQ run error] full error:', errMsg);
@@ -2544,12 +2642,15 @@
   }
 
   // Call after every successful function run to probe known state vars
-  async function probeStateVars() {
-    if (!sessionId) return;
+  async function probeStateVars(overrideSid) {
+    // Accept an explicit session ID (from runFunction) to avoid racing against
+    // concurrent sessionId changes (e.g. Reset VM called while run is in-flight).
+    var _activeSid = overrideSid || sessionId;
+    if (!_activeSid) return;
     // Snapshot the session and state schema at call time so an async race
     // (e.g. switching contracts while a probe is in-flight) does not mix up
     // one contract's values with another's variable names.
-    var _probeSid      = sessionId;
+    var _probeSid      = _activeSid;
     var _probeVars     = currentStateVars     ? currentStateVars.slice()   : [];
     var _probeVarTypes = currentStateVarTypes ? Object.assign({}, currentStateVarTypes) : {};
     try {
@@ -2557,6 +2658,24 @@
       var data = await res.json();
       // Discard if the user switched to a different contract while the fetch was in-flight
       if (_probeSid !== sessionId) return;
+      // Session lost (e.g. server restart) — surface a clear hint instead of silent '?'
+      if (!data.success && data.error && data.error.toLowerCase().includes('not found')) {
+        var names = (_probeVars.length > 0)
+          ? _probeVars.map(function(sv) { return sv[0]; })
+          : [];
+        if (names.length > 0) {
+          stateSnapshot = {};
+          names.forEach(function(n) { stateSnapshot[n] = '0'; });
+          stateVarNames = names;
+          updateStateDisplay();
+          // Show a one-time status hint
+          if (!window._sessionLostHinted) {
+            window._sessionLostHinted = true;
+            setStatus('Session expired — Compile & Deploy to get a fresh session.', 'warn');
+          }
+        }
+        return;
+      }
       if (data.success && data.state) {
         stateSnapshot = {};
         // Use the schema captured at call time — never the current global
@@ -2571,7 +2690,9 @@
         }
         names.forEach(function(n) {
           var raw = data.state[n];
-          if (raw === undefined || raw === null) { stateSnapshot[n] = '?'; }
+          // Treat missing keys as uninitialized zero — never '?'
+          // (server may lack a key if bytecode predates a state var addition)
+          if (raw === undefined || raw === null) { stateSnapshot[n] = '0'; }
           else if (typeof raw === 'object') {
             stateSnapshot[n] = Array.isArray(raw) ? raw : (raw.value !== undefined ? String(raw.value) : raw);
           } else {
@@ -2609,9 +2730,10 @@
         try { await fetch(SESSION_DEL_URL + c.session_id, { method: 'DELETE' }); } catch(e){}
       }
       // 2. Create a fresh session
-      var resetBody = { bytecode: c.bytecode, state_vars: c.state_vars || [] };
+      var resetBody = { bytecode: c.bytecode, state_vars: c.stateVars || c.state_vars || [] };
       if (c.name)      resetBody.contract_name = c.name;
-      if (workspaceId) resetBody.workspace_id  = workspaceId;
+      if (workspaceId)        resetBody.workspace_id    = workspaceId;
+      if (c.fnReturnTypes)   resetBody.fn_return_types = c.fnReturnTypes;
       try {
         var res  = await fetch(SESSION_NEW_URL, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2656,6 +2778,15 @@
       out.innerHTML = '<span class="ok">All sessions reset (' + names + '). All state back to zero — call init() to reinitialise.</span>';
     }
 
+      // Immediately zero stateSnapshot so panel shows clean VM, not stale '?'
+      stateSnapshot = {};
+      if (stateVarNames && stateVarNames.length > 0) {
+        stateVarNames.forEach(function(n) { stateSnapshot[n] = '0'; });
+      }
+      window._sessionLostHinted = false;
+      updateStateDisplay();
+      syncInitPillHint();
+
     // Clear param inputs
     for (var p = 0; p < (selectedFunc ? selectedFunc.paramCount : 0); p++) {
       var el = document.getElementById('param_' + p);
@@ -2666,9 +2797,25 @@
       }
     }
 
-    // Refresh state panel immediately so it shows zeros, not stale values
-    stateSnapshot = {};
-    await probeStateVars();
+    // Inline state fetch after reset — guarantees sessionId is the fresh one.
+    // probeStateVars() can race if called before sessionId propagates; this avoids that.
+    if (sessionId && currentStateVars && currentStateVars.length > 0) {
+      try {
+        var _rr = await fetch(SESSION_DEL_URL + sessionId + '/state');
+        var _rd = await _rr.json();
+        if (_rd.success && _rd.state) {
+          var _names = currentStateVars.map(function(sv){ return sv[0]; });
+          stateVarNames = _names;
+          stateSnapshot = {};
+          _names.forEach(function(n) {
+            var raw = _rd.state[n];
+            stateSnapshot[n] = (raw === undefined || raw === null) ? '0' : String(raw);
+          });
+          updateStateDisplay();
+          syncInitPillHint();
+        }
+      } catch(_re) {}
+    }
   }
 
   function updateSessionBadge() {
@@ -2788,6 +2935,7 @@
     '    s_val:      str;',
     '    admin:      u256;',
     '    ready:      bool;',
+    '    labelled:   bool;',
     '    op_count:   u256;',
     '    balances:   map<u256, u256>;',
     '    registered: set<u256>;',
@@ -2802,6 +2950,7 @@
     '    b_val    = true;',
     '    s_val    = "hello";',
     '    ready    = true;',
+    '    labelled = false;',
     '    op_count = 0;',
     '  }',
     '',
@@ -2870,7 +3019,9 @@
     '',
     '  function setLabel(label: str) as caller {',
     '    require(ready, "not initialised");',
-    '    s_val = label;',
+    '    require(!labelled, "label already set");',
+    '    s_val    = label;',
+    '    labelled = true;',
     '  }',
     '',
     '  // ── Map operations ─────────────────────────────────────────────────────────',
