@@ -437,6 +437,23 @@ contract TypeTestContract {
 
 </script>
 
+<script type="text/plain" id="fault-source">
+pragma synq ^0.9;
+contract FaultDemo {
+    function add(a: u256, b: u256) -> u256 { return a + b; }
+    function multiply(a: u256, b: u256) -> u256 { return a * b; }
+    function factorial(n: u256) -> u256 {
+        let result: u256 = 1;
+        let i: u256 = 1;
+        while (i <= n) {
+            result = result * i;
+            i = i + 1;
+        }
+        return result;
+    }
+}
+</script>
+
 <script type="module">
 // ── WASM Loader ──────────────────────────────────────────────────
 import init, { compile_synq, synq_version } from '/demo/wasm/synq_compiler_wasm.7f2fe75c19396ee0.js';
@@ -783,10 +800,7 @@ function flipMidByte(hexStr) {
 // ── Runtime Fault Injection Demo ────────────────────────────────────────────
 // Deploys contract, calls clean, then calls again with mid-execution byte corruption
 async function runRuntimeFault() {
-  if (!_benchSource || !_benchName) {
-    log('\u26A0 Select a contract or load a .synq file first.');
-    return;
-  }
+  // Runtime fault demo uses its own built-in contract, no selection needed
   var btn = document.getElementById('rtFaultBtn');
   btn.disabled = true;
   btn.textContent = 'Running...';
@@ -798,13 +812,18 @@ async function runRuntimeFault() {
   var logEl = document.getElementById('log');
   logEl.textContent = '';
   log('=== Runtime Fault Injection Demo ===');
-  log('Contract: ' + _benchName);
+  log('Contract: FaultDemo (built-in for fault injection)');
   log('');
 
   try {
-    // 1. Compile via HTTP
+    // 1. Use dedicated fault demo contract (no auth required)
+    var faultSource = document.getElementById('fault-source').textContent.trim();
+    log('Using dedicated FaultDemo contract (no auth required)');
+    log('');
+
+    // 2. Compile via HTTP
     log('Compiling...');
-    var compileData = JSON.stringify({ source: _benchSource });
+    var compileData = JSON.stringify({ source: faultSource });
     var compileResp = await fetch('/synq/compile', {
       method: 'POST', headers: {'Content-Type':'application/json'}, body: compileData
     }).then(r => r.json());
@@ -825,7 +844,7 @@ async function runRuntimeFault() {
 
     // 3. Create session + deploy
     log('Deploying...');
-    var sessionData = JSON.stringify({ source: _benchSource, bytecode: bytecode, state_vars: compileResp.state_vars || [] });
+    var sessionData = JSON.stringify({ source: faultSource, bytecode: bytecode, state_vars: compileResp.state_vars || [] });
     var sessionResp = await fetch('/synq/session/new', {
       method: 'POST', headers: {'Content-Type':'application/json'}, body: sessionData
     }).then(r => r.json());
@@ -865,7 +884,7 @@ async function runRuntimeFault() {
     }
 
     // 4. Clean call (fresh session to avoid state from probing)
-    var cleanSd = JSON.stringify({ source: _benchSource, bytecode: bytecode, state_vars: compileResp.state_vars || [] });
+    var cleanSd = JSON.stringify({ source: faultSource, bytecode: bytecode, state_vars: compileResp.state_vars || [] });
     var cleanSr = await fetch('/synq/session/new', {
       method: 'POST', headers: {'Content-Type':'application/json'}, body: cleanSd
     }).then(r => r.json());
@@ -891,7 +910,7 @@ async function runRuntimeFault() {
     for (var s of scenarios) {
       await new Promise(function(r) { setTimeout(r, 400); }); // rate limit
       // Fresh session
-      var sd = JSON.stringify({ source: _benchSource, bytecode: bytecode, state_vars: compileResp.state_vars || [] });
+      var sd = JSON.stringify({ source: faultSource, bytecode: bytecode, state_vars: compileResp.state_vars || [] });
       var sr = await fetch('/synq/session/new', {
         method: 'POST', headers: {'Content-Type':'application/json'}, body: sd
       }).then(r => r.json());
@@ -922,7 +941,7 @@ async function runRuntimeFault() {
 
     // 6. Render the panel
     var html = '<p style="font-size:14px;font-weight:600;margin-bottom:12px;">\u26A1 Runtime Fault Injection Results</p>';
-    html += '<p style="color:#8b949e;font-size:12px;">Contract: <strong>' + _benchName + '</strong> \u00B7 Function: <code>' + fnName + '</code></p>';
+    html += '<p style="color:#8b949e;font-size:12px;">Contract: <strong>FaultDemo</strong> \u00B7 Function: <code>' + fnName + '</code></p>';
     html += '<p style="margin-top:8px;">Clean result: <strong>' + (cleanResp.success ? JSON.stringify(cleanResp.result) : 'ERROR: ' + cleanResp.error) + '</strong></p>';
     html += '<div style="margin-top:12px;">';
 
