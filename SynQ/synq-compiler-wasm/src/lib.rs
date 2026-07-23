@@ -199,6 +199,7 @@ const PQC_BUILTINS: &[&str] = &[
     "kyber_encapsulate", "kyber_decapsulate", "kyber_decaps",
     "falcon_sign", "mceliece_encapsulate", "mceliece_decapsulate",
     "hqc_encapsulate", "hqc_decapsulate",
+    "str_len", "str_concat", "str_eq",
 ];
 
 fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String>) -> Result<(), String> {
