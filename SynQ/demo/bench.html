@@ -58,8 +58,10 @@
 <div class="toolbar">
   <button class="btn" onclick="runBench()">▶ Run Benchmark (8 rounds)</button>
   <button class="btn btn-stop" onclick="stopBench()">■ Stop</button>
-  <button class="btn-mock ok" onclick="showVerdictOk()">Simulate: Match</button>
-  <button class="btn-mock bad" onclick="showVerdictMismatch()">Simulate: Mismatch</button>
+  <label class="btn-mock ok" style="cursor:pointer;user-select:none;">
+    <input type="checkbox" id="flipToggle" style="margin-right:6px;vertical-align:middle;">
+    Flip mid-byte (inject real mismatch)
+  </label>
 </div>
 
 <div class="file-row">
@@ -537,7 +539,7 @@ async function runBench() {
   log('');
 
   var wasmTimes=[], loopTimes=[], srvTimes=[];
-  var wasmBc=0, srvBc=0, loopBc=0;
+  var wasmBc=0, srvBc=0, loopBc=0; var wasmHexStr="", srvHexStr="";
 
   for (var i = 0; i < ROUNDS && _running; i++) {
     // ── WASM ──
@@ -555,9 +557,17 @@ async function runBench() {
       var wasmErr = pw.error || (pw.errors && pw.errors[0]) || '(no error)';
       log((i+1) + ': WASM ERROR: ' + wasmErr);
     } else {
-      wasmBc = (pw.bytecode.startsWith('0x') ? pw.bytecode.length/2-1 : pw.bytecode.length/2);
+      var wasmHex = pw.bytecode || '';
+      wasmHexStr = wasmHex;
+      var flipInfo = null;
+      if (document.getElementById('flipToggle') && document.getElementById('flipToggle').checked && wasmHex.startsWith('0x') && wasmHex.length > 20) {
+        flipInfo = flipMidByte(wasmHex);
+        wasmHex = flipInfo.mutated;
+      }
+      wasmBc = (wasmHex.startsWith('0x') ? Math.floor(wasmHex.length/2-1) : Math.floor(wasmHex.length/2));
       wasmTimes.push(dtW);
-      log((i+1) + ': WASM        ' + dtW.toFixed(2).padStart(7) + ' ms  [bc=' + wasmBc + 'B]');
+      var flipTag = flipInfo ? ' [FLIP@' + flipInfo.byteOffset + ' ' + flipInfo.origNibble + '→' + flipInfo.newNibble + ']' : '';
+      log((i+1) + ': WASM        ' + dtW.toFixed(2).padStart(7) + ' ms  [bc=' + wasmBc + 'B]' + flipTag);
     }
 
     // ── Loopback (server-side compile time via bench-compile endpoint) ──
@@ -602,7 +612,8 @@ async function runBench() {
     } else if (ps.success === false) {
       log((i+1) + ': HTTP COMPILE ERROR: ' + (ps.error || 'unknown'));
     } else {
-      srvBc = (ps.bytecode && ps.bytecode.startsWith('0x')) ? Math.floor(ps.bytecode.length/2-1) : (ps.bytecode ? Math.floor(ps.bytecode.length/2) : 0);
+      srvHexStr = ps.bytecode || '';
+      srvBc = (srvHexStr.startsWith('0x')) ? Math.floor(srvHexStr.length/2-1) : (srvHexStr ? Math.floor(srvHexStr.length/2) : 0);
       if (srvBc === 0) {
         log((i+1) + ': HTTP WARNING: no bytecode in response. Keys: ' + Object.keys(ps).join(','));
       }
@@ -636,7 +647,22 @@ async function runBench() {
     log('JIT penalty:  ' + jitPenalty + 'x (WASM vs native)');
     log('Net overhead: ' + netOverhead + 'x (HTTP vs loopback)');
     log('WASM vs HTTP: ' + wasmVsHttp + 'x faster in-browser');
-    log('Bytecode: ' + (byteOk ? '✓ identical (' + srvBc + ' bytes) — deterministic' : '✗ MISMATCH — WASM ' + wasmBc + 'B loopback ' + loopBc + 'B HTTP ' + srvBc + 'B'));
+    if (byteOk) {
+      log('Bytecode: ✓ identical (' + srvBc + ' bytes) — deterministic');
+    } else {
+      var flipOn = document.getElementById('flipToggle') && document.getElementById('flipToggle').checked;
+      if (flipOn && wasmHexStr && srvHexStr) {
+        // Find first differing byte
+        var w = wasmHexStr.slice(2), s = srvHexStr.slice(2);
+        var firstDiff = -1;
+        for (var bi = 0; bi < Math.min(w.length, s.length); bi += 2) {
+          if (w[bi] !== s[bi] || w[bi+1] !== s[bi+1]) { firstDiff = bi/2; break; }
+        }
+        log('Bytecode: ✗ MISMATCH (injected) — first diff @ byte ' + firstDiff + ' of ' + srvBc + 'B');
+      } else {
+        log('Bytecode: ✗ MISMATCH — WASM ' + wasmBc + 'B loopback ' + loopBc + 'B HTTP ' + srvBc + 'B');
+      }
+    }
     log('');
 
     // Update UI
@@ -670,14 +696,18 @@ async function runBench() {
   }
 }
 
-function showVerdictOk() {
-  document.getElementById('verdict').className = 'verdict';
-  document.getElementById('verdict').innerHTML = '<p><span class="pill pill-green">✓ MATCH</span> Simulated: deterministic bytecode.</p>';
-}
-
-function showVerdictMismatch() {
-  document.getElementById('verdict').className = 'verdict';
-  document.getElementById('verdict').innerHTML = '<p><span class="pill" style="background:#da3633;color:#fff">✗ MISMATCH</span> Simulated: bytecode differs.</p>';
+function flipMidByte(hexStr) {
+  if (!hexStr || !hexStr.startsWith('0x')) return hexStr;
+  var hex = hexStr.slice(2);
+  if (hex.length < 10) return hexStr;
+  var mid = Math.floor(hex.length / 2);
+  // Align to byte boundary (even index)
+  if (mid % 2 !== 0) mid--;
+  // Flip the nibble to something different
+  var orig = hex[mid];
+  var flip = orig === '0' ? 'f' : '0';
+  var mutated = '0x' + hex.slice(0, mid) + flip + hex.slice(mid + 1);
+  return { original: hexStr, mutated: mutated, byteOffset: mid / 2, origNibble: orig, newNibble: flip };
 }
 
 // Expose ALL functions to window for onclick handlers
@@ -687,8 +717,7 @@ window.loadFile = loadFile;
 window.toggleSrc = toggleSrc;
 window.runBench = runBench;
 window.stopBench = stopBench;
-window.showVerdictOk = showVerdictOk;
-window.showVerdictMismatch = showVerdictMismatch;
+window.flipMidByte = flipMidByte;
 </script>
 
 </body>
