@@ -817,19 +817,11 @@ async function runRuntimeFault() {
     var bytecode = compileResp.bytecode || '';
     log('Compiled: ' + bytecode.length + ' chars');
 
-    // 2. Find first function with params
-    var fnName = 'init';
+    // 2. Find a function that works without authentication
+    var fnName = null;
     var fnArgs = [];
     var fns = compileResp.functions || [];
-    for (var f of fns) {
-      if (f.params && f.params.length > 0) {
-        fnName = f.name;
-        fnArgs = f.params.map(function(p) { return p.type === 'u256' ? '100' : (p.type === 'bool' ? 'true' : 'hello'); });
-        break;
-      }
-    }
-    // Fallback: just call init() with no args
-    log('Using function: ' + fnName + '(' + fnArgs.join(', ') + ')');
+    log('Functions available: ' + fns.map(function(f) { return f.name; }).join(', '));
 
     // 3. Create session + deploy
     log('Deploying...');
@@ -840,10 +832,48 @@ async function runRuntimeFault() {
     var sid = sessionResp.session_id;
     log('Session: ' + sid.substring(0, 12) + '...');
 
-    // 4. Clean call
+    // 3b. Try each function to find one that succeeds without auth
+    for (var f of fns) {
+      var tryArgs = (f.params || []).map(function(p) {
+        if (p.type === 'u256' || p.type === 'u128' || p.type === 'u32' || p.type === 'i32') return '100';
+        if (p.type === 'bool') return 'true';
+        return 'hello';
+      });
+      var tryData = JSON.stringify({ session_id: sid, function: f.name, args: tryArgs });
+      var tryResp = await fetch('/synq/session/run', {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: tryData
+      }).then(r => r.json());
+      log('  try ' + f.name + '(' + tryArgs.join(',') + '): ' + (tryResp.success ? 'OK' : 'FAIL: ' + (tryResp.error || '')));
+      if (tryResp.success) {
+        fnName = f.name;
+        fnArgs = tryArgs;
+        break;
+      }
+      await new Promise(function(r) { setTimeout(r, 200); });
+    }
+
+    if (!fnName) {
+      // No function works without auth — fall back to init() and show the auth failure as the "clean" result
+      fnName = fns.length > 0 ? fns[0].name : 'init';
+      fnArgs = (fns[0] && fns[0].params || []).map(function(p) {
+        if (p.type === 'u256' || p.type === 'bool') return '100';
+        return 'hello';
+      });
+      log('No function succeeded without auth. Using ' + fnName + ' (will show auth failure as baseline).');
+    } else {
+      log('Using function: ' + fnName + '(' + fnArgs.join(', ') + ')');
+    }
+
+    // 4. Clean call (fresh session to avoid state from probing)
+    var cleanSd = JSON.stringify({ source: _benchSource, bytecode: bytecode, state_vars: compileResp.state_vars || [] });
+    var cleanSr = await fetch('/synq/session/new', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: cleanSd
+    }).then(r => r.json());
+    var cleanSid = cleanSr.session_id;
+
     log('');
     log('\u2500 Clean execution (no fault) \u2500');
-    var cleanData = JSON.stringify({ session_id: sid, function: fnName, args: fnArgs });
+    var cleanData = JSON.stringify({ session_id: cleanSid, function: fnName, args: fnArgs });
     var cleanResp = await fetch('/synq/session/run', {
       method: 'POST', headers: {'Content-Type':'application/json'}, body: cleanData
     }).then(r => r.json());
