@@ -555,8 +555,7 @@ async function runBench() {
       log((i+1) + ': WASM        ' + dtW.toFixed(2).padStart(7) + ' ms  [bc=' + wasmBc + 'B]');
     }
 
-    // ── Loopback ──
-    var t1 = performance.now();
+    // ── Loopback (server-side compile time via bench-compile endpoint) ──
     var pl;
     try {
       pl = await fetch('/synq/bench-compile', {
@@ -568,14 +567,14 @@ async function runBench() {
       log((i+1) + ': Loopback ERROR: ' + ex);
       pl = { error: String(ex) };
     }
-    var dtL = performance.now() - t1;
 
     if (pl.error) {
       log((i+1) + ': Loopback ERROR: ' + pl.error);
     } else {
-      loopBc = (pl.bytecode && pl.bytecode.startsWith('0x')) ? pl.bytecode.length/2-1 : (pl.bytecode ? pl.bytecode.length/2 : 0);
-      loopTimes.push(dtL);
-      log((i+1) + ': Loopback    ' + dtL.toFixed(2).padStart(7) + ' ms  [bc=' + loopBc + 'B]');
+      loopBc = pl.bytecode_bytes || 0;
+      var loopMs = pl.total_ns ? pl.total_ns / 1e6 : 0;  // server-reported compile time
+      loopTimes.push(loopMs);
+      log((i+1) + ': Loopback    ' + loopMs.toFixed(3).padStart(7) + ' ms  [bc=' + loopBc + 'B]');
     }
 
     // ── HTTP (full round-trip) ──
