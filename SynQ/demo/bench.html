@@ -466,9 +466,8 @@ var _benchSource = '';
 var _running = false;
 var ROUNDS = 8;
 
-// Auto-load CT on page load
-_benchSource = document.getElementById('ct-source').textContent.trim();
-document.getElementById('fileInfo').textContent = 'ComprehensiveToken v2 (' + _benchSource.length + ' chars)';
+// No auto-load — user must pick a contract or file
+document.getElementById('fileInfo').textContent = 'Select a contract or load a .synq file to begin';
 
 function log(msg) {
   var el = document.getElementById('log');
@@ -528,7 +527,7 @@ function median(a) { a.sort((x,y)=>x-y); return a.length%2 ? a[Math.floor(a.leng
 function avg(a) { return a.reduce((s,v)=>s+v,0)/a.length; }
 
 async function runBench() {
-  if (!_benchSource) { log('Error: no source loaded'); return; }
+  if (!_benchSource || !_benchName) { log('⚠ Select a contract or load a .synq file first.'); return; }
   _running = true;
   var logEl = document.getElementById('log');
   logEl.textContent = '';
