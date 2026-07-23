@@ -76,6 +76,24 @@
   }
   #mockOkBtn:not(.sim-active):hover   { background:#2d5a2d; }
   #mockFailBtn:not(.sim-active):hover { background:#4a1a1a; }
+
+  /* ── File loader ── */
+  .file-row { display:flex; align-items:center; gap:10px; margin:10px 0 4px; flex-wrap:wrap; }
+  .file-row label.pick-btn {
+    display:inline-block; background:#1f6feb; color:#fff;
+    border:none; border-radius:6px; padding:7px 18px; font-size:13px;
+    cursor:pointer; font-family:monospace; white-space:nowrap;
+  }
+  .file-row label.pick-btn:hover { background:#388bfd; }
+  #fileInput { display:none; }
+  #fileInfo  { font-size:12px; color:#8b949e; }
+  #fileInfo.loaded { color:#3fb950; }
+  .src-toggle { background:#161b22; border:1px solid #30363d; color:#8b949e;
+                border-radius:5px; padding:4px 12px; font-size:12px; cursor:pointer; }
+  .src-toggle:hover { border-color:#58a6ff; color:#c9d1d9; }
+  #srcPreview { display:none; background:#0d1117; border:1px solid #21262d;
+                border-radius:4px; padding:10px; font-size:11px; color:#8b949e;
+                max-height:160px; overflow-y:auto; white-space:pre; margin-top:6px; }
 </style>
 </head>
 <body>
@@ -101,6 +119,15 @@
   <span id="progress" style="color:#8b949e;margin-left:12px;font-size:13px"></span>
 </div>
 <progress id="prog" value="0" max="24" style="display:none"></progress>
+
+
+<div class="file-row">
+  <label class="pick-btn" for="fileInput">📂 Load .synq file</label>
+  <input type="file" id="fileInput" accept=".synq,.txt">
+  <span id="fileInfo">Using built-in ComprehensiveToken — or load any .synq file</span>
+  <button class="src-toggle" onclick="toggleSrc()">Show source</button>
+</div>
+<pre id="srcPreview"></pre>
 
 <div class="grid3">
   <div class="card">
@@ -138,9 +165,9 @@
 </div>
 
 <script type="module">
-import init, { compile_synq, synq_version } from '/demo/wasm/synq_compiler_wasm.b2979828f934.js';
+import init, { compile_synq, synq_version } from '/demo/wasm/synq_compiler_wasm.18875071ce42.js';
 
-const SOURCE = `pragma synq ^0.9;
+let _benchSource = `pragma synq ^0.9;
 
 contract ComprehensiveToken {
   total_supply:  UInt256;
@@ -301,7 +328,7 @@ window.runBench = async () => {
   document.getElementById('prog').style.display = 'block';
 
   try {
-    await init('/demo/wasm/synq_compiler_wasm_bg.b2979828f934.wasm');
+    await init('/demo/wasm/synq_compiler_wasm_bg.18875071ce42.wasm');
 
   // ── WASM boot diagnostic ─────────────────────────────────────────────────
   // Fires once on page load. Shows version string + a test compile byte count
@@ -315,7 +342,7 @@ window.runBench = async () => {
         ? (probe.bytecode.startsWith('0x') ? probe.bytecode.length - 2 : probe.bytecode.length) / 2
         : 0;
       logEl.textContent = `[WASM boot] version=${ver}  probe_bc=${rawLen}B\n`;
-      logEl.textContent += `[WASM boot] binary URL: /demo/wasm/synq_compiler_wasm_bg.fbc86bb11b98.wasm\n`;
+      logEl.textContent += `[WASM boot] binary URL: /demo/wasm/synq_compiler_wasm_bg.18875071ce42.wasm\n`;
       logEl.textContent += probe.success
         ? `[WASM boot] ✓ compiler functional\n\n`
         : `[WASM boot] ✗ compile error: ${probe.errors}\n\n`;
@@ -340,7 +367,7 @@ window.runBench = async () => {
 
       // ── WASM (no network) ──────────────────────────────────────────────
       const t0w = performance.now();
-      const resW = compile_synq(SOURCE);
+      const resW = compile_synq(_benchSource);
       const dtW  = performance.now() - t0w;
       const pw = JSON.parse(resW);
       if (pw.success) {
@@ -573,6 +600,48 @@ window.runMockOk = () => {
   document.getElementById('mockFailBtn').classList.remove('sim-active');
   showVerdictWithBytecode(3361, 3361, 3361);
 };
+
+
+  // ── File loader ────────────────────────────────────────────────────────────
+  document.getElementById('fileInput').addEventListener('change', function(e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function(ev) {
+      _benchSource = ev.target.result;
+      var info = document.getElementById('fileInfo');
+      info.textContent = '✓ Loaded: ' + file.name + ' (' + _benchSource.length + ' chars)';
+      info.className = 'loaded';
+      // Update source preview if visible
+      var pre = document.getElementById('srcPreview');
+      if (pre.style.display !== 'none') pre.textContent = _benchSource;
+      // Reset results so stale numbers don't mislead
+      resetDisplay();
+      log('Loaded ' + file.name + ' — ' + _benchSource.length + ' chars. Click Run Benchmark.');
+    };
+    reader.readAsText(file);
+  });
+
+  function toggleSrc() {
+    var pre = document.getElementById('srcPreview');
+    var btn = document.querySelector('.src-toggle');
+    if (pre.style.display === 'none') {
+      pre.style.display = 'block';
+      pre.textContent = _benchSource;
+      btn.textContent = 'Hide source';
+    } else {
+      pre.style.display = 'none';
+      btn.textContent = 'Show source';
+    }
+  }
+
+  function resetDisplay() {
+    ['wasmMed','loopMed','srvMed'].forEach(function(id){ document.getElementById(id).textContent='—'; });
+    ['wasmRange','loopRange','srvRange'].forEach(function(id){ document.getElementById(id).textContent=''; });
+    ['wasmBar','loopBar','srvBar'].forEach(function(id){ document.getElementById(id).style.width='0%'; });
+    document.getElementById('summaryCard').style.display='none';
+    document.getElementById('log').innerHTML='';
+  }
 
 </script>
 </body>
