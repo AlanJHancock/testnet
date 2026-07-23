@@ -375,7 +375,7 @@ window.runBench = async () => {
   document.getElementById('prog').style.display = 'block';
 
   try {
-    const ver = (await window.SynQWasm.version()) : '?';
+    const ver = await window.SynQWasm.version();
     log(`WASM ready — SynQ ${ver}`);
     log(`Source: ${_benchSource.length} chars · ${_benchSource.split('\n').length} lines`);
     log(`Rounds: ${ROUNDS}   (3 calls/round: WASM → loopback → HTTP)\n`);
