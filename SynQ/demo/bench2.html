@@ -503,6 +503,7 @@ function loadFile(event) {
     _benchName = file.name;
     document.getElementById('fileInfo').textContent = file.name + ' — ' + _benchSource.length + ' chars';
     document.getElementById('srcPreview').style.display = 'none';
+    document.querySelector('.src-toggle').textContent = 'Show source';
     log('Loaded ' + file.name + ' — ' + _benchSource.length + ' chars');
   };
   reader.readAsText(file);
