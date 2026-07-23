@@ -599,8 +599,13 @@ async function runBench() {
 
     if (ps.error) {
       log((i+1) + ': HTTP ERROR: ' + (ps.error.message || ps.error));
+    } else if (ps.success === false) {
+      log((i+1) + ': HTTP COMPILE ERROR: ' + (ps.error || 'unknown'));
     } else {
-      srvBc = (ps.bytecode && ps.bytecode.startsWith('0x')) ? ps.bytecode.length/2-1 : (ps.bytecode ? ps.bytecode.length/2 : 0);
+      srvBc = (ps.bytecode && ps.bytecode.startsWith('0x')) ? Math.floor(ps.bytecode.length/2-1) : (ps.bytecode ? Math.floor(ps.bytecode.length/2) : 0);
+      if (srvBc === 0) {
+        log((i+1) + ': HTTP WARNING: no bytecode in response. Keys: ' + Object.keys(ps).join(','));
+      }
       srvTimes.push(dtS);
       log((i+1) + ': HTTP        ' + dtS.toFixed(2).padStart(7) + ' ms  [bc=' + srvBc + 'B]');
     }
@@ -626,7 +631,7 @@ async function runBench() {
     var jitPenalty = (wMed / lMed).toFixed(1);
     var netOverhead = (sMed / lMed).toFixed(1);
     var wasmVsHttp = (sMed / wMed).toFixed(1);
-    var byteOk = (wasmBc === srvBc && loopBc === srvBc);
+    var byteOk = (wasmBc > 0 && loopBc > 0 && srvBc > 0 && wasmBc === srvBc && loopBc === srvBc);
 
     log('JIT penalty:  ' + jitPenalty + 'x (WASM vs native)');
     log('Net overhead: ' + netOverhead + 'x (HTTP vs loopback)');
