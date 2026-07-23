@@ -527,6 +527,10 @@ async function runBench() {
   _running = true;
   var logEl = document.getElementById('log');
   logEl.textContent = '';
+  // Clear verdict panel at start of each run
+  var _v = document.getElementById('verdict');
+  _v.className = 'verdict';
+  _v.innerHTML = '<p style="color:#8b949e;">\u23F3 Running benchmark\u2026</p>';
 
   log('Source: ' + _benchSource.length + ' chars · ' + _benchSource.split('\n').length + ' lines');
   log('Rounds: ' + ROUNDS + '   (3 calls/round: WASM → loopback → HTTP)');
