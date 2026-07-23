@@ -923,26 +923,18 @@ impl QuantumVM {
             OpCode::SetAdd => {
                 let set_addr = self.pop()?.as_i32()? as usize;
                 let val      = self.pop()?;
-                eprintln!("[SetAdd] val={:?} set_addr={}", val, set_addr);
                 let key = value_to_key(&val)?;
-                eprintln!("[SetAdd] key={}", hex::encode(&key));
                 match self.memory.entry(set_addr).or_insert_with(|| Value::Set(BTreeSet::new())) {
-                    Value::Set(s) => { s.insert(key); eprintln!("[SetAdd] set now has {} entries", s.len()); }
+                    Value::Set(s) => { s.insert(key); }
                     _ => return Err(VMError::RuntimeError("SetAdd: slot is not a Set".into())),
                 }
             }
             OpCode::SetContains => {
                 let set_addr = self.pop()?.as_i32()? as usize;
                 let val      = self.pop()?;
-                eprintln!("[SetContains] val={:?} set_addr={}", val, set_addr);
                 let key = value_to_key(&val)?;
-                eprintln!("[SetContains] key={}", hex::encode(&key));
                 let found = match self.memory.get(&set_addr) {
-                    Some(Value::Set(s)) => {
-                        eprintln!("[SetContains] set has {} entries: {:?}", s.len(), s.iter().map(hex::encode).collect::<Vec<_>>());
-                        s.contains(&key)
-                    },
-                    None => { eprintln!("[SetContains] slot {} is empty/missing", set_addr); false },
+                    Some(Value::Set(s)) => s.contains(&key),
                     _ => false,
                 };
                 self.push(Value::Bool(found))?;
