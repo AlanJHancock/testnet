@@ -214,9 +214,14 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
     for part in &contract.parts {
         if let ContractPart::Function(f) = part {
             let param_names: HashSet<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+            let mut let_names: HashSet<String> = HashSet::new();
 
             let all_stmts: Vec<&Statement> = f.body.statements.iter().collect();
             for stmt in all_stmts {
+                // Track let-bound variables for subsequent statement checks
+                if let Statement::Let { name, .. } = stmt {
+                    let_names.insert(name.clone());
+                }
                 let exprs: Vec<&Expression> = match stmt {
                     Statement::Expression(e) => vec![e],
                     Statement::Require(e, _) => vec![e],
@@ -240,6 +245,7 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                     for id in &idents {
                         if !state_names.contains(id.as_str())
                             && !param_names.contains(id.as_str())
+                            && !let_names.contains(id.as_str())
                             && !PQC_BUILTINS.contains(&id.as_str())
                         {
                             return Err(format!(
