@@ -487,3 +487,99 @@ pub fn compile_synq(source: &str) -> String {
 /// Compiler version string.
 #[wasm_bindgen]
 pub fn synq_version() -> String { "0.1.0-wasm".to_string() }
+
+
+// ── C-ABI export for server-side wasmtime execution ──────────────────────────
+// Bypasses wasm-bindgen entirely. Called via wasmtime on the server.
+// Convention: compile_synq_c(src_ptr, src_len, out_ptr, out_len) -> i32
+//   - Reads source string from (src_ptr, src_len) in WASM memory
+//   - Writes JSON result to (out_ptr, out_len) in WASM memory
+//   - Returns actual bytes written, or -1 on error
+#[no_mangle]
+pub unsafe extern "C" fn compile_synq_c(src_ptr: *const u8, src_len: usize, out_ptr: *mut u8, out_len: usize) -> i32 {
+    let source = match std::slice::from_raw_parts(src_ptr, src_len) {
+        s => match std::str::from_utf8(s) {
+            Ok(st) => st,
+            Err(_) => return -1,
+        }
+    };
+
+    // Call the same compile() function that wasm-bindgen uses
+    let result = match compile(source) {
+        Ok(cr) => {
+            // Extract function metadata (same as compile_synq)
+            let ast = parser::parse(source).unwrap_or_default();
+            let mut functions: Vec<WasmFunctionInfo> = Vec::new();
+            let mut state_var_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+            for unit in &ast {
+                if let SourceUnit::Contract(c) = unit {
+                    for part in &c.parts {
+                        if let ContractPart::Function(f) = part {
+                            let params: Vec<WasmParamInfo> = f.params.iter().map(|p| WasmParamInfo {
+                                name: p.name.clone(),
+                                ty: type_name(&p.ty),
+                            }).collect();
+                            functions.push(WasmFunctionInfo {
+                                name: f.name.clone(),
+                                params,
+                                return_type: f.returns.as_ref().map(type_name),
+                                argc: f.params.len(),
+                            });
+                        }
+                        if let ContractPart::StateVariable(sv) = part {
+                            state_var_types.insert(sv.name.clone(), type_name(&sv.ty));
+                        }
+                    }
+                }
+            }
+
+            WasmCompileResult {
+                success: true,
+                bytecode: Some(hex::encode(&cr.bytecode)),
+                state_vars: cr.state_vars,
+                warnings: cr.warnings,
+                errors: vec![],
+                extern_contracts: cr.extern_contracts,
+                functions,
+                state_var_types,
+            }
+        }
+        Err(e) => WasmCompileResult {
+            success: false,
+            bytecode: None,
+            state_vars: vec![],
+            warnings: vec![],
+            errors: vec![e],
+            extern_contracts: vec![],
+            functions: vec![],
+            state_var_types: std::collections::HashMap::new(),
+        },
+    };
+
+    let json = serde_json::to_string(&result).unwrap_or_else(|e| {
+        format!("{{{{\"success\":false,\"errors\":[\"serialise: {}\"]}}}}", e)
+    });
+
+    let json_bytes = json.as_bytes();
+    let written = json_bytes.len().min(out_len);
+    if written > 0 {
+        std::ptr::copy_nonoverlapping(json_bytes.as_ptr(), out_ptr, written);
+    }
+    written as i32
+}
+
+/// Simple malloc for wasmtime callers — allocates `size` bytes, returns pointer.
+/// Uses a bump allocator from a static buffer.
+#[no_mangle]
+pub unsafe extern "C" fn synq_wasm_alloc(size: usize) -> *mut u8 {
+    // Simple static bump allocator
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static HEAP: AtomicUsize = AtomicUsize::new(0);
+    static mut HEAP_BASE: [u8; 4 * 1024 * 1024] = [0u8; 4 * 1024 * 1024]; // 4MB
+
+    let offset = HEAP.fetch_add(size, Ordering::SeqCst);
+    if offset + size > 4 * 1024 * 1024 {
+        return std::ptr::null_mut();
+    }
+    unsafe { HEAP_BASE.as_mut_ptr().add(offset) }
+}

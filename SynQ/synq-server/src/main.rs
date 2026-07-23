@@ -72,6 +72,8 @@ use synq_compiler::{PQCCompiler, PQCSecurityLevel};
 use ruint::aliases::U256;
 use synq_vm::{QuantumVM, Value};
 
+mod wasm_compiler;
+
 // ─── Security constants ───────────────────────────────────────────────────────
 
 const SIGNING_ALGORITHM: &str  = "ML-DSA-65";
@@ -95,7 +97,7 @@ fn build_rate_limiter() -> StdArc<IpLimiter> {
 }
 const SESSION_TTL: Duration    = Duration::from_secs(30 * 60);
 const MAX_SESSIONS: usize      = 100;
-const MAX_SOURCE_BYTES: usize  = 64 * 1024;
+pub const MAX_SOURCE_BYTES: usize  = 64 * 1024;
 const MAX_BODY_BYTES: usize    = 128 * 1024;
 
 // ─── Session store ────────────────────────────────────────────────────────────
@@ -191,18 +193,19 @@ struct Workspace {
 type WorkspaceStore = Arc<Mutex<HashMap<String, Workspace>>>;
 
 #[derive(Clone)]
-struct AppState {
+pub struct AppState {
     sessions:      SessionStore,
     workspaces:    WorkspaceStore,
     rate_limiter:  StdArc<IpLimiter>,
     compiler_key:  Arc<CompilerKey>,
     source_nonce_secret: Vec<u8>,  // Rev-2: HMAC key for source-nonce derivation
+    wasm_runtime:     Option<Arc<wasm_compiler::WasmRuntime>>,
 }
 
 /// PR-F Item 2: check the per-IP rate limit.
 /// Returns Ok(()) if the request is within quota, Err(Response) with 429 + Retry-After otherwise.
 /// Returns Ok(()) if within quota, Err(wait_secs) if rate-limited.
-fn check_rate_limit(limiter: &IpLimiter, ip: IpAddr) -> Result<(), u64> {
+pub fn check_rate_limit(limiter: &IpLimiter, ip: IpAddr) -> Result<(), u64> {
     match limiter.check_key(&ip) {
         Ok(_)  => Ok(()),
         Err(not_until) => {
@@ -2262,7 +2265,16 @@ async fn main() {
                 CompilerKey::Ephemeral => new_session_id().into_bytes(),
             }
         });
-    let store = AppState { sessions, workspaces, rate_limiter, compiler_key, source_nonce_secret };
+    let wasm_runtime = {
+        let path = std::env::var("SYNQ_WASM_PATH").unwrap_or_else(|_| {
+            "/root/Downloads/synergy-testnet/SynQ/synq-compiler-wasm/target/wasm32-unknown-unknown/release/synq_compiler_wasm.wasm".to_string()
+        });
+        match wasm_compiler::WasmRuntime::new(&path) {
+            Ok(rt) => { println!("  WASM runtime:   loaded from {}", path); Some(Arc::new(rt)) }
+            Err(e) => { eprintln!("  WASM runtime:   FAILED: {}", e); None }
+        }
+    };
+    let store = AppState { sessions, workspaces, rate_limiter, compiler_key, source_nonce_secret, wasm_runtime };
 
     let cors_origin = std::env::var("SYNQ_CORS_ORIGIN").unwrap_or_else(|_| "*".to_string());
     let cors = if cors_origin == "*" {
@@ -2298,6 +2310,7 @@ async fn main() {
         .route("/session/:id/state", get(session_state_handler))
         .route("/debug/ecrecover",   post(debug_ecrecover_handler))
         .route("/bench-compile",      post(bench_compile_handler))
+        .route("/compile-wasm",     post(wasm_compiler::compile_wasm_handler))
         .with_state(store.clone())
         .layer(
             ServiceBuilder::new()
