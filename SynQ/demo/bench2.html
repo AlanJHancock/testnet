@@ -420,6 +420,11 @@ contract TypeTestContract {
   }
 
   function testMapGet(key: u256) -> u256 {
+    require(ready, "not initialised");
+    return balances[key];
+  }
+}
+
 </script>
 
 <script type="module">
