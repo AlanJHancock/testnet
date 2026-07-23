@@ -170,9 +170,9 @@
 // Inline WASM loader — dynamic import() sets window.SynQWasm synchronously
 // as a promise, so classic scripts can await it without the module-defer race.
 window.SynQWasm = (function() {
-  var _ready = import('/demo/wasm/synq_compiler_wasm.e4ff66711fe1c77c.js')
+  var _ready = import('/demo/wasm/synq_compiler_wasm.4173e569eb3a5e7e.js')
     .then(function(mod) {
-      return mod.default({ module_or_path: '/demo/wasm/synq_compiler_wasm_bg.e4ff66711fe1c77c.wasm' })
+      return mod.default({ module_or_path: '/demo/wasm/synq_compiler_wasm_bg.4173e569eb3a5e7e.wasm' })
         .then(function() { return mod; });
     });
   return {
