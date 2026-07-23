@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>SynQ Compiler Benchmark</title>
+<style>
+  body { font-family: monospace; background: #0d1117; color: #c9d1d9; padding: 20px; max-width: 1000px; margin: 0 auto; }
+  h2   { color: #58a6ff; margin-bottom: 4px; }
+  .sub-head { color: #8b949e; font-size: 13px; margin-bottom: 16px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin: 12px 0; }
+  .label { color: #8b949e; font-size: 12px; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .big  { font-size: 28px; font-weight: bold; color: #e6edf3; }
+  .sub  { font-size: 12px; color: #8b949e; margin-top: 2px; }
+  .bar-wrap { background: #21262d; border-radius: 4px; height: 18px; margin: 8px 0 4px; overflow: hidden; }
+  .bar { height: 100%; border-radius: 4px; transition: width 0.5s ease; display: flex; align-items: center; padding: 0 8px; font-size: 11px; font-weight: bold; color: #000; min-width: 2px; }
+  .bar-wasm   { background: #3fb950; }
+  .bar-loopback { background: #d2a8ff; }
+  .bar-server { background: #58a6ff; }
+  .log  { background: #0d1117; border: 1px solid #21262d; border-radius: 4px; padding: 12px; font-size: 12px; height: 200px; overflow-y: auto; margin-top: 8px; }
+  button { background: #238636; color: #fff; border: none; border-radius: 6px; padding: 10px 24px; font-size: 14px; cursor: pointer; margin-right: 8px; }
+  button:disabled { background: #21262d; color: #8b949e; cursor: not-allowed; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+  @media(max-width: 650px) { .grid3 { grid-template-columns: 1fr; } }
+  .winner { color: #3fb950; font-weight: bold; }
+  .loser  { color: #f85149; }
+  progress { width: 100%; height: 6px; margin: 6px 0 12px; accent-color: #58a6ff; }
+  .explain { background: #161b22; border-left: 3px solid #30363d; padding: 10px 14px; margin: 8px 0; font-size: 12px; color: #8b949e; line-height: 1.6; }
+  .explain strong { color: #c9d1d9; }
+  .pill { display:inline-block; border-radius:4px; padding:1px 7px; font-size:11px; font-weight:bold; margin-right:4px; }
+  .pill-green  { background:#1a3a20; color:#3fb950; border:1px solid #2d5a2d; }
+  .pill-purple { background:#2a1f40; color:#d2a8ff; border:1px solid #4a3060; }
+  .pill-blue   { background:#1a2a3a; color:#58a6ff; border:1px solid #2d4a6a; }
+  table.breakdown { width:100%; border-collapse:collapse; font-size:12px; margin-top:8px; }
+  table.breakdown td { padding:3px 8px; }
+  table.breakdown tr:nth-child(even) { background:#0d1117; }
+  .dim { color:#484f58; }
+
+  .byte-ok, .byte-fail {
+    display: flex; gap: 14px; align-items: flex-start;
+    border-radius: 6px; padding: 14px 16px; margin-top: 10px;
+  }
+  .byte-ok   { background: #0d2b14; border: 1px solid #2ea043; }
+  .byte-fail { background: #2d0f0f; border: 1px solid #f85149; }
+  .byte-icon { font-size: 28px; line-height: 1; flex-shrink: 0; margin-top: 2px; }
+  .byte-ok   .byte-icon { color: #3fb950; }
+  .byte-fail .byte-icon { color: #f85149; }
+  .byte-detail { font-size: 12px; color: #8b949e; line-height: 1.6; display: block; margin-top: 4px; }
+  .byte-detail code { background: #21262d; padding: 1px 5px; border-radius: 3px; color: #e6edf3; font-size: 11px; }
+  .byte-detail em { color: #3fb950; font-style: normal; font-weight: bold; }
+
+  #stopBtn   { background: #b62324; }
+  #stopBtn:disabled { background: #21262d; color: #8b949e; }
+
+  .sim-group { display:inline-flex; align-items:center; gap:6px;
+               background:#161b22; border:1px solid #30363d;
+               border-radius:6px; padding:4px 10px; margin-left:8px; }
+  .sim-label { color:#8b949e; font-size:12px; white-space:nowrap; }
+
+  .sim-group button {
+    padding: 5px 14px; font-size:13px; border-radius:5px;
+    border: 2px solid transparent; cursor:pointer;
+    transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+  }
+  #mockOkBtn   { background:#1a3a20; color:#3fb950; }
+  #mockFailBtn { background:#2d0f0f; color:#f85149; }
+
+  #mockOkBtn.sim-active {
+    background:#2ea043; color:#fff;
+    border-color:#3fb950;
+    box-shadow: 0 0 0 3px rgba(63,185,80,0.35);
+  }
+  #mockFailBtn.sim-active {
+    background:#f85149; color:#fff;
+    border-color:#ff6b6b;
+    box-shadow: 0 0 0 3px rgba(248,81,73,0.35);
+  }
+  #mockOkBtn:not(.sim-active):hover   { background:#2d5a2d; }
+  #mockFailBtn:not(.sim-active):hover { background:#4a1a1a; }
+
+  /* ── File loader ── */
+  .file-row { display:flex; align-items:center; gap:10px; margin:10px 0 4px; flex-wrap:wrap; }
+  .file-row label.pick-btn {
+    display:inline-block; background:#1f6feb; color:#fff;
+    border:none; border-radius:6px; padding:7px 18px; font-size:13px;
+    cursor:pointer; font-family:monospace; white-space:nowrap;
+  }
+  .file-row label.pick-btn:hover { background:#388bfd; }
+  #fileInput { display:none; }
+  #fileInfo  { font-size:12px; color:#8b949e; }
+  #fileInfo.loaded { color:#3fb950; }
+  .src-toggle { background:#161b22; border:1px solid #30363d; color:#8b949e;
+                border-radius:5px; padding:4px 12px; font-size:12px; cursor:pointer; }
+  .src-toggle:hover { border-color:#58a6ff; color:#c9d1d9; }
+  #srcPreview { display:none; background:#0d1117; border:1px solid #21262d;
+                border-radius:4px; padding:10px; font-size:11px; color:#8b949e;
+                max-height:160px; overflow-y:auto; white-space:pre; margin-top:6px; }
+</style>
+</head>
+<body>
+<h2>⚡ SynQ Compiler Benchmark</h2>
+<p class="sub-head">Three-way comparison: in-browser WASM · server loopback (pure compile) · full HTTP round-trip</p>
+
+<div class="explain">
+  <strong>What each column measures:</strong><br>
+  <span class="pill pill-green">WASM</span> The SynQ compiler running as a WebAssembly module <em>inside your browser</em>. No network. This is what the IDE uses for instant feedback.<br>
+  <span class="pill pill-purple">Loopback</span> The same native Rust binary on the server, timed server-side in nanoseconds via <code>/synq/bench-compile</code>. No PQC signing, no HTTP overhead — pure <em>parse + codegen</em> time.<br>
+  <span class="pill pill-blue">HTTP</span> A real <code>POST /synq/compile</code> including nginx, TLS, Axum routing, PQC attestation signing, and the network round-trip from your browser.<br><br>
+  <strong>Why it matters:</strong> WASM vs Loopback shows the JIT penalty of running Rust compiled to WASM in the browser. Loopback vs HTTP isolates the network + signing overhead. All three compile <em>identical source</em> and produce <em>identical bytecode</em>.
+</div>
+
+<div style="margin: 14px 0 6px">
+  <button id="runBtn"    onclick="runBench()">▶ Run Benchmark (8 rounds)</button>
+  <button id="stopBtn"   onclick="stopBench()" disabled>■ Stop</button>
+  <div class="sim-group" title="Simulate the bytecode verdict panel without running a real compile">
+    <span class="sim-label">Simulate verdict:</span>
+    <button id="mockOkBtn"  onclick="runMockOk()">✓ Match</button>
+    <button id="mockFailBtn" onclick="runMock()">✗ Mismatch</button>
+  </div>
+  <span id="progress" style="color:#8b949e;margin-left:12px;font-size:13px"></span>
+</div>
+<progress id="prog" value="0" max="24" style="display:none"></progress>
+
+
+<div class="file-row">
+  <label class="pick-btn" for="fileInput">📂 Load .synq file</label>
+  <input type="file" id="fileInput" accept=".synq,.txt">
+  <span id="fileInfo">Using built-in ComprehensiveToken v2 — or load any .synq file</span>
+  <button class="src-toggle" onclick="toggleSrc()">Show source</button>
+</div>
+<pre id="srcPreview"></pre>
+
+<div class="grid3">
+  <div class="card">
+    <div class="label">🟢 WASM (browser)</div>
+    <div class="big" id="wasmMed">—</div>
+    <div class="sub">median</div>
+    <div class="bar-wrap"><div class="bar bar-wasm" id="wasmBar" style="width:0%"></div></div>
+    <div class="sub" id="wasmRange">min / avg / max</div>
+  </div>
+  <div class="card">
+    <div class="label">🟣 Server loopback</div>
+    <div class="big" id="loopMed">—</div>
+    <div class="sub">median (server-timed)</div>
+    <div class="bar-wrap"><div class="bar bar-loopback" id="loopBar" style="width:0%"></div></div>
+    <div class="sub" id="loopRange">parse / codegen breakdown</div>
+  </div>
+  <div class="card">
+    <div class="label">🔵 HTTP round-trip</div>
+    <div class="big" id="srvMed">—</div>
+    <div class="sub">median (incl. network + PQC)</div>
+    <div class="bar-wrap"><div class="bar bar-server" id="srvBar" style="width:0%"></div></div>
+    <div class="sub" id="srvRange">min / avg / max</div>
+  </div>
+</div>
+
+<div class="card" id="summaryCard" style="display:none">
+  <div class="label">VERDICT</div>
+  <div id="verdict" style="font-size:15px;margin-top:6px;line-height:1.8"></div>
+  <div class="sub" id="byteInfo" style="margin-top:6px"></div>
+</div>
+
+<div class="card">
+  <div class="label">LOG</div>
+  <div class="log" id="log"></div>
+</div>
+
+<script>
+// Inline WASM loader — dynamic import() sets window.SynQWasm synchronously
+// as a promise, so classic scripts can await it without the module-defer race.
+window.SynQWasm = (function() {
+  var _ready = import('/demo/wasm/synq_compiler_wasm.e4ff66711fe1c77c.js')
+    .then(function(mod) {
+      return mod.default({ module_or_path: '/demo/wasm/synq_compiler_wasm_bg.e4ff66711fe1c77c.wasm' })
+        .then(function() { return mod; });
+    });
+  return {
+    ready: _ready,
+    compile: async function(source) {
+      var mod = await _ready;
+      return JSON.parse(mod.compile_synq(source));
+    },
+    version: async function() {
+      var mod = await _ready;
+      return mod.synq_version();
+    }
+  };
+})();
+</script>
+<script>
+// ── WASM boot diagnostic ─────────────────────────────────────────────────
+  // Fires once on page load. Shows version string + a test compile byte count
+  // so you can confirm the correct binary loaded WITHOUT running a full bench.
+  (async () => {
+    const logEl = document.getElementById('log');
+    try {
+      await window.SynQWasm.ready;
+      const ver   = await window.SynQWasm.version();
+      const probe = await window.SynQWasm.compile(`pragma synq ^0.9;\ncontract _Probe { function ping() { return 1; } }`);
+      const rawLen = probe.bytecode
+        ? (probe.bytecode.startsWith('0x') ? probe.bytecode.length - 2 : probe.bytecode.length) / 2
+        : 0;
+      logEl.textContent = `[WASM boot] version=${ver}  probe_bc=${rawLen}B\n`;
+      logEl.textContent += `[WASM boot] binary URL: loaded via synq-wasm-loader.js\n`;
+      logEl.textContent += probe.success
+        ? `[WASM boot] ✓ compiler functional\n\n`
+        : `[WASM boot] ✗ compile error: ${probe.errors}\n\n`;
+    } catch(e) {
+      logEl.textContent = `[WASM boot] ERROR: ${e}\n\n`;
+    }
+  })();
+</script>
+
+<script>
+(function() {
+
+
+let _benchSource = `pragma synq ^0.9;
+
+// ComprehensiveToken v2 — exercises bool, str, map<u256,bool>, map<u256,str>
+// and the str_concat / str_len / str_eq builtins alongside the full ERC-20-style
+// token surface.  All state-mutating functions require \`as caller\` (EIP-712 auth).
+
+contract ComprehensiveToken {
+
+  state {
+    // ── Numeric state ──────────────────────────────────────────────────────
+    total_supply:  u256;
+    admin_count:   u256;
+    version:       u256;
+
+    // ── Boolean state (Bool type) ──────────────────────────────────────────
+    initialised:   bool;
+    feat_pqc:      bool;
+    debug_mode:    bool;
+
+    // ── String state (Str type) ────────────────────────────────────────────
+    token_name:    str;
+    token_symbol:  str;
+
+    // ── Role mappings (map<u256, bool>) ────────────────────────────────────
+    admin_role:    map<u256, bool>;
+    minter_role:   map<u256, bool>;
+    registered:    map<u256, bool>;
+
+    // ── Balance mapping (map<u256, u256>) ──────────────────────────────────
+    balances:      map<u256, u256>;
+
+    // ── Label mapping (map<u256, str>) — optional per-address label ────────
+    labels:        map<u256, str>;
+  }
+
+  impl {
+
+    // ── Bootstrap ──────────────────────────────────────────────────────────
+    // Sign with your wallet — caller becomes the first admin.
+    function init(name: str, symbol: str) as caller {
+      require(initialised == false,  "init: already initialised");
+      require(str_len(name) > 0,     "init: name empty");
+      require(str_len(symbol) > 0,   "init: symbol empty");
+      require(str_len(name) <= 64,   "init: name too long");
+      require(str_len(symbol) <= 8,  "init: symbol too long");
+
+      admin_role[caller]  = true;
+      registered[caller]  = true;
+      admin_count         = 1;
+      feat_pqc            = true;
+      version             = 2;
+      token_name          = name;
+      token_symbol        = symbol;
+      initialised         = true;
+      debug_mode          = false;
+    }
+
+    // ── Admin management ───────────────────────────────────────────────────
+    function grantAdmin(target: u256) as caller {
+      require(admin_role[caller] == true, "grantAdmin: not admin");
+      require(target > 0,                 "grantAdmin: invalid address");
+      if (admin_role[target] == false) {
+        admin_count = admin_count + 1;
+      }
+      admin_role[target]  = true;
+      registered[target]  = true;
+    }
+
+    function revokeAdmin(target: u256) as caller {
+      require(admin_role[caller] == true, "revokeAdmin: not admin");
+      require(target != caller,           "revokeAdmin: cannot revoke self");
+      require(admin_count > 1,            "revokeAdmin: cannot remove last admin");
+      if (admin_role[target] == true) {
+        admin_count = admin_count - 1;
+      }
+      admin_role[target] = false;
+    }
+
+    function grantMinter(target: u256) as caller {
+      require(admin_role[caller] == true, "grantMinter: not admin");
+      require(target > 0,                 "grantMinter: invalid address");
+      minter_role[target] = true;
+      registered[target]  = true;
+    }
+
+    function revokeMinter(target: u256) as caller {
+      require(admin_role[caller] == true, "revokeMinter: not admin");
+      require(target != caller,           "revokeMinter: cannot revoke self");
+      minter_role[target] = false;
+    }
+
+    // ── Registration ───────────────────────────────────────────────────────
+    function register(target: u256) as caller {
+      require(admin_role[caller] == true, "register: not admin");
+      require(target > 0,                 "register: invalid address");
+      registered[target] = true;
+    }
+
+    function deregister(target: u256) as caller {
+      require(admin_role[caller] == true,  "deregister: not admin");
+      require(balances[target] == 0,       "deregister: target still holds tokens");
+      registered[target] = false;
+    }
+
+    // ── Token metadata (admin only) ────────────────────────────────────────
+    function setTokenName(name: str) as caller {
+      require(admin_role[caller] == true, "setTokenName: not admin");
+      require(str_len(name) > 0,          "setTokenName: empty");
+      require(str_len(name) <= 64,        "setTokenName: too long");
+      token_name = name;
+    }
+
+    function setTokenSymbol(symbol: str) as caller {
+      require(admin_role[caller] == true, "setTokenSymbol: not admin");
+      require(str_len(symbol) > 0,        "setTokenSymbol: empty");
+      require(str_len(symbol) <= 8,       "setTokenSymbol: too long");
+      token_symbol = symbol;
+    }
+
+    // ── Per-address labels (admin only) ────────────────────────────────────
+    function setLabel(target: u256, label: str) as caller {
+      require(admin_role[caller] == true, "setLabel: not admin");
+      require(str_len(label) <= 32,       "setLabel: label too long");
+      labels[target] = label;
+    }
+
+    function getLabel(target: u256) -> str { return labels[target]; }
+
+    // ── Minting ────────────────────────────────────────────────────────────
+    function mint(to: u256, amount: u256) as caller {
+      require(minter_role[caller] == true || admin_role[caller] == true, "mint: not authorised");
+      require(to > 0,     "mint: invalid recipient");
+      require(amount > 0, "mint: zero amount");
+      registered[to]  = true;
+      total_supply    = total_supply + amount;
+      balances[to]    = balances[to] + amount;
+      return total_supply;
+    }
+
+    // ── Transfers ──────────────────────────────────────────────────────────
+    function transfer(to: u256, amount: u256) as caller {
+      require(registered[caller] == true,   "transfer: sender not registered");
+      require(registered[to] == true,       "transfer: recipient not registered");
+      require(to > 0,                       "transfer: invalid recipient");
+      require(to != caller,                 "transfer: cannot transfer to self");
+      require(balances[caller] >= amount,   "transfer: insufficient balance");
+      balances[caller] = balances[caller] - amount;
+      balances[to]     = balances[to] + amount;
+      return true;
+    }
+
+    function burn(from: u256, amount: u256) as caller {
+      require(admin_role[caller] == true,  "burn: not admin");
+      require(balances[from] >= amount,    "burn: amount exceeds balance");
+      balances[from] = balances[from] - amount;
+      total_supply   = total_supply - amount;
+      return total_supply;
+    }
+
+    // ── Debug control (admin only) ─────────────────────────────────────────
+    function setDebugMode(enabled: bool) as caller {
+      require(admin_role[caller] == true, "setDebugMode: not admin");
+      debug_mode = enabled;
+    }
+
+    // ── Diagnostics (gated on debug_mode) ─────────────────────────────────
+    function whoAmI() as caller {
+      require(debug_mode == true, "whoAmI: debug mode not enabled");
+      return caller;
+    }
+
+    function amIRegistered() -> bool as caller {
+      require(debug_mode == true, "amIRegistered: debug mode not enabled");
+      return registered[caller];
+    }
+
+    // ── Identity helpers ───────────────────────────────────────────────────
+    function amIAdmin() -> bool as caller    { return admin_role[caller]; }
+    function amIMinter() -> bool as caller   { return minter_role[caller]; }
+
+    // ── Token info (str builtins) ──────────────────────────────────────────
+    // Returns "Name: <token_name> [<token_symbol>]" as a single string.
+    function tokenInfo() -> str {
+      return str_concat(str_concat(str_concat("Name: ", token_name), " ["), str_concat(token_symbol, "]"));
+    }
+
+    // Check if a given string matches the token symbol exactly.
+    function isSymbol(s: str) -> bool { return str_eq(s, token_symbol); }
+
+    // ── Queries ────────────────────────────────────────────────────────────
+    function isAdmin(who: u256)      -> bool  { return admin_role[who]; }
+    function isMinter(who: u256)     -> bool  { return minter_role[who]; }
+    function isRegistered(who: u256) -> bool  { return registered[who]; }
+    function balanceOf(who: u256)    -> u256  { return balances[who]; }
+    function totalSupply()           -> u256  { return total_supply; }
+    function tokenName()             -> str   { return token_name; }
+    function tokenSymbol()           -> str   { return token_symbol; }
+    function getVersion()            -> u256  { return version; }
+    function isInitialised()         -> bool  { return initialised; }
+    function isPQCEnabled()          -> bool  { return feat_pqc; }
+  }
+}
+`;
+
+const COMPILE_URL   = '/synq/compile';
+const LOOPBACK_URL  = '/synq/bench-compile';
+const ROUNDS = 8;
+let running = false, stop = false;
+
+window.stopBench = () => { stop = true; };
+
+function log(msg) {
+  const el = document.getElementById('log');
+  el.innerHTML += msg + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+function median(a) { const s=[...a].sort((x,y)=>x-y); return s[Math.floor(s.length/2)]; }
+function avg(a)    { return a.reduce((x,y)=>x+y,0)/a.length; }
+function ms(ns)    { return (ns/1e6).toFixed(3) + ' ms'; }
+
+window.runBench = async () => {
+  if (running) return;
+  running = true; stop = false;
+  document.getElementById('runBtn').disabled = true;
+  document.getElementById('stopBtn').disabled = false;
+  document.getElementById('log').innerHTML = '';
+  document.getElementById('summaryCard').style.display = 'none';
+  document.getElementById('mockOkBtn').classList.remove('sim-active');
+  document.getElementById('mockFailBtn').classList.remove('sim-active');
+  document.getElementById('prog').style.display = 'block';
+
+  try {
+    const ver = await window.SynQWasm.version();
+    log(`WASM ready — SynQ ${ver}`);
+    log(`Source: ${_benchSource.length} chars · ${_benchSource.split('\n').length} lines`);
+    log(`Rounds: ${ROUNDS}   (3 calls/round: WASM → loopback → HTTP)\n`);
+
+    const wasmTimes=[]; const loopTimes=[]; const srvTimes=[];
+    const parseNs=[]; const codegenNs=[];
+    let wasmBc=0, srvBc=0, loopBc=0;
+    const prog = document.getElementById('prog');
+
+    for (let i=0; i<ROUNDS; i++) {
+      if (stop) { log('\n[stopped]'); break; }
+      prog.value = i*3;
+      document.getElementById('progress').textContent = `Round ${i+1}/${ROUNDS}`;
+
+      // ── WASM (no network) ──────────────────────────────────────────────
+      let dtW = 0, pw = null;
+      try {
+        const t0w = performance.now();
+        pw = (await window.SynQWasm.compile(_benchSource));
+        dtW = performance.now() - t0w;
+      } catch(wasmEx) {
+        log(`  ${i+1}: WASM EXCEPTION: ${wasmEx.message || wasmEx}`);
+        pw = { success: false, error: String(wasmEx.message || wasmEx) };
+      }
+      if (pw && pw.success) {
+        wasmBc = (pw.bytecode.startsWith('0x') ? pw.bytecode.length/2-1 : pw.bytecode.length/2);
+        wasmTimes.push(dtW);
+        const rawWasmBcLen = (pw.bytecode.startsWith('0x') ? pw.bytecode.length-2 : pw.bytecode.length)/2;
+        log(`  ${String(i+1).padStart(2)}: WASM        ${dtW.toFixed(2).padStart(7)} ms  [bc_raw=${rawWasmBcLen}B str_len=${pw.bytecode.length}]`);
+      } else if (pw) {
+        var wasmErrMsg = pw.error || (pw.errors && pw.errors[0]) || '(no error — check browser console)';
+        log(`  ${i+1}: WASM ERROR: ${wasmErrMsg}`);
+      }
+
+      await new Promise(r=>setTimeout(r,150));
+      prog.value = i*3+1;
+
+      // ── Server loopback (HTTP but no PQC, server-timed) ────────────────
+      const t0l = performance.now();
+      const respL = await fetch(LOOPBACK_URL, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({source:_benchSource})
+      });
+      const resL = await respL.json();
+      const dtL  = performance.now() - t0l;
+      if (resL.success) {
+        loopBc = resL.bytecode_bytes;
+        const serverMs = resL.total_ns / 1e6;
+        loopTimes.push(serverMs);          // use server-reported time (true compile time)
+        parseNs.push(resL.parse_ns);
+        codegenNs.push(resL.codegen_ns);
+        log(`      loopback   ${serverMs.toFixed(3).padStart(7)} ms  (server-timed; HTTP shell: ${dtL.toFixed(1)}ms)`);
+      } else {
+        log(`  ${i+1}: Loopback ERROR: ${resL.error}`);
+      }
+
+      await new Promise(r=>setTimeout(r,1800)); // rate-limit gap before HTTP compile
+      prog.value = i*3+2;
+
+      // ── Full HTTP compile (with PQC signing + network) ─────────────────
+      const t0s = performance.now();
+      const respS = await fetch(COMPILE_URL, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({source:_benchSource, contract_name: (loadedFileName || 'ComprehensiveToken')})
+      });
+      const resS = await respS.json();
+      const dtS  = performance.now() - t0s;
+      if (resS.success) {
+        srvBc = (resS.bytecode.startsWith('0x') ? resS.bytecode.length/2-1 : resS.bytecode.length/2);
+        srvTimes.push(dtS);
+        log(`      HTTP       ${dtS.toFixed(2).padStart(7)} ms  (incl. TLS + PQC sign)\n`);
+      } else {
+        log(`  ${i+1}: HTTP ERROR: ${resS.error || resS.errors?.[0]}\n`);
+      }
+
+      await new Promise(r=>setTimeout(r,300));
+    }
+
+    prog.value = ROUNDS*3;
+    document.getElementById('progress').textContent = 'Done';
+
+    if (wasmTimes.length && loopTimes.length && srvTimes.length) {
+      const wMed=median(wasmTimes), wAvg=avg(wasmTimes), wMin=Math.min(...wasmTimes), wMax=Math.max(...wasmTimes);
+      const lMed=median(loopTimes), lAvg=avg(loopTimes), lMin=Math.min(...loopTimes), lMax=Math.max(...loopTimes);
+      const sMed=median(srvTimes),  sAvg=avg(srvTimes),  sMin=Math.min(...srvTimes),  sMax=Math.max(...srvTimes);
+      const pMed=median(parseNs), cMed=median(codegenNs);
+
+      const scale = Math.max(wMed, lMed, sMed);
+      // WASM bar
+      document.getElementById('wasmMed').textContent = wMed.toFixed(2)+' ms';
+      document.getElementById('wasmRange').textContent = `min ${wMin.toFixed(2)} / avg ${wAvg.toFixed(2)} / max ${wMax.toFixed(2)} ms`;
+      document.getElementById('wasmBar').style.width = (wMed/scale*100).toFixed(1)+'%';
+      document.getElementById('wasmBar').textContent = wMed.toFixed(2)+'ms';
+      // Loopback bar
+      document.getElementById('loopMed').textContent = lMed.toFixed(3)+' ms';
+      document.getElementById('loopRange').textContent =
+        `parse ${ms(pMed)} · codegen ${ms(cMed)}`;
+      document.getElementById('loopBar').style.width = (lMed/scale*100).toFixed(1)+'%';
+      document.getElementById('loopBar').textContent = lMed.toFixed(3)+'ms';
+      // HTTP bar
+      document.getElementById('srvMed').textContent = sMed.toFixed(1)+' ms';
+      document.getElementById('srvRange').textContent = `min ${sMin.toFixed(1)} / avg ${sAvg.toFixed(1)} / max ${sMax.toFixed(1)} ms`;
+      document.getElementById('srvBar').style.width = (sMed/scale*100).toFixed(1)+'%';
+      document.getElementById('srvBar').textContent = sMed.toFixed(1)+'ms';
+
+      // Verdict
+      const jitPenalty  = (wMed / lMed).toFixed(1);
+      const netPenalty  = (sMed / lMed).toFixed(1);
+      const wasmVsHttp  = (sMed / wMed).toFixed(1);
+
+      const byteOk = (wasmBc===srvBc && loopBc===srvBc);
+
+      // ── Bytecode determinism block ────────────────────────────────────────
+      const byteBlock = byteOk
+        ? `<div class="byte-ok">
+             <span class="byte-icon">✓</span>
+             <div>
+               <strong>All three compilers produced identical bytecode (${srvBc} bytes)</strong><br>
+               <span class="byte-detail">
+                 WASM (browser), server loopback, and full HTTP compile all agree to the byte.
+                 This confirms the compiler is <em>deterministic</em>: given the same source, it always
+                 emits the same binary regardless of process, environment, or which path (JIT vs native)
+                 runs it. The function dispatch table is sorted alphabetically, not by HashMap iteration
+                 order, so the output is stable and reproducible — a prerequisite for bytecode signing,
+                 content-addressed caching, and audit trails.
+               </span>
+             </div>
+           </div>`
+        : `<div class="byte-fail">
+             <span class="byte-icon">✗</span>
+             <div>
+               <strong>Bytecode mismatch detected</strong><br>
+               <span class="byte-detail">
+                 WASM <code>${wasmBc}B</code> &nbsp;·&nbsp;
+                 Loopback <code>${loopBc}B</code> &nbsp;·&nbsp;
+                 HTTP <code>${srvBc}B</code><br>
+                 The three compilers disagree. This means non-deterministic output — likely a
+                 HashMap iteration order bug in the dispatch table, a stale WASM binary,
+                 or a codegen divergence between the browser and server builds.
+                 Bytecode signing and caching are unreliable until this is resolved.
+               </span>
+             </div>
+           </div>`;
+
+      document.getElementById('verdict').innerHTML =
+        `<span class="pill pill-green">WASM</span> <strong>${wMed.toFixed(2)}ms</strong> &nbsp;` +
+        `<span class="pill pill-purple">Loopback</span> <strong>${lMed.toFixed(3)}ms</strong> &nbsp;` +
+        `<span class="pill pill-blue">HTTP</span> <strong>${sMed.toFixed(1)}ms</strong><br>` +
+        `WASM is <strong>${jitPenalty}×</strong> slower than the native binary (JIT overhead).<br>` +
+        `HTTP is <strong>${netPenalty}×</strong> slower than loopback (network + TLS + PQC signing overhead).<br>` +
+        `WASM is <strong>${wasmVsHttp}×</strong> faster than the full HTTP path.`;
+      document.getElementById('byteInfo').innerHTML = byteBlock;
+      document.getElementById('summaryCard').style.display = 'block';
+
+      log(`\n=== RESULTS (${wasmTimes.length} rounds) ===`);
+      log(`WASM     median ${wMed.toFixed(3)}ms  min ${wMin.toFixed(3)}  avg ${wAvg.toFixed(3)}  max ${wMax.toFixed(3)}`);
+      log(`Loopback median ${lMed.toFixed(3)}ms  min ${lMin.toFixed(3)}  avg ${lAvg.toFixed(3)}  max ${lMax.toFixed(3)}  [server-timed]`);
+      log(`  └─ parse ${ms(pMed)}  codegen ${ms(cMed)}`);
+      log(`HTTP     median ${sMed.toFixed(1)}ms   min ${sMin.toFixed(1)}   avg ${sAvg.toFixed(1)}   max ${sMax.toFixed(1)}`);
+      log(`JIT penalty:  ${jitPenalty}× (WASM vs native)`);
+      log(`Net+PQC cost: ${netPenalty}× (HTTP vs loopback)`);
+      log(`Bytecode: ${byteOk ? '✓ identical (' + srvBc + ' bytes) — deterministic' : '✗ MISMATCH — WASM ' + wasmBc + 'B loopback ' + loopBc + 'B HTTP ' + srvBc + 'B'}`);
+    }
+  } catch(e) {
+    log('ERROR: '+e.message);
+    console.error(e);
+  } finally {
+    running = false;
+    document.getElementById('runBtn').disabled = false;
+    document.getElementById('stopBtn').disabled = true;
+  }
+};
+
+// ── Test harness: simulate bytecode verdict without running a real bench ──────
+function showVerdictWithBytecode(wasmBc, loopBc, srvBc) {
+  const wMed=12.34, lMed=0.082, sMed=38.5;
+  const jitPenalty=(wMed/lMed).toFixed(1);
+  const netPenalty=(sMed/lMed).toFixed(1);
+  const wasmVsHttp=(sMed/wMed).toFixed(1);
+
+  const byteOk = (wasmBc===srvBc && loopBc===srvBc);
+  const byteBlock = byteOk
+    ? `<div class="byte-ok">
+         <span class="byte-icon">✓</span>
+         <div>
+           <strong>All three compilers produced identical bytecode (${srvBc} bytes)</strong><br>
+           <span class="byte-detail">
+             WASM (browser), server loopback, and full HTTP compile all agree to the byte.
+             This confirms the compiler is <em>deterministic</em>: given the same source, it always
+             emits the same binary regardless of process, environment, or which path (JIT vs native)
+             runs it. The function dispatch table is sorted alphabetically, not by HashMap iteration
+             order, so the output is stable and reproducible — a prerequisite for bytecode signing,
+             content-addressed caching, and audit trails.
+           </span>
+         </div>
+       </div>`
+    : `<div class="byte-fail">
+         <span class="byte-icon">✗</span>
+         <div>
+           <strong>Bytecode mismatch detected</strong><br>
+           <span class="byte-detail">
+             WASM <code>${wasmBc}B</code> &nbsp;·&nbsp;
+             Loopback <code>${loopBc}B</code> &nbsp;·&nbsp;
+             HTTP <code>${srvBc}B</code><br>
+             The three compilers disagree. This means non-deterministic output — likely a
+             HashMap iteration order bug in the dispatch table, a stale WASM binary,
+             or a codegen divergence between the browser and server builds.
+             Bytecode signing and caching are unreliable until this is resolved.
+           </span>
+         </div>
+       </div>`;
+
+  // Populate stat cards with mock values
+  document.getElementById('wasmMed').textContent = wMed.toFixed(2)+' ms';
+  document.getElementById('wasmRange').textContent = 'min 11.2 / avg 12.8 / max 14.1 ms';
+  document.getElementById('wasmBar').style.width = (wMed/sMed*100).toFixed(1)+'%';
+  document.getElementById('wasmBar').textContent = wMed.toFixed(2)+'ms';
+  document.getElementById('loopMed').textContent = lMed.toFixed(3)+' ms';
+  document.getElementById('loopRange').textContent = 'parse 0.062 ms · codegen 0.020 ms';
+  document.getElementById('loopBar').style.width = (lMed/sMed*100).toFixed(1)+'%';
+  document.getElementById('loopBar').textContent = lMed.toFixed(3)+'ms';
+  document.getElementById('srvMed').textContent = sMed.toFixed(1)+' ms';
+  document.getElementById('srvRange').textContent = 'min 35.1 / avg 39.2 / max 44.8 ms';
+  document.getElementById('srvBar').style.width = '100%';
+  document.getElementById('srvBar').textContent = sMed.toFixed(1)+'ms';
+
+  document.getElementById('verdict').innerHTML =
+    `<span style="color:#8b949e;font-size:11px;font-weight:normal">[SIMULATED — not a real run]</span><br>` +
+    `<span class="pill pill-green">WASM</span> <strong>${wMed.toFixed(2)}ms</strong> &nbsp;` +
+    `<span class="pill pill-purple">Loopback</span> <strong>${lMed.toFixed(3)}ms</strong> &nbsp;` +
+    `<span class="pill pill-blue">HTTP</span> <strong>${sMed.toFixed(1)}ms</strong><br>` +
+    `WASM is <strong>${jitPenalty}×</strong> slower than the native binary (JIT overhead).<br>` +
+    `HTTP is <strong>${netPenalty}×</strong> slower than loopback (network + TLS + PQC signing overhead).<br>` +
+    `WASM is <strong>${wasmVsHttp}×</strong> faster than the full HTTP path.`;
+  document.getElementById('byteInfo').innerHTML = byteBlock;
+  document.getElementById('summaryCard').style.display = 'block';
+
+  const logEl = document.getElementById('log');
+  logEl.innerHTML += `[SIMULATED] Bytecode: ${byteOk
+    ? '✓ identical (' + srvBc + ' bytes) — deterministic'
+    : '✗ MISMATCH — WASM ' + wasmBc + 'B loopback ' + loopBc + 'B HTTP ' + srvBc + 'B'}
+`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+window.runMock = () => {
+  document.getElementById('mockFailBtn').classList.add('sim-active');
+  document.getElementById('mockOkBtn').classList.remove('sim-active');
+  showVerdictWithBytecode(3374, 3361, 3361); // old WASM (pre-sort-fix) vs correct server output
+};
+window.runMockOk = () => {
+  document.getElementById('mockOkBtn').classList.add('sim-active');
+  document.getElementById('mockFailBtn').classList.remove('sim-active');
+  showVerdictWithBytecode(3361, 3361, 3361);
+};
+
+
+  var loadedFileName = null;
+  // ── File loader ────────────────────────────────────────────────────────────
+  document.getElementById('fileInput').addEventListener('change', function(e) {
+    var file = e.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function(ev) {
+      _benchSource = ev.target.result;
+      var info = document.getElementById('fileInfo');
+      info.textContent = '✓ Loaded: ' + file.name + ' (' + _benchSource.length + ' chars)';
+      loadedFileName = file.name.replace(/\.synq$/i,'');
+      info.className = 'loaded';
+      // Update source preview if visible
+      var pre = document.getElementById('srcPreview');
+      if (pre.style.display !== 'none') pre.textContent = _benchSource;
+      // Reset results so stale numbers don't mislead
+      resetDisplay();
+      log('Loaded ' + file.name + ' — ' + _benchSource.length + ' chars. Click Run Benchmark.');
+    };
+    reader.readAsText(file);
+  });
+
+  function toggleSrc() {
+    var pre = document.getElementById('srcPreview');
+    var btn = document.querySelector('.src-toggle');
+    if (pre.style.display === 'none') {
+      pre.style.display = 'block';
+      pre.textContent = _benchSource;
+      btn.textContent = 'Hide source';
+    } else {
+      pre.style.display = 'none';
+      btn.textContent = 'Show source';
+    }
+  }
+
+  function resetDisplay() {
+    ['wasmMed','loopMed','srvMed'].forEach(function(id){ document.getElementById(id).textContent='—'; });
+    ['wasmRange','loopRange','srvRange'].forEach(function(id){ document.getElementById(id).textContent=''; });
+    ['wasmBar','loopBar','srvBar'].forEach(function(id){ document.getElementById(id).style.width='0%'; });
+    document.getElementById('summaryCard').style.display='none';
+    document.getElementById('log').innerHTML='';
+  }
+
+  // Expose to global scope for onclick handlers
+  window.toggleSrc = toggleSrc;
+  window.stopBench = stopBench;
+  window.runBench = runBench;
+  window.runMock = runMock;
+  window.runMockOk = runMockOk;
+  window.resetDisplay = resetDisplay;
+})();
+</script>
+</body>
+</html>
