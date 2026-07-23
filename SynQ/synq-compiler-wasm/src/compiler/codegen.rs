@@ -1,5 +1,5 @@
-use super::ast::*;
-use crate::vm_inner::{Assembler, OpCode};
+use crate::ast::*;
+use quantumvm::{Assembler, OpCode};
 use ruint::aliases::U256;
 use std::collections::HashMap;
 
@@ -37,8 +37,10 @@ use std::collections::HashMap;
 // Each function gets its own disjoint address block so that parameters
 // with the same name across different functions never alias the same
 // memory slot.
-const FUNCTION_LOCAL_BASE: u32 = 1_000_000;
-const FUNCTION_LOCAL_STRIDE: u32 = 1_000;
+// Param slots start at 1024 (above realistic state-var range 0..1023).
+// STRIDE=16 → supports ≤16 params per function; functions 0..63 fit in 0..2047.
+const FUNCTION_LOCAL_BASE: u32 = 1024;
+const FUNCTION_LOCAL_STRIDE: u32 = 16;
 
 /// One PQC/KEM builtin call compiles directly to its matching VM opcode.
 /// The tuple is (arg count, opcode, pushes a Bool/Bytes result).
@@ -62,8 +64,8 @@ struct FunctionScope {
     /// name -> memory address, local to this function (params + any
     /// future locals). Looked up before falling back to state variables.
     locals: HashMap<String, u32>,
-    /// Parameter types for type-aware codegen (e.g. str + str → StrConcat).
-    local_types: HashMap<String, crate::compiler::ast::Type>,
+    /// Declared type for each local variable (for range checks and type tracking).
+    local_types: HashMap<String, Type>,
     /// Reserved for future local-variable declarations (not yet supported
     /// by the grammar -- only params are locals today).
     #[allow(dead_code)]
@@ -267,13 +269,13 @@ impl CodeGenerator {
             let idx = self.function_addresses.len() as u32 - 1;
             FUNCTION_LOCAL_BASE + idx * FUNCTION_LOCAL_STRIDE
         });
-        let mut scope = FunctionScope {
-            locals,
-            local_types: f.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect(),
-            next_local_addr,
-            break_patches: Vec::new(),
-            continue_targets: Vec::new(),
-        };
+        // Pre-populate local_types with function parameter types so
+        // type-aware codegen (e.g. str + str → StrConcat) can inspect them.
+        let mut param_types: HashMap<String, crate::ast::Type> = HashMap::new();
+        for param in &f.params {
+            param_types.insert(param.name.clone(), param.ty.clone());
+        }
+        let mut scope = FunctionScope { locals, local_types: param_types, next_local_addr, break_patches: Vec::new(), continue_targets: Vec::new() };
 
         // ── G1: Authority enforcement pre-pass ─────────────────────────────
         // Per §20.2.1: "There is no implicit authority derived from call
@@ -540,11 +542,12 @@ impl CodeGenerator {
                 Ok(())
             }
             // ── Let binding: `let x = expr` ──────────────────────────────────
-            Statement::Let { name, ty: _, value } => {
+            Statement::Let { name, ty, value } => {
                 // Allocate a new local slot and assign
                 let addr = scope.next_local_addr;
                 scope.next_local_addr += 1;
                 scope.locals.insert(name.clone(), addr);
+                if let Some(t) = ty { scope.local_types.insert(name.clone(), t.clone()); }
                 self.gen_expression(value, scope)?;
                 self.assembler.emit_op(OpCode::Push);
                 self.assembler.emit_i32(addr as i32);
@@ -629,8 +632,13 @@ impl CodeGenerator {
                 Ok(())
             }
             Expression::Literal(Literal::String(s)) => {
+                // Length-prefixed UTF-8: [len:4LE][bytes]
+                let b = s.as_bytes();
+                let mut payload = Vec::with_capacity(4 + b.len());
+                payload.extend_from_slice(&(b.len() as u32).to_le_bytes());
+                payload.extend_from_slice(b);
                 self.assembler.emit_op(OpCode::LoadImm);
-                self.assembler.emit_bytes(s.as_bytes());
+                self.assembler.emit_bytes(&payload);
                 Ok(())
             }
             Expression::Literal(Literal::Hex(bytes)) => {
@@ -669,6 +677,32 @@ impl CodeGenerator {
                     ));
                 }
                 self.assembler.emit_op(OpCode::LoadCaller);
+                Ok(())
+            }
+            Expression::Tuple(exprs) => {
+                for expr in exprs.iter() { self.gen_expression(expr, scope)?; }
+                self.assembler.emit_op(OpCode::Push);
+                self.assembler.emit_i32(exprs.len() as i32);
+                self.assembler.emit_op(OpCode::TuplePack);
+                Ok(())
+            }
+            Expression::Some(inner) => {
+                self.gen_expression(inner, scope)?;
+                self.assembler.emit_op(OpCode::OptionSome);
+                Ok(())
+            }
+            Expression::None => {
+                self.assembler.emit_op(OpCode::OptionNone);
+                Ok(())
+            }
+            Expression::Ok(inner) => {
+                self.gen_expression(inner, scope)?;
+                self.assembler.emit_op(OpCode::ResultOk);
+                Ok(())
+            }
+            Expression::Err(inner) => {
+                self.gen_expression(inner, scope)?;
+                self.assembler.emit_op(OpCode::ResultErr);
                 Ok(())
             }
             Expression::MapIndex(map, key) => {
@@ -815,7 +849,7 @@ impl CodeGenerator {
             Expression::Literal(Literal::String(_)) => true,
             Expression::Identifier(name) => {
                 // Check function parameter types
-                scope.local_types.get(name).map_or(false, |t| matches!(t, crate::compiler::ast::Type::Str))
+                scope.local_types.get(name).map_or(false, |t| matches!(t, crate::ast::Type::Str))
             }
             _ => false,
         }

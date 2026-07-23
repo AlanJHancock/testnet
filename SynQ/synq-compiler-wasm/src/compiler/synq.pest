@@ -134,7 +134,7 @@ multiplicative = { unary ~ (mul_op ~ unary)* }
 mul_op         = { "*" | "/" | "%" }
 
 unary   = { ("-" ~ unary) | ("!" ~ unary) | primary }
-primary = { map_index_expr | method_call_expr | call_expr | literal | "(" ~ expression ~ ")" | IDENT }
+primary = { map_index_expr | method_call_expr | some_expr | none_expr | ok_expr | err_expr | call_expr | tuple_literal | literal | "(" ~ expression ~ ")" | IDENT }
 map_index_expr  = { IDENT ~ "[" ~ expression ~ "]" }
 method_call_expr = { IDENT ~ "." ~ IDENT ~ "(" ~ arg_list? ~ ")" }
 
@@ -147,6 +147,13 @@ number_literal = @{ ASCII_DIGIT+ }
 hex_literal    = @{ "0x" ~ ASCII_HEX_DIGIT+ }
 string_literal = @{ "\"" ~ (!("\"") ~ ANY)* ~ "\"" }
 bool_literal   = { "true" | "false" }
+
+// ── Constructed expressions ───────────────────────────────────────────────────
+tuple_literal = { "(" ~ expression ~ ("," ~ expression)+ ~ ")" }
+some_expr     = { "Some" ~ "(" ~ expression ~ ")" }
+none_expr     = { "None" }
+ok_expr       = { "Ok"   ~ "(" ~ expression ~ ")" }
+err_expr      = { "Err"  ~ "(" ~ expression ~ ")" }
 
 // ── Types ────────────────────────────────────────────────────────────────────
 // Full numeric tower: u8..u256, i8..i256 + aliases + option/result/tuple

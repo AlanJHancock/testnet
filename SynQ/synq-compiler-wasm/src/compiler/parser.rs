@@ -1,6 +1,6 @@
 use pest::Parser;
 use pest::iterators::Pair;
-use super::ast::*;
+use crate::ast::*;
 
 #[derive(Parser)]
 #[grammar = "synq.pest"]
@@ -316,7 +316,9 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
         }
         Rule::unary => {
             // pest string terminals ("-", "!") are NOT returned as inner pairs —
-            // detect the operator from the outer pair's full text instead.
+            // only named rules produce pairs. So for ("!" ~ unary), into_inner()
+            // yields just the single unary child, and first.as_str() is the full
+            // text e.g. "!done". We detect the operator from pair.as_str() instead.
             let full = pair.as_str();
             let mut inner = pair.into_inner();
             let operand_pair = inner.next().unwrap();
@@ -395,7 +397,25 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
         }
         Rule::IDENT => match pair.as_str() {
             "caller" => Expression::Caller,
+            "None"   => Expression::None,
             name     => Expression::Identifier(name.to_string()),
+        }
+        Rule::none_expr     => Expression::None,
+        Rule::tuple_literal => {
+            let exprs = pair.into_inner().map(parse_expression).collect();
+            Expression::Tuple(exprs)
+        }
+        Rule::some_expr => {
+            let inner = pair.into_inner().next().unwrap();
+            Expression::Some(Box::new(parse_expression(inner)))
+        }
+        Rule::ok_expr => {
+            let inner = pair.into_inner().next().unwrap();
+            Expression::Ok(Box::new(parse_expression(inner)))
+        }
+        Rule::err_expr => {
+            let inner = pair.into_inner().next().unwrap();
+            Expression::Err(Box::new(parse_expression(inner)))
         }
         _ => Expression::Literal(Literal::Number(0)),
     }

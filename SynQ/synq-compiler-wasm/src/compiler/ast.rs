@@ -177,6 +177,11 @@ pub enum Expression {
     MapMethod { map: String, method: String, args: Vec<Expression> },
     /// `set.contains(v)` / `set.len()` method calls
     SetMethod { set: String, method: String, args: Vec<Expression> },
+    Tuple(Vec<Expression>),
+    Some(Box<Expression>),
+    None,
+    Ok(Box<Expression>),
+    Err(Box<Expression>),
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
