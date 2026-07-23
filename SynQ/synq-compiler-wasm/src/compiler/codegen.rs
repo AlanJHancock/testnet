@@ -1,5 +1,5 @@
-use crate::ast::*;
-use quantumvm::{Assembler, OpCode};
+use super::ast::*;
+use crate::vm_inner::{Assembler, OpCode};
 use ruint::aliases::U256;
 use std::collections::HashMap;
 
@@ -271,7 +271,7 @@ impl CodeGenerator {
         });
         // Pre-populate local_types with function parameter types so
         // type-aware codegen (e.g. str + str → StrConcat) can inspect them.
-        let mut param_types: HashMap<String, crate::ast::Type> = HashMap::new();
+        let mut param_types: HashMap<String, super::ast::Type> = HashMap::new();
         for param in &f.params {
             param_types.insert(param.name.clone(), param.ty.clone());
         }
@@ -849,7 +849,7 @@ impl CodeGenerator {
             Expression::Literal(Literal::String(_)) => true,
             Expression::Identifier(name) => {
                 // Check function parameter types
-                scope.local_types.get(name).map_or(false, |t| matches!(t, crate::ast::Type::Str))
+                scope.local_types.get(name).map_or(false, |t| matches!(t, super::ast::Type::Str))
             }
             _ => false,
         }

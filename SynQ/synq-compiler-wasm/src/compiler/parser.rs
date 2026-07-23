@@ -1,6 +1,6 @@
 use pest::Parser;
 use pest::iterators::Pair;
-use crate::ast::*;
+use super::ast::*;
 
 #[derive(Parser)]
 #[grammar = "synq.pest"]
