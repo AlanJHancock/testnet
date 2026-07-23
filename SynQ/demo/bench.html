@@ -12,8 +12,11 @@
   .info-box p { margin: 4px 0; font-size: 13px; line-height: 1.5; }
   .pill { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
   .pill-green  { background: #1a7f37; color: #fff; }
+  .pill-red    { background: #da3633; color: #fff; }
   .pill-purple { background: #8957e5; color: #fff; }
   .pill-blue   { background: #1f6feb; color: #fff; }
+  .verdict-ok  { border-color: #1a7f37; background: #0d1f12; }
+  .verdict-bad { border-color: #da3633; background: #1f0d0d; }
   .toolbar { display: flex; gap: 10px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
   .btn { background: #238636; color: #fff; border: none; border-radius: 6px; padding: 8px 16px; font-size: 14px; cursor: pointer; font-family: inherit; }
   .btn:hover { background: #2ea043; }
@@ -619,6 +622,7 @@ async function runBench() {
     }
 
     log('');
+    if (i < ROUNDS - 1 && _running) { await new Promise(r => setTimeout(r, 600)); }
   }
 
   if (!_running) { log('--- STOPPED ---'); return; }
@@ -682,14 +686,46 @@ async function runBench() {
 
     // Verdict
     var v = document.getElementById('verdict');
-    v.className = 'verdict';
-    v.innerHTML = (byteOk
-      ? '<p><span class="pill pill-green">✓ MATCH</span> <strong>Deterministic bytecode across all three paths.</strong></p>' +
+    if (byteOk) {
+      v.className = 'verdict verdict-ok';
+      v.innerHTML =
+        '<p><span class="pill pill-green">✓ MATCH</span> <strong>Deterministic bytecode across all three paths.</strong></p>' +
+        '<p>WASM <code>' + wasmBc + 'B</code> · Loopback <code>' + loopBc + 'B</code> · HTTP <code>' + srvBc + 'B</code> — ' +
+        'all three compilation paths produced byte-identical output.</p>' +
+        '<p>WASM is <strong>' + wasmVsHttp + 'x</strong> faster than the full HTTP path.</p>' +
+        '<p style="margin-top:8px;color:#7ee787;font-size:12px;">🔒 <strong>Security implication:</strong> Deterministic compilation ' +
+        'guarantees that the bytecode running on-chain matches what the compiler produced. ' +
+        'Any tampering — whether by a compromised compiler, a MITM attacker, or a stale binary — ' +
+        'would be immediately detected by comparing hashes. This is the foundation of ' +
+        'compiler-attested trust: you don\'t need to trust the delivery channel, only the hash.</p>';
+    } else if (_flipEnabled) {
+      // Find the diff
+      var w = wasmHexStr.startsWith('0x') ? wasmHexStr.slice(2) : wasmHexStr;
+      var s = srvHexStr.startsWith('0x') ? srvHexStr.slice(2) : srvHexStr;
+      var firstDiff = -1;
+      for (var bi = 0; bi < Math.min(w.length, s.length); bi += 2) {
+        if (w[bi] !== s[bi] || w[bi+1] !== s[bi+1]) { firstDiff = bi/2; break; }
+      }
+      v.className = 'verdict verdict-bad';
+      v.innerHTML =
+        '<p><span class="pill pill-red">✗ INJECTED MISMATCH</span> <strong>Byte-flip detected at byte offset ' + firstDiff + '.</strong></p>' +
+        '<p>WASM nibble <code>' + w[firstDiff*2] + w[firstDiff*2+1] + '</code> vs server <code>' + s[firstDiff*2] + s[firstDiff*2+1] + '</code> — ' +
+        'a single nibble was flipped in the WASM path to simulate tampering.</p>' +
+        '<p style="margin-top:8px;color:#ff7b72;font-size:12px;">🛡️ <strong>Security implication:</strong> The bench correctly detected ' +
+        'the mutation — even a single-bit change in 5116 bytes is caught by the hex comparison. ' +
+        'In production, the server\'s tamper-detection layer performs this same check against ' +
+        'the compiler-signed attestation. A mismatched contract is rejected before it ever ' +
+        'reaches the VM, preventing bytecode injection attacks.</p>';
+    } else {
+      v.className = 'verdict verdict-bad';
+      v.innerHTML =
+        '<p><span class="pill pill-red">✗ MISMATCH</span> <strong>Bytecode differs between compilation paths.</strong></p>' +
         '<p>WASM <code>' + wasmBc + 'B</code> · Loopback <code>' + loopBc + 'B</code> · HTTP <code>' + srvBc + 'B</code></p>' +
-        '<p>WASM is <strong>' + wasmVsHttp + 'x</strong> faster than the full HTTP path.</p>'
-      : '<p><span class="pill pill-red">✗ MISMATCH</span> Bytecode differs — possible HashMap ordering or stale binary.</p>' +
-        '<p>WASM <code>' + wasmBc + 'B</code> · Loopback <code>' + loopBc + 'B</code> · HTTP <code>' + srvBc + 'B</code></p>'
-    );
+        '<p style="margin-top:8px;color:#ff7b72;font-size:12px;">⚠️ <strong>Security implication:</strong> A genuine mismatch ' +
+        'indicates non-deterministic compilation — likely a HashMap ordering issue or a stale ' +
+        'WASM binary. This must be resolved before deployment, as it means the on-chain bytecode ' +
+        'cannot be reliably verified against the source.</p>';
+    }
   } else {
     log('Insufficient successful rounds for comparison.');
   }
