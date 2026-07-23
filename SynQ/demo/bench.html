@@ -366,17 +366,23 @@ window.runBench = async () => {
       document.getElementById('progress').textContent = `Round ${i+1}/${ROUNDS}`;
 
       // ── WASM (no network) ──────────────────────────────────────────────
-      const t0w = performance.now();
-      const resW = compile_synq(_benchSource);
-      const dtW  = performance.now() - t0w;
-      const pw = JSON.parse(resW);
-      if (pw.success) {
+      let dtW = 0, pw = null;
+      try {
+        const t0w = performance.now();
+        const resW = compile_synq(_benchSource);
+        dtW = performance.now() - t0w;
+        pw = JSON.parse(resW);
+      } catch(wasmEx) {
+        log(`  ${i+1}: WASM EXCEPTION: ${wasmEx.message || wasmEx}`);
+        pw = { success: false, error: String(wasmEx.message || wasmEx) };
+      }
+      if (pw && pw.success) {
         wasmBc = (pw.bytecode.startsWith('0x') ? pw.bytecode.length/2-1 : pw.bytecode.length/2);
         wasmTimes.push(dtW);
         const rawWasmBcLen = (pw.bytecode.startsWith('0x') ? pw.bytecode.length-2 : pw.bytecode.length)/2;
         log(`  ${String(i+1).padStart(2)}: WASM        ${dtW.toFixed(2).padStart(7)} ms  [bc_raw=${rawWasmBcLen}B str_len=${pw.bytecode.length}]`);
-      } else {
-        log(`  ${i+1}: WASM ERROR: ${pw.error}`);
+      } else if (pw) {
+        log(`  ${i+1}: WASM ERROR: ${pw.error || '(no error message — check browser console)'}`);
       }
 
       await new Promise(r=>setTimeout(r,150));
