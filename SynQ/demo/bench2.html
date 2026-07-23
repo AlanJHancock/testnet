@@ -58,10 +58,7 @@
 <div class="toolbar">
   <button class="btn" onclick="runBench()">▶ Run Benchmark (8 rounds)</button>
   <button class="btn btn-stop" onclick="stopBench()">■ Stop</button>
-  <label class="btn-mock ok" style="cursor:pointer;user-select:none;">
-    <input type="checkbox" id="flipToggle" style="margin-right:6px;vertical-align:middle;">
-    Flip mid-byte (inject real mismatch)
-  </label>
+  <button class="btn-mock bad" id="flipBtn" onclick="toggleFlip()">Flip mid-byte: OFF</button>
 </div>
 
 <div class="file-row">
@@ -560,7 +557,7 @@ async function runBench() {
       var wasmHex = pw.bytecode || '';
       wasmHexStr = wasmHex;
       var flipInfo = null;
-      if (document.getElementById('flipToggle') && document.getElementById('flipToggle').checked && wasmHex.startsWith('0x') && wasmHex.length > 20) {
+      if (_flipEnabled && wasmHex.startsWith('0x') && wasmHex.length > 20) {
         flipInfo = flipMidByte(wasmHex);
         wasmHex = flipInfo.mutated;
       }
@@ -650,7 +647,7 @@ async function runBench() {
     if (byteOk) {
       log('Bytecode: ✓ identical (' + srvBc + ' bytes) — deterministic');
     } else {
-      var flipOn = document.getElementById('flipToggle') && document.getElementById('flipToggle').checked;
+      var flipOn = _flipEnabled;
       if (flipOn && wasmHexStr && srvHexStr) {
         // Find first differing byte
         var w = wasmHexStr.slice(2), s = srvHexStr.slice(2);
@@ -696,14 +693,29 @@ async function runBench() {
   }
 }
 
+var _flipEnabled = false;
+function toggleFlip() {
+  _flipEnabled = !_flipEnabled;
+  var btn = document.getElementById('flipBtn');
+  if (_flipEnabled) {
+    btn.textContent = 'Flip mid-byte: ON';
+    btn.style.background = '#da3633';
+    btn.style.color = '#fff';
+    btn.style.borderColor = '#da3633';
+  } else {
+    btn.textContent = 'Flip mid-byte: OFF';
+    btn.style.background = '';
+    btn.style.color = '';
+    btn.style.borderColor = '';
+  }
+}
+
 function flipMidByte(hexStr) {
   if (!hexStr || !hexStr.startsWith('0x')) return hexStr;
   var hex = hexStr.slice(2);
   if (hex.length < 10) return hexStr;
   var mid = Math.floor(hex.length / 2);
-  // Align to byte boundary (even index)
   if (mid % 2 !== 0) mid--;
-  // Flip the nibble to something different
   var orig = hex[mid];
   var flip = orig === '0' ? 'f' : '0';
   var mutated = '0x' + hex.slice(0, mid) + flip + hex.slice(mid + 1);
@@ -718,6 +730,7 @@ window.toggleSrc = toggleSrc;
 window.runBench = runBench;
 window.stopBench = stopBench;
 window.flipMidByte = flipMidByte;
+window.toggleFlip = toggleFlip;
 </script>
 
 </body>
