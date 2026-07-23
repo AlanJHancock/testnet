@@ -352,7 +352,7 @@ window.runBench = async () => {
   })();
     const ver = synq_version ? synq_version() : '?';
     log(`WASM ready — SynQ ${ver}`);
-    log(`Source: ${SOURCE.length} chars · ${SOURCE.split('\n').length} lines`);
+    log(`Source: ${_benchSource.length} chars · ${_benchSource.split('\n').length} lines`);
     log(`Rounds: ${ROUNDS}   (3 calls/round: WASM → loopback → HTTP)\n`);
 
     const wasmTimes=[]; const loopTimes=[]; const srvTimes=[];
@@ -386,7 +386,7 @@ window.runBench = async () => {
       const t0l = performance.now();
       const respL = await fetch(LOOPBACK_URL, {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({source:SOURCE})
+        body: JSON.stringify({source:_benchSource})
       });
       const resL = await respL.json();
       const dtL  = performance.now() - t0l;
@@ -408,7 +408,7 @@ window.runBench = async () => {
       const t0s = performance.now();
       const respS = await fetch(COMPILE_URL, {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({source:SOURCE, contract_name:'ComprehensiveToken'})
+        body: JSON.stringify({source:_benchSource, contract_name: (loadedFileName || 'ComprehensiveToken')})
       });
       const resS = await respS.json();
       const dtS  = performance.now() - t0s;
@@ -602,6 +602,7 @@ window.runMockOk = () => {
 };
 
 
+  var loadedFileName = null;
   // ── File loader ────────────────────────────────────────────────────────────
   document.getElementById('fileInput').addEventListener('change', function(e) {
     var file = e.target.files[0];
@@ -611,6 +612,7 @@ window.runMockOk = () => {
       _benchSource = ev.target.result;
       var info = document.getElementById('fileInfo');
       info.textContent = '✓ Loaded: ' + file.name + ' (' + _benchSource.length + ' chars)';
+      loadedFileName = file.name.replace(/\.synq$/i,'');
       info.className = 'loaded';
       // Update source preview if visible
       var pre = document.getElementById('srcPreview');
