@@ -383,6 +383,11 @@ pub struct QuantumVM {
     /// Hard limit on call_stack depth enforced at the Call opcode.
     /// Default: DEFAULT_MAX_CALL_DEPTH.
     pub max_call_depth: usize,
+
+    // ── Fault injection (cosmic ray / Rowhammer simulation) ────────────────
+    /// When set, at the given step, XOR the byte at byte_offset with xor_mask.
+    /// One-shot: cleared after firing. Used for runtime fault injection demos.
+    pub fault_injection: Option<(usize, usize, u8)>,
 }
 
 /// Format a VM Value for Print/emit output.
@@ -419,6 +424,7 @@ impl QuantumVM {
             steps: 0,
             max_steps: DEFAULT_MAX_STEPS,
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
+            fault_injection: None,
         }
     }
 
@@ -569,6 +575,19 @@ impl QuantumVM {
         self.steps += 1;
         if self.steps > self.max_steps {
             return Err(VMError::StepLimitExceeded(self.max_steps));
+        }
+
+        // ── Fault injection: simulate cosmic ray / Rowhammer bit flip ───────
+        if let Some((target_step, byte_offset, xor_mask)) = self.fault_injection.take() {
+            if self.steps == target_step && byte_offset < self.code.len() {
+                let orig = self.code[byte_offset];
+                self.code[byte_offset] ^= xor_mask;
+                eprintln!("[VM] ⚡ FAULT INJECTION at step {}: code[{}] 0x{:02x} → 0x{:02x}",
+                    self.steps, byte_offset, orig, self.code[byte_offset]);
+            } else {
+                // Not yet or out of range — keep it for the next step
+                self.fault_injection = Some((target_step, byte_offset, xor_mask));
+            }
         }
 
         let opcode = OpCode::try_from(self.code[self.pc])?;

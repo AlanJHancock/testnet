@@ -1738,6 +1738,10 @@ struct SessionRunRequest {
     call_nonce:     Option<String>,
     call_signature: Option<String>,  // "functionName(arg0, arg1, ...)" — must match frontend
     param_types:    Option<Vec<String>>,  // declared types per arg ("str","u256","bool")
+    // ── Runtime fault injection (cosmic ray simulation) ──
+    fault_step:       Option<usize>,
+    fault_byte_offset: Option<usize>,
+    fault_xor_mask:   Option<u8>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1973,6 +1977,13 @@ async fn session_run_handler(
     }
 
     eprintln!("[RUN] sid={} signing_key={} fn={} args_len={}", &req.session_id, hex_encode(&caller_addr), req.function, vm_args.len());
+
+    // ── Runtime fault injection (cosmic ray / Rowhammer simulation) ────────
+    if let (Some(step), Some(offset), Some(mask)) = (req.fault_step, req.fault_byte_offset, req.fault_xor_mask) {
+        eprintln!("[RUN] ⚡ fault injection enabled: step={} byte_offset={} xor_mask=0x{:02x}", step, offset, mask);
+        session.vm.fault_injection = Some((step, offset, mask));
+    }
+
     let call_result = session.vm.call_function(&req.function, &vm_args);
     eprintln!("[RUN] result={:?}", call_result);
     session.vm.call_context = synq_vm::CallContext::anonymous();
