@@ -315,17 +315,23 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
             left
         }
         Rule::unary => {
+            // pest string terminals ("-", "!") are NOT returned as inner pairs —
+            // detect the operator from the outer pair's full text instead.
+            let full = pair.as_str();
             let mut inner = pair.into_inner();
-            let first = inner.next().unwrap();
-            if first.as_str() == "-" {
-                let operand = parse_expression(inner.next().unwrap());
+            let operand_pair = inner.next().unwrap();
+            if full.starts_with('!') {
+                let operand = parse_expression(operand_pair);
+                Expression::UnaryOp(UnaryOperator::Not, Box::new(operand))
+            } else if full.starts_with('-') {
+                let operand = parse_expression(operand_pair);
                 Expression::BinaryOp(
                     Box::new(Expression::Literal(Literal::Number(0))),
                     BinaryOperator::Sub,
                     Box::new(operand),
                 )
             } else {
-                parse_expression(first)
+                parse_expression(operand_pair)
             }
         }
         Rule::primary  => parse_expression(pair.into_inner().next().unwrap()),
