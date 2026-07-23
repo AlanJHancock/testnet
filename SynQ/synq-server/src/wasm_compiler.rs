@@ -1,40 +1,61 @@
 // Server-side WASM executor via wasmtime
 // Loads synq_compiler_wasm.wasm and calls the C-ABI export compile_synq_c,
-// bypassing wasm-bindgen entirely.
+// bypassing wasm-bindgen entirely. Includes fuel/gas metering.
 
 use wasmtime::*;
 use std::net::SocketAddr;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+/// Default fuel cap per compilation request. ~10M fuel units is generous
+/// enough for any realistic SynQ contract but prevents runaway loops or
+/// pathological inputs from pegging the server.
+const DEFAULT_FUEL_LIMIT: u64 = 100_000_000;
+
 pub struct WasmRuntime {
     engine: Engine,
     module: Module,
+    fuel_limit: u64,
 }
 
 impl WasmRuntime {
     pub fn new(wasm_path: &str) -> Result<Self, String> {
-        let engine = Engine::default();
+        Self::with_fuel_limit(wasm_path, DEFAULT_FUEL_LIMIT)
+    }
+
+    pub fn with_fuel_limit(wasm_path: &str, fuel_limit: u64) -> Result<Self, String> {
+        let mut config = Config::new();
+        config.consume_fuel(true);
+        let engine = Engine::new(&config)
+            .map_err(|e| format!("Engine init: {}", e))?;
         let module = Module::from_file(&engine, wasm_path)
             .map_err(|e| format!("Failed to load WASM module: {}", e))?;
-        Ok(Self { engine, module })
+        Ok(Self { engine, module, fuel_limit })
     }
 
     pub fn compile(&self, source: &str) -> Result<Value, String> {
         let mut store = Store::new(&self.engine, ());
 
+        // Add fuel and configure trap-on-exhaustion
+        store.add_fuel(self.fuel_limit)
+            .map_err(|e| format!("add_fuel: {}", e))?;
+        store.out_of_fuel_trap();
+
         // wbindgen imports (no-ops needed for instantiation)
         let mut linker = Linker::new(&self.engine);
-        linker.func_wrap("__wbindgen_placeholder__", "__wbindgen_describe", |_: i32| {}).map_err(|e| format!("linker: {}", e))?;
-        linker.func_wrap("__wbindgen_externref_xform__", "__wbindgen_externref_table_set_null", |_: i32| {}).map_err(|e| format!("linker: {}", e))?;
-        linker.func_wrap("__wbindgen_externref_xform__", "__wbindgen_externref_table_grow", |d: i32| -> i32 { d }).map_err(|e| format!("linker: {}", e))?;
+        linker.func_wrap("__wbindgen_placeholder__", "__wbindgen_describe", |_: i32| {})
+            .map_err(|e| format!("linker: {}", e))?;
+        linker.func_wrap("__wbindgen_externref_xform__", "__wbindgen_externref_table_set_null", |_: i32| {})
+            .map_err(|e| format!("linker: {}", e))?;
+        linker.func_wrap("__wbindgen_externref_xform__", "__wbindgen_externref_table_grow", |d: i32| -> i32 { d })
+            .map_err(|e| format!("linker: {}", e))?;
 
         let instance = linker.instantiate(&mut store, &self.module)
             .map_err(|e| format!("Instantiate: {}", e))?;
 
         let memory = instance.get_memory(&mut store, "memory").ok_or("no memory export")?;
 
-        // Use the C-ABI exports (no wasm-bindgen glue needed)
+        // C-ABI exports
         let alloc_fn = instance.get_typed_func::<i32, i32>(&mut store, "synq_wasm_alloc")
             .map_err(|e| format!("no synq_wasm_alloc: {}", e))?;
         let compile_fn = instance.get_typed_func::<(i32, i32, i32, i32), i32>(&mut store, "compile_synq_c")
@@ -43,28 +64,38 @@ impl WasmRuntime {
         let source_bytes = source.as_bytes();
         let src_len = source_bytes.len() as i32;
 
-        // Allocate space for source string in WASM memory
-        let src_ptr = alloc_fn.call(&mut store, src_len).map_err(|e| format!("alloc source: {}", e))?;
+        let src_ptr = alloc_fn.call(&mut store, src_len)
+            .map_err(|e| format!("alloc source: {}", e))?;
         if src_ptr == 0 {
             return Err("WASM alloc returned null for source".to_string());
         }
         memory.write(&mut store, src_ptr as usize, source_bytes)
             .map_err(|e| format!("write source: {}", e))?;
 
-        // Allocate output buffer (generous — 4x source size, min 64KB)
         let out_len = (src_len * 4 + 65536) as i32;
-        let out_ptr = alloc_fn.call(&mut store, out_len).map_err(|e| format!("alloc output: {}", e))?;
+        let out_ptr = alloc_fn.call(&mut store, out_len)
+            .map_err(|e| format!("alloc output: {}", e))?;
         if out_ptr == 0 {
             return Err("WASM alloc returned null for output".to_string());
         }
 
-        // Call compile_synq_c(src_ptr, src_len, out_ptr, out_len) -> bytes_written
+        // Execute compilation — will trap if fuel runs out
         let written = compile_fn.call(&mut store, (src_ptr, src_len, out_ptr, out_len))
-            .map_err(|e| format!("compile_synq_c: {}", e))?;
+            .map_err(|e| {
+                let msg = format!("{}", e);
+                if msg.contains("fuel") || msg.contains("out of gas") {
+                    format!("OUT_OF_FUEL: compilation exceeded {} fuel units", self.fuel_limit)
+                } else {
+                    format!("compile_synq_c: {}", e)
+                }
+            })?;
 
         if written < 0 {
             return Err("compile_synq_c returned error code".to_string());
         }
+
+        // Read fuel consumed
+        let fuel_consumed = store.fuel_consumed().unwrap_or(0);
 
         // Read result from WASM memory
         let mut result_buf = vec![0u8; written as usize];
@@ -74,12 +105,23 @@ impl WasmRuntime {
         let result_str = String::from_utf8(result_buf)
             .map_err(|e| format!("utf8: {}", e))?;
 
-        serde_json::from_str::<Value>(&result_str)
-            .map_err(|e| format!("JSON: {} (got: {})", e, &result_str[..result_str.len().min(200)]))
+        let mut result = serde_json::from_str::<Value>(&result_str)
+            .map_err(|e| format!("JSON: {} (got: {})", e, &result_str[..result_str.len().min(200)]))?;
+
+        // Inject fuel metadata into the response
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("fuel_consumed".to_string(), json!(fuel_consumed));
+            obj.insert("fuel_limit".to_string(), json!(self.fuel_limit));
+        }
+
+        Ok(result)
     }
+
+    /// Get the configured fuel limit
+    pub fn fuel_limit(&self) -> u64 { self.fuel_limit }
 }
 
-// POST /compile-wasm — compile via server-side wasmtime execution
+// POST /compile-wasm — compile via server-side wasmtime execution with fuel metering
 pub async fn compile_wasm_handler(
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
     axum::extract::State(state): axum::extract::State<crate::AppState>,

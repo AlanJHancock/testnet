@@ -110,6 +110,7 @@
     <div class="sub" id="wtRange">min / avg / max</div>
     <div class="bar-wrap"><div class="bar bar-wt" id="wtBar" style="width:0%"></div></div>
     <div class="sub" id="wtDetail">server-side WASM sandbox</div>
+    <div class="sub" id="wtFuel" style="color:#f0883e;font-weight:600;">fuel: —</div>
   </div>
 </div>
 
@@ -587,7 +588,7 @@ async function runBench() {
   log('');
 
   var wasmTimes=[], loopTimes=[], srvTimes=[], wtTimes=[];
-  var wasmBc=0, srvBc=0, loopBc=0, wtBc=0; var wasmHexStr="", srvHexStr="", wtHexStr="";
+  var wasmBc=0, srvBc=0, loopBc=0, wtBc=0; var wasmHexStr="", srvHexStr="", wtHexStr=""; var wtFuel=0, wtFuelMax=0;
 
   for (var i = 0; i < ROUNDS && _running; i++) {
     // ── WASM ──
@@ -691,8 +692,12 @@ async function runBench() {
     } else {
       wtHexStr = pwt.bytecode || '';
       wtBc = wtHexStr.startsWith('0x') ? Math.floor((wtHexStr.length-2)/2) : (wtHexStr ? Math.floor(wtHexStr.length/2) : 0);
+      var fuel = pwt.fuel_consumed || 0;
+      var fuelLimit = pwt.fuel_limit || 0;
+      if (fuel > wtFuelMax) wtFuelMax = fuel;
+      wtFuel = fuel;
       wtTimes.push(dtWt);
-      log((i+1) + ': Wasmtime    ' + dtWt.toFixed(2).padStart(7) + ' ms  [bc=' + wtBc + 'B]');
+      log((i+1) + ': Wasmtime    ' + dtWt.toFixed(2).padStart(7) + ' ms  [bc=' + wtBc + 'B  fuel=' + (fuel/1e6).toFixed(2) + 'M]');
     }
 
     log('');
@@ -716,6 +721,7 @@ async function runBench() {
     log('HTTP     median ' + sMed.toFixed(3) + 'ms  min ' + sMin.toFixed(3) + '  avg ' + sAvg.toFixed(3) + '  max ' + sMax.toFixed(3));
     if (wtTimes.length) {
       log('Wasmtime median ' + wtMed.toFixed(3) + 'ms  min ' + wtMin.toFixed(3) + '  avg ' + wtAvg.toFixed(3) + '  max ' + wtMax.toFixed(3));
+      log('  Fuel: ' + (wtFuel/1e6).toFixed(2) + 'M / ' + (wtFuelMax/1e6).toFixed(0) + 'M limit (last round)');
     }
     log('');
 
@@ -766,6 +772,7 @@ async function runBench() {
     if (wtTimes.length) {
       document.getElementById('wtMed').textContent = wtMed.toFixed(2) + ' ms';
       document.getElementById('wtRange').textContent = 'min ' + wtMin.toFixed(2) + ' / avg ' + wtAvg.toFixed(2) + ' / max ' + wtMax.toFixed(2);
+      document.getElementById('wtFuel').textContent = 'fuel: ' + (wtFuel/1e6).toFixed(2) + 'M / 100M cap';
     }
 
     var scale = Math.max(wMed, lMed, sMed, wtTimes.length ? wtMed : 0);
@@ -790,6 +797,7 @@ async function runBench() {
         '<p>WASM <code>' + wasmBc + 'B</code> · Loopback <code>' + loopBc + 'B</code> · HTTP <code>' + srvBc + 'B</code>' +
         (wtTimes.length ? ' · Wasmtime <code>' + wtBc + 'B</code>' : '') + ' — ' +
         'all compilation paths produced byte-identical output.</p>' +
+        (wtTimes.length ? '<p style="color:#f0883e;font-size:12px;">\u26FD Fuel consumed: <code>' + (wtFuel/1e6).toFixed(2) + 'M</code> units (cap: 100M) \u2014 ' + ((wtFuel/1e8)*100).toFixed(1) + '% of budget used.</p>' : '') +
         '<p>WASM is <strong>' + wasmVsHttp + 'x</strong> faster than the full HTTP path.</p>' +
         '<p style="margin-top:8px;color:#7ee787;font-size:12px;">🔒 <strong>Security implication:</strong> Deterministic compilation ' +
         'guarantees that the bytecode running on-chain matches what the compiler produced. ' +
