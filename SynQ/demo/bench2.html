@@ -640,7 +640,10 @@ async function runBench() {
     var jitPenalty = (wMed / lMed).toFixed(1);
     var netOverhead = (sMed / lMed).toFixed(1);
     var wasmVsHttp = (sMed / wMed).toFixed(1);
-    var byteOk = (wasmBc > 0 && loopBc > 0 && srvBc > 0 && wasmBc === srvBc && loopBc === srvBc);
+    // Compare actual hex content (normalize 0x prefix)
+      var wHex = wasmHexStr.startsWith('0x') ? wasmHexStr.slice(2).toLowerCase() : wasmHexStr.toLowerCase();
+      var sHex = srvHexStr.startsWith('0x') ? srvHexStr.slice(2).toLowerCase() : srvHexStr.toLowerCase();
+      var byteOk = (wasmBc > 0 && loopBc > 0 && srvBc > 0 && wasmBc === srvBc && loopBc === srvBc && wHex === sHex);
 
     log('JIT penalty:  ' + jitPenalty + 'x (WASM vs native)');
     log('Net overhead: ' + netOverhead + 'x (HTTP vs loopback)');
@@ -648,9 +651,7 @@ async function runBench() {
     if (byteOk) {
       log('Bytecode: ✓ identical (' + srvBc + ' bytes) — deterministic');
     } else {
-      var flipOn = _flipEnabled;
-      if (flipOn && wasmHexStr && srvHexStr) {
-        // Find first differing byte
+      if (_flipEnabled && wasmHexStr && srvHexStr) {
         var w = wasmHexStr.startsWith('0x') ? wasmHexStr.slice(2) : wasmHexStr;
         var s = srvHexStr.startsWith('0x') ? srvHexStr.slice(2) : srvHexStr;
         var firstDiff = -1;
