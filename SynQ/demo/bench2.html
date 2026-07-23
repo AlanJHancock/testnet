@@ -854,7 +854,7 @@ async function runRuntimeFault() {
     // 3b. Try each function to find one that succeeds without auth
     for (var f of fns) {
       var tryArgs = (f.params || []).map(function(p) {
-        var t = (p.type || '').toLowerCase();
+        var t = (p.ty || p.type || '').toLowerCase();
         if (t.indexOf('u256') >= 0 || t.indexOf('u128') >= 0 || t.indexOf('u32') >= 0 ||
             t.indexOf('i32') >= 0 || t.indexOf('i64') >= 0 || t.indexOf('int') >= 0 ||
             t.indexOf('uint') >= 0 || t.indexOf('u8') >= 0) return '100';
