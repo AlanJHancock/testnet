@@ -758,9 +758,10 @@ impl CodeGenerator {
                 match method.as_str() {
                     "contains" => {
                         if args.len() != 1 { return Err("set.contains expects 1 arg".into()); }
+                        // val first, set_addr last — VM pops set_addr first (top of stack)
+                        self.gen_expression(&args[0], scope)?;
                         self.assembler.emit_op(OpCode::Push);
                         self.assembler.emit_i32(addr as i32);
-                        self.gen_expression(&args[0], scope)?;
                         self.assembler.emit_op(OpCode::SetContains);
                     }
                     "len" => {
