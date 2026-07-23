@@ -555,13 +555,14 @@ async function runBench() {
       log((i+1) + ': WASM ERROR: ' + wasmErr);
     } else {
       var wasmHex = pw.bytecode || '';
+
       wasmHexStr = wasmHex;
       var flipInfo = null;
-      if (_flipEnabled && wasmHex.startsWith('0x') && wasmHex.length > 20) {
+      if (_flipEnabled && wasmHex.length > 20) {
         flipInfo = flipMidByte(wasmHex);
         wasmHex = flipInfo.mutated;
       }
-      wasmBc = (wasmHex.startsWith('0x') ? Math.floor(wasmHex.length/2-1) : Math.floor(wasmHex.length/2));
+      wasmBc = wasmHex.startsWith('0x') ? Math.floor((wasmHex.length-2)/2) : Math.floor(wasmHex.length/2);
       wasmTimes.push(dtW);
       var flipTag = flipInfo ? ' [FLIP@' + flipInfo.byteOffset + ' ' + flipInfo.origNibble + '→' + flipInfo.newNibble + ']' : '';
       log((i+1) + ': WASM        ' + dtW.toFixed(2).padStart(7) + ' ms  [bc=' + wasmBc + 'B]' + flipTag);
@@ -610,7 +611,7 @@ async function runBench() {
       log((i+1) + ': HTTP COMPILE ERROR: ' + (ps.error || 'unknown'));
     } else {
       srvHexStr = ps.bytecode || '';
-      srvBc = (srvHexStr.startsWith('0x')) ? Math.floor(srvHexStr.length/2-1) : (srvHexStr ? Math.floor(srvHexStr.length/2) : 0);
+      srvBc = srvHexStr.startsWith('0x') ? Math.floor((srvHexStr.length-2)/2) : (srvHexStr ? Math.floor(srvHexStr.length/2) : 0);
       if (srvBc === 0) {
         log((i+1) + ': HTTP WARNING: no bytecode in response. Keys: ' + Object.keys(ps).join(','));
       }
@@ -650,7 +651,8 @@ async function runBench() {
       var flipOn = _flipEnabled;
       if (flipOn && wasmHexStr && srvHexStr) {
         // Find first differing byte
-        var w = wasmHexStr.slice(2), s = srvHexStr.slice(2);
+        var w = wasmHexStr.startsWith('0x') ? wasmHexStr.slice(2) : wasmHexStr;
+        var s = srvHexStr.startsWith('0x') ? srvHexStr.slice(2) : srvHexStr;
         var firstDiff = -1;
         for (var bi = 0; bi < Math.min(w.length, s.length); bi += 2) {
           if (w[bi] !== s[bi] || w[bi+1] !== s[bi+1]) { firstDiff = bi/2; break; }
@@ -711,14 +713,15 @@ function toggleFlip() {
 }
 
 function flipMidByte(hexStr) {
-  if (!hexStr || !hexStr.startsWith('0x')) return hexStr;
-  var hex = hexStr.slice(2);
+  if (!hexStr || hexStr.length < 20) return hexStr;
+  var has0x = hexStr.startsWith('0x');
+  var hex = has0x ? hexStr.slice(2) : hexStr;
   if (hex.length < 10) return hexStr;
   var mid = Math.floor(hex.length / 2);
   if (mid % 2 !== 0) mid--;
   var orig = hex[mid];
   var flip = orig === '0' ? 'f' : '0';
-  var mutated = '0x' + hex.slice(0, mid) + flip + hex.slice(mid + 1);
+  var mutated = (has0x ? '0x' : '') + hex.slice(0, mid) + flip + hex.slice(mid + 1);
   return { original: hexStr, mutated: mutated, byteOffset: mid / 2, origNibble: orig, newNibble: flip };
 }
 
