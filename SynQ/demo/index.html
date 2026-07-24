@@ -2912,9 +2912,18 @@
     '  function getTotalOut() { return totalOut; }',
     '',
     '  // balance() -- vault-side net (totalIn - totalOut).',
-    '  function balance() {',
-    '    require(totalIn \u003E= totalOut, "TokenVault.balance: totalOut exceeds totalIn");',
+    '  // How much is available to withdraw from the vault (totalIn - totalOut).',
+    '// This is NOT the same as your SimpleToken balance — it is the vault\'s net flow.',
+    '// Your actual token balance is shown by SimpleToken.balanceOf(), or call tokenBalance() below.',
+    '  function available() -> u256 {',
+    '    require(totalIn \u003E= totalOut, "totalOut exceeds totalIn");',
     '    return totalIn - totalOut;',
+    '  }',
+    '',
+    '  // Returns your ACTUAL SimpleToken balance via extern_call.',
+    '  // This is the real token count — different from available() which tracks vault flow.',
+    '  function tokenBalance() -> u256 as caller {',
+    '    extern_call("SimpleToken", "balanceOf", caller);',
     '  }',
     '',
     '  // assertSync() -- cross-contract invariant check.',
@@ -3577,7 +3586,7 @@
     })(compileFunctions, parsedFunctions, document.getElementById('editor') && document.getElementById('editor').value);
 
     // Sort pills: init first, then setters, then getters, then alphabetical
-    var PILL_ORDER = ['init', 'deposit', 'withdraw', 'netFlow', 'balance', 'assertSync', 'getTotalIn', 'getTotalOut', 'getTotal', 'assertBalance', 'getOwner', 'getPaused', 'mint', 'burn', 'setPaused', 'testArithmetic', 'testSigned', 'testCompare', 'testBool', 'testString', 'testMapSet', 'testMapGet', 'testMapUpdate', 'testSetAdd', 'testSetContains', 'testSetRemove', 'testRequirePass', 'testRequireFail', 'adminOnly', 'setLabel', 'getUVal', 'getIVal', 'getBVal', 'getSVal', 'getOpCount', 'getAdmin', 'isReady'];
+    var PILL_ORDER = ['init', 'deposit', 'withdraw', 'available', 'tokenBalance', 'netFlow', 'assertSync', 'getTotalIn', 'getTotalOut', 'getTotal', 'assertBalance', 'getOwner', 'getPaused', 'mint', 'burn', 'setPaused', 'testArithmetic', 'testSigned', 'testCompare', 'testBool', 'testString', 'testMapSet', 'testMapGet', 'testMapUpdate', 'testSetAdd', 'testSetContains', 'testSetRemove', 'testRequirePass', 'testRequireFail', 'adminOnly', 'setLabel', 'getUVal', 'getIVal', 'getBVal', 'getSVal', 'getOpCount', 'getAdmin', 'isReady'];
     // Internal functions hidden on SimpleToken — called via extern_call by TokenVault,
     // vault accounting. Any other contract (including user contracts) shows them normally.
     if (currentContractName === 'SimpleToken') {
