@@ -1193,14 +1193,21 @@ async function runExecPhaseFresh(source, name) {
   // Determine which functions should target the secondary wallet
   // (revoke, transfer, deregister — anything where self-targeting would conflict)
   function shouldUseSecondary(fnName, fnMeta) {
-    // Check if any requires_state precondition would conflict with self
-    if (!fnMeta.requires_state || !fnMeta.requires_state.length) return false;
-    // revokeAdmin targeting self = can't revoke last admin
+    // Name-based conflict detection always runs — don't bail on empty requires_state
+    // revokeAdmin targeting self = can't revoke last admin / cannot revoke self
     // transfer targeting self = "cannot transfer to self"
     // deregister targeting self with tokens = fails
+    // burn targeting self = may deplete self balance needed later
     var conflictNames = ['revoke', 'transfer', 'deregister', 'burn'];
     for (var ci = 0; ci < conflictNames.length; ci++) {
       if (fnName.toLowerCase().indexOf(conflictNames[ci]) >= 0) return true;
+    }
+    // Also check requires_state for self-referential conflicts (future contracts)
+    if (fnMeta.requires_state) {
+      for (var ri = 0; ri < fnMeta.requires_state.length; ri++) {
+        var rs = fnMeta.requires_state[ri];
+        if (rs.indexOf('caller') >= 0 && rs.indexOf('==') >= 0) return true;
+      }
     }
     return false;
   }
