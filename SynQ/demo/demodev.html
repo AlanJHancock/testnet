@@ -375,17 +375,7 @@
         }
       }
     }).catch(function() {});
-  
-  function loadLoopDemo() {
-    evictWorkspaceContractByName('LoopDemo');
-    document.getElementById('editor').value = LOOP_LINES.join('\n');
-    updateLineNums();
-    clearResults();
-    syncCompileBtn();
-    setStatus('LoopDemo loaded — compile and deploy, then call init() before runIterations(). Try factorial(5), sumRange(1,100), countEven(10), sqrtFloor(16), power(2,10).', 'info');
-  }
-  window.loadLoopDemo = loadLoopDemo;
-})();
+  })();
   var SESSION_RUN_URL = 'https://hanksweb.co.uk/synq/session/run';
   var SESSION_DEL_URL   = 'https://hanksweb.co.uk/synq/session/';
   var SESSION_NONCE_URL = 'https://hanksweb.co.uk/synq/session/';
@@ -2866,34 +2856,7 @@
     }
   }
 
-  var BLANK_LINES = [
-  'pragma synq ^0.9;',
-  '',
-  'contract Blank {',
-  '  state {',
-  '    value: u256;',
-  '    initialised: bool;',
-  '  }',
-  '',
-  '  function init() -> bool as caller {',
-  '    if (initialised) { return false; }',
-  '    value = 0;',
-  '    initialised = true;',
-  '    return true;',
-  '  }',
-  '',
-  '  function setValue(v: u256) -> bool as caller {',
-  '    value = v;',
-  '    return true;',
-  '  }',
-  '',
-  '  function getValue() -> u256 {',
-  '    return value;',
-  '  }',
-  '}',
-];
-
-var VAULT_LINES = [
+  var VAULT_LINES = [
     'pragma synq ^0.9;',
     '',
     '// TokenVault -- primary entry point.  Mints/burns SimpleToken via extern_call.',
@@ -3104,7 +3067,7 @@ var LOOP_LINES = [
   '    initialised: bool;',
   '  }',
   '',
-  '  // Idempotent init — must be called once before runIterations()',
+  '  // Idempotent init — call once before runIterations()',
   '  function init() -> bool as caller {',
   '    if (initialised) { return false; }',
   '    accumulator = 0;',
@@ -3188,8 +3151,7 @@ var LOOP_LINES = [
   '    return total;',
   '  }',
   '}',
-];
-',
+];',
     '  }',
     '',
     '  function testMapUpdate(key: u256, delta: u256) -> u256 as caller {',
@@ -3908,7 +3870,43 @@ var LOOP_LINES = [
     setStatus('TypeTestContract loaded — Compile, Deploy, then call init() to begin testing all types and operators.', 'info');
   }
   window.loadTypeTest = loadTypeTest;
-}
+}  // ── BLANK_LINES: minimal template for the "New" button ──
+  var BLANK_LINES = [
+    'pragma synq ^0.9;',
+    '',
+    'contract Blank {',
+    '  state {',
+    '    value: u256;',
+    '    initialised: bool;',
+    '  }',
+    '',
+    '  function init() -> bool as caller {',
+    '    if (initialised) { return false; }',
+    '    value = 0;',
+    '    initialised = true;',
+    '    return true;',
+    '  }',
+    '',
+    '  function setValue(v: u256) -> bool as caller {',
+    '    value = v;',
+    '    return true;',
+    '  }',
+    '',
+    '  function getValue() -> u256 {',
+    '    return value;',
+    '  }',
+    '}',
+  ];
+
+  function loadLoopDemo() {
+    evictWorkspaceContractByName('LoopDemo');
+    document.getElementById('editor').value = LOOP_LINES.join('\n');
+    updateLineNums();
+    clearResults();
+    syncCompileBtn();
+    setStatus('LoopDemo loaded. Call init() before runIterations(). Try factorial(5), sumRange(1,100), countEven(10), sqrtFloor(16), power(2,10).', 'info');
+  }
+  window.loadLoopDemo = loadLoopDemo;
 
 )();
 </script>
