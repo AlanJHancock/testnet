@@ -37,8 +37,8 @@ contract ComprehensiveToken {
 
     // ── Bootstrap ──────────────────────────────────────────────────────────
     // Sign with your wallet — caller becomes the first admin.
-    function init(name: str, symbol: str) as caller {
-      require(initialised == false,  "init: already initialised");
+    function init(name: str, symbol: str) -> bool as caller {
+      if (initialised) { return false; }
       require(str_len(name) > 0,     "init: name empty");
       require(str_len(symbol) > 0,   "init: symbol empty");
       require(str_len(name) <= 64,   "init: name too long");
@@ -53,6 +53,7 @@ contract ComprehensiveToken {
       token_symbol        = symbol;
       initialised         = true;
       debug_mode          = false;
+      return true;
     }
 
     // ── Admin management ───────────────────────────────────────────────────

@@ -19,8 +19,8 @@ contract TypeTestContract {
   }
 
   // ── Init ───────────────────────────────────────────────────────────────────
-  function init() as caller {
-    require(!ready, "init: already initialised");
+  function init() -> bool as caller {
+    if (ready) { return false; }
     admin    = caller;
     u_val    = 100;
     i_val    = -42;
@@ -29,6 +29,7 @@ contract TypeTestContract {
     ready    = true;
     labelled = false;
     op_count = 0;
+    return true;
   }
 
   // ── u256 arithmetic (+  -  *  /  %) ───────────────────────────────────────
