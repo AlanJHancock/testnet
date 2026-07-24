@@ -1,0 +1,3884 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+  <!-- js-sha3: battle-tested Keccak-256 matching Ethereum's keccak256 opcode -->
+  <script src="https://cdn.jsdelivr.net/npm/js-sha3@0.8.0/src/sha3.min.js"></script>
+  <!-- noble/secp256k1: self-hosted bundle (CDN-free, includes @noble/hashes) -->
+  <script src="/demo/noble-secp256k1.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SynQ IDE — Powered by Synergy Network</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #03070f; color: #e2e8f0; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; min-height: 100vh; padding: 24px 16px 60px; }
+  .header { text-align: center; margin-bottom: 28px; }
+  .header h1 { font-size: 2rem; font-weight: 700; background: linear-gradient(135deg, #00ced1, #7c3aed); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 6px; }
+  .header p { color: rgba(255,255,255,0.45); font-size: 0.9rem; letter-spacing: 0.04em; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; background: rgba(0,206,209,0.1); border: 1px solid rgba(0,206,209,0.25); border-radius: 20px; padding: 4px 14px; font-size: 0.78rem; color: #00ced1; margin-top: 10px; }
+  .badge::before { content: ''; width: 7px; height: 7px; background: #00ced1; border-radius: 50%; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* wallet bar */
+  .wallet-bar { max-width: 980px; margin: 0 auto 18px; background: rgba(124,58,237,0.08); border: 1px solid rgba(124,58,237,0.25); border-radius: 12px; padding: 14px 20px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+  .wallet-left { display: flex; align-items: center; gap: 10px; }
+  .wallet-dot { width: 9px; height: 9px; border-radius: 50%; background: #9333ea; }
+  .wallet-dot.connected { background: #10b981; animation: pulse 2s infinite; }
+  .wallet-label { font-size: 0.82rem; color: rgba(255,255,255,0.55); }
+  .wallet-address { font-family: ui-monospace, monospace; font-size: 0.82rem; color: #a78bfa; }
+  .wallet-right { display: flex; align-items: center; gap: 10px; }
+  .wallet-mode { font-size: 0.72rem; padding: 3px 10px; border-radius: 12px; font-weight: 600; }
+  .wallet-mode.hybrid { background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.4); color: #6ee7b7; }
+  .wallet-mode.wasm     { background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.4); color: #93c5fd; }
+  .wasm-toolbar-badge { display:inline-flex; align-items:center; gap:5px; font-size:0.7rem; font-weight:700; letter-spacing:0.04em; padding:3px 10px; border-radius:12px; background:rgba(59,130,246,0.15); border:1px solid rgba(59,130,246,0.4); color:#93c5fd; vertical-align:middle; }
+  .wallet-mode.ephemeral   { background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.3); color: #fcd34d; }
+    .wallet-mode.persistent  { background: rgba(52,211,153,0.1);  border: 1px solid rgba(52,211,153,0.4);  color: #34d399; }
+  .btn-wallet { display: inline-flex; align-items: center; gap: 6px; padding: 7px 18px; border-radius: 8px; font-size: 0.82rem; font-weight: 600; cursor: pointer; border: 1px solid rgba(124,58,237,0.5); background: rgba(124,58,237,0.15); color: #a78bfa; }
+
+  /* cards */
+  .card { max-width: 980px; margin: 0 auto 24px; background: rgba(255,255,255,0.03); border: 1px solid rgba(0,206,209,0.15); border-radius: 12px; padding: 24px; }
+  .card-title { font-size: 0.75rem; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: rgba(255,255,255,0.35); margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
+  .card-title svg { opacity: 0.6; }
+
+  /* editor */
+  .editor-wrap { display: grid; grid-template-columns: 48px minmax(0,1fr); border: 1px solid rgba(0,206,209,0.2); border-radius: 8px; overflow: hidden; background: rgba(3,7,15,0.88); min-height: 380px; }
+  .line-nums { border-right: 1px solid rgba(255,255,255,0.1); color: rgba(255,255,255,0.3); font-family: ui-monospace, monospace; font-size: 12px; line-height: 20px; padding: 12px 6px; text-align: right; white-space: pre; user-select: none; }
+  textarea#editor { width: 100%; min-height: 380px; resize: vertical; border: none; outline: none; padding: 12px; background: transparent; color: #f2f5ff; font-family: ui-monospace, monospace; font-size: 13px; line-height: 20px; tab-size: 2; }
+
+  /* buttons */
+  .actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; align-items: center; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 20px; border-radius: 8px; font-size: 0.875rem; font-weight: 600; cursor: pointer; border: none; transition: opacity 0.15s, transform 0.1s; }
+  .btn:hover { opacity: 0.88; transform: translateY(-1px); }
+  .btn:active { transform: translateY(0); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+  .btn-primary { background: linear-gradient(135deg, #00ced1, #0891b2); color: #03070f; }
+  .btn-secondary { background: rgba(0,206,209,0.12); color: #00ced1; border: 1px solid rgba(0,206,209,0.3); }
+  .btn-run { background: linear-gradient(135deg, #10b981, #0891b2); color: #03070f; }
+  .btn-reset { background: rgba(251,191,36,0.1); color: #fcd34d; border: 1px solid rgba(251,191,36,0.3); }
+  .sig-note { font-size: 0.7rem; color: rgba(255,255,255,0.28); font-style: italic; white-space: nowrap; }
+
+  /* status */
+  .status-bar { margin-top: 14px; padding: 10px 14px; border-radius: 8px; font-size: 0.85rem; font-family: ui-monospace, monospace; display: none; }
+  .status-bar.show { display: block; }
+  .status-bar.info { background: rgba(0,206,209,0.1); border: 1px solid rgba(0,206,209,0.25); color: #67e8f9; }
+  .status-bar.success { background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.3); color: #6ee7b7; }
+  .status-bar.error { background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); color: #fca5a5; }
+
+  /* results */
+  .results-section { margin-top: 20px; display: none; }
+  .results-section.show { display: block; }
+  .results-title { font-size: 0.78rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: rgba(255,255,255,0.4); margin-bottom: 10px; }
+  .bytecode-display { background: rgba(3,7,15,0.9); border: 1px solid rgba(0,206,209,0.15); border-radius: 8px; padding: 14px 16px; font-family: ui-monospace, monospace; font-size: 11.5px; line-height: 19px; color: #a5f3fc; white-space: pre; overflow-x: auto; max-height: 400px; overflow-y: auto; }
+  .download-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+  .hash-badge { font-family: ui-monospace, monospace; font-size: 0.75rem; color: rgba(255,255,255,0.35); }
+  .attest-panel { margin-top: 16px; padding: 14px 16px; background: rgba(124,58,237,0.07); border: 1px solid rgba(124,58,237,0.2); border-radius: 8px; display: none; }
+  .attest-panel.show { display: block; }
+  .attest-title { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: rgba(167,139,250,0.7); margin-bottom: 10px; }
+  .attest-row { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 6px; }
+  .attest-key { font-size: 0.72rem; color: rgba(255,255,255,0.35); min-width: 110px; font-family: ui-monospace, monospace; }
+  .attest-val { font-size: 0.72rem; font-family: ui-monospace, monospace; color: rgba(167,139,250,0.85); word-break: break-all; }
+  .attest-val.dim { color: rgba(255,255,255,0.2); font-style: italic; }
+  .attest-val.pqc { color: #6ee7b7; }
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(3,7,15,0.3); border-top-color: #03070f; border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; }
+
+  /* VM panel */
+  .vm-card { display: none; }
+  .vm-card.show { display: block; }
+  .func-pills { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+  .func-pill { display: inline-flex; align-items: center; padding: 7px 16px; border-radius: 20px; font-family: ui-monospace, monospace; font-size: 0.82rem; cursor: pointer; background: rgba(0,206,209,0.1); border: 1px solid rgba(0,206,209,0.3); color: #00ced1; transition: all 0.15s; user-select: none; }
+  .func-pill:hover { background: rgba(0,206,209,0.18); border-color: rgba(0,206,209,0.5); }
+  .func-pill.active { background: rgba(0,206,209,0.25); border-color: #00ced1; color: #fff; font-weight: 600; box-shadow: 0 0 10px rgba(0,206,209,0.3); }
+  .params-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .param-group label { display: block; font-size: 0.72rem; font-family: ui-monospace, monospace; color: rgba(0,206,209,0.7); margin-bottom: 5px; letter-spacing: 0.06em; }
+  .param-group input { width: 100%; background: rgba(3,7,15,0.8); border: 1px solid rgba(0,206,209,0.2); border-radius: 8px; color: #f2f5ff; font-family: ui-monospace, monospace; font-size: 0.85rem; padding: 8px 12px; outline: none; }
+  .param-group input:focus { border-color: rgba(0,206,209,0.6); box-shadow: 0 0 0 2px rgba(0,206,209,0.1); }
+  .vm-output { background: rgba(3,7,15,0.9); border: 1px solid rgba(0,206,209,0.12); border-radius: 8px; padding: 14px 16px; font-family: ui-monospace, monospace; font-size: 0.85rem; min-height: 80px; white-space: pre-wrap; word-break: break-all; }
+  .vm-output .ok  { color: #6ee7b7; }
+  .vm-output .err { color: #fca5a5; }
+  .vm-output .dim { color: rgba(255,255,255,0.35); }
+  .vm-actions { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+  .footer { text-align: center; margin-top: 40px; color: rgba(255,255,255,0.2); font-size: 0.78rem; }
+  .footer a { color: rgba(0,206,209,0.6); text-decoration: none; }
+
+  /* ── Workspace panel ──────────────────────────────────────────────────────── */
+  .workspace-panel {
+    background: rgba(0,20,30,0.6);
+    border: 1px solid rgba(0,206,209,0.2);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-top: 18px;
+  }
+  .workspace-header {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 10px;
+    font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em;
+    color: rgba(0,206,209,0.8);
+  }
+  .workspace-id-badge {
+    font-family: monospace; font-size: 0.72rem;
+    color: rgba(255,255,255,0.4); margin-left: auto;
+  }
+  .workspace-contracts { display: flex; flex-direction: column; gap: 6px; }
+  .ws-contract-card {
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(0,206,209,0.08);
+    border: 1px solid rgba(0,206,209,0.12);
+    border-radius: 6px; padding: 7px 10px;
+    transition: background 0.15s;
+  }
+  .ws-contract-card:hover { background: rgba(0,206,209,0.15); }
+  .ws-contract-card.active { border-left: 3px solid rgba(0,206,209,0.8); }
+  .ws-contract-num  { font-size: 0.72rem; color: rgba(0,206,209,0.45); min-width: 1.5rem; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+  .ws-contract-name { font-size: 0.82rem; color: #e0e0e0; flex: 1; }
+  .ws-contract-addr { font-family: monospace; font-size: 0.7rem; color: rgba(255,255,255,0.35); }
+  .ws-btn {
+    font-size: 0.7rem; padding: 3px 8px; border-radius: 4px; cursor: pointer;
+    border: 1px solid rgba(0,206,209,0.4); background: rgba(0,206,209,0.1);
+    color: rgba(0,206,209,0.9); transition: background 0.15s;
+  }
+  .ws-btn:hover { background: rgba(0,206,209,0.22); }
+  .ws-btn-del { border-color: rgba(255,80,80,0.4); background: rgba(255,80,80,0.08); color: rgba(255,100,100,0.9); }
+  .ws-btn-del:hover { background: rgba(255,80,80,0.2); }
+  .workspace-empty { font-size: 0.78rem; color: rgba(255,255,255,0.3); padding: 4px 0; }
+  .ws-new-btn {
+    font-size: 0.72rem; padding: 3px 9px; border-radius: 4px; cursor: pointer;
+    border: 1px solid rgba(0,206,209,0.35); background: transparent;
+    color: rgba(0,206,209,0.7); margin-left: 6px; transition: background 0.15s;
+  }
+  .ws-new-btn:hover { background: rgba(0,206,209,0.12); }
+</style>
+  <script type="module" src="/demo/wasm/synq-wasm-loader.js"></script>
+  <script>
+    // Show WASM badge in toolbar once the module is ready (no compile needed)
+    document.addEventListener("DOMContentLoaded", function() {
+      // Load TokenVault as the default contract — it is the primary entry point.
+      if (typeof loadVault === "function") loadVault();
+      var checkWasm = setInterval(function() {
+        if (window.SynQWasm) {
+          clearInterval(checkWasm);
+          window.SynQWasm.ready.then(function() {
+            var wb = document.getElementById("wasmBadge");
+            if (wb) wb.style.display = "inline-flex";
+          });
+        }
+      }, 100);
+    });
+  </script>
+</head>
+<body>
+
+<div class="header">
+  <h1>SynQ IDE</h1>
+  <p>Post-Quantum Smart Contract Compiler &amp; Sandbox</p>
+  <div class="badge">Live Compiler &mdash; hanksweb.co.uk</div>
+</div>
+
+<!-- Wallet bar -->
+<div class="wallet-bar">
+  <div class="wallet-left" style="flex-wrap:wrap;gap:6px 10px;">
+    <div class="wallet-dot" id="walletDot"></div>
+    <span class="wallet-label" id="walletLabel">No wallet connected</span>
+    <span class="wallet-address" id="walletAddress"></span>
+    <!-- UMA row — hidden until wallet connected -->
+    <div id="umaRow" style="display:none;width:100%;align-items:center;gap:6px;margin-top:2px;">
+      <span style="font-size:0.72rem;color:rgba(255,255,255,0.38);font-family:ui-monospace,monospace;">UMA:</span>
+      <span id="umaDisplay" style="font-size:0.72rem;font-family:ui-monospace,monospace;color:#5eead4;word-break:break-all;"></span>
+      <button id="umaCopyBtn" title="Copy UMA to clipboard"
+              style="flex-shrink:0;font-size:0.65rem;padding:2px 7px;border-radius:4px;border:1px solid rgba(94,234,212,0.35);background:rgba(94,234,212,0.07);color:rgba(94,234,212,0.8);cursor:pointer;font-family:ui-monospace,monospace;">copy</button>
+    </div>
+  </div>
+  <div class="wallet-right">
+    <span class="wallet-mode persistent" id="sigMode">Compiler-Attested PQC</span>
+    <span class="sig-note" id="sigNote">Signing: ML-DSA-65 · key_id —</span>
+    <button class="btn-wallet" id="walletBtn" onclick="connectWallet()">Connect Synergy Wallet</button>
+        <label class="btn-wallet" style="cursor:pointer;font-size:0.78rem;padding:4px 10px;opacity:0.75;" title="Import Synergy device-link JSON">Import device link<input type="file" accept=".json" style="display:none" onchange="(function(e){var f=e.target.files[0];if(!f)return;var r=new FileReader();r.onload=function(ev){importDeviceLink(ev.target.result);};r.readAsText(f);})(event)"></label>
+  </div>
+</div>
+
+<!-- Editor card -->
+<div class="card">
+  <div class="card-title">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+    Contract Editor
+  </div>
+  <div class="editor-wrap">
+    <div class="line-nums" id="lineNums">1</div>
+    <textarea id="editor" spellcheck="false" autocomplete="off" autocorrect="off"></textarea>
+  </div>
+  <!-- Hidden file input -->
+  <input type="file" id="contractFileInput" accept=".synq,.txt" style="display:none;"
+         onchange="loadFromFile(this)">
+
+  <!-- Row A: Load contracts — always above compile/deploy, never reflows -->
+  <div style="display:flex;align-items:center;gap:5px;flex-wrap:nowrap;margin-bottom:6px;">
+    <button class="btn btn-secondary" onclick="document.getElementById('contractFileInput').click()"
+            title="Load a .synq or .txt contract file from disk"
+            style="display:flex;align-items:center;gap:4px;padding:4px 10px;flex-shrink:0;">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           style="flex-shrink:0;opacity:0.85;">
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+      </svg>
+      Open File
+    </button>
+    <button class="btn btn-secondary" onclick="saveToFile()"
+            title="Save editor contents as a .synq file"
+            style="display:flex;align-items:center;gap:4px;padding:4px 10px;flex-shrink:0;">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           style="flex-shrink:0;opacity:0.85;">
+        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+        <polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>
+      </svg>
+      Save File
+    </button>
+    <span style="font-size:0.8rem;font-weight:600;color:rgba(255,255,255,0.4);padding:0 2px;">|</span>
+    <button class="btn btn-secondary" onclick="loadBlank()" title="Blank starter contract">New</button>
+    <button class="btn btn-secondary" onclick="loadVault()" title="Step 1 — TokenVault (uses extern_call)">TokenVault</button>
+    <button class="btn btn-secondary" onclick="loadDemo()" title="Step 2 — SimpleToken (deploy into same workspace)">SimpleToken</button>
+    <button class="btn btn-secondary" onclick="loadComprehensive()" title="Standalone role-based token — sign init() with wallet">ComprehensiveToken</button>
+    <button class="btn btn-secondary" onclick="loadTypeTest()" title="Type &amp; operator test contract — all primitives, map, set, require">TypeTestContract</button>
+    <button class="btn btn-secondary" onclick="loadLoopDemo()" title="Loop constructs — while, break, continue, let locals, state accumulation">LoopDemo</button>
+        
+  </div>
+
+  <!-- Row B: Compile / Deploy — fixed single line, never wraps -->
+  <div class="actions" style="flex-wrap:nowrap;align-items:center;gap:8px;">
+    <button class="btn btn-primary" id="compileBtn" onclick="doCompile()">Compile</button>
+    <button class="btn btn-primary" id="deployBtn" onclick="initVMPanel()" style="visibility:hidden;pointer-events:none;" title="Deploy compiled bytecode to the QVM session">Deploy</button>
+  </div>
+  <!-- Row 2: status badges + deps hint — always in DOM, never causes row-1 reflow -->
+  <div style="display:flex;align-items:center;gap:8px;min-height:1.4rem;margin-top:4px;padding-left:2px;">
+    <span id="wasmBadge" style="display:none;" class="wasm-toolbar-badge">&#x26A1; In-Browser WASM</span>
+    <span id="pqcSimBadge" style="display:none;" class="wasm-toolbar-badge" title="PQC builtins will throw RuntimeError in browser — deploy to synq-server for real verification">&#x26A0; PQC Simulation</span>
+    <span id="depsHint" style="font-size:0.75rem;visibility:hidden;">&nbsp;</span>
+  </div>
+  <div class="status-bar" id="statusBar"></div>
+
+  <!-- Compilation results -->
+  <div class="results-section" id="resultsSection">
+    <div class="results-title">Compilation Results</div>
+    <div class="bytecode-display" id="bytecodeDisplay"></div>
+    <div class="attest-panel" id="attestPanel">
+      <div class="attest-title">Hybrid Attestation Bundle</div>
+      <div id="attestRows"></div>
+    </div>
+    <div class="download-row">
+      <button class="btn btn-secondary" onclick="downloadQvm()" style="font-size:12px;padding:5px 14px;">Download .qvm</button>
+      <button onclick="downloadSig()" style="font-size:12px;padding:5px 14px;background:rgba(147,51,234,0.15);border:1px solid rgba(147,51,234,0.5);color:rgba(200,150,255,0.9);border-radius:6px;cursor:pointer;">Download .sig.json</button>
+      <span class="hash-badge" id="hashBadge"></span>
+    </div>
+  </div>
+</div>
+
+<!-- VM Execution card -->
+<div class="card vm-card" id="vmCard">
+  <div class="card-title" style="justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+    <span style="display:flex;align-items:center;gap:8px;">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+      Execute Contract
+      <span id="contractNameBadge" style="font-size:0.72rem;font-family:ui-monospace,monospace;background:rgba(0,206,209,0.12);border:1px solid rgba(0,206,209,0.3);color:#00ced1;border-radius:10px;padding:2px 10px;margin-left:8px;letter-spacing:0.04em;text-transform:none;display:none;"></span>
+    </span>
+    <span id="sessionBadge" style="display:none; font-size:0.7rem; font-family:ui-monospace,monospace;
+      background:rgba(16,185,129,0.12); border:1px solid rgba(16,185,129,0.35);
+      color:#6ee7b7; border-radius:10px; padding:2px 10px; letter-spacing:0.04em;">
+      ● session active
+    </span>
+  </div>
+
+  <!-- Function pills -->
+  <div class="results-title">Functions</div>
+  <div class="func-pills" id="funcPills"></div>
+
+  <!-- Param inputs (shown when function selected) -->
+  <div id="paramsSection" style="display:none;">
+    <div class="results-title" id="paramsTitle">Parameters</div>
+    <div class="params-grid" id="paramsGrid"></div>
+  </div>
+
+  <!-- Run / Reset buttons -->
+  <div class="vm-actions">
+    <button class="btn btn-run" id="runBtn" onclick="runFunction()" disabled>
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      Run Function
+    </button>
+    <button class="btn btn-reset" onclick="resetVM()">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.5"/></svg>
+      Reset Virtual Machine (VM)
+    </button>
+  </div>
+
+  <!-- Output -->
+  <div class="results-title">Execution Output</div>
+  <div class="vm-output" id="vmOutput"><span class="dim">Select a function and press Run.</span></div>
+    <div id="statePanel" style="display:none;margin-top:8px;padding:8px 10px;background:rgba(0,206,209,0.06);border:1px solid rgba(0,206,209,0.2);border-radius:6px;font-family:ui-monospace,monospace;font-size:11px;color:#7efcfd;"><span id="stateLabel" style="opacity:0.6;">contract state &nbsp;▸&nbsp;</span><span id="stateValues"></span></div>
+</div>
+
+<!-- ── Workspace Panel ───────────────────────────────────────────────────── -->
+<div style="max-width:980px;margin:0 auto 24px;">
+<div class="workspace-panel" id="workspacePanel" style="display:none;">
+  <div class="workspace-header">
+    <span>&#128196; Workspace</span>
+    <span class="workspace-id-badge" id="workspaceIdBadge"></span>
+    <button class="ws-new-btn" onclick="newWorkspace()">+ New Workspace</button>
+  </div>
+  <div class="workspace-contracts" id="workspaceContracts">
+    <div class="workspace-empty">No contracts deployed yet.</div>
+  </div>
+</div>
+</div>
+
+<div class="footer">
+  Powered by <a href="https://synergy-network.io" target="_blank">Synergy Network</a>
+  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ── keccak256Bytes: returns Uint8Array from any input ─────────────────── */
+  // js-sha3@0.8.0 exposes window.keccak256(data) → hex string (correct EVM keccak)
+  function keccak256Bytes(data) {
+    var hex = keccak256.create().update(data).hex();
+    var out = new Uint8Array(32);
+    for (var i = 0; i < 32; i++) out[i] = parseInt(hex.substr(i*2, 2), 16);
+    return out;
+  }
+
+  var COMPILE_URL       = 'https://hanksweb.co.uk/synq/compile';
+  var SIGN_SOURCE_URL   = 'https://hanksweb.co.uk/synq/compile/sign-source';
+  var SOURCE_NONCE_URL  = 'https://hanksweb.co.uk/synq/source-nonce';
+  var ATTEST_URL      = 'https://hanksweb.co.uk/synq/attest';
+  var SESSION_NEW_URL  = 'https://hanksweb.co.uk/synq/session/new';
+  var WORKSPACE_URL    = 'https://hanksweb.co.uk/synq/workspace';
+  var PUBKEY_URL      = 'https://hanksweb.co.uk/synq/pubkey';
+
+  // PR-G: fetch compiler key info once on load and pre-fill the signing badge
+  var compilerKeyId    = null;
+  var compilerTrust    = 'ephemeral';
+  var compilerPQCOwner = null;   // first 20 bytes of PQC pubkey as decimal string
+  (function fetchCompilerKey() {
+    fetch(PUBKEY_URL).then(function(r) { return r.json(); }).then(function(d) {
+      compilerKeyId  = d.key_id  || null;
+      compilerTrust  = d.trust_model || 'ephemeral';
+      // Derive a stable UInt256 owner identity: first 20 bytes of PQC pubkey
+      if (d.public_key && d.public_key.length >= 40) {
+        try { compilerPQCOwner = BigInt('0x' + d.public_key.slice(0, 40)).toString(10); } catch(e) {}
+      }
+      // Update badge if no compile has happened yet and no wallet connected
+      if (!walletAddress) {
+        var mode = document.getElementById('sigMode');
+        var note = document.getElementById('sigNote');
+        if (!mode || !note) return;
+        if (compilerTrust === 'compiler-attested' && compilerKeyId) {
+          mode.textContent = 'Compiler-Attested PQC';
+          mode.className   = 'wallet-mode persistent';
+          note.textContent = 'Signing: ML-DSA-65 · key_id ' + compilerKeyId;
+        }
+      }
+    }).catch(function() {});
+  })();
+  var SESSION_RUN_URL = 'https://hanksweb.co.uk/synq/session/run';
+  var SESSION_DEL_URL   = 'https://hanksweb.co.uk/synq/session/';
+  var SESSION_NONCE_URL = 'https://hanksweb.co.uk/synq/session/';
+
+  var currentBytecode         = null;
+  var currentSidecar          = null;
+  var currentStateVars        = [];
+  var currentStateVarTypes    = {};
+  var currentFnReturnTypes    = {};
+
+  var parsedFunctions         = [];
+  var compileFunctions        = [];  // [{name, params:[{name,ty}], has_return, return_type}]
+  var selectedFunc            = null;
+  var sessionId               = null;
+  var workspaceId             = null;   // current workspace id
+  var workspaceNum            = 0;      // sequential workspace counter (1-based)
+  var workspaceContracts      = [];     // [{name, session_id, address, bytecode, stateVars, deploy_index}]
+  var currentExternContracts  = [];     // contracts this one calls via extern_call
+
+  /* ── Opcode names for disassembler ───────────────────────────────────────── */
+  var OPS = {
+    0x01:'Push', 0x02:'Pop', 0x03:'Dup', 0x04:'Swap',
+    0x10:'Add', 0x11:'Sub', 0x12:'Mul', 0x13:'Div',
+    0x20:'Eq', 0x21:'Ne', 0x22:'Lt', 0x23:'Le', 0x24:'Gt', 0x25:'Ge',
+    0x30:'Jump', 0x31:'JumpIf', 0x32:'Call', 0x33:'Return',
+    0x40:'Load', 0x41:'Store', 0x42:'LoadImm', 0x43:'LoadImm128', 0x50:'LoadCaller',
+    0x80:'ML-DSA-65 Verify', 0x81:'ML-KEM-768 KeyExchange', 0x82:'FN-DSA-512 Verify', 0x83:'SPHINCS+ Verify',
+    0xF0:'Print', 0xFF:'Halt'
+  };
+  var currentContractName     = null;  // from compile response
+  var currentContractAddress  = null;  // keccak256("SynQ:"+name)[12..] — used in EIP-712 domain
+  var walletAddress   = null;
+  var walletUma       = null;
+  var _walletMode = "none"; // "synergy" | "ethereum" | "none"
+  var _ephemeralPrivKey  = null;
+  var _ephemeralAddress  = null; // always the address derived from _ephemeralPrivKey        // Uint8Array — secp256k1 private key
+
+  /* ── Wallet — Synergy extension integration ─────────────────────────────── */
+  // The Synergy browser extension injects window.ethereum (EIP-1193 compatible)
+  // and window.synergy.isSynergyWallet = true.
+  // On load: eth_accounts (no prompt) silently restores an already-approved session.
+  // On button: eth_requestAccounts triggers the Synergy approval popup.
+  // Both EIP-712 sign paths use window.ethereum.eth_signTypedData_v4.
+
+
+  // callerIdentity(evmAddress) — EVM address as decimal UInt256 (matches LoadCaller 0x50)
+  function callerIdentity(evmAddress) {
+    var addrHex = evmAddress.toLowerCase().replace(/^0x/, '');
+    return BigInt('0x' + addrHex).toString(10);
+  }
+  function computeUma(evmAddress) { return callerIdentity(evmAddress); }
+
+  function hexToBytes(hex) {
+    var h = hex.startsWith('0x') ? hex.slice(2) : hex;
+    var out = new Uint8Array(h.length / 2);
+    for (var i = 0; i < out.length; i++) {
+      out[i] = parseInt(h.substr(i * 2, 2), 16);
+    }
+    return out;
+  }
+
+  function readU32LE(bytes, off) {
+    return (bytes[off] | (bytes[off+1]<<8) | (bytes[off+2]<<16) | (bytes[off+3]<<24)) >>> 0;
+  }
+
+  function formatBytecode(hex) {
+    var bytes = hexToBytes(hex);
+    var lines = [];
+    if (bytes.length < 15) { lines.push(hex); return lines.join('\n'); }
+
+    // Header: 4 magic + 1 version + 2 hdrLen + 4 codeLen + 4 dataLen = 15 bytes
+    var magic   = Array.from(bytes.slice(0,4)).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
+    var ver     = bytes[4];
+    var hdrLen  = bytes[5] | (bytes[6]<<8);
+    var codeLen = readU32LE(bytes, 7);
+    var dataLen = readU32LE(bytes, 11);
+
+    lines.push('; QVM Bytecode -- ' + bytes.length + ' bytes');
+    lines.push('; Magic: 0x' + magic.toUpperCase() + '  Version: ' + ver);
+    lines.push('; Header: ' + hdrLen + 'B  Code: ' + codeLen + 'B  Data: ' + dataLen + 'B');
+    lines.push('');
+    lines.push('; === CODE SECTION ===');
+
+    var codeStart = hdrLen;
+    var codeEnd   = codeStart + codeLen;
+    var pc = codeStart, instrNum = 0;
+    while (pc < codeEnd && instrNum < 300) {
+      var op     = bytes[pc];
+      var opName = OPS[op] || ('0x' + op.toString(16).padStart(2,'0'));
+      var addr   = pc.toString(16).padStart(4,'0');
+      if (op === 0x01) {                // Push i32
+        if (pc + 4 < codeEnd) {
+          var buf = new ArrayBuffer(4);
+          new Uint8Array(buf).set(bytes.slice(pc+1, pc+5));
+          var val = new Int32Array(buf)[0];
+          lines.push('  [' + addr + ']  Push     ' + val); pc += 5;
+        } else { lines.push('  [' + addr + ']  Push     <truncated>'); pc++; }
+      } else if (op === 0x30 || op === 0x31 || op === 0x32) { // Jump / JumpIf / Call
+        if (pc + 4 < codeEnd) {
+          var tgt = readU32LE(bytes, pc+1);
+          lines.push('  [' + addr + ']  ' + opName.padEnd(9) + '-> 0x' + tgt.toString(16).padStart(4,'0').toUpperCase());
+          pc += 5;
+        } else { pc++; }
+      } else if (op === 0x42) {         // LoadImm (raw bytes)
+        if (pc + 4 < codeEnd) {
+          var len = readU32LE(bytes, pc+1);
+          lines.push('  [' + addr + ']  LoadImm  ' + len + ' bytes'); pc += 5 + len;
+        } else { pc++; }
+      } else if (op === 0x43) {         // LoadImm128 (16-byte u128)
+        if (pc + 16 <= codeEnd) {
+          var hexVal = Array.from(bytes.slice(pc+1, pc+17)).map(function(b){return b.toString(16).padStart(2,'0');}).join('');
+          lines.push('  [' + addr + ']  LoadImm128  0x' + hexVal); pc += 17;
+        } else { pc++; }
+      } else {
+        lines.push('  [' + addr + ']  ' + opName); pc++;
+      }
+      instrNum++;
+    }
+
+    if (dataLen > 0) {
+      lines.push(''); lines.push('; === DATA SECTION (dispatch table) ===');
+      var db = bytes.slice(codeEnd, codeEnd + Math.min(dataLen, 128));
+      lines.push('  ' + Array.from(db).map(function(b){return b.toString(16).padStart(2,'0');}).join(' ') + (dataLen > 128 ? ' ...' : ''));
+    }
+    lines.push(''); lines.push('; Raw: ' + hex);
+    return lines.join('\n');
+  }
+
+  function parseDispatchTable(hex) {
+    var bytes = hexToBytes(hex);
+    if (bytes.length < 15) return [];
+
+    // QVM header layout (confirmed from assembler.rs build()):
+    // [0..3]  magic   — u32 LE  (4 bytes: 0x004d5651 "QVM\0")
+    // [4]     version — u8      (1 byte,  always 1)
+    // [5..6]  hdrLen  — u16 LE  (2 bytes, always 15)
+    // [7..10] codeLen — u32 LE  (4 bytes)
+    // [11..14] dataLen — u32 LE (4 bytes)
+    // code section starts at byte hdrLen (= 15)
+    // data section starts at hdrLen + codeLen
+    var hdrLen  = bytes[5] | (bytes[6] << 8);          // always 15
+    var codeLen = readU32LE(bytes, 7);
+    var dataLen = readU32LE(bytes, 11);
+
+    var dataStart = hdrLen + codeLen;
+    if (dataStart + 4 > bytes.length || dataLen < 4) return [];
+
+    var off = dataStart;
+    var funcCount = readU32LE(bytes, off); off += 4;
+    var funcs = [];
+
+    for (var i = 0; i < funcCount; i++) {
+      if (off + 4 > bytes.length) break;
+      var nameLen = readU32LE(bytes, off); off += 4;
+      if (off + nameLen > bytes.length) break;
+      var nameBytes = bytes.slice(off, off + nameLen);
+      var name = new TextDecoder('utf-8').decode(nameBytes);
+      off += nameLen;
+
+      if (off + 8 > bytes.length) break;
+      var address    = readU32LE(bytes, off); off += 4;
+      var paramCount = readU32LE(bytes, off); off += 4;
+
+      var paramAddrs = [];
+      for (var p = 0; p < paramCount; p++) {
+        if (off + 4 > bytes.length) break;
+        paramAddrs.push(readU32LE(bytes, off)); off += 4;
+      }
+      // Skip param_signs: 1 byte per param (0=unsigned, 1=signed) — must consume
+      // these bytes or the offset drifts and all subsequent functions parse garbage.
+      off += paramCount;
+
+      if (off >= bytes.length) break;
+      var hasReturn = bytes[off]; off += 1;
+
+      // New fields from extended dispatch table format:
+      if (off >= bytes.length) break;
+      var requiresCaller = bytes[off]; off += 1;
+
+      if (off + 4 > bytes.length) break;
+      var capCount = readU32LE(bytes, off); off += 4;
+
+      var caps = [];
+      for (var c = 0; c < capCount; c++) {
+        if (off + 4 > bytes.length) break;
+        var capLen = readU32LE(bytes, off); off += 4;
+        if (off + capLen > bytes.length) break;
+        var capBytes = bytes.slice(off, off + capLen);
+        var capName = new TextDecoder('utf-8').decode(capBytes);
+        caps.push(capName);
+        off += capLen;
+      }
+
+      funcs.push({
+        name: name,
+        address: address,
+        paramCount: paramCount,
+        paramAddrs: paramAddrs,
+        hasReturn: hasReturn,
+        requiresCaller: requiresCaller,
+        capabilities: caps
+      });
+    }
+    return funcs;
+  }
+
+  function parseDispatchTable(hex) {
+    var bytes = hexToBytes(hex);
+    if (bytes.length < 15) return [];
+
+    // QVM header layout (confirmed from assembler.rs build()):
+    // [0..3]  magic   — u32 LE  (4 bytes: 0x004d5651 "QVM\0")
+    // [4]     version — u8      (1 byte,  always 1)
+    // [5..6]  hdrLen  — u16 LE  (2 bytes, always 15)
+    // [7..10] codeLen — u32 LE  (4 bytes)
+    // [11..14] dataLen — u32 LE (4 bytes)
+    // code section starts at byte hdrLen (= 15)
+    // data section starts at hdrLen + codeLen
+    var hdrLen  = bytes[5] | (bytes[6] << 8);          // always 15
+    var codeLen = readU32LE(bytes, 7);
+    var dataLen = readU32LE(bytes, 11);
+
+    var dataStart = hdrLen + codeLen;
+    if (dataStart + 4 > bytes.length || dataLen < 4) return [];
+
+    var off = dataStart;
+    var funcCount = readU32LE(bytes, off); off += 4;
+    var funcs = [];
+
+    for (var i = 0; i < funcCount; i++) {
+      if (off + 4 > bytes.length) break;
+      var nameLen = readU32LE(bytes, off); off += 4;
+      if (off + nameLen > bytes.length) break;
+      var nameBytes = bytes.slice(off, off + nameLen);
+      var name = new TextDecoder('utf-8').decode(nameBytes);
+      off += nameLen;
+
+      if (off + 8 > bytes.length) break;
+      var address    = readU32LE(bytes, off); off += 4;
+      var paramCount = readU32LE(bytes, off); off += 4;
+
+      var paramAddrs = [];
+      for (var p = 0; p < paramCount; p++) {
+        if (off + 4 > bytes.length) break;
+        paramAddrs.push(readU32LE(bytes, off)); off += 4;
+      }
+      // Skip param_signs: 1 byte per param (0=unsigned, 1=signed) — must consume
+      // these bytes or the offset drifts and all subsequent functions parse garbage.
+      off += paramCount;
+
+      if (off >= bytes.length) break;
+      var hasReturn = bytes[off]; off += 1;
+
+      // New fields from extended dispatch table format:
+      if (off >= bytes.length) break;
+      var requiresCaller = bytes[off]; off += 1;
+
+      if (off + 4 > bytes.length) break;
+      var capCount = readU32LE(bytes, off); off += 4;
+
+      var caps = [];
+      for (var c = 0; c < capCount; c++) {
+        if (off + 4 > bytes.length) break;
+        var capLen = readU32LE(bytes, off); off += 4;
+        if (off + capLen > bytes.length) break;
+        var capBytes = bytes.slice(off, off + capLen);
+        var capName = new TextDecoder('utf-8').decode(capBytes);
+        caps.push(capName);
+        off += capLen;
+      }
+
+      funcs.push({
+        name: name,
+        address: address,
+        paramCount: paramCount,
+        paramAddrs: paramAddrs,
+        hasReturn: hasReturn,
+        requiresCaller: requiresCaller,
+        capabilities: caps
+      });
+    }
+    return funcs;
+  }
+
+  function removeFromWorkspace(sid) {
+    // Find the contract before filtering so we can tell the server
+    var removing = workspaceContracts.find(function(c){ return c.session_id === sid; });
+    workspaceContracts = workspaceContracts.filter(function(c){ return c.session_id !== sid; });
+
+    // If the removed contract was the active session, clear it
+    if (sessionId === sid) {
+      sessionId = null;
+      updateSessionBadge();
+      // Auto-switch to the first remaining workspace contract
+      if (workspaceContracts.length > 0) {
+        switchToContract(workspaceContracts[0].session_id);
+      }
+    }
+
+    // Tell the server to un-register this session from the workspace.
+    // This prevents stale entries from re-appearing if the workspace state
+    // is fetched again (e.g. after wallet reconnect).
+    if (workspaceId && removing) {
+      fetch(WORKSPACE_URL + '/' + workspaceId + '/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sid, contract_name: removing.name })
+      }).catch(function(e) { console.warn('[workspace] remove error:', e); });
+    }
+
+    renderWorkspacePanel();
+  }
+
+  async function resetVM() {
+    var out = document.getElementById('vmOutput');
+    out.innerHTML = '<span class="dim">Resetting all VM sessions...</span>';
+
+    // ── Reset every contract in the workspace, not just the active one ──────
+    // This ensures all contracts (e.g. SimpleToken) start with clean state
+    // so TokenVault.init() can call extern_call("SimpleToken","init") fresh.
+    var toReset = workspaceContracts.length > 0
+      ? workspaceContracts.slice()   // copy — reset all workspace members
+      : (currentBytecode ? [{ name: currentContractName, session_id: sessionId,
+                               bytecode: currentBytecode, state_vars: currentStateVars }] : []);
+
+    if (toReset.length === 0) {
+      out.innerHTML = '<span class="dim">No bytecode loaded — compile a contract first.</span>';
+      return;
+    }
+
+    var failed = [];
+    for (var ri = 0; ri < toReset.length; ri++) {
+      var c = toReset[ri];
+      // 1. Delete the old session
+      if (c.session_id) {
+        try { await fetch(SESSION_DEL_URL + c.session_id, { method: 'DELETE' }); } catch(e){}
+      }
+      // 2. Create a fresh session
+      var resetBody = { bytecode: c.bytecode, state_vars: c.stateVars || c.state_vars || [] };
+      if (c.name)      resetBody.contract_name = c.name;
+      if (workspaceId)        resetBody.workspace_id    = workspaceId;
+      if (c.fnReturnTypes)   resetBody.fn_return_types = c.fnReturnTypes;
+      try {
+        var res  = await fetch(SESSION_NEW_URL, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(resetBody)
+        });
+        var data = await res.json();
+        if (data.success) {
+          var newSid = data.session_id;
+          // 3. Re-register into workspace
+          if (workspaceId && c.name) {
+            try {
+              await fetch(WORKSPACE_URL + '/' + workspaceId + '/join', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: newSid, contract_name: c.name })
+              });
+            } catch(we) { console.warn('[resetVM] workspace re-join failed for', c.name, we); }
+          }
+          // 4. Update local state
+          var ci = workspaceContracts.findIndex(function(w){ return w.name === c.name; });
+          if (ci >= 0) workspaceContracts[ci].session_id = newSid;
+          // Update active sessionId if this contract is the active one.
+          // Match on name OR on old session_id (covers single-contract flow
+          // where c.name may be undefined or currentContractName unset).
+          if (c.name === currentContractName
+              || c.session_id === sessionId
+              || toReset.length === 1) {
+            sessionId = newSid;
+            updateSessionBadge();
+          }
+        } else {
+          failed.push(c.name + ': ' + (data.error || 'unknown'));
+        }
+      } catch(e) { failed.push(c.name + ': ' + e.message); }
+    }
+
+    renderWorkspacePanel();
+
+    if (failed.length > 0) {
+      out.innerHTML = '<span class="err">Reset partial — failed: ' + failed.join(', ') + '</span>';
+    } else {
+      var names = toReset.map(function(c){ return c.name; }).join(', ');
+      out.innerHTML = '<span class="ok">All sessions reset (' + names + '). ' + 'State cleared — the <b>init</b> pill will glow amber on each contract that needs initialising.</span>';
+    }
+
+      // Immediately zero stateSnapshot so panel shows clean VM, not stale '?'
+      stateSnapshot = {};
+      if (stateVarNames && stateVarNames.length > 0) {
+        stateVarNames.forEach(function(n) { stateSnapshot[n] = '0'; });
+      }
+      window._sessionLostHinted = false;
+      updateStateDisplay();
+      syncInitPillHint();
+
+    // Clear param inputs
+    for (var p = 0; p < (selectedFunc ? selectedFunc.paramCount : 0); p++) {
+      var el = document.getElementById('param_' + p);
+      if (el) {
+        // Reset str params to blank, numeric params to 0
+        var _isStr = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'str';
+        el.value = _isStr ? '' : '0';
+      }
+    }
+
+    // Inline state fetch after reset — guarantees sessionId is the fresh one.
+    // probeStateVars() can race if called before sessionId propagates; this avoids that.
+    if (sessionId && currentStateVars && currentStateVars.length > 0) {
+      try {
+        var _rr = await fetch(SESSION_DEL_URL + sessionId + '/state');
+        var _rd = await _rr.json();
+        if (_rd.success && _rd.state) {
+          var _names = currentStateVars.map(function(sv){ return sv[0]; });
+          stateVarNames = _names;
+          stateSnapshot = {};
+          _names.forEach(function(n) {
+            var raw = _rd.state[n];
+            stateSnapshot[n] = (raw === undefined || raw === null) ? '0' : String(raw);
+          });
+          updateStateDisplay();
+          syncInitPillHint();
+        }
+      } catch(_re) {}
+    }
+  }
+
+  function updateWalletUI() {
+    var dot   = document.getElementById('walletDot');
+    var label = document.getElementById('walletLabel');
+    var addr  = document.getElementById('walletAddress');
+    var mode  = document.getElementById('sigMode');
+    var note  = document.getElementById('sigNote');
+    var btn   = document.getElementById('walletBtn');
+    if (walletAddress) {
+      dot.classList.add('connected');
+      label.textContent = 'Connected:';
+      addr.textContent  = walletAddress.slice(0,6) + '...' + walletAddress.slice(-4);
+      mode.textContent  = 'Hybrid PQC + EVM signing';
+      mode.className    = 'wallet-mode hybrid';
+      note.textContent  = 'Signing: EVM wallet + ML-DSA-65 wrapper';
+      btn.textContent   = 'Disconnect';
+      btn.onclick       = disconnectWallet;
+      // Compute + display UMA in wallet bar
+      try {
+        walletUma = callerIdentity(walletAddress);
+        var umaRow = document.getElementById('umaRow');
+        var umaDisp = document.getElementById('umaDisplay');
+        var umaCopyBtn = document.getElementById('umaCopyBtn');
+        if (umaRow && umaDisp) {
+          umaDisp.textContent = walletUma;
+          umaRow.style.display = 'flex';
+        }
+        if (umaCopyBtn) {
+          umaCopyBtn.onclick = function() {
+            if (navigator.clipboard) {
+              navigator.clipboard.writeText(walletUma).then(function() {
+                umaCopyBtn.textContent = '✓ copied';
+                setTimeout(function(){ umaCopyBtn.textContent = 'copy'; }, 1500);
+              });
+            } else {
+              // fallback
+              var ta = document.createElement('textarea');
+              ta.value = walletUma; ta.style.position='fixed'; ta.style.opacity='0';
+              document.body.appendChild(ta); ta.select();
+              try { document.execCommand('copy'); umaCopyBtn.textContent = '✓ copied'; } catch(e){}
+              document.body.removeChild(ta);
+              setTimeout(function(){ umaCopyBtn.textContent = 'copy'; }, 1500);
+            }
+          };
+        }
+      } catch(e) { console.warn('UMA compute failed:', e); }
+      // Enable Run button now wallet is connected
+      var runBtn = document.getElementById('runBtn');
+      if (runBtn && currentBytecode) runBtn.disabled = false;
+      // Re-populate param inputs so 'My UMA' buttons appear now that wallet is live
+      if (currentBytecode && typeof populateFunctionPicker === 'function') {
+        populateFunctionPicker();
+      }
+    } else {
+      dot.classList.remove('connected');
+      label.textContent = 'No wallet connected';
+      addr.textContent  = '';
+      walletUma = null;
+      var umaRow = document.getElementById('umaRow');
+      if (umaRow) umaRow.style.display = 'none';
+      if (compilerTrust === 'compiler-attested' && compilerKeyId) {
+        mode.textContent = 'Compiler-Attested PQC';
+        mode.className   = 'wallet-mode persistent';
+        note.textContent = 'Signing: ML-DSA-65 · key_id ' + compilerKeyId;
+      } else {
+        mode.textContent = 'Ephemeral PQC signing';
+        mode.className   = 'wallet-mode ephemeral';
+        note.textContent = 'Signing: ephemeral ML-DSA-65';
+      }
+      btn.textContent   = 'Connect EVM Wallet';
+      btn.onclick       = connectWallet;
+    }
+  }
+
+  if (window.ethereum) {
+    window.ethereum.on('accountsChanged', function(accounts) {
+      walletAddress = accounts.length ? accounts[0] : null; updateWalletUI();
+    });
+  }
+
+  /* ── Ephemeral secp256k1 key (default signing path) ─────────────────────── */
+  // generateEphemeralKey() — creates a random secp256k1 keypair in the browser.
+  // The derived EVM address becomes walletAddress and `caller` in contracts.
+  // waitForNoble() — returns the noble secp256k1 module, polling up to 5s for CDN load
+  function waitForNoble() {
+    return new Promise(function(resolve, reject) {
+      var attempts = 0;
+      function check() {
+        // Self-hosted bundle sets globalThis.nobleSecp256k1 synchronously on load
+        if (typeof nobleSecp256k1 !== 'undefined' && nobleSecp256k1.utils) {
+          resolve(nobleSecp256k1); return;
+        }
+        if (++attempts > 50) {
+          reject(new Error('noble-secp256k1.js failed to load — check /demo/noble-secp256k1.js is served correctly.'));
+          return;
+        }
+        setTimeout(check, 100);
+      }
+      check();
+    });
+  }
+
+  // Persist ephemeral key in localStorage so address stays stable across page reloads.
+  // User can still cycle the key with the "Regen Devnet Key" button.
+  var EPHEMERAL_KEY_STORAGE = 'synq_devnet_ephemeral_key';
+
+  function _deriveAddress(privKey, _noble) {
+    var pubKeyUncomp = _noble.getPublicKey(privKey, false);
+    var pubKeyBody   = pubKeyUncomp.slice(1);
+    var addrBytes    = keccak256Bytes(pubKeyBody).slice(-20);
+    return '0x' + Array.from(addrBytes).map(function(b){
+      return b.toString(16).padStart(2,'0');
+    }).join('');
+  }
+
+  async function generateEphemeralKey(forceNew) {
+    var _noble;
+    try { _noble = await waitForNoble(); }
+    catch(e) { console.error('[SynQ]', e.message); return false; }
+
+    if (!forceNew) {
+      // Try to restore persisted key
+      try {
+        var stored = localStorage.getItem(EPHEMERAL_KEY_STORAGE);
+        if (stored) {
+          var privBytes = new Uint8Array(JSON.parse(stored));
+          if (privBytes.length === 32) {
+            _ephemeralPrivKey = privBytes;
+            var _addrHex = _deriveAddress(_ephemeralPrivKey, _noble);
+            _ephemeralAddress = _addrHex;
+            walletAddress     = _addrHex;
+            _walletMode = 'ephemeral';
+            console.log('[SynQ] Restored ephemeral devnet address:', walletAddress);
+            return true;
+          }
+        }
+      } catch(e) { /* ignore — generate fresh */ }
+    }
+
+    // Generate a new random key
+    _ephemeralPrivKey = _noble.utils.randomPrivateKey();
+    // Persist to localStorage
+    try { localStorage.setItem(EPHEMERAL_KEY_STORAGE, JSON.stringify(Array.from(_ephemeralPrivKey))); }
+    catch(e) { /* storage unavailable — non-fatal */ }
+    var _addrHex = _deriveAddress(_ephemeralPrivKey, _noble);
+    _ephemeralAddress = _addrHex;
+    walletAddress     = _addrHex;
+    _walletMode = 'ephemeral';
+    console.log('[SynQ] New ephemeral devnet address:', walletAddress);
+    return true;
+  }
+
+  async function regenerateKey() {
+    await generateEphemeralKey(true);  // force new — discard persisted key
+    updateWalletUI();
+    sessionId = null; workspaceId = null; workspaceContracts = [];
+    if (typeof populateFunctionPicker === 'function') populateFunctionPicker();
+  }
+  window.regenerateKey = regenerateKey;
+
+  /* ── Import Synergy device-link JSON ─────────────────────────────────────── */
+  // Sets walletAddress to the real Synergy EVM address for display.
+  // Signing still uses the ephemeral key — so the server recovers the ephemeral
+  // address. For devnet this is fine: caller = ephemeral addr is consistent.
+  // When the Synergy extension gains origin approval, connectWallet() will
+  // upgrade automatically to real signing.
+  function importDeviceLink(jsonText) {
+    try {
+      var dl = JSON.parse(jsonText);
+      if (!dl.publicProfile || !dl.publicProfile.eip155Address) {
+        showWalletError('Device link missing EVM address.'); return;
+      }
+      var evmAddr = dl.publicProfile.eip155Address;
+      var sns     = dl.publicProfile.snsName || dl.publicProfile.label || evmAddr;
+      walletAddress = evmAddr;
+      _walletMode   = 'ephemeral';
+      walletUma     = callerIdentity(evmAddr);
+      updateWalletUI();
+      var out = document.getElementById('vmOutput');
+      if (out) out.innerHTML =
+        '<span class="ok">Identity imported: ' + sns + ' (' + evmAddr.slice(0,8) + '…)<br>' +
+        '<span style="color:rgba(255,200,80,0.9)">⚠ Display identity set. ' +
+        'Contract <code>caller</code> will be the ephemeral signing key until the Synergy extension is approved for this origin.</span></span>';
+      setStatus('Device link imported — ' + sns, 'ok');
+    } catch(e) { showWalletError('Device link parse error: ' + e.message); }
+  }
+  window.importDeviceLink = importDeviceLink;
+
+  /* ── EIP-712 ephemeral signer ─────────────────────────────────────────────── */
+  async function signEIP712Ephemeral(typedDataJson) {
+    // Await noble CDN + auto-generate key if not yet ready
+    if (!_ephemeralPrivKey) {
+      var _ok = await generateEphemeralKey();
+      if (!_ok) throw new Error('@noble/secp256k1 CDN failed to load — reload the page.');
+      updateWalletUI();
+    }
+    var _noble = await waitForNoble();
+    if (!_ephemeralPrivKey) throw new Error('Ephemeral key not initialised');
+    var td = (typeof typedDataJson === 'string') ? JSON.parse(typedDataJson) : typedDataJson;
+    function encodeType(typeName, types) {
+      var deps = [];
+      function collect(t) {
+        (types[t]||[]).forEach(function(f){
+          if (types[f.type] && !deps.includes(f.type)){ deps.push(f.type); collect(f.type); }
+        });
+      }
+      collect(typeName);
+      return typeName+'('+(types[typeName]||[]).map(function(f){return f.type+' '+f.name;}).join(',')+')'
+        + deps.sort().map(function(d){return d+'('+(types[d]||[]).map(function(f){return f.type+' '+f.name;}).join(',')+')'}).join('');
+    }
+    function typeHash(n,t){ return keccak256Bytes(new TextEncoder().encode(encodeType(n,t))); }
+    function encodePrimitive(type,value){
+      var buf=new Uint8Array(32);
+      if(type==='address'){var h=value.toLowerCase().replace(/^0x/,'').padStart(40,'0');for(var i=0;i<20;i++)buf[12+i]=parseInt(h.substr(i*2,2),16);}
+      else if(type==='bytes32'){var hx=(typeof value==='string'?value:'0x').replace(/^0x/,'').padEnd(64,'0');for(var i=0;i<32;i++)buf[i]=parseInt(hx.substr(i*2,2),16);}
+      else if(type==='uint256'){var n=BigInt(value);var hx2=n.toString(16).padStart(64,'0');for(var i=0;i<32;i++)buf[i]=parseInt(hx2.substr(i*2,2),16);}
+      else if(type==='string'||type==='bytes'){return keccak256Bytes(new TextEncoder().encode(value));}
+      else if(type==='bool'){buf[31]=value?1:0;}
+      return buf;
+    }
+    function hashStruct(typeName,value,types){
+      var th=typeHash(typeName,types);var parts=[th];
+      (types[typeName]||[]).forEach(function(f){
+        parts.push(types[f.type]?hashStruct(f.type,value[f.name],types):encodePrimitive(f.type,value[f.name]));
+      });
+      var combined=new Uint8Array(parts.reduce(function(s,p){return s+p.length;},0));
+      var off=0;parts.forEach(function(p){combined.set(p,off);off+=p.length;});
+      return keccak256Bytes(combined);
+    }
+    var domainHash=hashStruct('EIP712Domain',td.domain,td.types);
+    var messageHash=hashStruct(td.primaryType,td.message,td.types);
+    var digest=new Uint8Array(66);digest[0]=0x19;digest[1]=0x01;
+    digest.set(domainHash,2);digest.set(messageHash,34);
+    var digestHash=keccak256Bytes(digest);
+    var sig=await _noble.sign(digestHash,_ephemeralPrivKey,{lowS:true});
+    var r=sig.r.toString(16).padStart(64,'0');
+    var s=sig.s.toString(16).padStart(64,'0');
+    var v=(sig.recovery+27).toString(16).padStart(2,'0');
+    return '0x'+r+s+v;
+  }
+
+  /* ── Master signing dispatcher ────────────────────────────────────────────── */
+  async function getSignature(typedData) {
+    if (_walletMode === 'synergy' && window.ethereum) {
+      var json = typeof typedData === 'string' ? typedData : JSON.stringify(typedData);
+      return await window.ethereum.request({ method: 'eth_signTypedData_v4', params: [walletAddress, json] });
+    }
+    return await signEIP712Ephemeral(typedData);
+  }
+
+  async function connectWallet() {
+    // Try Synergy extension first; fall back to ephemeral if not available/approved
+    var provider = window.ethereum;
+    var hasSynergy = provider && window.synergy && window.synergy.isSynergyWallet;
+    if (hasSynergy) {
+      try {
+        var accounts = await provider.request({ method: 'eth_requestAccounts' });
+        if (accounts && accounts.length) {
+          walletAddress = accounts[0]; _walletMode = 'synergy';
+          updateWalletUI(); attachEthereumListeners(); return;
+        }
+      } catch(e) {
+        if (e.code === 4001) {
+          showWalletError('Connection rejected — approve in Synergy Wallet.');
+          return;
+        }
+        // Extension not approved for this origin — fall through to ephemeral
+        console.warn('[SynQ] Synergy Wallet not available, using ephemeral key:', e.message);
+      }
+    }
+    // Ephemeral fallback — generate a fresh in-browser devnet identity
+    var ok = await generateEphemeralKey();
+    if (ok) { updateWalletUI(); }
+    else { showWalletError('Could not initialise signing — reload and try again.'); }
+  }
+  // Expose early so onclick attributes can call it before the IIFE bottom runs
+  window.connectWallet = connectWallet;
+
+  function showWalletError(msg) {
+    var out = document.getElementById('vmOutput');
+    if (out) out.innerHTML = '<span class="err">' + msg + '</span>';
+    setStatus(msg, 'error');
+  }
+
+  function attachEthereumListeners() {
+    if (attachEthereumListeners._done) return;
+    attachEthereumListeners._done = true;
+    if (!window.ethereum || !window.ethereum.on) return;
+    window.ethereum.on('accountsChanged', function(accs) {
+      if (!accs || accs.length === 0) {
+        walletAddress = null; _walletMode = 'none';
+        document.querySelectorAll('[data-uma-btn]').forEach(function(b){ b.style.display='none'; });
+        updateWalletUI();
+        document.getElementById('attestPanel').classList.remove('show');
+        var out = document.getElementById('vmOutput');
+        if (out) out.innerHTML = '<span class="err">Synergy Wallet disconnected — reconnect to authenticate calls.</span>';
+      } else { walletAddress = accs[0]; updateWalletUI(); }
+    });
+  }
+
+  /* ── Auto-init: ephemeral key on load; restore Synergy if available ────── */
+  (function autoInitKey() {
+    // Try silent Synergy restore (no popup — only returns if already approved)
+    if (window.ethereum && window.synergy && window.synergy.isSynergyWallet) {
+      window.ethereum.request({ method: 'eth_accounts' }).then(function(accs) {
+        if (accs && accs.length) {
+          walletAddress = accs[0]; _walletMode = 'synergy';
+          updateWalletUI(); attachEthereumListeners(); return;
+        }
+        generateEphemeralKey().then(function(ok){ if (ok) updateWalletUI(); });
+      }).catch(function() {
+        generateEphemeralKey().then(function(ok){ if (ok) updateWalletUI(); });
+      });
+    } else {
+      generateEphemeralKey().then(function(ok){ if (ok) updateWalletUI(); });
+    }
+  })();
+
+  function disconnectWallet() {
+    walletAddress = null; _walletMode = 'none'; updateWalletUI();
+    document.getElementById('attestPanel').classList.remove('show');
+  }
+  window.disconnectWallet = disconnectWallet;
+
+  function regenerateKey() { /* no-op */ }
+
+  // Auto-restore already-approved connection (no user prompt)
+  // (stale autoInitKey removed — ephemeral-first autoInitKey above handles this)
+
+  
+  function updateWalletUI() {
+    var dot   = document.getElementById('walletDot');
+    var label = document.getElementById('walletLabel');
+    var addr  = document.getElementById('walletAddress');
+    var mode  = document.getElementById('sigMode');
+    var note  = document.getElementById('sigNote');
+    var btn   = document.getElementById('walletBtn');
+    if (!dot || !btn) return;
+    if (walletAddress) {
+      dot.classList.add('connected');
+      label.textContent = 'Connected:';
+      addr.textContent  = walletAddress.slice(0,6) + '...' + walletAddress.slice(-4);
+      var _isSyn = (_walletMode === 'synergy');
+      mode.textContent  = _walletMode === 'synergy' ? 'Synergy Wallet' : 'Ephemeral Devnet Key';
+      mode.className    = 'wallet-mode hybrid';
+      note.textContent  = _isSyn
+        ? 'Signing: Synergy Wallet · EIP-712 · ' + walletAddress.slice(0,8) + '…'
+        : 'Signing: EIP-712';
+      btn.textContent   = 'Disconnect Synergy';
+      btn.onclick       = disconnectWallet;
+      // UMA display
+      try {
+        walletUma = callerIdentity(walletAddress);
+        var umaRow = document.getElementById('umaRow');
+        var umaDisp = document.getElementById('umaDisplay');
+        var umaCopyBtn = document.getElementById('umaCopyBtn');
+        if (umaRow && umaDisp) { umaDisp.textContent = walletUma; umaRow.style.display = 'flex'; }
+        if (umaCopyBtn) {
+          umaCopyBtn.onclick = function() {
+            if (navigator.clipboard) {
+              navigator.clipboard.writeText(walletUma).then(function() {
+                umaCopyBtn.textContent = '✓ copied';
+                setTimeout(function(){ umaCopyBtn.textContent = 'copy'; }, 1500);
+              });
+            }
+          };
+        }
+      } catch(e) { console.warn('UMA compute failed:', e); }
+      var runBtn = document.getElementById('runBtn');
+      if (runBtn && currentBytecode) runBtn.disabled = false;
+      if (currentBytecode && typeof populateFunctionPicker === 'function') populateFunctionPicker();
+    } else {
+      dot.classList.remove('connected');
+      label.textContent = 'No wallet connected';
+      addr.textContent  = '';
+      walletUma = null;
+      var umaRow = document.getElementById('umaRow');
+      if (umaRow) umaRow.style.display = 'none';
+      if (compilerTrust === 'compiler-attested' && compilerKeyId) {
+        mode.textContent = 'Compiler-Attested PQC';
+        mode.className   = 'wallet-mode persistent';
+        note.textContent = 'Signing: ML-DSA-65 · key_id ' + compilerKeyId;
+      } else {
+        mode.textContent = 'PQC signing';
+        mode.className   = 'wallet-mode ephemeral';
+        note.textContent = 'Signing: ML-DSA-65 (compiler-attested)';
+      }
+      btn.textContent   = (window.synergy && window.synergy.isSynergyWallet) ? 'Connect Synergy Wallet' : 'Regen Devnet Key';
+      btn.onclick       = connectWallet;
+    }
+  }
+
+/* ── Editor ──────────────────────────────────────────────────────────────── */
+  function updateLineNums() {
+    var lines = document.getElementById('editor').value.split('\n').length;
+    var nums = []; for (var i = 1; i <= lines; i++) nums.push(i);
+    document.getElementById('lineNums').textContent = nums.join('\n');
+  }
+
+  // Evict a named contract from the workspace (fires-and-forgets server call).
+  // Called before template load so the next Deploy always starts fresh.
+  function evictWorkspaceContractByName(name) {
+    var entry = workspaceContracts.find(function(c){ return c.name === name; });
+    if (!entry) return;
+    workspaceContracts = workspaceContracts.filter(function(c){ return c.name !== name; });
+    fetch(SESSION_DEL_URL + entry.session_id, { method: 'DELETE' }).catch(function(){});
+    if (workspaceId) {
+      fetch(WORKSPACE_URL + '/' + workspaceId + '/remove', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: entry.session_id, contract_name: name })
+      }).catch(function(){});
+    }
+    renderWorkspacePanel();
+  }
+
+  function clearResults() {
+    var wb = document.getElementById('wasmBadge'); if (wb) wb.style.display = 'none';
+    var _db = document.getElementById('deployBtn'); if (_db) { _db.style.visibility = 'hidden'; _db.style.pointerEvents = 'none'; }
+    if (sessionId) {
+      // Only delete server session if it is NOT registered in the workspace.
+      // Workspace contracts must survive template switches — they are only
+      // evicted explicitly via evictWorkspaceContractByName() on template load.
+      var _inWs = workspaceContracts.some(function(c){ return c.session_id === sessionId; });
+      if (!_inWs) fetch(SESSION_DEL_URL + sessionId, { method: 'DELETE' }).catch(function(){});
+      sessionId = null;
+    }
+    currentBytecode = null; currentSidecar = null; currentContractName = null; currentContractAddress = null;
+    (function() {
+      var mode = document.getElementById('sigMode');
+      var note = document.getElementById('sigNote');
+      if (!mode || !note || walletAddress) return;
+      if (compilerTrust === 'compiler-attested' && compilerKeyId) {
+        mode.textContent = 'Compiler-Attested PQC';
+        mode.className   = 'wallet-mode persistent';
+        note.textContent = 'Signing: ML-DSA-65 · key_id ' + compilerKeyId;
+      } else {
+        mode.textContent = 'Ephemeral PQC signing';
+        mode.className   = 'wallet-mode ephemeral';
+        note.textContent = 'Signing: ephemeral ML-DSA-65';
+      }
+    })();
+    parsedFunctions = []; selectedFunc = null;
+    stateVarNames = []; stateSnapshot = {}; currentStateVars = []; currentStateVarTypes = {}; currentFnReturnTypes = {};
+    var sp = document.getElementById('statePanel');
+    if (sp) sp.style.display = 'none';
+    document.getElementById('resultsSection').classList.remove('show');
+    document.getElementById('statusBar').classList.remove('show');
+    document.getElementById('attestPanel').classList.remove('show');
+    var _vc = document.getElementById('vmCard'); _vc.classList.remove('show'); _vc.style.display = '';
+    document.getElementById('funcPills').innerHTML = '';
+    var _dh = document.getElementById('depsHint'); if (_dh) { _dh.style.visibility = 'hidden'; _dh.textContent = '\u00a0'; }
+    document.getElementById('paramsSection').style.display = 'none';
+    document.getElementById('paramsGrid').innerHTML = '';
+    document.getElementById('runBtn').disabled = true;
+    document.getElementById('vmOutput').innerHTML = '<span class="dim">Select a function and press Run.</span>';
+  }
+
+  function setStatus(msg, type) {
+    var bar = document.getElementById('statusBar');
+    bar.textContent = msg; bar.className = 'status-bar show ' + type;
+  }
+
+  function loadDemo() {
+    evictWorkspaceContractByName('SimpleToken');
+    document.getElementById('editor').value = DEMO_LINES.join('\n');
+    updateLineNums(); clearResults(); syncCompileBtn();
+    setStatus('Step 2 of 2 — Compile SimpleToken, then Deploy into the same workspace.', 'info');
+  }
+
+  function loadBlank() {
+    document.getElementById('editor').value = BLANK_LINES.join('\n');
+    updateLineNums(); clearResults(); syncCompileBtn();
+    setStatus('Blank template loaded — edit the contract name and functions, then Compile and Deploy.', 'info');
+  }
+
+  function loadFromFile(input) {
+    var file = input.files[0];
+    if (!file) return;
+    // Reset the input so the same file can be re-selected after edits
+    input.value = '';
+    var ext = file.name.split('.').pop().toLowerCase();
+    if (ext !== 'synq' && ext !== 'txt') {
+      setStatus('Unsupported file type — please select a .synq or .txt file.', 'error');
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      var src = e.target.result;
+      if (!src || !src.trim()) {
+        setStatus('File is empty.', 'error');
+        return;
+      }
+      document.getElementById('editor').value = src;
+      updateLineNums();
+      clearResults();
+      syncCompileBtn();
+      // Extract contract name from source for a friendly status message
+      var match = src.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
+      var name  = match ? match[1] : file.name;
+      setStatus('Loaded “' + name + '” from ' + file.name + ' — review, then Compile and Deploy.', 'info');
+    };
+    reader.onerror = function() {
+      setStatus('Could not read file: ' + file.name, 'error');
+    };
+    reader.readAsText(file);
+  }
+  function saveToFile() {
+    var src = (typeof getCode === 'function' ? getCode() : null)
+              || document.getElementById('editor').value || '';
+    if (!src.trim()) {
+      setStatus('Nothing to save — editor is empty.', 'error');
+      return;
+    }
+    // Derive filename from contract name in source
+    var match = src.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
+    var name  = (match ? match[1] : (currentContractName || 'contract'));
+    var filename = name + '.synq';
+    var blob = new Blob([src], { type: 'text/plain' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function() {
+      URL.revokeObjectURL(a.href);
+      document.body.removeChild(a);
+    }, 1000);
+    setStatus('Saved ' + filename + ' (' + src.length + ' chars).', 'info');
+  }
+  window.saveToFile = saveToFile;
+
+
+  function loadVault() {
+    evictWorkspaceContractByName('TokenVault');
+    document.getElementById('editor').value = VAULT_LINES.join('\n');
+    updateLineNums(); clearResults(); syncCompileBtn();
+    setStatus('Step 1 of 2 — Compile TokenVault, then Deploy. Then load SimpleToken for step 2.', 'info');
+  }
+  function loadComprehensive() {
+    if (typeof clearState === 'function') clearState();
+    document.getElementById('editor').value = CT_LINES.join('\n');
+    if (typeof initEditor === 'function') initEditor();
+    updateLineNums();
+    clearResults();
+    syncCompileBtn();
+    setStatus('ComprehensiveToken loaded — connect wallet, Compile, Deploy, then call init() (signs with your raw EVM address as caller identity)', 'info');
+  }
+
+
+  /* ── Compile ─────────────────────────────────────────────────────────────── */
+  async function doCompile() {
+    var source = document.getElementById('editor').value.trim();
+    if (!source) { setStatus('No source code to compile.', 'error'); return; }
+    var btn = document.getElementById('compileBtn');
+    var _previewSrc = (typeof getCode === 'function' ? getCode() : null)
+                   || document.getElementById('editor').value || '';
+    var _previewName = (_previewSrc.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/) || [])[1] || '';
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Compiling' + (_previewName ? ' ' + _previewName : '') + '...';
+    clearResults();
+
+    try {
+      var data = null;
+
+      // ── Try WASM in-browser compile first ─────────────────────────────────
+      if (window.SynQWasm) {
+        try {
+          setStatus('Compiling in-browser (WASM)...', 'info');
+          await window.SynQWasm.ready;
+          data = await window.SynQWasm.compile(source);
+          if (data && data.success) {
+            // WASM doesn't return sidecar — null it out
+            data.signature_sidecar = null;
+            // Derive contract_name + address client-side
+            if (!data.contract_name) {
+              var _cm = source.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
+              if (_cm) {
+                data.contract_name = _cm[1];
+                var _key  = 'SynQ:' + _cm[1];
+                var _hash = window.keccak_256(_key);
+                data.contract_address = '0x' + _hash.slice(24);
+              }
+            }
+            // ── Security: cross-check WASM extern_contracts with server AST ────
+            // Send wasm_extern_contracts to the server so it can independently
+            // derive the same list from the source AST and compare. A mismatch
+            // means the WASM output was patched in-memory (memory poke, extension
+            // hook) before reaching the deploy flow. We treat it as fatal.
+            try {
+              var _xchk = await fetch(COMPILE_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  source: source,
+                  wasm_extern_contracts: data.extern_contracts || []
+                })
+              });
+              var _xdat = await _xchk.json();
+              if (!_xdat.success && _xdat.errors && _xdat.errors[0] && _xdat.errors[0].startsWith('Tamper')) {
+                console.error('[SynQ security] extern_contracts tamper detected:', _xdat.errors[0]);
+                setStatus('\u26a0 Security: WASM compile output was tampered with. Bytecode rejected.', 'error');
+                data = null; btn.disabled = false; syncCompileBtn(); return;
+              }
+              // Use server bytecode as the authoritative deploy payload.
+              // This ensures the deployed bytecode is always the server-compiled
+              // version, regardless of WASM build age or browser module cache.
+              if (_xdat.success && _xdat.bytecode) {
+                data.bytecode = _xdat.bytecode;
+              }
+              // Also pick up the PQC sidecar from the server response
+              if (_xdat.success && _xdat.signature_sidecar) {
+                data.signature_sidecar = _xdat.signature_sidecar;
+              }
+              // Server is authoritative for metadata too — always prefer its
+              // state_var_types, state_vars, and functions over WASM output.
+              if (_xdat.success) {
+                if (_xdat.state_var_types && Object.keys(_xdat.state_var_types).length > 0)
+                  data.state_var_types = _xdat.state_var_types;
+                if (_xdat.state_vars && _xdat.state_vars.length > 0)
+                  data.state_vars = _xdat.state_vars;
+                if (_xdat.functions && _xdat.functions.length > 0)
+                  data.functions = _xdat.functions;
+              }
+            } catch(_xErr) {
+              console.warn('[SynQ] extern_contracts cross-check unavailable (offline?):', _xErr);
+            }
+            var wb = document.getElementById('wasmBadge');
+            if (wb) wb.style.display = 'inline-flex';
+            // G3: show PQC simulation badge if any PQC builtins are in use
+            var pqcBadge = document.getElementById('pqcSimBadge');
+            if (pqcBadge) {
+              var hasPQCWarn = (data.warnings || []).some(function(w) {
+                return w.indexOf('PQC builtin') !== -1;
+              });
+              pqcBadge.style.display = hasPQCWarn ? 'inline-flex' : 'none';
+            }
+          } else {
+            data = null; // fall through to server
+          }
+        } catch(wasmErr) {
+          console.warn('[SynQ] WASM compile failed, falling back to server:', wasmErr);
+          data = null;
+        }
+      }
+
+      // ── Server-side compile fallback ───────────────────────────────────────
+      if (!data) {
+        setStatus('Compiling...', 'info');
+        var res  = await fetch(COMPILE_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: source, wasm_extern_contracts: null }) });
+        data = await res.json();
+        var wb2 = document.getElementById('wasmBadge');
+        if (wb2) wb2.style.display = 'none';
+        var pqcB2 = document.getElementById('pqcSimBadge');
+        if (pqcB2) pqcB2.style.display = 'none';
+      }
+
+      // ── Handle compile failure ─────────────────────────────────────────────
+      if (!data.success) {
+        var errs = data.errors || ['Compilation failed'];
+        setStatus('Error: ' + errs[0], 'error');
+        return;
+      }
+
+      // ── Compile success — store state ──────────────────────────────────────
+      currentBytecode        = data.bytecode;
+      currentSidecar         = data.signature_sidecar || null;
+      currentStateVars       = data.state_vars        || [];
+      currentStateVarTypes    = data.state_var_types   || {};
+      currentFnReturnTypes    = (data.functions || []).reduce(function(m,f){ if(f.return_type) m[f.name]=f.return_type; return m; }, {});
+      currentContractName    = data.contract_name     || null;
+      currentExternContracts = data.extern_contracts  || [];
+      currentContractAddress = data.contract_address  || null;
+      compileFunctions       = data.functions         || [];
+      // WASM path now returns state_var_types too — merge it in
+      if (data.state_var_types && Object.keys(data.state_var_types).length > 0) {
+        currentStateVarTypes = data.state_var_types;
+      }
+      stateVarNames = currentStateVars.map(function(sv) { return sv[0]; });
+      stateSnapshot = {};
+
+
+      // ── Update signing badge ───────────────────────────────────────────────
+      (function() {
+        var mode = document.getElementById('sigMode');
+        var note = document.getElementById('sigNote');
+        if (!mode || !note) return;
+        var sc = currentSidecar || {};
+        if (walletAddress) return;
+        if (!currentSidecar) {
+          mode.textContent = 'In-Browser WASM';
+          mode.className   = 'wallet-mode wasm';
+          note.textContent = 'Compiled locally · PQC sidecar attached on deploy';
+          return;
+        }
+        if (sc.mode === 'persistent') {
+          mode.textContent = 'Compiler-Attested PQC';
+          mode.className   = 'wallet-mode persistent';
+          note.textContent = 'Signing: ML-DSA-65 · key_id ' + (sc.key_id || '—');
+        } else {
+          mode.textContent = 'Ephemeral PQC signing';
+          mode.className   = 'wallet-mode ephemeral';
+          note.textContent = 'Signing: ephemeral ML-DSA-65';
+        }
+      })();
+
+      // ── Render bytecode display ────────────────────────────────────────────
+      document.getElementById('bytecodeDisplay').textContent = formatBytecode(data.bytecode);
+      var hexRaw = data.bytecode.startsWith('0x') ? data.bytecode.slice(2) : data.bytecode;
+      document.getElementById('hashBadge').textContent = (hexRaw.length/2) + ' bytes  0x' + hexRaw.slice(0,8) + '...';
+      document.getElementById('resultsSection').classList.add('show');
+
+      // ── Rev-2 Source Signing (if wallet connected) ───────────────────────
+      // SourceCommit EIP-712:
+      //   domain  : { name:'SynQ', version:'1', chainId:1337,
+      //               verifyingContract: keccak256(contractName)[0..20] }
+      //   struct  : SourceCommit { string sourceHash, string contractName, string nonce }
+      //   The server verifies the KMAC128 nonce, ecrecovers the author, compiles,
+      //   and returns the same compile result + source_commit sidecar in one call.
+      if (walletAddress) {
+        setStatus('Compiled OK — requesting wallet source signature (Rev-2)...', 'info');
+        btn.innerHTML = '<span class="spinner"></span> Waiting for wallet...';
+        try {
+          // 1. Source hash: keccak256 of the UTF-8 source text
+          var sourceHashHex = window.keccak_256(source); // 64-char hex, no 0x
+          var sourceHashWith0x = '0x' + sourceHashHex;
+
+          // 2. Fetch KMAC128 nonce from server (bound to this exact source hash)
+          setStatus('Fetching source nonce...', 'info');
+          var nonceRes = await fetch(SOURCE_NONCE_URL, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source_hash: sourceHashHex })
+          });
+          var nonceData = await nonceRes.json();
+          if (!nonceData.nonce || nonceData.nonce.length !== 64) {
+            setStatus('Source nonce request failed — compile aborted', 'error');
+            return;
+          }
+          var sourceNonce = nonceData.nonce;
+
+          // 3. EIP-712 SourceCommit typed data
+          //    verifyingContract = keccak256(contractName)[0..20]
+          // verifyingContract = keccak256('SynQ:'+contractName)[12..] — matches server derivation
+          var _cnForDomain = currentContractName || 'unknown';
+          var _vcBytes = window.keccak_256('SynQ:' + _cnForDomain); // 64-char hex
+          var vcHex = '0x' + _vcBytes.slice(24); // last 20 bytes = [12..]
+          var typedData = JSON.stringify({
+            types: {
+              EIP712Domain: [
+                { name: 'name',              type: 'string'  },
+                { name: 'version',           type: 'string'  },
+                { name: 'chainId',           type: 'uint256' },
+                { name: 'verifyingContract', type: 'address' }
+              ],
+              SourceCommit: [
+                { name: 'sourceHash',    type: 'string' },
+                { name: 'contractName', type: 'string' },
+                { name: 'nonce',        type: 'string' }
+              ]
+            },
+            primaryType: 'SourceCommit',
+            domain: {
+              name:              'SynQ · ' + (currentContractName || 'unknown'),
+              version:           '1',
+              chainId:           1337,
+              verifyingContract: vcHex
+            },
+            message: {
+              sourceHash:   sourceHashWith0x,
+              contractName: currentContractName || 'unknown',
+              nonce:        sourceNonce
+            }
+          });
+
+          // 4. Sign — ephemeral key or Synergy Wallet via getSignature dispatcher
+          setStatus('Signing source commit...', 'info');
+          var evmSig;
+          setStatus('Signing with ' + (_walletMode === 'synergy' ? 'Synergy Wallet' : 'ephemeral devnet key') + '...', 'info');
+          evmSig = await getSignature(typedData);
+
+          // 5. POST /compile/sign-source — server re-compiles + binds author → source → bytecode
+          setStatus('Source signed — generating PQC SourceCommit...', 'info');
+          var scRes = await fetch(SIGN_SOURCE_URL, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              source:        source,
+              evm_address:   (_walletMode === 'ephemeral' && _ephemeralAddress) ? _ephemeralAddress : walletAddress,
+              evm_signature: evmSig,
+              nonce:         sourceNonce,
+              wasm_extern_contracts: data.extern_contracts || []
+            })
+          });
+          var scData = await scRes.json();
+
+          if (scData.success) {
+            // Merge source_commit sidecar into existing compile result
+            currentSidecar = scData.signature_sidecar || currentSidecar;
+            // Render attestation panel with source_commit badge
+            var sc = (currentSidecar || {}).source_commit || {};
+            renderAttestPanel(currentSidecar, evmSig);
+            // Show source commit badge
+            var scBadge = document.getElementById('sourceCommitBadge');
+            if (scBadge) {
+              scBadge.style.display = 'inline-flex';
+              scBadge.title = 'SourceCommitV2 · author ' + (sc.author || '') + ' · ' + new Date((sc.issued_at || 0) * 1000).toISOString();
+            }
+            setStatus('Compiled ▶ ' + (currentContractName || 'contract') + ' — SourceCommit signed (KMAC128 · ML-DSA-65 PQC)', 'success');
+          } else {
+            var scErr = (scData.errors || ['Source signing failed'])[0];
+            // Non-fatal: we still have the compile result from WASM/server step
+            renderAttestPanel(currentSidecar);
+            setStatus('Compiled OK · source signing error: ' + scErr, 'warning');
+            console.warn('[SynQ Rev-2] sign-source error:', scErr);
+          }
+
+        } catch (we) {
+          if (we.code === 4001 || we.code === 'ACTION_REJECTED') {
+            setStatus('Compiled ▶ ' + (currentContractName || 'contract') + ' (wallet signature declined)', 'success');
+          } else if (we.code === 4902 || we.code === -32603 ||
+                     (we.message && we.message.toLowerCase().includes('chain'))) {
+            setStatus('Wallet error: domain chain mismatch — SynQ uses chainId 1337. Try again.', 'error');
+          } else {
+            setStatus('Source signing error: ' + (we.message || we.toString()), 'error');
+          }
+        }
+      } else {
+        renderAttestPanel(currentSidecar);
+        setStatus('Compiled ▶ ' + (currentContractName || 'contract'), 'success');
+      }
+
+      // ── Ensure workspace exists before user clicks Deploy ─────────────────
+      if (!workspaceId) {
+        try {
+          var _wres = await fetch(WORKSPACE_URL + '/new', { method: 'POST' });
+          var _wdat = await _wres.json();
+          if (_wdat.success) { workspaceId = _wdat.workspace_id; renderWorkspacePanel(); }
+        } catch(_we) { console.warn('[workspace] pre-create failed:', _we); }
+      }
+
+      // ── Show Deploy button ─────────────────────────────────────────────────
+      var db = document.getElementById('deployBtn');
+      if (db) {
+        db.textContent = 'Deploy ▶ ' + (currentContractName || 'Contract');
+        db.style.visibility = 'visible';
+        db.style.pointerEvents = 'auto';
+        db.removeAttribute('disabled');
+        db.style.opacity = '1';
+      }
+      // Dependency hint — contextual message based on what still needs deploying.
+      // Uses visibility (not display) so the badge row height stays constant.
+      (function updateDepsHint(ec) {
+        var dh = document.getElementById('depsHint'); if (!dh) return;
+        if (!ec || !ec.length) { dh.style.visibility = 'hidden'; dh.textContent = '\u00a0'; return; }
+        var deployed = workspaceContracts.map(function(c){ return c.name; });
+        var missing  = ec.filter(function(n){ return !deployed.includes(n); });
+        var wsLabel  = workspaceNum > 0 ? 'Workspace ' + workspaceNum : 'the workspace';
+        if (missing.length > 0) {
+          // Suppress until first contract deployed — no workspace context yet
+          if (workspaceContracts.length === 0) {
+            dh.style.visibility = 'hidden'; dh.textContent = '\u00a0'; return;
+          }
+          dh.style.visibility = 'visible';
+          dh.textContent = '↳ ' + missing.join(', ') + ' required — load, compile and deploy into ' + wsLabel;
+          dh.style.color = 'rgba(255,180,0,0.9)';
+        } else {
+          dh.style.visibility = 'visible';
+          dh.textContent = '↳ ' + ec.join(', ') + ' compiled and deployed in ' + wsLabel + ' ✓';
+          dh.style.color = 'rgba(0,206,209,0.75)';
+        }
+      })(data.extern_contracts || []);
+
+    } catch (err) {
+      setStatus('Compiler unreachable: ' + err.message, 'error');
+      console.error('[SynQ doCompile] error:', err);
+    } finally {
+      btn.disabled = false;
+      syncCompileBtn();
+    }
+  }
+
+  /* ── Attest panel ────────────────────────────────────────────────────────── */
+  function renderAttestPanel(sidecar, evmSigOverride) {
+    if (!sidecar) return;
+
+    var pqc       = sidecar.pqc || {};
+    var evmAddr   = sidecar.evm_address || null;
+    var evmSigRaw = evmSigOverride || null;
+    var isHybrid  = !!(evmAddr);
+
+    function hexUp(s) { return s ? s.toLowerCase() : s; }
+    function trunc(s, n) { return s ? (s.slice(0, n) + (s.length > n ? '…' : '')) : '—'; }
+
+    var modeLabel = isHybrid ? 'Hybrid (EVM + ML-DSA-65)' : 'Compiler-Attested PQC (ML-DSA-65)';
+    var kid       = hexUp(pqc.key_id    || sidecar.key_id    || compilerKeyId || '') || '—';
+    var algo      = pqc.algorithm || sidecar.algorithm || 'ML-DSA-65';
+    var rawPqcSig = pqc.signature || sidecar.signature || '';
+    var pqcSig    = rawPqcSig ? hexUp(rawPqcSig).slice(0, 8) + '…' : '—';
+
+    // Bytecode hash
+    var hashTxt = '';
+    if (sidecar.bytecode_hash) {
+      hashTxt = hexUp(sidecar.bytecode_hash).slice(0, 14) + '…';
+    } else if (currentBytecode) {
+      try {
+        var hashHex = keccak_256(hexToBytes(currentBytecode));
+        hashTxt = '0x' + hexUp(hashHex).slice(0, 12) + '…';
+      } catch(e) { hashTxt = '—'; }
+    }
+
+    var evmAddrTxt, evmSigTxt, evmAddrCls, evmSigCls;
+    if (isHybrid) {
+      evmAddrTxt = hexUp(evmAddr);
+      evmSigTxt  = evmSigRaw ? hexUp(evmSigRaw).slice(0, 10) + '…' : '—';
+      evmAddrCls = 'attest-val';
+      evmSigCls  = 'attest-val';
+    } else {
+      var pubKey = pqc.public_key || sidecar.public_key || '';
+      // Show wallet address if connected, even when no hybrid sig was produced
+      if (walletAddress) {
+        evmAddrTxt = walletAddress;
+        evmAddrCls = 'attest-val';
+      } else {
+        evmAddrTxt = 'n/a — no wallet connected';
+        evmAddrCls = 'attest-val dim';
+      }
+      evmSigTxt  = pubKey ? '0x' + hexUp(pubKey).slice(0, 40) + '…' : '—';
+      evmSigCls  = 'attest-val';
+    }
+
+    // ── Build base rows ──────────────────────────────────────────────────────
+    function row(key, val, cls, titleAttr) {
+      cls = cls || 'attest-val';
+      var t = titleAttr ? ' title="' + titleAttr + '" style="cursor:help;"' : '';
+      return '<div class="attest-row"><span class="attest-key">' + key + '</span>' +
+             '<span class="' + cls + '"' + t + '>' + val + '</span></div>';
+    }
+    var rows =
+      row('Mode',          modeLabel) +
+      row('Bytecode hash', hashTxt || '\u2014') +
+      row('EVM address',   evmAddrTxt, evmAddrCls) +
+      row('EVM sig',       evmSigTxt,  evmSigCls) +
+      row('PQC algorithm', algo,    'attest-val pqc') +
+      row('PQC\u202fkey\u202fID', hexUp(kid), 'attest-val pqc') +
+      row('PQC sig',       pqcSig,  'attest-val pqc');
+
+    // ── SourceCommit Rev-2 section ────────────────────────────────────────────
+    // Shows which developer (EVM address) signed exactly which source text and
+    // produced which bytecode, bound by a KMAC128 nonce and ML-DSA-65.
+    //
+    // Shoulder-surfing note: the "remove from view" button wipes this section
+    // from the DOM.  The full data remains in currentSidecar and is included
+    // verbatim when the user downloads contract.sig.json.
+    var sc = sidecar.source_commit || null;
+    if (sc) {
+      var scAuthor   = hexUp(sc.author       || '') || '\u2014';
+      var scSrcHash  = hexUp(sc.source_hash  || '') || '\u2014';
+      var scBcHash   = hexUp(sc.bytecode_hash|| '') || '\u2014';
+      var scCname    = sc.contract_name || '\u2014';
+      var scNonce    = hexUp(sc.nonce    || '') || '\u2014';
+      var scIssuedAt = sc.issued_at
+        ? new Date(sc.issued_at * 1000).toISOString().replace('T',' ').slice(0,19) + '\u202fUTC'
+        : '\u2014';
+      var scTrust  = sc.trust_model   || '\u2014';
+      var scKeyId  = hexUp(sc.key_id  || '') || '\u2014';
+      var scSpec   = sc.signing_spec  || 'SourceCommitV2';
+      var scAlgo   = sc.pqc_algorithm || 'ML-DSA-65';
+
+      rows +=
+        '<div id="scSection" style="margin-top:10px;padding-top:10px;' +
+          'border-top:1px solid rgba(255,255,255,0.08);">' +
+
+          // ── Section header + inline dismiss button (after title) ─────────────
+          '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">' +
+            '<span style="font-size:10px;font-weight:700;letter-spacing:.7px;' +
+              'text-transform:uppercase;color:rgba(0,220,120,0.85);">' +
+              '\u2713\u2009' + scSpec + '\u2002\u2014\u2002Source Commit' +
+            '</span>' +
+            '<button ' +
+              'onclick="document.getElementById(\'scSection\').remove()" ' +
+              'title="Remove from view — data is still saved in the sidecar file" ' +
+              'style="background:none;border:1px solid rgba(255,255,255,0.15);border-radius:3px;' +
+                'color:rgba(255,255,255,0.35);cursor:pointer;font-size:9px;' +
+                'padding:1px 6px;line-height:1.5;transition:color .15s,border-color .15s;" ' +
+              'onmouseover="this.style.color=\'rgba(255,90,90,0.85)\';this.style.borderColor=\'rgba(255,90,90,0.4)\'" ' +
+              'onmouseout="this.style.color=\'rgba(255,255,255,0.35)\';this.style.borderColor=\'rgba(255,255,255,0.15)\'">' +
+              '\u00d7 hide from view' +
+            '</button>' +
+          '</div>' +
+
+          // ── Author — truncated by default, click to reveal full address ──
+          // Only the EVM address has meaningful operational-security sensitivity
+          // (wallet identity attribution). Everything else is public verifier data.
+          (function() {
+            var short = scAuthor.length >= 10
+              ? scAuthor.slice(0,6) + '…' + scAuthor.slice(-4)
+              : scAuthor;
+            var revealId = 'scAuthorReveal_' + Date.now();
+            return '<div class="attest-row">' +
+              '<span class="attest-key">Author</span>' +
+              '<span id="' + revealId + '">' +
+                // ── Masked state (default) ─────────────────────────────────
+                '<span class="sc-author-masked" ' +
+                  'onclick="' +
+                    'var el=document.getElementById(\'' + revealId + '\');' +
+                    'el.querySelector(\'.sc-author-masked\').style.display=\'none\';' +
+                    'el.querySelector(\'.sc-author-full\').style.display=\'inline\'" ' +
+                  'title="Click to reveal full address" ' +
+                  'style="cursor:pointer;">' +
+                  '<span style="font-family:monospace;font-size:11px;letter-spacing:.3px;">' + short + '</span>' +
+                  '<span style="margin-left:6px;font-size:9px;color:rgba(255,255,255,0.3);' +
+                    'border:1px solid rgba(255,255,255,0.15);border-radius:3px;' +
+                    'padding:1px 5px;vertical-align:middle;">' +
+                    'reveal ↓' +
+                  '</span>' +
+                '</span>' +
+                // ── Revealed state (hidden until clicked) ─────────────────
+                '<span class="sc-author-full" style="display:none;">' +
+                  '<span style="font-family:monospace;font-size:11px;' +
+                    'word-break:break-all;letter-spacing:.3px;">' + scAuthor + '</span>' +
+                  '<span ' +
+                    'onclick="' +
+                      'var el=document.getElementById(\'' + revealId + '\');' +
+                      'el.querySelector(\'.sc-author-full\').style.display=\'none\';' +
+                      'el.querySelector(\'.sc-author-masked\').style.display=\'inline\'" ' +
+                    'style="margin-left:6px;font-size:9px;color:rgba(255,255,255,0.3);' +
+                      'border:1px solid rgba(255,255,255,0.15);border-radius:3px;' +
+                      'padding:1px 5px;vertical-align:middle;cursor:pointer;">' +
+                    'hide ↑' +
+                  '</span>' +
+                '</span>' +
+              '</span>' +
+            '</div>';
+          })() +
+
+          // ── Source hash — truncated, full in tooltip ──────────────────────
+          row('Source\u202fhash',   trunc(scSrcHash,  20), 'attest-val', scSrcHash) +
+          row('Bytecode\u202fhash', trunc(scBcHash,   20), 'attest-val', scBcHash) +
+          row('Contract',           scCname) +
+          row('Issued',             scIssuedAt) +
+
+          // ── Nonce — KMAC128 tag, truncated, full in tooltip ───────────────
+          row('Nonce\u202f(KMAC128)', trunc(scNonce, 14), 'attest-val pqc', scNonce) +
+
+          row('Trust\u202fmodel', scTrust,  'attest-val pqc') +
+          row('PQC\u202fkey\u202fID', scKeyId !== '\u2014' ? trunc(scKeyId, 16) : '\u2014', 'attest-val pqc', scKeyId) +
+          row('PQC\u202falgorithm', scAlgo, 'attest-val pqc') +
+
+        '</div>';
+    }
+
+    document.getElementById('attestRows').innerHTML = rows;
+    document.getElementById('attestPanel').classList.add('show');
+  }
+
+  /* ── Downloads ───────────────────────────────────────────────────────────── */
+  function downloadQvm() {
+    if (!currentBytecode) return;
+    var bytes = hexToBytes(currentBytecode);
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+    a.download = 'contract.qvm'; a.click();
+  }
+
+  function downloadSig() {
+    if (!currentSidecar) return;
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(currentSidecar, null, 2)], { type: 'application/json' }));
+    a.download = 'contract.sig.json'; a.click();
+  }
+
+  /* ── VM Execution Panel ──────────────────────────────────────────────────── */
+  async function initVMPanel() {
+    if (!currentBytecode) return;
+
+    var deployBtn = document.getElementById('deployBtn');
+    // Dependency order check — warn if user is deploying a caller before its callees
+    if (currentExternContracts.length > 0) {
+      var deployedNames = workspaceContracts.map(function(c){ return c.name; });
+      var missing = currentExternContracts.filter(function(n){ return !deployedNames.includes(n); });
+      if (missing.length > 0) {
+        setStatus('⚠ ' + currentContractName + ' calls ' + missing.join(', ') +
+          ' via extern_call — deploy ' + missing.join(' & ') + ' into this workspace too.', 'warning');
+      }
+    }
+    if (deployBtn) { deployBtn.disabled = true; deployBtn.innerHTML = '<span class="spinner"></span> Deploying...'; }
+    setStatus('Deploying to QVM...', 'info');
+
+    // Destroy previous session only if it is not part of the workspace.
+    // Exception: if a contract with the SAME NAME already exists in the workspace
+    // (e.g. re-deploy after wallet reconnect), remove the old entry first so we
+    // don't end up with duplicate name entries pointing to different session IDs.
+    if (sessionId) {
+      var _inWs = workspaceContracts.some(function(c){ return c.session_id === sessionId; });
+      if (!_inWs) fetch(SESSION_DEL_URL + sessionId, { method: 'DELETE' }).catch(function(){});
+      sessionId = null;
+      updateSessionBadge();
+    }
+    // Evict any existing workspace entry with the same contract name so a re-deploy
+    // replaces rather than duplicates it. Preserve the original deploy_index so the
+    // re-deployed contract keeps its slot number (no duplicated badge numbers).
+    var _evictedDeployIndex = undefined;
+    if (workspaceId && currentContractName) {
+      var _sameNameEntry = workspaceContracts.find(function(c){ return c.name === currentContractName; });
+      if (_sameNameEntry) {
+        _evictedDeployIndex = _sameNameEntry.deploy_index;
+        workspaceContracts = workspaceContracts.filter(function(c){ return c.name !== currentContractName; });
+        fetch(SESSION_DEL_URL + _sameNameEntry.session_id, { method: 'DELETE' }).catch(function(){});
+        fetch(WORKSPACE_URL + '/' + workspaceId + '/remove', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: _sameNameEntry.session_id, contract_name: currentContractName })
+        }).catch(function(){});
+      }
+    }
+
+    // Create a new persistent VM session on the server
+    try {
+      var res  = await fetch(SESSION_NEW_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(Object.assign(
+          { bytecode: currentBytecode, state_vars: currentStateVars, contract_name: currentContractName },
+          workspaceId ? { workspace_id: workspaceId } : {}
+        ))
+      });
+      var data = await res.json();
+
+      if (!data.success) {
+        setStatus('Deploy failed: ' + (data.error || 'unknown'), 'error');
+        document.getElementById('vmOutput').innerHTML =
+          '<span class="err">Failed to create VM session: ' + (data.error || 'unknown') + '</span>';
+        if (deployBtn) { deployBtn.disabled = false; deployBtn.textContent = 'Deploy ▶ ' + (currentContractName || 'Contract'); }
+        return;
+      }
+
+      const deployedSessionId  = data.session_id;
+      const deployedName       = currentContractName || 'Contract';
+      const deployedAddress    = currentContractAddress;
+      const deployedBytecode   = currentBytecode;
+      const deployedStateVars  = currentStateVars.slice();
+
+      // Always update sessionId to the freshly deployed session.
+      // The old guard prevented re-deploys from updating sessionId when a
+      // workspace was active, causing init() to fire against a stale session.
+      sessionId = deployedSessionId;
+      updateSessionBadge();
+      probeStateVars();
+
+      // Register into workspace (pre-created at compile time)
+      if (workspaceId) {
+        await registerInWorkspace(deployedSessionId, deployedName, deployedAddress, deployedBytecode, deployedStateVars, _evictedDeployIndex);
+      }
+
+    } catch (e) {
+      setStatus('Could not reach VM server: ' + e.message, 'error');
+      document.getElementById('vmOutput').innerHTML =
+        '<span class="err">Could not reach VM server: ' + e.message + '</span>';
+      if (deployBtn) { deployBtn.disabled = false; deployBtn.innerHTML = 'Deploy'; }
+      return;
+    }
+
+    populateFunctionPicker();
+    document.getElementById('runBtn').disabled = true;
+    selectedFunc = null;
+
+    var vc = document.getElementById('vmCard');
+    vc.classList.add('show');
+    vc.style.display = 'block';
+    vc.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    if (deployBtn) { deployBtn.disabled = false; deployBtn.textContent = 'Deploy ▶ ' + (currentContractName || 'Contract') + ' again'; }
+    setStatus('Deployed! Select a function below to execute.', 'success');
+  }
+
+  function selectFunction(idx) {
+    selectedFunc = parsedFunctions[idx];
+
+    // Update pill active state
+    var pills = document.getElementById('funcPills').getElementsByClassName('func-pill');
+    for (var i = 0; i < pills.length; i++) {
+      pills[i].classList.toggle('active', i === idx);
+    }
+
+    // Build param inputs
+    var grid = document.getElementById('paramsGrid');
+    grid.innerHTML = '';
+    if (selectedFunc.paramCount > 0) {
+      for (var p = 0; p < selectedFunc.paramCount; p++) {
+        var group = document.createElement('div');
+        group.className = 'param-group';
+        var lbl = document.createElement('label');
+        var pName = (selectedFunc.paramNames && selectedFunc.paramNames[p]) ? selectedFunc.paramNames[p] : ('param_' + p);
+        // paramTypeHint set after isBoolParam detection below
+        // Append type hint to label if available
+        var pTypeHint = (selectedFunc.paramTypes && selectedFunc.paramTypes[p])
+          ? selectedFunc.paramTypes[p] : '';
+        var pTypeLabel = (pTypeHint && pTypeHint !== 'u256' && pTypeHint !== 'bool')
+          ? ' <span style="color:rgba(255,255,255,0.28);font-size:0.7rem;">(' + pTypeHint + ')</span>' : '';
+        lbl.innerHTML = pName + pTypeLabel; // updated after bool detection
+        // Detect bool-domain params: name starts with is/has/enabled/paused/flag/active
+        // or param name is exactly 'flag' — render a True/False select instead of free text
+        // Compiler type wins; name heuristic only when no type declared
+        var declaredType = selectedFunc.paramTypes && selectedFunc.paramTypes[p];
+        var boolHints = /^(is[A-Z_]|has[A-Z_]|enabled|paused|flag|active|frozen|allow|deny)/;
+        var isBoolParam = (declaredType === 'bool')
+          || (!declaredType && (boolHints.test(pName) || pName === 'flag' || pName === 'enabled' || pName === 'paused'));
+        var _pRawType = (selectedFunc.paramTypes && selectedFunc.paramTypes[p]) || '';
+        var paramTypeHint = isBoolParam ? 'Bool'
+          : (_pRawType === 'str'                           ? 'str'
+          : (_pRawType && _pRawType !== 'u256' && _pRawType !== 'i32' ? _pRawType : ''));
+        lbl.innerHTML = pName + (paramTypeHint
+          ? ' <span style="font-size:0.65rem;color:#888;font-weight:400;">(' + paramTypeHint + ')</span>'
+          : '');
+        var inp;
+        if (isBoolParam) {
+          inp = document.createElement('select');
+          inp.id = 'param_' + p;
+          var optF = document.createElement('option'); optF.value = '0'; optF.textContent = '0 — False';
+          var optT = document.createElement('option'); optT.value = '1'; optT.textContent = '1 — True';
+          inp.appendChild(optF);
+          inp.appendChild(optT);
+          inp.style.fontFamily = 'ui-monospace,monospace';
+          inp.style.letterSpacing = '0.02em';
+          inp.style.background = '#1a1a2e';
+          inp.style.color = 'rgba(255,255,255,0.82)';
+          inp.style.border = '1px solid rgba(255,255,255,0.12)';
+          inp.style.borderRadius = '5px';
+          inp.style.padding = '6px 10px';
+          inp.style.width = '100%';
+          inp.style.cursor = 'pointer';
+        } else {
+          inp = document.createElement('input');
+          inp.type = 'text';
+          var isStrParam = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'str';
+          if (!isStrParam) inp.inputMode = 'numeric';
+          inp.id = 'param_' + p;
+          inp.value = isStrParam ? '' : '0';
+          inp.placeholder = isStrParam ? 'text…' : '0';
+          inp.autocomplete = 'off';
+          inp.spellcheck = false;
+          inp.dataset.paramType = isStrParam ? 'str' : 'num';
+          inp.style.fontFamily = 'ui-monospace,monospace';
+          inp.style.letterSpacing = '0.02em';
+          inp.addEventListener('input', function() {
+            var v = this.value;
+            if (this.dataset.paramType === 'str') { this.style.borderColor = ''; return; }
+            this.style.borderColor = (v.trim() === '' || /^\d+$/.test(v.trim())) ? '' : '#f87171';
+          });
+        }
+        // UMA address hint + "My UMA" button for identity params
+        // Any param name that plausibly represents an identity/address gets 'My UMA' button
+        var umaNames = [
+          'to','from','who','owner','addr','address','recipient','sender','caller',
+          'target','account','user','minter','admin','grantee','subject',
+          'identity','wallet','holder','spender','operator','beneficiary',
+          'key','id','agent','delegate','source','dest'
+        ];
+        if (!isBoolParam && umaNames.indexOf(pName) >= 0) {
+          // Row: input + wallet button
+          var inputRow = document.createElement('div');
+          inputRow.style.cssText = 'display:flex;gap:6px;align-items:stretch;margin-top:4px;';
+          inp.style.flex = '1 1 0';
+          inputRow.appendChild(inp);
+
+          // "My UMA" button
+          var walletBtn = document.createElement('button');
+          walletBtn.type = 'button';
+          walletBtn.textContent = '\uD83D\uDD11 My Address';
+          walletBtn.title = 'Fill with your wallet address as UInt256 (matches LoadCaller on devnet)';
+          walletBtn.style.cssText = [
+            'flex-shrink:0',
+            'font-size:0.68rem',
+            'font-family:ui-monospace,monospace',
+            'padding:4px 9px',
+            'border-radius:5px',
+            'border:1px solid rgba(0,206,209,0.35)',
+            'background:rgba(0,206,209,0.08)',
+            'color:rgba(0,206,209,0.85)',
+            'cursor:pointer',
+            'white-space:nowrap',
+            'display:' + (walletAddress ? 'inline-flex' : 'none'),
+            'align-items:center',
+            'gap:4px',
+            'transition:color 0.2s,border-color 0.2s'
+          ].join(';');
+          walletBtn.setAttribute('data-uma-btn', '1');
+
+          (function(inputEl, btn) {
+            btn.addEventListener('click', function() {
+              if (!walletAddress && !_ephemeralAddress) { btn.style.display = 'none'; return; }
+              try {
+                // Always use the signing address — the actual address the VM sees as caller.
+                // In ephemeral mode walletAddress may show a display identity that differs
+                // from the secp256k1 key used to sign, causing auth mismatches.
+                var _signingAddr = (_walletMode === 'ephemeral' && _ephemeralAddress)
+                  ? _ephemeralAddress : walletAddress;
+                var uma = callerIdentity(_signingAddr);
+                inputEl.value = uma;
+                inputEl.style.borderColor = 'rgba(0,206,209,0.6)';
+                var orig = btn.textContent;
+                btn.textContent = '\u2713 filled';
+                btn.style.color = 'rgba(100,220,180,1)';
+                btn.style.borderColor = 'rgba(100,220,180,0.5)';
+                setTimeout(function() {
+                  btn.textContent = '\uD83D\uDD11 My Address';
+                  btn.style.color = 'rgba(0,206,209,0.85)';
+                  btn.style.borderColor = 'rgba(0,206,209,0.35)';
+                }, 1400);
+              } catch(e) { btn.textContent = 'error'; }
+            });
+          })(inp, walletBtn);
+
+          inputRow.appendChild(walletBtn);
+
+          var hint = document.createElement('div');
+          hint.style.cssText = 'font-size:0.63rem;color:rgba(255,255,255,0.25);margin-top:3px;font-family:ui-monospace,monospace;';
+          hint.textContent = 'EVM address as UInt256 \u2014 matches LoadCaller on devnet (UMA consensus layer pending)';
+          group.appendChild(lbl);
+          group.appendChild(inputRow);
+          group.appendChild(hint);
+        } else {
+          group.appendChild(lbl);
+          group.appendChild(inp);
+        }
+        grid.appendChild(group);
+      }
+      document.getElementById('paramsTitle').textContent = 'Parameters for ' + selectedFunc.name;
+      document.getElementById('paramsSection').style.display = 'block';
+    } else {
+      document.getElementById('paramsSection').style.display = 'none';
+    }
+
+    document.getElementById('runBtn').disabled = false;
+    document.getElementById('vmOutput').innerHTML = '<span class="dim">Ready to run ' + selectedFunc.name + '.</span>';
+  }
+
+  function setVMOutput(htmlContent) {
+    var el = document.getElementById('vmOutput');
+    if (el) el.innerHTML = htmlContent;
+  }
+
+  async function runFunction() {
+    if (!selectedFunc || !currentBytecode) return;
+
+    // Guard: block init() if contract is already initialised
+    if (selectedFunc.name === 'init') {
+      var _iv = stateSnapshot['initialised'];
+      var _av = stateSnapshot['active'];
+      var _alreadyDone = (_iv === '1' || _iv === 'true' || _iv === 1 || _iv === true)
+                     || (_av === '1' || _av === 1 || _av === 'true' || _av === true);
+      if (_alreadyDone) {
+        document.getElementById('vmOutput').innerHTML =
+          '<span class="err">Contract already initialised. '          + 'Press <b>Reset VM</b> to wipe all state and start fresh.</span>';
+        return;
+      }
+    }
+
+    var btn = document.getElementById('runBtn');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Running...';
+
+    var out = document.getElementById('vmOutput');
+
+    // Build args — text inputs, send large values as strings to avoid
+    // JS float precision loss. Server parse_arg() accepts both.
+    var args = [];
+    var argError = null;
+    for (var p = 0; p < selectedFunc.paramCount; p++) {
+      var el = document.getElementById('param_' + p);
+      var paramIsStr = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'str';
+      var raw = el ? (paramIsStr ? el.value : el.value.trim()) : '';
+      if (!paramIsStr && raw === '') {
+        argError = selectedFunc.paramNames && selectedFunc.paramNames[p]
+          ? 'Enter a value for "' + selectedFunc.paramNames[p] + '"'
+          : 'Enter a value for parameter ' + p;
+        break;
+      }
+      if (paramIsStr) {
+        // String params sent as-is; server parse_arg handles utf-8 bytes
+        args.push(raw);
+      } else {
+        // Validate: unsigned integers only (SynQ has no signed types)
+        if (!/^\d+$/.test(raw)) {
+          // Skip validation for str-typed params
+        if (selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'str') break;
+        argError = 'param_' + p + ': "' + raw + '" must be a non-negative integer (all SynQ types are unsigned).';
+          break;
+        }
+        // Safe JS integer? Send as number; else send quoted decimal string.
+        var isSafe = raw.length < 16 || (raw.charAt(0) !== '-' && raw.length <= 15);
+        if (isSafe) {
+          args.push(Number(raw));
+        } else {
+          args.push(raw);   // quoted decimal string — server parses as u128
+        }
+      }
+    }
+    if (argError) {
+      out.innerHTML = '<span class="err">' + argError + '</span>';
+      btn.disabled = false;
+      btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Function';
+      return;
+    }
+
+    // Pre-flight semantic check — fail fast before wallet popup fires
+    if (selectedFunc.name === 'setPaused') {
+      var flagVal = String(args[0]);
+      if (flagVal !== '0' && flagVal !== '1') {
+        out.innerHTML = '<span class="err">require failed: setPaused: flag must be 0 or 1</span>';
+        btn.disabled = false;
+        btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Function';
+        return;
+      }
+    }
+
+    // Snapshot sessionId AND state BEFORE the call.
+    // sessionId can change between now and the post-run probe (e.g. Reset VM
+    // running concurrently), so we lock in the target session here.
+    var runSessionId    = sessionId;
+    var preCallSnapshot = Object.assign({}, stateSnapshot);
+    out.innerHTML = '<span class="dim">Calling ' + selectedFunc.name + '(' + args.join(', ') + ') on QVM...</span>';
+
+    if (!sessionId) {
+      out.innerHTML = '<span class="err">No active session. Recompile the contract to start a new session.</span>';
+      btn.disabled = false;
+      btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Function';
+      return;
+    }
+    try {
+      var callBody = {
+        session_id:   sessionId,
+        function:     selectedFunc.name,
+        args:         args.map(function(a) { return String(a); }),
+        param_types:  (selectedFunc.paramTypes || []).map(function(t) { return t || 'u256'; })
+      };
+
+      if (walletAddress) {
+        // Liveness check: only needed for extension wallet; ephemeral key is always valid
+        if (_walletMode === 'synergy' && window.ethereum) {
+          var liveAccounts = await window.ethereum.request({ method: 'eth_accounts' });
+          if (!liveAccounts || liveAccounts.length === 0) {
+            walletAddress = null; updateWalletUI();
+            setVMOutput('<span class="err">Wallet disconnected — reconnect to call authenticated functions.</span>');
+            btn.disabled = false; btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Function';
+            return;
+          }
+          walletAddress = liveAccounts[0];
+        }
+
+        if (!sessionId) {
+          setVMOutput('<span class="err">No active session — deploy the contract first, then run.</span>');
+          btn.disabled = false; btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Function';
+          return;
+        }
+        var nonceRes  = await fetch(SESSION_NONCE_URL + sessionId + '/nonce');
+        var nonceData = await nonceRes.json();
+        if (!nonceData.nonce) {
+          var nonceErr = nonceData.error || 'unknown';
+          var nonceMsg = (nonceErr.toLowerCase().indexOf('not found') !== -1 || nonceErr.toLowerCase().indexOf('expired') !== -1)
+            ? 'Session expired or not found — click <strong>Deploy</strong> to start a new session, then run again.'
+            : 'Failed to obtain call nonce: ' + nonceErr;
+          setVMOutput('<span class="err">' + nonceMsg + '</span>');
+          btn.disabled = false; btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Function';
+          return;
+        }
+        var callNonce   = nonceData.nonce;
+        // EIP-712: build typed data for ContractCall
+        // verifyingContract = contract-name-derived address (deterministic, not on-chain).
+        //   Derived as: keccak256("SynQ:" + contractName), last 20 bytes.
+        //   Server derives the same value from the contract_name stored in session.
+        // callSignature = 'functionName(arg0, arg1, ...)' — shown verbatim in wallet UI
+        // so the user can see exactly what they are authorising before signing.
+        var callSignature = selectedFunc.name + '(' + args.join(', ') + ')';
+        var callTypedData = JSON.stringify({
+          types: {
+            EIP712Domain: [
+              { name: 'name',              type: 'string'  },
+              { name: 'version',           type: 'string'  },
+              { name: 'chainId',           type: 'uint256' },
+              { name: 'verifyingContract', type: 'address' }
+            ],
+            ContractCall: [
+              { name: 'callSignature', type: 'string' },
+              { name: 'sessionId',     type: 'string' },
+              { name: 'nonce',         type: 'string' }
+            ]
+          },
+          primaryType: 'ContractCall',
+          domain: {
+            name:              currentContractName ? ('SynQ · ' + currentContractName) : 'SynQ',
+            version:           '1',
+            chainId:           1337,
+            verifyingContract: (function() {
+              // Always derive from contract name — matches server's eip712_domain_separator_for_contract()
+              // keccak256("SynQ:" + name), last 20 bytes (hash[12..31])
+              if (currentContractName && window.keccak_256) {
+                return '0x' + window.keccak_256('SynQ:' + currentContractName).slice(24);
+              }
+              return currentContractAddress || '0x0000000000000000000000000000000000000000';
+            })()
+          },
+          message: {
+            callSignature: callSignature,
+            sessionId:     sessionId,
+            nonce:         callNonce
+          }
+        });
+        console.log('[SynQ auth] EIP-712 typed data:', callTypedData);
+        console.log('[SynQ auth] wallet addr:', walletAddress);
+        setVMOutput('<span style="color:rgba(255,255,255,0.6);font-size:0.85rem;">'
+          + '&#x1F510; Sign the <strong>' + selectedFunc.name + '()</strong> call in your wallet to authenticate as the contract caller.'
+          + '</span>');
+
+        var signature;
+        try {
+          signature = await getSignature(callTypedData);
+          console.log('[SynQ auth] signature:', signature);
+        } catch (sigErr) {
+          var sigErrMsg;
+          if (sigErr.code === 4001 || sigErr.code === 'ACTION_REJECTED') {
+            sigErrMsg = 'Signature declined — call not sent.';
+          } else if (sigErr.code === 4902 || sigErr.code === -32603 || (sigErr.message && sigErr.message.toLowerCase().includes('chain'))) {
+            sigErrMsg = 'Wallet error: domain chain mismatch — SynQ uses chainId 1337 (devnet) for signing only, no network switch needed. Try again.';
+          } else {
+            sigErrMsg = 'Signing error: ' + (sigErr.message || sigErr.toString());
+          }
+          setVMOutput('<span class="err">' + sigErrMsg + '</span>');
+          btn.disabled = false; btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Function';
+          return;
+        }
+        // Use the key-derived address when signing ephemerally — walletAddress
+        // may show a display identity (e.g. imported Synergy addr) that differs.
+        callBody.evm_address   = (_walletMode === 'ephemeral' && _ephemeralAddress) ? _ephemeralAddress : walletAddress;
+        callBody.evm_signature = signature;
+        callBody.call_nonce    = callNonce;
+      }
+
+      var res = await fetch(SESSION_RUN_URL, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(callBody)
+      });
+      var data = await res.json();
+
+      if (data.success) {
+        var rv = data.result;
+        var display = '';
+        // ── Line 1: function name (dim) ──────────────────────────────────
+        var fnLabel = (selectedFunc && selectedFunc.name) ? selectedFunc.name : (req.function || '');
+        // Show passed args in the header so the output is self-documenting
+        var fnArgs = (typeof args !== 'undefined' && args.length) ? args.join(', ') : '';
+        display += '<div style="font-size:0.72rem;font-family:ui-monospace,monospace;color:rgba(255,255,255,0.28);margin-bottom:5px;">' + fnLabel + '(' + fnArgs + ')</div>';
+        // ── Line 2: caller badge (wallet-signed calls only) ───────────────
+        if (typeof callBody !== 'undefined' && callBody.evm_address) {
+          display += '<div style="font-size:0.7rem;font-family:ui-monospace,monospace;color:rgba(147,210,147,0.75);margin-bottom:5px;">&#x2713; ' + callBody.evm_address + '</div>';
+        }
+        // ── Line 3: return value (prominent) ─────────────────────────────
+        if (rv !== null && rv !== undefined) {
+          var val  = (typeof rv === 'object' && rv.value !== undefined) ? rv.value : JSON.stringify(rv);
+          var _rvType = (typeof rv === 'object' && rv.type) ? rv.type : '';
+          // Compiler-declared return type overrides VM runtime type
+          // (VM emits 'UInt256' for Bytes/str slots; compiler knows the declared type)
+          var _declRet = (currentFnReturnTypes && selectedFunc)
+                       ? (currentFnReturnTypes[selectedFunc.name] || '') : '';
+          var type = (_declRet === 'str')  ? 'str'
+                   : (_declRet === 'bool') ? 'Bool'
+                   : _rvType;
+          // Bool decoration: any UInt256 0/1 return gets a true/false badge
+          var boolBadge = '';
+          var isStringResult = (type === 'String' || type === 'Str' || type === 'str');
+          var isBoolResult   = (type === 'Bool');
+          if (isBoolResult) {
+            var isBT = (val === 'true' || val === '1');
+            var bc = isBT ? 'rgba(100,220,150,0.9)' : 'rgba(255,120,100,0.85)';
+            boolBadge = '<span style="font-size:0.78rem;font-family:ui-monospace,monospace;'
+              + 'background:' + bc + ';color:#111;border-radius:3px;'
+              + 'padding:1px 6px;font-weight:700;vertical-align:middle;">'
+              + (isBT ? 'true' : 'false') + '</span>';
+          } else if (!isStringResult && type !== 'UInt256' && type !== 'u256' && (val === '0' || val === '1')) {
+            var isBT = val === '1';
+            var bc = isBT ? 'rgba(100,220,150,0.9)' : 'rgba(255,120,100,0.85)';
+            boolBadge = '<span style="font-size:0.78rem;font-family:ui-monospace,monospace;'
+              + 'background:' + bc + ';color:#111;border-radius:3px;'
+              + 'padding:1px 6px;margin-left:8px;font-weight:700;vertical-align:middle;">'
+              + (isBT ? 'true' : 'false') + '</span>';
+          }
+          if (isStringResult) {
+            display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;color:rgba(180,230,180,1);">“'
+              + (function(_v){
+                  if(/^0x[0-9a-fA-F]+$/.test(_v)){
+                    try{
+                      var _h=_v.slice(2).replace(/^(00)+/,'');
+                      if(_h.length%2!==0)_h='0'+_h;
+                      var _b=[];
+                      for(var _k=0;_k<_h.length;_k+=2)_b.push(parseInt(_h.substr(_k,2),16));
+                      var _s=new TextDecoder('utf-8',{fatal:true}).decode(new Uint8Array(_b));
+                      if(/^[\x20-\x7E]+$/.test(_s))return _s;
+                    }catch(e){}
+                  }
+                  return _v;
+                })(val).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+              + '”</span>';
+            display += '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;">str</span>\n';
+          } else if (isBoolResult) {
+            display += boolBadge + '\n';
+          } else {
+            var dispVal = val;
+            if ((type === 'UInt256' || type === 'u256') && /^\d+$/.test(val) && BigInt(val) > 0n) {
+              try { var h = BigInt(val).toString(16); if (h.length >= 20) dispVal = '0x' + h.padStart(40,'0'); } catch(e) {}
+            }
+            display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;">' + dispVal + '</span>';
+            if (type) display += '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;">' + type + '</span>';
+            display += boolBadge + '\n';
+          }
+        } else {
+          // void return — probe state using the session this run was sent to,
+          // not the global sessionId (which may have been overwritten by a
+          // concurrent Reset VM between the run and this probe).
+          await probeStateVars(runSessionId);
+          var diffLines = [];
+          // Build a set of mapping/set slot names — their /state value is just
+          // the compile-time slot index (not enumerable), so skip them in diffs.
+          var mappingSlotNames = {};
+          if (currentStateVars) {
+            currentStateVars.forEach(function(sv) {
+              // slot index > 0 AND /state returns that index as the value
+              // OR name contains 'balance','role','map','set' as a strong hint
+              var n = sv[0], slot = String(sv[1]);
+              if (/balance|_role|map|set|roles/i.test(n)) mappingSlotNames[n] = true;
+            });
+          }
+          stateVarNames.forEach(function(n) {
+            if (mappingSlotNames[n]) return; // skip non-enumerable mapping slots
+            var before = preCallSnapshot[n];
+            var after  = stateSnapshot[n];
+            // Guard: skip if either value is an object (shouldn't happen but safety net)
+            if (typeof before === 'object' || typeof after === 'object') return;
+            if (before !== undefined && before !== after) {
+              diffLines.push(
+                '<span style="color:rgba(255,255,255,0.55);">' + n + '</span>'
+                + ' <span style="color:rgba(255,255,255,0.25);">→</span> '
+                + '<span style="font-weight:600;color:rgba(100,220,180,1);">' + formatStateVal(n, after) + '</span>'
+                + ' <span style="font-size:0.7rem;color:rgba(255,255,255,0.22);">(was ' + formatStateVal(n, before) + ')</span>'
+              );
+            }
+          });
+          if (diffLines.length > 0) {
+            display += '<div style="line-height:1.8;margin-top:2px;font-size:0.82rem;font-family:ui-monospace,monospace;">'
+              + diffLines.join('<br>') + '</div>';
+          } else {
+            display += '<span class="ok" style="font-size:0.85rem;">void</span>';
+          }
+        }
+        // ── Line 4: events (if any) ──────────────────────────────────────
+        if (data.events && data.events.length > 0) {
+          display += '<div style="margin-top:8px;border-top:1px solid rgba(255,255,255,0.08);padding-top:6px;">';
+          data.events.forEach(function(ev) {
+            var argStrs = (ev.args || []).map(function(a) {
+              if (typeof a === 'object' && a !== null) return JSON.stringify(a);
+              var s = String(a);
+              // Reformat 32-byte zero-padded hex as trimmed address
+              if (/^0{24}[0-9a-f]{40}$/i.test(s)) return '0x' + s.slice(24);
+              if (s === '0') return '0x0';
+              return s;
+            });
+            display += '<div style="font-size:0.75rem;font-family:ui-monospace,monospace;'
+              + 'color:rgba(255,255,255,0.55);line-height:1.7;">'
+              + '<span style="color:rgba(150,220,255,0.85);font-weight:600;">&#x2605; ' + ev.name + '</span>'
+              + '<span style="color:rgba(255,255,255,0.3);"> (</span>'
+              + '<span style="color:rgba(255,220,150,0.85);">' + argStrs.join('<span style="color:rgba(255,255,255,0.3);">, </span>') + '</span>'
+              + '<span style="color:rgba(255,255,255,0.3);">)</span></div>';
+          });
+          display += '</div>';
+        }
+        // ── Line 5: capabilities (if any, subtle) ────────────────────────
+        if (selectedFunc && selectedFunc.capabilities && selectedFunc.capabilities.length > 0) {
+          display += '<div style="font-size:0.68rem;color:rgba(255,255,255,0.22);margin-top:4px;">requires cap::' + selectedFunc.capabilities.join(', cap::') + '</div>';
+        }
+        // data.output intentionally omitted — server echoes 'Return value: X'
+        // which duplicates the rv line already rendered above.
+        out.innerHTML = display;
+        probeStateVars(runSessionId);
+      } else {
+        var errMsg = data.error || 'unknown error';
+        console.log('[SynQ run error] full error:', errMsg);
+        console.log('[SynQ run error] callBody was:', typeof callBody !== 'undefined' ? JSON.stringify({addr: callBody.evm_address, nonce: callBody.call_nonce}) : 'none');
+        // Annotate specific VM errors with extra context — but never replace the real message
+        if (errMsg.includes('overflow on Add') || errMsg.includes('overflow on Mul')) {
+          errMsg += ' — total would exceed UInt256 max (2²⁵⁶−1). Burn some supply first.';
+        } else if (errMsg.includes('underflow on Sub')) {
+          errMsg += ' — burn amount exceeds current supply. Call getTotal() to check the remaining balance before burning.';
+        } else if (errMsg.includes('out of sync with vault')) {
+          errMsg += ' Make sure SimpleToken was initialised with init(name, symbol) and that both contracts are in the same workspace before depositing.';
+        } else if (errMsg.includes('extern_call') && errMsg.includes('not in workspace')) {
+          var _cnm = errMsg.match(/contract '([^']+)'/);
+          var _missing = _cnm ? _cnm[1] : 'the target contract';
+          errMsg = 'Cross-contract call failed: ' + _missing + ' is not deployed in this workspace. Deploy ' + _missing + ' using the same workspace first, then retry.';
+        } else if (errMsg.includes('extern_call') && errMsg.includes('no workspace active')) {
+          errMsg = 'Cross-contract call failed: no workspace is active. Deploy this contract using the workspace panel, then deploy the target contract into the same workspace.';
+        } else if (errMsg.includes('extern_call') && errMsg.includes('not found')) {
+          errMsg = 'Cross-contract call failed: the target contract session expired. Re-deploy the target contract into this workspace and retry.';
+        } else if (errMsg.includes('StackUnderflow')) {
+          errMsg = 'Stack underflow: a cross-contract call failed internally — ensure all required contracts are deployed in the same workspace before calling this function.';
+        }
+        out.innerHTML = '<span class="err">' + errMsg + '</span>';
+        probeStateVars();
+      }
+    } catch (err) {
+      out.innerHTML = '<span class="err">Network error: ' + err.message + '</span>';
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Function';
+    }
+  }
+
+  // Track last-known state var values (updated after each successful call)
+  var stateVarNames = [];   // populated from parsed dispatch table fields
+  var stateSnapshot = {};   // name -> last known value string
+
+  function formatStateVal(name, v) {
+    if (v === undefined || v === null) return '?';
+
+    var BOOL_SCALARS = ['feat_pqc','initialised','paused','frozen','active','enabled'];
+    var BOOL_MAPS    = ['admin_role','minter_role','registered'];
+    var _declType    = (currentStateVarTypes && currentStateVarTypes[name]) || '';
+
+    function isBoolScalar(n) {
+      if (currentStateVarTypes && currentStateVarTypes[n]) return currentStateVarTypes[n] === 'bool';
+      return BOOL_SCALARS.indexOf(n) >= 0;
+    }
+    function isBoolMap(n) {
+      if (currentStateVarTypes && currentStateVarTypes[n]) return currentStateVarTypes[n] === 'bool';
+      return BOOL_MAPS.indexOf(n) >= 0;
+    }
+
+    function safeKey(k) {
+      if (typeof k === 'string' && /^0x[0-9a-f]+$/i.test(k)) {
+        var hex = k.slice(2).replace(/^0+/, '') || '0';
+        if (hex.length % 2 !== 0) hex = '0' + hex;
+        while (hex.length < 40) hex = '0' + hex;
+        var addr = '0x' + hex;
+        return addr.length > 14 ? addr.slice(0,8) + '\u2026' + addr.slice(-6) : addr;
+      }
+      return (typeof k === 'string' && k.length > 14) ? k.slice(0,6)+'\u2026'+k.slice(-4) : String(k);
+    }
+
+    // ── Str rendering helpers — plain-text-safe Unicode quotes ────────────
+    var STR_BADGE = '<span style="font-size:0.72rem;color:rgba(255,255,255,0.4);margin-left:3px;">(str)</span>';
+    function strEmpty()      { return '\u201c\u201d\u00a0' + STR_BADGE; }
+    function strDisplay(txt) { return '\u201c' + txt.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '\u201d\u00a0' + STR_BADGE; }
+
+    // Unset str slot — VM returns I32(0) or 0x0 before any write
+    if (_declType === 'str' && (
+          v === '0' || v === 0 || v === '0x0'
+          || (typeof v === 'string' && /^0x0+$/.test(v))
+       )) {
+      return strEmpty();
+    }
+
+    // Str type: decode hex bytes → quoted ASCII string.
+    // Server returns Value::Bytes as "0x<hex>". Decimal fallback handles legacy paths.
+    if (_declType === 'str') {
+      var _sv = String(v);
+      // Decimal integer → convert to 0x hex first
+      if (/^\d+$/.test(_sv) && _sv !== '0') {
+        try {
+          var _bigi = BigInt(_sv);
+          var _hexRaw = _bigi.toString(16);
+          if (_hexRaw.length % 2 !== 0) _hexRaw = '0' + _hexRaw;
+          _sv = '0x' + _hexRaw;
+        } catch(_e) {}
+      }
+      // 0x hex → decode bytes to UTF-8 string
+      if (/^0x[0-9a-fA-F]{2,}$/.test(_sv)) {
+        var _hx = _sv.slice(2).replace(/^(00)+/, '');
+        if (_hx.length === 0) return strEmpty();
+        if (_hx.length % 2 === 0) {
+          try {
+            var _ba = [];
+            for (var _i = 0; _i < _hx.length; _i += 2)
+              _ba.push(parseInt(_hx.substr(_i, 2), 16));
+            var _ss = new TextDecoder('utf-8', {fatal: true}).decode(new Uint8Array(_ba));
+            if (/^[\x20-\x7E]{1,32}$/.test(_ss)) return strDisplay(_ss);
+          } catch(_e) {}
+        }
+      }
+      // Already a plain string (shouldn't happen but guard it)
+      if (typeof v === 'string' && !/^0x/.test(v) && v.length > 0) return strDisplay(v);
+      return strEmpty();
+    }
+
+    // Hex-encoded Bytes (non-str) → skip decode, fall through to numeric display
+    if (typeof v === 'string' && /^0x[0-9a-fA-F]{2,64}$/.test(v)
+        && _declType !== 'u256' && _declType !== 'i256'
+        && _declType !== 'address' && _declType !== 'bool') {
+      var _hx2 = v.slice(2).replace(/^(00)+/, '');
+      if (_hx2.length === 0) return '0x0';
+    }
+
+    // Mapping / set
+    if (typeof v === 'object' && !Array.isArray(v)) {
+      var keys = Object.keys(v);
+      if (keys.length === 0) return isBoolMap(name) ? 'false' : '{}';
+      if (isBoolMap(name)) {
+        var granted = keys.filter(function(k) { return String(v[k]) === '1'; });
+        return granted.length > 0 ? 'true (' + granted.length + ')' : 'false';
+      }
+      var pairs = keys.slice(0,3).map(function(k) { return safeKey(k) + ':' + v[k]; });
+      return '{' + pairs.join(', ') + (keys.length > 3 ? ', \u2026' : '') + '}';
+    }
+
+    if (Array.isArray(v)) return '[' + v.length + ' items]';
+
+    var s = String(v);
+    if (/^\d+$/.test(name)) return 'slot[' + name + '] = ' + s;
+    if (isBoolScalar(name)) return s === '?' ? '?' : (s === '1' || s === 'true' ? 'true' : 'false');
+    if (isBoolMap(name))    return (s === '0' || s === '?') ? 'false' : 'true';
+    if (name === 'version') return (s === '?' || s === '0') ? '0' : 'v' + s;
+    // EVM address fields — render as 0x-prefixed hex, truncated
+    if (name === 'owner' || name === 'creator' || name === 'vaultOwner'
+        || (_declType === 'u256' && /[Oo]wner$|[Aa]ddress$|[Cc]aller$/.test(name))) {
+      if (s === '0' || s === '0x0') return '(not set)';
+      try {
+        var hex40 = BigInt(s).toString(16).padStart(40, '0');
+        return '0x' + hex40.slice(0, 6) + '…' + hex40.slice(-4);
+      } catch(e) { return s; }
+    }
+    return s;
+  }
+
+  function updateStateDisplay() {
+    var panel = document.getElementById('statePanel');
+    var el    = document.getElementById('stateValues');
+    if (!panel || !el) return;
+    if (stateVarNames.length === 0) { panel.style.display = 'none'; return; }
+    panel.style.display = 'block';
+    // Show contract name in the state label
+    var lbl = document.getElementById('stateLabel');
+    if (lbl) lbl.innerHTML = (currentContractName ? currentContractName + ' ' : 'contract ')
+      + 'state &nbsp;&#x25B8;&nbsp;';
+    el.innerHTML = stateVarNames.map(function(n) {
+      return n + ' = ' + formatStateVal(n, stateSnapshot[n]);
+    }).join('  <span style="opacity:0.35;">│</span>  ');
+  }
+
+  // Call after every successful function run to probe known state vars
+  async function probeStateVars(overrideSid) {
+    // Accept an explicit session ID (from runFunction) to avoid racing against
+    // concurrent sessionId changes (e.g. Reset VM called while run is in-flight).
+    var _activeSid = overrideSid || sessionId;
+    if (!_activeSid) return;
+    // Snapshot the session and state schema at call time so an async race
+    // (e.g. switching contracts while a probe is in-flight) does not mix up
+    // one contract's values with another's variable names.
+    var _probeSid      = _activeSid;
+    var _probeVars     = currentStateVars     ? currentStateVars.slice()   : [];
+    var _probeVarTypes = currentStateVarTypes ? Object.assign({}, currentStateVarTypes) : {};
+    try {
+      var res  = await fetch(SESSION_DEL_URL + _probeSid + '/state');
+      var data = await res.json();
+      // Discard if the user switched to a different contract while the fetch was in-flight
+      if (_probeSid !== sessionId) return;
+      // Session lost (e.g. server restart) — surface a clear hint instead of silent '?'
+      if (!data.success && data.error && data.error.toLowerCase().includes('not found')) {
+        var names = (_probeVars.length > 0)
+          ? _probeVars.map(function(sv) { return sv[0]; })
+          : [];
+        if (names.length > 0) {
+          stateSnapshot = {};
+          names.forEach(function(n) { stateSnapshot[n] = '0'; });
+          stateVarNames = names;
+          updateStateDisplay();
+          // Show a one-time status hint
+          if (!window._sessionLostHinted) {
+            window._sessionLostHinted = true;
+            setStatus('Session expired — Compile & Deploy to get a fresh session.', 'warn');
+          }
+        }
+        return;
+      }
+      if (data.success && data.state) {
+        stateSnapshot = {};
+        // Use the schema captured at call time — never the current global
+        var names = (_probeVars.length > 0)
+          ? _probeVars.map(function(sv) { return sv[0]; })
+          : Object.keys(data.state);
+        stateVarNames = names;
+        // Restore captured type metadata — prevents stale/cleared currentStateVarTypes
+        // from causing str/bool fields to render as raw numbers after a redeploy.
+        if (Object.keys(_probeVarTypes).length > 0) {
+          currentStateVarTypes = _probeVarTypes;
+        }
+        names.forEach(function(n) {
+          var raw = data.state[n];
+          // Treat missing keys as uninitialized zero — never '?'
+          // (server may lack a key if bytecode predates a state var addition)
+          if (raw === undefined || raw === null) { stateSnapshot[n] = '0'; }
+          else if (typeof raw === 'object') {
+            stateSnapshot[n] = Array.isArray(raw) ? raw : (raw.value !== undefined ? String(raw.value) : raw);
+          } else {
+            stateSnapshot[n] = String(raw);
+          }
+        });
+        updateStateDisplay();
+        syncInitPillHint();
+      }
+    } catch(e) {}
+  }
+
+  async function resetVM() {
+    var out = document.getElementById('vmOutput');
+    out.innerHTML = '<span class="dim">Resetting all VM sessions...</span>';
+
+    // ── Reset every contract in the workspace, not just the active one ──────
+    // This ensures all contracts (e.g. SimpleToken) start with clean state
+    // so TokenVault.init() can call extern_call("SimpleToken","init") fresh.
+    var toReset = workspaceContracts.length > 0
+      ? workspaceContracts.slice()   // copy — reset all workspace members
+      : (currentBytecode ? [{ name: currentContractName, session_id: sessionId,
+                               bytecode: currentBytecode, state_vars: currentStateVars }] : []);
+
+    if (toReset.length === 0) {
+      out.innerHTML = '<span class="dim">No bytecode loaded — compile a contract first.</span>';
+      return;
+    }
+
+    var failed = [];
+    for (var ri = 0; ri < toReset.length; ri++) {
+      var c = toReset[ri];
+      // 1. Delete the old session
+      if (c.session_id) {
+        try { await fetch(SESSION_DEL_URL + c.session_id, { method: 'DELETE' }); } catch(e){}
+      }
+      // 2. Create a fresh session
+      var resetBody = { bytecode: c.bytecode, state_vars: c.stateVars || c.state_vars || [] };
+      if (c.name)      resetBody.contract_name = c.name;
+      if (workspaceId)        resetBody.workspace_id    = workspaceId;
+      if (c.fnReturnTypes)   resetBody.fn_return_types = c.fnReturnTypes;
+      try {
+        var res  = await fetch(SESSION_NEW_URL, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(resetBody)
+        });
+        var data = await res.json();
+        if (data.success) {
+          var newSid = data.session_id;
+          // 3. Re-register into workspace
+          if (workspaceId && c.name) {
+            try {
+              await fetch(WORKSPACE_URL + '/' + workspaceId + '/join', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: newSid, contract_name: c.name })
+              });
+            } catch(we) { console.warn('[resetVM] workspace re-join failed for', c.name, we); }
+          }
+          // 4. Update local state
+          var ci = workspaceContracts.findIndex(function(w){ return w.name === c.name; });
+          if (ci >= 0) workspaceContracts[ci].session_id = newSid;
+          // Update active sessionId if this contract is the active one.
+          // Match on name OR on old session_id (covers single-contract flow
+          // where c.name may be undefined or currentContractName unset).
+          if (c.name === currentContractName
+              || c.session_id === sessionId
+              || toReset.length === 1) {
+            sessionId = newSid;
+            updateSessionBadge();
+          }
+        } else {
+          failed.push(c.name + ': ' + (data.error || 'unknown'));
+        }
+      } catch(e) { failed.push(c.name + ': ' + e.message); }
+    }
+
+    renderWorkspacePanel();
+
+    if (failed.length > 0) {
+      out.innerHTML = '<span class="err">Reset partial — failed: ' + failed.join(', ') + '</span>';
+    } else {
+      var names = toReset.map(function(c){ return c.name; }).join(', ');
+      out.innerHTML = '<span class="ok">All sessions reset (' + names + '). All state back to zero — call init() to reinitialise.</span>';
+    }
+
+      // Immediately zero stateSnapshot so panel shows clean VM, not stale '?'
+      stateSnapshot = {};
+      if (stateVarNames && stateVarNames.length > 0) {
+        stateVarNames.forEach(function(n) { stateSnapshot[n] = '0'; });
+      }
+      window._sessionLostHinted = false;
+      updateStateDisplay();
+      syncInitPillHint();
+
+    // Clear param inputs
+    for (var p = 0; p < (selectedFunc ? selectedFunc.paramCount : 0); p++) {
+      var el = document.getElementById('param_' + p);
+      if (el) {
+        // Reset str params to blank, numeric params to 0
+        var _isStr = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'str';
+        el.value = _isStr ? '' : '0';
+      }
+    }
+
+    // Inline state fetch after reset — guarantees sessionId is the fresh one.
+    // probeStateVars() can race if called before sessionId propagates; this avoids that.
+    if (sessionId && currentStateVars && currentStateVars.length > 0) {
+      try {
+        var _rr = await fetch(SESSION_DEL_URL + sessionId + '/state');
+        var _rd = await _rr.json();
+        if (_rd.success && _rd.state) {
+          var _names = currentStateVars.map(function(sv){ return sv[0]; });
+          stateVarNames = _names;
+          stateSnapshot = {};
+          _names.forEach(function(n) {
+            var raw = _rd.state[n];
+            stateSnapshot[n] = (raw === undefined || raw === null) ? '0' : String(raw);
+          });
+          updateStateDisplay();
+          syncInitPillHint();
+        }
+      } catch(_re) {}
+    }
+  }
+
+  function updateSessionBadge() {
+    var badge = document.getElementById('sessionBadge');
+    if (badge) badge.style.display = sessionId ? 'inline-block' : 'none';
+  }
+
+  /* ── Compile button label sync ─────────────────────────────────────────── */
+  function syncCompileBtn() {
+    var btn = document.getElementById('compileBtn');
+    if (!btn || btn.disabled) return;
+    var src = (typeof getCode === 'function' ? getCode() : null)
+              || document.getElementById('editor').value || '';
+    var m = src.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
+    var editorName = m ? m[1] : null;
+    btn.innerHTML = editorName ? 'Compile &#x25B6; ' + editorName : 'Compile';
+
+    // Stale-deploy warning: editor has a different contract than what's deployed
+    var staleBar = document.getElementById('staleWarn');
+    if (!staleBar) {
+      staleBar = document.createElement('div');
+      staleBar.id = 'staleWarn';
+      staleBar.style.cssText = 'display:none;margin-top:4px;padding:4px 10px;border-radius:5px;' +
+        'background:rgba(255,180,0,0.12);border:1px solid rgba(255,180,0,0.4);' +
+        'color:#ffd060;font-size:0.78rem;font-family:ui-monospace,monospace;';
+      var sb = document.getElementById('statusBar');
+      if (sb && sb.parentNode) sb.parentNode.insertBefore(staleBar, sb);
+    }
+    var deployed = currentContractName;
+    if (sessionId && deployed && editorName && editorName !== deployed) {
+      staleBar.style.display = 'block';
+      staleBar.textContent = '⚠ Editor shows ' + editorName + ' but session has ' + deployed + ' — Compile & Deploy before calling functions.';
+    } else {
+      staleBar.style.display = 'none';
+    }
+  }
+
+  var VAULT_LINES = [
+    'pragma synq ^0.9;',
+    '',
+    '// TokenVault -- primary entry point.  Mints/burns SimpleToken via extern_call.',
+    '// IMPORTANT: TokenVault tracks totalIn/totalOut (mint/burn flow) but cannot',
+    '// see direct SimpleToken transfers. Calling transfer() on SimpleToken moves',
+    '// tokens without TokenVault knowing. withdraw() pre-checks the actual balance',
+    '// via extern_call balanceOf() to catch this and give a clear error.',
+    '// Deploy this first, then deploy SimpleToken into the same workspace.',
+    'contract TokenVault {',
+    '',
+    '  vaultOwner: UInt256;',
+    '  active:     UInt256;',
+    '  totalIn:    UInt256;',
+    '  totalOut:   UInt256;',
+    '',
+    '  // Initialise the vault -- caller becomes vault owner.',
+    '  function init() -> bool as caller {',
+    '    if (active == 1) { return false; }',
+    '    vaultOwner = caller;',
+    '    active     = 1;',
+    '    return true;',
+    '  }',
+    '',
+    '  // Deposit: mint `amount` tokens into SimpleToken on behalf of the vault.',
+    '  function deposit(amount: UInt256) -> UInt256 as caller {',
+    '    require(active == 1, "TokenVault.deposit: vault not active");',
+    '    require(amount \u003E 0, "TokenVault.deposit: amount must be \u003E 0");',
+    '    extern_call("SimpleToken", "mint", caller, amount);',
+    '    totalIn = totalIn + amount;',
+    '    return totalIn;',
+    '  }',
+    '',
+    '  // Withdraw: burn `amount` tokens from SimpleToken.',
+    '  function withdraw(amount: UInt256) as caller requires cap::Withdrawer {',
+    '    require(active == 1, "TokenVault.withdraw: vault not active");',
+    '    require(caller == vaultOwner, "TokenVault.withdraw: caller is not vault owner");',
+    '    require(amount \u003E 0, "TokenVault.withdraw: amount must be \u003E 0");',
+    '    require(totalIn \u003E= totalOut + amount, "TokenVault.withdraw: amount exceeds available balance");',
+    '    // Pre-check: verify the caller actually holds enough SimpleToken balance.',
+    '    // Direct transfers on SimpleToken can drain the balance without TokenVault knowing.',
+    '    extern_call("SimpleToken", "checkBalance", caller, amount);',
+    '    extern_call("SimpleToken", "burn", caller, amount);',
+    '    totalOut = totalOut + amount;',
+    '    return totalOut;',
+    '  }',
+    '',
+    '  // Returns vault-tracked net inflow (totalIn - totalOut). Returns 0 if totalOut \u003E totalIn.',
+    '  function netFlow() {',
+    '    require(totalIn \u003E= totalOut, "TokenVault.netFlow: totalOut exceeds totalIn");',
+    '    return totalIn - totalOut;',
+    '  }',
+    '',
+    '  function getTotalIn()  { return totalIn; }',
+    '  function getTotalOut() { return totalOut; }',
+    '',
+    '  // balance() -- vault-side net (totalIn - totalOut).',
+    '  // How much is available to withdraw from the vault (totalIn - totalOut).',
+    '// This is NOT the same as your SimpleToken balance — it is the vault\'s net flow.',
+    '// Your actual token balance is shown by SimpleToken.balanceOf(), or call tokenBalance() below.',
+    '  function available() -> u256 {',
+    '    require(totalIn \u003E= totalOut, "totalOut exceeds totalIn");',
+    '    return totalIn - totalOut;',
+    '  }',
+    '',
+    '  // Returns your ACTUAL SimpleToken balance via extern_call.',
+    '  // This is the real token count — different from available() which tracks vault flow.',
+    '  function tokenBalance() -> u256 as caller {',
+    '    extern_call("SimpleToken", "balanceOf", caller);',
+    '  }',
+    '',
+    '  // assertSync() -- cross-contract invariant check.',
+    '  // Calls SimpleToken.assertBalance(totalIn - totalOut).',
+    '  // Reverts if the two contracts have drifted out of sync.',
+    '  function assertSync() -> bool as caller {',
+    '    require(totalIn \u003E= totalOut, "assertSync: totalOut exceeds totalIn");',
+    '    extern_call("SimpleToken", "assertBalance", totalIn - totalOut);',
+    '    return true;',
+    '  }',
+    '}'
+  ];
+
+
+    var TT_LINES = [
+    'pragma synq ^0.9;',
+    '',
+    '// TypeTestContract — exercises every data type and operator in SynQ.',
+    '// Deploy, call init(), then run any function in any order.',
+    'contract TypeTestContract {',
+    '',
+    '  // ── State — one of every supported type ───────────────────────────────────',
+    '  state {',
+    '    u_val:      u256;',
+    '    i_val:      i32;',
+    '    b_val:      bool;',
+    '    s_val:      str;',
+    '    admin:      u256;',
+    '    ready:      bool;',
+    '    labelled:   bool;',
+    '    op_count:   u256;',
+    '    balances:   map\u003Cu256, u256\u003E;',
+    '    registered: set\u003Cu256\u003E;',
+    '  }',
+    '',
+    '  // ── Init ───────────────────────────────────────────────────────────────────',
+    '  function init() -> bool as caller {',
+    '    if (ready) { return false; }',
+    '    admin    = caller;',
+    '    u_val    = 100;',
+    '    i_val    = -42;',
+    '    b_val    = true;',
+    '    s_val    = "hello";',
+    '    ready    = true;',
+    '    labelled = false;',
+    '    op_count = 0;',
+    '    return true;',
+    '  }',
+    '',
+    '  // ── u256 arithmetic (+  -  *  /  %) ───────────────────────────────────────',
+    '  function testArithmetic(a: u256, b: u256) -\u003E u256 as caller {',
+    '    require(ready, "not initialised");',
+    '    require(b \u003E 0, "b must be \u003E 0");',
+    '    let sum  = a + b;',
+    '    let diff = sum - b;',
+    '    let prod = a * b;',
+    '    let quot = prod / b;',
+    '    let rem  = prod % (b + 1);',
+    '    u_val    = quot + rem;',
+    '    op_count = op_count + 1;',
+    '    return u_val;',
+    '  }',
+    '',
+    '  // ── i32 signed arithmetic ──────────────────────────────────────────────────',
+    '  function testSigned(x: i32, y: i32) -\u003E i32 as caller {',
+    '    require(ready, "not initialised");',
+    '    let s = x + y;',
+    '    let d = x - y;',
+    '    let p = x * y;',
+    '    i_val    = s + d + p;',
+    '    op_count = op_count + 1;',
+    '    return i_val;',
+    '  }',
+    '',
+    '  // ── Comparison operators (==  !=  \u003C  \u003C=  \u003E  \u003E=) ───────────────────────────',
+    '  function testCompare(a: u256, b: u256) -\u003E bool as caller {',
+    '    require(ready, "not initialised");',
+    '    let eq = (a == b);',
+    '    let ne = (a != b);',
+    '    let lt = (a \u003C b);',
+    '    let le = (a \u003C= b);',
+    '    let gt = (a \u003E b);',
+    '    let ge = (a \u003E= b);',
+    '    let ok = (eq == !ne);',
+    '    b_val    = ok;',
+    '    op_count = op_count + 1;',
+    '    return ok;',
+    '  }',
+    '',
+    '  // ── Boolean operators (&&  ||  !) ─────────────────────────────────────────',
+    '  function testBool(p: bool, q: bool) -\u003E bool as caller {',
+    '    require(ready, "not initialised");',
+    '    let and_r = p && q;',
+    '    let or_r  = p || q;',
+    '    let not_p = !p;',
+    '    let xor_r = (p || q) && !(p && q);',
+    '    b_val    = xor_r;',
+    '    op_count = op_count + 1;',
+    '    return and_r;',
+    '  }',
+    '',
+    '  // ── String operations (concat + strLen) ───────────────────────────────────',
+    '  function testString(a: str, b: str) -\u003E str as caller {',
+    '    require(ready, "not initialised");',
+    '    let cat = a + b;',
+    '    let len = str_len(cat);',
+    '    require(len \u003E 0, "empty result");',
+    '    s_val    = cat;',
+    '    op_count = op_count + 1;',
+    '    return cat;',
+    '  }',
+    '',
+    '  function setLabel(label: str) -> bool as caller {',
+    '    require(ready, "not initialised");',
+    '    require(!labelled, "label already set");',
+    '    s_val    = label;',
+    '    labelled = true;',
+    '    return true;',
+    '  }',
+    '',
+    '  // ── Map operations ─────────────────────────────────────────────────────────',
+    '  function testMapSet(key: u256, val: u256) -> bool as caller {',
+    '    require(ready, "not initialised");',
+    '    require(key \u003E 0, "key must be \u003E 0");',
+    '    balances[key] = val;',
+    '    op_count = op_count + 1;',
+    '    return true;',
+    '  }',
+    '',
+    '  function testMapGet(key: u256) -\u003E u256 {',
+    '    return balances[key];
+
+var LOOP_LINES = [
+  'pragma synq ^0.9;',
+  '',
+  'contract LoopDemo {',
+  '  state {',
+  '    accumulator: u256;',
+  '    iterationCount: u256;',
+  '    initialised: bool;',
+  '  }',
+  '',
+  '  // Idempotent init — must be called once before runIterations()',
+  '  function init() -> bool as caller {',
+  '    if (initialised) { return false; }',
+  '    accumulator = 0;',
+  '    iterationCount = 0;',
+  '    initialised = true;',
+  '    return true;',
+  '  }',
+  '',
+  '  // Classic while-loop: factorial(n) = n * (n-1) * ... * 1',
+  '  function factorial(n: u256) -> u256 {',
+  '    let result: u256 = 1;',
+  '    let i: u256 = 1;',
+  '    while (i <= n) {',
+  '      result = result * i;',
+  '      i = i + 1;',
+  '    }',
+  '    return result;',
+  '  }',
+  '',
+  '  // Sum all integers from start to end (inclusive)',
+  '  function sumRange(start: u256, end: u256) -> u256 {',
+  '    let total: u256 = 0;',
+  '    let i: u256 = start;',
+  '    while (i <= end) {',
+  '      total = total + i;',
+  '      i = i + 1;',
+  '    }',
+  '    return total;',
+  '  }',
+  '',
+  '  // Count even numbers up to n — skip odds with continue',
+  '  function countEven(n: u256) -> u256 {',
+  '    let count: u256 = 0;',
+  '    let i: u256 = 1;',
+  '    while (i <= n) {',
+  '      let remainder: u256 = i % 2;',
+  '      if (remainder != 0) {',
+  '        i = i + 1;',
+  '        continue;',
+  '      }',
+  '      count = count + 1;',
+  '      i = i + 1;',
+  '    }',
+  '    return count;',
+  '  }',
+  '',
+  '  // Integer square root via break — finds floor(sqrt(target))',
+  '  function sqrtFloor(target: u256) -> u256 {',
+  '    let i: u256 = 0;',
+  '    let sq: u256 = 0;',
+  '    while (sq <= target) {',
+  '      i = i + 1;',
+  '      sq = i * i;',
+  '      if (sq > target) { break; }',
+  '    }',
+  '    return i - 1;',
+  '  }',
+  '',
+  '  // Power via repeated multiplication',
+  '  function power(base: u256, exp: u256) -> u256 {',
+  '    let result: u256 = 1;',
+  '    let i: u256 = 0;',
+  '    while (i < exp) {',
+  '      result = result * base;',
+  '      i = i + 1;',
+  '    }',
+  '    return result;',
+  '  }',
+  '',
+  '  // State-accumulating loop — requires init() first',
+  '  function runIterations(n: u256) -> u256 as caller {',
+  '    require(initialised, "not initialised");',
+  '    let total: u256 = 0;',
+  '    let i: u256 = 0;',
+  '    while (i < n) {',
+  '      total = total + i;',
+  '      i = i + 1;',
+  '    }',
+  '    accumulator = accumulator + total;',
+  '    iterationCount = iterationCount + n;',
+  '    return total;',
+  '  }',
+  '}',
+];
+',
+    '  }',
+    '',
+    '  function testMapUpdate(key: u256, delta: u256) -> u256 as caller {',
+    '    require(ready, "not initialised");',
+    '    balances[key] = balances[key] + delta;',
+    '    op_count = op_count + 1;',
+    '    return balances[key];',
+    '  }',
+    '',
+    '  // ── Set operations ─────────────────────────────────────────────────────────',
+    '  function testSetAdd(addr: u256) -> bool as caller {',
+    '    require(ready, "not initialised");',
+    '    require(addr > 0, "invalid address");',
+    '    registered.add(addr);',
+    '    op_count = op_count + 1;',
+    '    return true;',
+    '  }',
+    '',
+    '  function testSetContains(addr: u256) -> bool {',
+    '    return registered.contains(addr);',
+    '  }',
+    '',
+    '  function testSetRemove(addr: u256) -> bool as caller {',
+    '    require(ready, "not initialised");',
+    '    registered.remove(addr);',
+    '    op_count = op_count + 1;',
+    '    return true;',
+    '  }',
+    '',
+    '  // ── require guard paths ───────────────────────────────────────────────────',
+    '  function testRequirePass(x: u256) -> u256 as caller {',
+    '    require(ready,   "not initialised");',
+    '    require(x > 0,   "x must be > 0");',
+    '    require(x < 1000000, "x too large");',
+    '    op_count = op_count + 1;',
+    '    return x * 2;',
+    '  }',
+    '',
+    '  function testRequireFail() as caller {',
+    '    require(ready, "not initialised");',
+    '    require(false, "intentional revert");',
+    '  }',
+    '',
+    '  // ── Admin-gated function ───────────────────────────────────────────────────',
+    '  function adminOnly() -> u256 as caller {',
+    '    require(ready, "not initialised");',
+    '    require(caller == admin, "not admin");',
+    '    op_count = op_count + 1;',
+    '    return op_count;',
+    '  }',
+    '',
+    '  // ── Read-only getters ──────────────────────────────────────────────────────',
+    '  function getUVal()    -> u256 { return u_val;    }',
+    '  function getIVal()    -> i32  { return i_val;    }',
+    '  function getBVal()    -> bool { return b_val;    }',
+    '  function getSVal()    -> str  { return s_val;    }',
+    '  function getOpCount() -> u256 { return op_count; }',
+    '  function getAdmin()   -> u256 { return admin;    }',
+    '  function isReady()    -> bool { return ready;    }',
+    '}',
+    '',
+  ];
+
+
+  /* ── Init ────────────────────────────────────────────────────────────────── */
+  (function init() {
+    document.getElementById('editor').value = VAULT_LINES.join('\n');
+    updateLineNums();
+    syncCompileBtn();
+    document.getElementById('editor').addEventListener('input', updateLineNums);
+    document.getElementById('editor').addEventListener('input', syncCompileBtn);
+    document.getElementById('editor').addEventListener('scroll', function() {
+      document.getElementById('lineNums').scrollTop = this.scrollTop;
+    });
+  })();
+
+  /* ── Expose globals for onclick attrs ────────────────────────────────────── */
+  window.connectWallet  = connectWallet;
+
+  var DEMO_LINES = [
+    'pragma synq ^0.9;',
+    '',
+    '// SimpleToken — ERC-20-style token for the SynQ devnet demo.',
+    '// Deploy after TokenVault in the same workspace.',
+    'contract SimpleToken {',
+    '',
+    '  state {',
+    '    name:        str;',
+    '    symbol:      str;',
+    '    totalSupply:  u256;',
+    '    initialSupply: u256;',
+    '    owner:       u256;',
+    '    initialised: bool;',
+    '    balances:    map\u003Cu256, u256\u003E;',
+    '  }',
+    '',
+    '  function init(tokenName: str, tokenSymbol: str, supply: u256) -> bool as caller {',
+    '    if (initialised) { return false; }',
+    '    name        = tokenName;',
+    '    symbol      = tokenSymbol;',
+    '    totalSupply  = supply;',
+    '    initialSupply = supply;',
+    '    owner        = caller;',
+    '    balances[caller] = supply;',
+    '    initialised = true;',
+    '    return true;',
+    '  }',
+    '',
+    '  function mint(to: u256, amount: u256) -> bool as caller {',
+    '    require(initialised, "not initialised");',
+    '    require(caller == owner, "not owner");',
+    '    balances[to]  = balances[to] + amount;',
+    '    totalSupply   = totalSupply + amount;',
+    '    return true;',
+    '  }',
+    '',
+    '  function burn(from: u256, amount: u256) -> bool as caller {',
+    '    require(initialised, "not initialised");',
+    '    require(caller == owner, "not owner");',
+    '    require(balances[from] \u003E= amount, "insufficient balance");',
+    '    balances[from] = balances[from] - amount;',
+    '    totalSupply    = totalSupply - amount;',
+    '    return true;',
+    '  }',
+    '',
+    '  // WARNING: Direct transfers move tokens WITHOUT TokenVault knowing.',
+    '// If you use TokenVault.deposit/withdraw, avoid calling transfer() directly',
+    '// — it drains your balance and withdraw() will fail with insufficient balance.',
+    '  function transfer(to: u256, amount: u256) -> bool as caller {',
+    '    require(initialised, "not initialised");',
+    '    require(to != caller, "cannot transfer to self");',
+    '    require(balances[caller] \u003E= amount, "insufficient balance");',
+    '    balances[caller] = balances[caller] - amount;',
+    '    balances[to]     = balances[to] + amount;',
+    '    return true;',
+    '  }',
+    '',
+    '  function balanceOf(addr: u256) -\u003E u256 {',
+    '    return balances[addr];',
+    '  }',
+    '',
+    '  // Internal: called by TokenVault.withdraw() to verify balance before burn.',
+    '  function checkBalance(addr: u256, amount: u256) -> bool {',
+    '    require(balances[addr] >= amount, "insufficient token balance for vault withdrawal");',
+    '    return true;',
+    '  }',
+    '',
+    '  function getOwner() -\u003E u256 {',
+    '    return owner;',
+    '  }',
+    '',
+    '  function getTotalSupply() -\u003E u256 {',
+    '    return totalSupply;',
+    '  }',
+    '',
+    '  // ── Internal: called by TokenVault.assertSync() via extern_call ──',
+    '  // Do not call directly — use TokenVault.assertSync() instead.',
+    '  // Verifies: totalSupply - initialSupply == vault net flow (totalIn - totalOut).',
+    '  function assertBalance(expected: u256) -> bool {',
+    '    require(totalSupply - initialSupply == expected, "assertBalance: supply delta mismatch");',
+    '    return true;',
+    '  }',
+    '}',
+  ];
+
+  var CT_LINES = [
+    'pragma synq ^0.9;',
+    '',
+    '// ComprehensiveToken v2 — exercises bool, str, map\u003Cu256,bool\u003E, map\u003Cu256,str\u003E',
+    '// and the str_concat / str_len / str_eq builtins alongside the full ERC-20-style',
+    '// token surface.  All state-mutating functions require `as caller` (EIP-712 auth).',
+    '',
+    'contract ComprehensiveToken {',
+    '',
+    '  state {',
+    '    // ── Numeric state ──────────────────────────────────────────────────────',
+    '    total_supply:  u256;',
+    '    admin_count:   u256;',
+    '    version:       u256;',
+    '',
+    '    // ── Boolean state (Bool type) ──────────────────────────────────────────',
+    '    initialised:   bool;',
+    '    feat_pqc:      bool;',
+    '    debug_mode:    bool;',
+    '',
+    '    // ── String state (Str type) ────────────────────────────────────────────',
+    '    token_name:    str;',
+    '    token_symbol:  str;',
+    '',
+    '    // ── Role mappings (map\u003Cu256, bool\u003E) ────────────────────────────────────',
+    '    admin_role:    map\u003Cu256, bool\u003E;',
+    '    minter_role:   map\u003Cu256, bool\u003E;',
+    '    registered:    map\u003Cu256, bool\u003E;',
+    '',
+    '    // ── Balance mapping (map\u003Cu256, u256\u003E) ──────────────────────────────────',
+    '    balances:      map\u003Cu256, u256\u003E;',
+    '',
+    '    // ── Label mapping (map\u003Cu256, str\u003E) — optional per-address label ────────',
+    '    labels:        map\u003Cu256, str\u003E;',
+    '  }',
+    '',
+    '  impl {',
+    '',
+    '    // ── Bootstrap ──────────────────────────────────────────────────────────',
+    '    // Sign with your wallet — caller becomes the first admin.',
+    '    function init(name: str, symbol: str) -> bool as caller {',
+    '      if (initialised) { return false; }',
+    '      require(str_len(name) \u003E 0,     "init: name empty");',
+    '      require(str_len(symbol) \u003E 0,   "init: symbol empty");',
+    '      require(str_len(name) \u003C= 64,   "init: name too long");',
+    '      require(str_len(symbol) \u003C= 8,  "init: symbol too long");',
+    '',
+    '      admin_role[caller]  = true;',
+    '      registered[caller]  = true;',
+    '      admin_count         = 1;',
+    '      feat_pqc            = true;',
+    '      version             = 2;',
+    '      token_name          = name;',
+    '      token_symbol        = symbol;',
+    '      initialised         = true;',
+    '      debug_mode          = false;',
+    '      return true;',
+    '    }',
+    '',
+    '    // ── Admin management ───────────────────────────────────────────────────',
+    '    function grantAdmin(target: u256) -> bool as caller {',
+    '      require(admin_role[caller] == true, "grantAdmin: not admin");',
+    '      require(target \u003E 0,                 "grantAdmin: invalid address");',
+    '      if (admin_role[target] == false) {',
+    '        admin_count = admin_count + 1;',
+    '      }',
+    '      admin_role[target]  = true;',
+    '      registered[target]  = true;',
+    '      return true;',
+    '    }',
+    '',
+    '    function revokeAdmin(target: u256) -> bool as caller {',
+    '      require(admin_role[caller] == true, "revokeAdmin: not admin");',
+    '      require(target != caller,           "revokeAdmin: cannot revoke self");',
+    '      require(admin_count \u003E 1,            "revokeAdmin: cannot remove last admin");',
+    '      if (admin_role[target] == true) {',
+    '        admin_count = admin_count - 1;',
+    '      }',
+    '      admin_role[target] = false;',
+    '      return true;',
+    '    }',
+    '',
+    '    function grantMinter(target: u256) -> bool as caller {',
+    '      require(admin_role[caller] == true, "grantMinter: not admin");',
+    '      require(target \u003E 0,                 "grantMinter: invalid address");',
+    '      minter_role[target] = true;',
+    '      registered[target]  = true;',
+    '      return true;',
+    '    }',
+    '',
+    '    function revokeMinter(target: u256) -> bool as caller {',
+    '      require(admin_role[caller] == true, "revokeMinter: not admin");',
+    '      require(target != caller,           "revokeMinter: cannot revoke self");',
+    '      minter_role[target] = false;',
+    '      return true;',
+    '    }',
+    '',
+    '    // ── Registration ───────────────────────────────────────────────────────',
+    '    function register(target: u256) -> bool as caller {',
+    '      require(admin_role[caller] == true, "register: not admin");',
+    '      require(target \u003E 0,                 "register: invalid address");',
+    '      registered[target] = true;',
+    '      return true;',
+    '    }',
+    '',
+    '    function deregister(target: u256) -> bool as caller {',
+    '      require(admin_role[caller] == true,  "deregister: not admin");',
+    '      require(balances[target] == 0,       "deregister: target still holds tokens");',
+    '      registered[target] = false;',
+    '      return true;',
+    '    }',
+    '',
+    '    // ── Token metadata (admin only) ────────────────────────────────────────',
+    '    function setTokenName(name: str) -> bool as caller {',
+    '      require(admin_role[caller] == true, "setTokenName: not admin");',
+    '      require(str_len(name) \u003E 0,          "setTokenName: empty");',
+    '      require(str_len(name) \u003C= 64,        "setTokenName: too long");',
+    '      token_name = name;',
+    '      return true;',
+    '    }',
+    '',
+    '    function setTokenSymbol(symbol: str) -> bool as caller {',
+    '      require(admin_role[caller] == true, "setTokenSymbol: not admin");',
+    '      require(str_len(symbol) \u003E 0,        "setTokenSymbol: empty");',
+    '      require(str_len(symbol) \u003C= 8,       "setTokenSymbol: too long");',
+    '      token_symbol = symbol;',
+    '      return true;',
+    '    }',
+    '',
+    '    // ── Per-address labels (admin only) ────────────────────────────────────',
+    '    function setLabel(target: u256, label: str) -> bool as caller {',
+    '      require(admin_role[caller] == true, "setLabel: not admin");',
+    '      require(str_len(label) \u003C= 32,       "setLabel: label too long");',
+    '      labels[target] = label;',
+    '      return true;',
+    '    }',
+    '',
+    '    function getLabel(target: u256) -\u003E str { return labels[target]; }',
+    '',
+    '    // ── Minting ────────────────────────────────────────────────────────────',
+    '    function mint(to: u256, amount: u256) -> u256 as caller {',
+    '      require(minter_role[caller] == true || admin_role[caller] == true, "mint: not authorised");',
+    '      require(to \u003E 0,     "mint: invalid recipient");',
+    '      require(amount \u003E 0, "mint: zero amount");',
+    '      registered[to]  = true;',
+    '      total_supply    = total_supply + amount;',
+    '      balances[to]    = balances[to] + amount;',
+    '      return total_supply;',
+    '    }',
+    '',
+    '    // ── Transfers ──────────────────────────────────────────────────────────',
+    '    function transfer(to: u256, amount: u256) -> bool as caller {',
+    '      require(registered[caller] == true,   "transfer: sender not registered");',
+    '      require(registered[to] == true,       "transfer: recipient not registered");',
+    '      require(to \u003E 0,                       "transfer: invalid recipient");',
+    '      require(to != caller,                 "transfer: cannot transfer to self");',
+    '      require(balances[caller] \u003E= amount,   "transfer: insufficient balance");',
+    '      balances[caller] = balances[caller] - amount;',
+    '      balances[to]     = balances[to] + amount;',
+    '      return true;',
+    '    }',
+    '',
+    '    function burn(from: u256, amount: u256) -> u256 as caller {',
+    '      require(admin_role[caller] == true,  "burn: not admin");',
+    '      require(balances[from] \u003E= amount,    "burn: amount exceeds balance");',
+    '      balances[from] = balances[from] - amount;',
+    '      total_supply   = total_supply - amount;',
+    '      return total_supply;',
+    '    }',
+    '',
+    '    // ── Debug control (admin only) ─────────────────────────────────────────',
+    '    function setDebugMode(enabled: bool) -> bool as caller {',
+    '      require(admin_role[caller] == true, "setDebugMode: not admin");',
+    '      debug_mode = enabled;',
+    '      return true;',
+    '    }',
+    '',
+    '    // ── Diagnostics (gated on debug_mode) ─────────────────────────────────',
+    '    function whoAmI() -> u256 as caller {',
+    '      require(debug_mode == true, "whoAmI: debug mode not enabled");',
+    '      return caller;',
+    '    }',
+    '',
+    '    function amIRegistered() -\u003E bool as caller {',
+    '      require(debug_mode == true, "amIRegistered: debug mode not enabled");',
+    '      return registered[caller];',
+    '    }',
+    '',
+    '    // ── Identity helpers ───────────────────────────────────────────────────',
+    '    function amIAdmin() -\u003E bool as caller    { return admin_role[caller]; }',
+    '    function amIMinter() -\u003E bool as caller   { return minter_role[caller]; }',
+    '',
+    '    // ── Token info (str builtins) ──────────────────────────────────────────',
+    '    // Returns "Name: \u003Ctoken_name\u003E [\u003Ctoken_symbol\u003E]" as a single string.',
+    '    function tokenInfo() -\u003E str {',
+    '      return str_concat(str_concat(str_concat("Name: ", token_name), " ["), str_concat(token_symbol, "]"));',
+    '    }',
+    '',
+    '    // Check if a given string matches the token symbol exactly.',
+    '    function isSymbol(s: str) -\u003E bool { return str_eq(s, token_symbol); }',
+    '',
+    '    // ── Queries ────────────────────────────────────────────────────────────',
+    '    function isAdmin(who: u256)      -\u003E bool  { return admin_role[who]; }',
+    '    function isMinter(who: u256)     -\u003E bool  { return minter_role[who]; }',
+    '    function isRegistered(who: u256) -\u003E bool  { return registered[who]; }',
+    '    function balanceOf(who: u256)    -\u003E u256  { return balances[who]; }',
+    '    function totalSupply()           -\u003E u256  { return total_supply; }',
+    '    function tokenName()             -\u003E str   { return token_name; }',
+    '    function tokenSymbol()           -\u003E str   { return token_symbol; }',
+    '    function getVersion()            -\u003E u256  { return version; }',
+    '    function isInitialised()         -\u003E bool  { return initialised; }',
+    '    function isPQCEnabled()          -\u003E bool  { return feat_pqc; }',
+    '  }',
+    '}',
+    '',
+  ];
+
+  window.loadBlank      = loadBlank;
+  window.loadFromFile   = loadFromFile;
+  window.loadDemo       = loadDemo;
+  window.loadComprehensive = loadComprehensive;
+
+  /* ── Workspace helpers ───────────────────────────────────────────────────── */
+
+  // Highlight or grey-out the init pill based on current state snapshot.
+  // Called after every probeStateVars() so the UI reflects live VM state.
+  function syncInitPillHint() {
+    var pills = document.getElementById('funcPills');
+    if (!pills) return;
+    var initPill = null;
+    var allPills = pills.getElementsByClassName('func-pill');
+    for (var i = 0; i < allPills.length; i++) {
+      if (allPills[i].textContent.replace(/\s/g,'').startsWith('init')) {
+        initPill = allPills[i]; break;
+      }
+    }
+    if (!initPill) return;
+    // Check: does state have an 'initialised' or 'active' slot?
+    var initVal = stateSnapshot['initialised'];
+    var activeVal = stateSnapshot['active'];
+    var isInitialised = (initVal === '1' || initVal === 'true' || initVal === 1 || initVal === true)
+                     || (activeVal === '1' || activeVal === 1 || activeVal === 'true' || activeVal === true);
+    var hasInitSlot   = ('initialised' in stateSnapshot) || ('active' in stateSnapshot);
+    if (hasInitSlot && isInitialised) {
+      // Already initialised — grey out, block clicks
+      initPill.style.opacity       = '0.35';
+      initPill.style.cursor        = 'not-allowed';
+      initPill.style.pointerEvents = 'none';
+      initPill.title               = 'Contract already initialised — call Reset VM to start fresh';
+      initPill.style.outline       = '';
+      initPill.dataset.blocked     = '1';
+    } else if (hasInitSlot && !isInitialised) {
+      // Needs init — pulse amber to guide user
+      initPill.style.opacity       = '1';
+      initPill.style.cursor        = 'pointer';
+      initPill.style.pointerEvents = '';
+      initPill.title               = 'Call init() to initialise this contract';
+      initPill.style.outline       = '2px solid rgba(255,180,0,0.8)';
+      initPill.style.outlineOffset = '1px';
+      initPill.dataset.blocked     = '';
+    } else {
+      // No initialised slot — leave as-is
+      initPill.style.opacity       = '';
+      initPill.style.cursor        = '';
+      initPill.style.pointerEvents = '';
+      initPill.title               = '';
+      initPill.style.outline       = '';
+      initPill.dataset.blocked     = '';
+    }
+  }
+
+  function renderWorkspacePanel() {
+    var panel = document.getElementById('workspacePanel');
+    var list  = document.getElementById('workspaceContracts');
+    var badge = document.getElementById('workspaceIdBadge');
+    if (!workspaceId) { panel.style.display = 'none'; return; }
+    panel.style.display = 'block';
+    badge.textContent = 'Workspace ' + workspaceNum;
+    if (!workspaceContracts.length) {
+      list.innerHTML = '<div class="workspace-empty">No contracts deployed yet.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    workspaceContracts.forEach(function(c, idx) {
+      var isActive = (c.session_id === sessionId);
+      var addrShort = c.address ? (c.address.slice(0,6) + '\u2026' + c.address.slice(-4)) : '\u2014';
+      var card = document.createElement('div');
+      card.className = 'ws-contract-card' + (isActive ? ' active' : '');
+      var numBadge = document.createElement('span');
+      numBadge.className = 'ws-contract-num';
+      numBadge.textContent = ((c.deploy_index !== undefined ? c.deploy_index : idx) + 1) + '.';
+      var nameSpan = document.createElement('span');
+      nameSpan.className = 'ws-contract-name'; nameSpan.textContent = c.name;
+      var addrSpan = document.createElement('span');
+      addrSpan.className = 'ws-contract-addr'; addrSpan.textContent = addrShort;
+      card.appendChild(numBadge); card.appendChild(nameSpan); card.appendChild(addrSpan);
+      if (!isActive) {
+        var swBtn = document.createElement('button');
+        swBtn.className = 'ws-btn'; swBtn.textContent = '\u25b6 Switch';
+        swBtn.addEventListener('click', (function(sid){ return function(){ switchToContract(sid); }; })(c.session_id));
+        card.appendChild(swBtn);
+      } else {
+        var activeSpan = document.createElement('span');
+        activeSpan.style.cssText = 'font-size:0.7rem;color:rgba(0,206,209,0.6);'; activeSpan.textContent = 'active';
+        card.appendChild(activeSpan);
+      }
+      var delBtn = document.createElement('button');
+      delBtn.className = 'ws-btn ws-btn-del'; delBtn.textContent = '\u00d7';
+      delBtn.addEventListener('click', (function(sid){ return function(){ removeFromWorkspace(sid); }; })(c.session_id));
+      card.appendChild(delBtn);
+      list.appendChild(card);
+    });
+  }
+
+  function populateFunctionPicker() {
+    if (!currentBytecode) return;
+    // Update the contract name badge in the Execute Contract card
+    var _cnb = document.getElementById('contractNameBadge');
+    if (_cnb) { _cnb.textContent = currentContractName || ''; _cnb.style.display = currentContractName ? 'inline' : 'none'; }
+
+    parsedFunctions = parseDispatchTable(currentBytecode);
+
+    // Enrich each function with param names parsed from source
+    (function enrichParamNames(src, fns) {
+      fns.forEach(function(fn) {
+        // Match: function fnName(p1: T, p2: T) {
+        var re = new RegExp('function\\s+' + fn.name + '\\s*\\(([^)]*)\\)', 'i');
+        var m = src.match(re);
+        if (!m || !m[1].trim()) { fn.paramNames = []; return; }
+        fn.paramNames = m[1].split(',').map(function(p) {
+          return p.trim().split(/[:\s]/)[0].trim();
+        });
+      });
+    })(document.getElementById('editor').value, parsedFunctions);
+
+    // Enrich parsedFunctions with paramTypes from server compile metadata
+    // Falls back to regex parsing from source for WASM compile path
+    (function enrichParamTypes(cfns, fns, src) {
+      var byName = {};
+      cfns.forEach(function(cf) { byName[cf.name] = cf; });
+      fns.forEach(function(fn) {
+        var cf = byName[fn.name];
+        if (cf) {
+          fn.paramTypes = cf.params.map(function(p) { return p.ty; });
+          fn.paramNames = fn.paramNames && fn.paramNames.length
+            ? fn.paramNames : cf.params.map(function(p) { return p.name; });
+          fn.returnType = cf.return_type;
+        } else {
+          // Fallback: parse types from source regex  function fname(p: type, ...) 
+          var re = new RegExp('function\\s+' + fn.name + '\\s*\\(([^)]*)\\)', 'i');
+          var m = src ? src.match(re) : null;
+          fn.paramTypes = [];
+          fn.paramNames = fn.paramNames || [];
+          if (m && m[1].trim()) {
+            m[1].split(',').forEach(function(part, i) {
+              var kv = part.trim().split(/\s*:\s*/);
+              fn.paramNames[i] = fn.paramNames[i] || (kv[0] ? kv[0].trim() : ('p' + i));
+              fn.paramTypes[i] = kv[1] ? kv[1].trim().split(/[\s<{(]/)[0].toLowerCase() : 'u256';
+            });
+          }
+          fn.returnType = null;
+        }
+      });
+    })(compileFunctions, parsedFunctions, document.getElementById('editor') && document.getElementById('editor').value);
+
+    // Sort pills: init first, then setters, then getters, then alphabetical
+    var PILL_ORDER = ['init', 'deposit', 'withdraw', 'available', 'tokenBalance', 'netFlow', 'assertSync', 'getTotalIn', 'getTotalOut', 'getTotal', 'assertBalance', 'getOwner', 'getPaused', 'mint', 'burn', 'setPaused', 'testArithmetic', 'testSigned', 'testCompare', 'testBool', 'testString', 'testMapSet', 'testMapGet', 'testMapUpdate', 'testSetAdd', 'testSetContains', 'testSetRemove', 'testRequirePass', 'testRequireFail', 'adminOnly', 'setLabel', 'getUVal', 'getIVal', 'getBVal', 'getSVal', 'getOpCount', 'getAdmin', 'isReady'];
+    // Internal functions hidden on SimpleToken — called via extern_call by TokenVault,
+    // vault accounting. Any other contract (including user contracts) shows them normally.
+    if (currentContractName === 'SimpleToken') {
+      var VAULT_INTERNAL = ['mint', 'burn', 'checkBalance', 'assertBalance'];
+      parsedFunctions = parsedFunctions.filter(function(fn) {
+        return VAULT_INTERNAL.indexOf(fn.name) === -1;
+      });
+    }
+    parsedFunctions.sort(function(a, b) {
+      var ai = PILL_ORDER.indexOf(a.name);
+      var bi = PILL_ORDER.indexOf(b.name);
+      if (ai === -1 && bi === -1) return a.name.localeCompare(b.name);
+      if (ai === -1) return 1;
+      if (bi === -1) return -1;
+      return ai - bi;
+    });
+
+    var pills = document.getElementById('funcPills');
+    pills.innerHTML = '';
+
+    if (parsedFunctions.length === 0) {
+      pills.innerHTML = '<span style="color:rgba(255,255,255,0.3);font-size:0.8rem;">No callable functions found in dispatch table.</span>';
+    } else {
+      parsedFunctions.forEach(function(fn, idx) {
+        var pill = document.createElement('button');
+        pill.className = 'func-pill';
+        
+        var innerHTML = '';
+        if (fn.requiresCaller) {
+          innerHTML += '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0; margin-right: 4px;"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>';
+        }
+        innerHTML += fn.name + '(' + (fn.paramCount > 0 ? fn.paramCount + ' arg' + (fn.paramCount > 1 ? 's' : '') : '') + ')';
+        
+        if (fn.capabilities && fn.capabilities.length > 0) {
+          fn.capabilities.forEach(function(cap) {
+            innerHTML += '<span class="cap-badge" style="background: rgba(167,139,250,0.15); border: 1px solid rgba(167,139,250,0.4); color: #c084fc; font-size: 0.65rem; padding: 1px 5px; border-radius: 4px; margin-left: 6px; font-family: inherit; flex-shrink: 0; line-height: 1;">' + cap + '</span>';
+          });
+        }
+        pill.innerHTML = innerHTML;
+        
+        pill.onclick = (function(i) { return function() { selectFunction(i); }; })(idx);
+        pills.appendChild(pill);
+      });
+    }
+
+    document.getElementById('vmOutput').innerHTML = '<span class="dim">Select a function above and press Run.</span>';
+    document.getElementById('paramsSection').style.display = 'none';
+    document.getElementById('paramsGrid').innerHTML = '';
+    syncInitPillHint();
+  }
+
+  function switchToContract(sid) {
+    var c = workspaceContracts.find(function(x){ return x.session_id === sid; });
+    if (!c) return;
+    currentBytecode        = c.bytecode;
+    currentContractName    = c.name;
+    currentContractAddress = c.address;
+    currentStateVars       = c.stateVars       || [];
+    currentStateVarTypes   = c.stateVarTypes   || {};
+    currentFnReturnTypes   = c.fnReturnTypes   || {};
+    compileFunctions       = c.compileFunctions || [];
+    sessionId              = c.session_id;
+    updateSessionBadge();
+    renderWorkspacePanel();
+    // Show vmCard and re-render pills for the newly selected contract
+    document.getElementById('vmCard').classList.add('show');
+    populateFunctionPicker();
+    probeStateVars();
+  }
+
+  function removeFromWorkspace(sid) {
+    // Find the contract before filtering so we can tell the server
+    var removing = workspaceContracts.find(function(c){ return c.session_id === sid; });
+    workspaceContracts = workspaceContracts.filter(function(c){ return c.session_id !== sid; });
+
+    // If the removed contract was the active session, clear it
+    if (sessionId === sid) {
+      sessionId = null;
+      updateSessionBadge();
+      // Auto-switch to the first remaining workspace contract
+      if (workspaceContracts.length > 0) {
+        switchToContract(workspaceContracts[0].session_id);
+      }
+    }
+
+    // Tell the server to un-register this session from the workspace.
+    // This prevents stale entries from re-appearing if the workspace state
+    // is fetched again (e.g. after wallet reconnect).
+    if (workspaceId && removing) {
+      fetch(WORKSPACE_URL + '/' + workspaceId + '/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sid, contract_name: removing.name })
+      }).catch(function(e) { console.warn('[workspace] remove error:', e); });
+    }
+
+    renderWorkspacePanel();
+  }
+
+  async function newWorkspace() {
+    try {
+      var res  = await fetch(WORKSPACE_URL + '/new', { method: 'POST' });
+      var data = await res.json();
+      if (data.success) {
+        workspaceId = data.workspace_id;
+        workspaceNum += 1;
+        workspaceContracts = [];
+        renderWorkspacePanel();
+      }
+    } catch(e) { console.warn('[workspace] newWorkspace error:', e); }
+  }
+
+  async function registerInWorkspace(sid, name, address, bytecode, stateVars, forcedIndex) {
+    // POST /workspace/:id/join — registers existing session into workspace.
+    // Does NOT create a new VM session; the server stamps workspace_id on the
+    // existing session so its contract_name stays correct for EIP-712 recovery.
+    // forcedIndex: when re-deploying an existing contract, pass its original deploy_index
+    // so the badge number stays stable and no two entries share the same number.
+    try {
+      await fetch(WORKSPACE_URL + '/' + workspaceId + '/join', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sid, contract_name: name })
+      });
+    } catch(e) { console.warn('[workspace] register error:', e); }
+    // deploy_index: use forcedIndex if supplied (re-deploy keeps original slot),
+    // otherwise use existing entry's index, otherwise append at end.
+    var existing = workspaceContracts.findIndex(function(c){ return c.session_id === sid; });
+    var idx = (forcedIndex !== undefined) ? forcedIndex
+            : (existing >= 0)            ? workspaceContracts[existing].deploy_index
+            :                              workspaceContracts.length;
+    if (existing >= 0) workspaceContracts.splice(existing, 1);
+    workspaceContracts.push({ name: name, session_id: sid, address: address,
+                              bytecode: bytecode, stateVars: stateVars, deploy_index: idx,
+                              stateVarTypes: currentStateVarTypes,
+                              fnReturnTypes: currentFnReturnTypes,
+                              compileFunctions: compileFunctions });
+    workspaceContracts.sort(function(a, b){ return a.deploy_index - b.deploy_index; });
+    renderWorkspacePanel();
+    // Re-evaluate the deps hint now that workspace membership has changed.
+    // updateDepsHint is defined inline inside doCompile so we duplicate the
+    // logic here as a standalone call using the stored currentExternContracts.
+    (function refreshDepsHint() {
+      var dh = document.getElementById('depsHint'); if (!dh) return;
+      var ec = currentExternContracts || [];
+      if (!ec.length) { dh.style.visibility = 'hidden'; dh.textContent = '\u00a0'; return; }
+      var deployed = workspaceContracts.map(function(c){ return c.name; });
+      var missing  = ec.filter(function(n){ return !deployed.includes(n); });
+      var wsLabel  = workspaceNum > 0 ? 'Workspace ' + workspaceNum : 'the workspace';
+      if (missing.length > 0) {
+        if (workspaceContracts.length === 0) { dh.style.visibility = 'hidden'; dh.textContent = '\u00a0'; return; }
+        dh.style.visibility = 'visible';
+        dh.textContent = '↳ ' + missing.join(', ') + ' required — load, compile and deploy into ' + wsLabel;
+        dh.style.color = 'rgba(255,180,0,0.9)';
+      } else {
+        dh.style.visibility = 'visible';
+        dh.textContent = '↳ ' + ec.join(', ') + ' compiled and deployed in ' + wsLabel + ' ✓';
+        dh.style.color = 'rgba(0,206,209,0.75)';
+      }
+    })();
+    // The newly deployed contract is already active (sessionId set by caller).
+    // Just re-highlight its badge in the workspace panel.
+    renderWorkspacePanel();
+  }
+
+  window.doCompile      = doCompile;
+  window.downloadQvm    = downloadQvm;
+  window.downloadSig    = downloadSig;
+  window.runFunction    = runFunction;
+  window.resetVM        = resetVM;
+  window.switchToContract = switchToContract;
+  window.removeFromWorkspace = removeFromWorkspace;
+  window.newWorkspace   = newWorkspace;
+  window.initVMPanel    = initVMPanel;
+  window.loadVault      = loadVault;
+
+
+  function loadTypeTest() {
+    evictWorkspaceContractByName('TypeTestContract');
+    document.getElementById('editor').value = TT_LINES.join('\n');
+    updateLineNums();
+    clearResults();
+    syncCompileBtn();
+    setStatus('TypeTestContract loaded — Compile, Deploy, then call init() to begin testing all types and operators.', 'info');
+  }
+  window.loadTypeTest = loadTypeTest;
+}
+
+function loadLoopDemo() {
+  evictWorkspaceContractByName('LoopDemo');
+  document.getElementById('editor').value = LOOP_LINES.join('\n');
+  setStatus('LoopDemo loaded — compile and deploy, then call init() before runIterations(). Try factorial(5), sumRange(1,100), countEven(10), sqrtFloor(16), power(2,10).', 'info');
+}
+)();
+</script>
+</body>
+</html>
