@@ -1320,15 +1320,31 @@ async function runExecPhaseFresh(source, name) {
 
   for (var fi = 0; fi < fns.length; fi++) {
     var fn = fns[fi];
-    // Skip init — already called in pre-pass
-    if (fn.name === 'init') {
-      results.push({ name: fn.name, args: 'test, test', ok: true, result: '(void) [pre-pass]', time: 0 });
-      elog('  [' + (fi+1) + '/' + fns.length + '] init — skipped (already called)');
+    // Skip init — already called in smart-setup
+    if (fn.name === 'init' || fn.name === 'initialize' || fn.name === 'constructor' || fn.name === 'setup') {
+      results.push({ name: fn.name, args: '(smart-setup)', ok: true, result: '(void) [smart-setup]', time: 0 });
+      elog('  [' + (fi+1) + '/' + fns.length + '] ' + fn.name + ' — skipped (already called)');
       continue;
     }
-    var da = defaultArgsForFunction(fn, evmAddr, evmAddr2Dec, fn.name);
+    // Use metadata-driven secondary-wallet detection
+    var useSec = shouldUseSecondary(fn.name, fn);
+    var da = defaultArgsForFunction(fn, evmAddr, evmAddr2Dec, fn.name, useSec);
     var argStr = da.args.map(fmtArg).join(', ');
     var callSig = fn.name + '(' + argStr + ')';
+
+    // Pre-call setup: deregister(target) fails if target has tokens — burn them first
+    if (fn.name.toLowerCase().indexOf('deregister') >= 0 && fnByName['burn'] && da.args[0]) {
+      var dTarget = da.args[0];
+      var dBal = stateTracker.balance[dTarget] || 0;
+      if (dBal > 0) {
+        elog('  [' + (fi+1) + '/' + fns.length + '] [pre-call] burn(' + dTarget.slice(0,10) + '..., ' + dBal + ') to clear balance for deregister...');
+        try {
+          var burnRes = await signedCall('burn', [dTarget, String(dBal)], ['u256', 'u256']);
+          elog('    ' + (burnRes.success ? '✓' : '✗') + ' ' + burnRes.callSig + ' ' + (burnRes.success ? '' : (burnRes.error || '')));
+          if (burnRes.success) updateState('burn', fnByName['burn'] || {}, [dTarget, String(dBal)]);
+        } catch(ex) { elog('    ✗ pre-call burn failed: ' + ex); }
+      }
+    }
 
     elog('  [' + (fi+1) + '/' + fns.length + '] ' + callSig + '...');
 
