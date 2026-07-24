@@ -135,7 +135,7 @@ contract ComprehensiveToken {
     function getLabel(target: u256) -> str { return labels[target]; }
 
     // ── Minting ────────────────────────────────────────────────────────────
-    function mint(to: u256, amount: u256) as caller {
+    function mint(to: u256, amount: u256) -> u256 as caller {
       require(minter_role[caller] == true || admin_role[caller] == true, "mint: not authorised");
       require(to > 0,     "mint: invalid recipient");
       require(amount > 0, "mint: zero amount");
@@ -146,7 +146,7 @@ contract ComprehensiveToken {
     }
 
     // ── Transfers ──────────────────────────────────────────────────────────
-    function transfer(to: u256, amount: u256) as caller {
+    function transfer(to: u256, amount: u256) -> bool as caller {
       require(registered[caller] == true,   "transfer: sender not registered");
       require(registered[to] == true,       "transfer: recipient not registered");
       require(to > 0,                       "transfer: invalid recipient");
@@ -157,7 +157,7 @@ contract ComprehensiveToken {
       return true;
     }
 
-    function burn(from: u256, amount: u256) as caller {
+    function burn(from: u256, amount: u256) -> u256 as caller {
       require(admin_role[caller] == true,  "burn: not admin");
       require(balances[from] >= amount,    "burn: amount exceeds balance");
       balances[from] = balances[from] - amount;
