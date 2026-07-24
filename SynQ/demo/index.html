@@ -2896,7 +2896,6 @@
     '    require(totalIn \u003E= totalOut + amount, "TokenVault.withdraw: amount exceeds available balance");',
     '    // Pre-check: verify the caller actually holds enough SimpleToken balance.',
     '    // Direct transfers on SimpleToken can drain the balance without TokenVault knowing.',
-    '    require(extern_call("SimpleToken", "balanceOf", caller) \u003E= amount, "TokenVault.withdraw: insufficient token balance — direct transfers may have drained it");',
     '    extern_call("SimpleToken", "checkBalance", caller, amount);',
     '    extern_call("SimpleToken", "burn", caller, amount);',
     '    totalOut = totalOut + amount;',
