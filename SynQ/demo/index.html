@@ -2146,7 +2146,9 @@
     // Guard: block init() if contract is already initialised
     if (selectedFunc.name === 'init') {
       var _iv = stateSnapshot['initialised'];
-      var _alreadyDone = (_iv === '1' || _iv === 'true' || _iv === 1 || _iv === true);
+      var _av = stateSnapshot['active'];
+      var _alreadyDone = (_iv === '1' || _iv === 'true' || _iv === 1 || _iv === true)
+                     || (_av === '1' || _av === 1 || _av === 'true' || _av === true);
       if (_alreadyDone) {
         document.getElementById('vmOutput').innerHTML =
           '<span class="err">Contract already initialised. '          + 'Press <b>Reset VM</b> to wipe all state and start fresh.</span>';
@@ -3429,10 +3431,12 @@
       }
     }
     if (!initPill) return;
-    // Check: does state have an 'initialised' slot?
+    // Check: does state have an 'initialised' or 'active' slot?
     var initVal = stateSnapshot['initialised'];
-    var isInitialised = (initVal === '1' || initVal === 'true' || initVal === 1 || initVal === true);
-    var hasInitSlot   = ('initialised' in stateSnapshot);
+    var activeVal = stateSnapshot['active'];
+    var isInitialised = (initVal === '1' || initVal === 'true' || initVal === 1 || initVal === true)
+                     || (activeVal === '1' || activeVal === 1 || activeVal === 'true' || activeVal === true);
+    var hasInitSlot   = ('initialised' in stateSnapshot) || ('active' in stateSnapshot);
     if (hasInitSlot && isInitialised) {
       // Already initialised — grey out, block clicks
       initPill.style.opacity       = '0.35';
