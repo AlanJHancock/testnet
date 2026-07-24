@@ -847,10 +847,15 @@ async function runBench() {
   }
 
   // ── Execution Phase: deploy + call functions ──
-  if (_running && ps && ps.success !== false && ps.functions && ps.functions.length) {
-    log('');
-    log('─ EXECUTION PHASE ─');
+  log('');
+  log('─ EXECUTION PHASE ─');
+  if (ps && ps.functions && ps.functions.length > 0) {
     await runExecPhase(ps);
+  } else {
+    log('Skipping execution phase: no functions in compile response.');
+    log('  ps.success=' + (ps ? ps.success : 'null') + '  functions=' + (ps ? (ps.functions ? ps.functions.length : 'none') : 'null'));
+    document.getElementById('execPhase').style.display = 'block';
+    document.getElementById('execLog').textContent = 'No functions found in compile response.\nps.success=' + (ps ? ps.success : 'null') + '\nfunctions=' + (ps ? JSON.stringify(ps.functions || 'none') : 'null');
   }
 }
 
