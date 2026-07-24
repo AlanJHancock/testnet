@@ -353,7 +353,7 @@ contract TypeTestContract {
   }
 
   // ── Init ───────────────────────────────────────────────────────────────────
-  function init() as caller {
+  function init() -> bool as caller {
     require(!ready, "init: already initialised");
     admin    = caller;
     u_val    = 100;
@@ -363,6 +363,7 @@ contract TypeTestContract {
     ready    = true;
     labelled = false;
     op_count = 0;
+    return true;
   }
 
   // ── u256 arithmetic (+  -  *  /  %) ───────────────────────────────────────
@@ -1331,7 +1332,7 @@ async function runExecPhaseFresh(source, name) {
     var fn = fns[fi];
     // Skip init — already called in smart-setup
     if (fn.name === 'init' || fn.name === 'initialize' || fn.name === 'constructor' || fn.name === 'setup') {
-      results.push({ name: fn.name, args: '(smart-setup)', ok: true, result: '(void) [smart-setup]', time: 0 });
+      results.push({ name: fn.name, args: '(smart-setup)', ok: true, result: 'true [smart-setup]', time: 0 });
       elog('  [' + (fi+1) + '/' + fns.length + '] ' + fn.name + ' — skipped (already called)');
       continue;
     }
