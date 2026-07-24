@@ -1324,6 +1324,8 @@ async function runExecPhaseFresh(source, name) {
 
   var execTimes = [];
   var results = [];
+  var preCallCount = 0;
+  var preCallSuccess = 0;
 
   for (var fi = 0; fi < fns.length; fi++) {
     var fn = fns[fi];
@@ -1348,9 +1350,10 @@ async function runExecPhaseFresh(source, name) {
       if (dBal > 0) {
         elog('  [' + (fi+1) + '/' + fns.length + '] [pre-call] burn(' + targetAddr.slice(0,10) + '..., ' + dBal + ') to clear balance for deregister...');
         try {
+          preCallCount++;
           var burnRes = await signedCall('burn', [targetAddr, String(dBal)], ['u256', 'u256']);
           elog('    ' + (burnRes.success ? '✓' : '✗') + ' ' + burnRes.callSig + ' ' + (burnRes.success ? '' : (burnRes.error || '')));
-          if (burnRes.success) updateState('burn', fnByName['burn'] || {}, [targetAddr, String(dBal)]);
+          if (burnRes.success) { updateState('burn', fnByName['burn'] || {}, [targetAddr, String(dBal)]); preCallSuccess++; }
         } catch(ex) { elog('    ✗ pre-call burn failed: ' + ex); }
       }
     }
@@ -1360,9 +1363,10 @@ async function runExecPhaseFresh(source, name) {
       if (!stateTracker.registered[targetAddr] && fnByName['register']) {
         elog('  [' + (fi+1) + '/' + fns.length + '] [pre-call] register(' + targetAddr.slice(0,10) + '...) to re-register recipient...');
         try {
+          preCallCount++;
           var regRes = await signedCall('register', [targetAddr], ['u256']);
           elog('    ' + (regRes.success ? '✓' : '✗') + ' ' + regRes.callSig + ' ' + (regRes.success ? '' : (regRes.error || '')));
-          if (regRes.success) updateState('register', fnByName['register'] || {}, [targetAddr]);
+          if (regRes.success) { updateState('register', fnByName['register'] || {}, [targetAddr]); preCallSuccess++; }
         } catch(ex) { elog('    ✗ pre-call register failed: ' + ex); }
       }
       // Also ensure caller (wallet1) has enough balance for the transfer
@@ -1372,9 +1376,10 @@ async function runExecPhaseFresh(source, name) {
         var mintAmt = String(xferAmt + 10);  // mint a bit extra
         elog('  [' + (fi+1) + '/' + fns.length + '] [pre-call] mint(' + evmAddr1Dec.slice(0,10) + '..., ' + mintAmt + ') to ensure caller has balance...');
         try {
+          preCallCount++;
           var mtRes = await signedCall('mint', [evmAddr1Dec, mintAmt], ['u256', 'u256']);
           elog('    ' + (mtRes.success ? '✓' : '✗') + ' ' + mtRes.callSig + ' ' + (mtRes.success ? '' : (mtRes.error || '')));
-          if (mtRes.success) updateState('mint', fnByName['mint'] || {}, [evmAddr1Dec, mintAmt]);
+          if (mtRes.success) { updateState('mint', fnByName['mint'] || {}, [evmAddr1Dec, mintAmt]); preCallSuccess++; }
         } catch(ex) { elog('    ✗ pre-call mint failed: ' + ex); }
       }
     }
@@ -1387,9 +1392,10 @@ async function runExecPhaseFresh(source, name) {
         var mintAmt = String(burnAmt + 10);  // mint a bit extra
         elog('  [' + (fi+1) + '/' + fns.length + '] [pre-call] mint(' + targetAddr.slice(0,10) + '..., ' + mintAmt + ') to ensure burn target has balance...');
         try {
+          preCallCount++;
           var mtRes = await signedCall('mint', [targetAddr, mintAmt], ['u256', 'u256']);
           elog('    ' + (mtRes.success ? '✓' : '✗') + ' ' + mtRes.callSig + ' ' + (mtRes.success ? '' : (mtRes.error || '')));
-          if (mtRes.success) updateState('mint', fnByName['mint'] || {}, [targetAddr, mintAmt]);
+          if (mtRes.success) { updateState('mint', fnByName['mint'] || {}, [targetAddr, mintAmt]); preCallSuccess++; }
         } catch(ex) { elog('    ✗ pre-call mint failed: ' + ex); }
       }
     }
@@ -1428,8 +1434,12 @@ async function runExecPhaseFresh(source, name) {
     var avg = execTimes.reduce((s,v)=>s+v,0) / execTimes.length;
     var mn = Math.min(...execTimes);
     var mx = Math.max(...execTimes);
-    elog('Functions called: ' + results.length + '  (' + execTimes.length + ' succeeded)');
-    elog('Execution time: median ' + med.toFixed(2) + ' ms  avg ' + avg.toFixed(2) + ' ms  min ' + mn.toFixed(2) + '  max ' + mx.toFixed(2));
+    var failCount = results.length - execTimes.length;
+    elog('Contract functions: ' + fns.length + ' tested, ' + execTimes.length + ' passed' + (failCount > 0 ? ', ' + failCount + ' failed' : ''));
+    if (preCallCount > 0) {
+      elog('Pre-call setups: ' + preCallCount + ' called, ' + preCallSuccess + ' passed' + (preCallCount - preCallSuccess > 0 ? ', ' + (preCallCount - preCallSuccess) + ' failed' : ''));
+    }
+    elog('Execution time (contract fns only): median ' + med.toFixed(2) + ' ms  avg ' + avg.toFixed(2) + ' ms  min ' + mn.toFixed(2) + '  max ' + mx.toFixed(2));
   } else {
     elog('No functions executed successfully.');
   }
