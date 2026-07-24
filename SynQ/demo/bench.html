@@ -864,18 +864,22 @@ function defaultArgForType(ty) {
   return '1';
 }
 
-function defaultArgsForFunction(fn, walletAddr) {
+function defaultArgsForFunction(fn, walletAddr, wallet2AddrDec, fnName) {
   var params = fn.params || [];
   var args = []; var types = [];
   var addrNames = ['to','from','who','target','account','admin','grantee','recipient','addr','address','spender'];
   // Convert hex address to decimal uint256 string (VM expects numeric, not hex)
   var walletAddrDec = walletAddr ? BigInt(walletAddr).toString() : '1';
+  // Functions that should target the secondary wallet (not self)
+  var useSecondaryFns = ['revokeAdmin', 'revokeMinter', 'transfer', 'deregister'];
+  var useSecondary = useSecondaryFns.indexOf(fnName) >= 0;
   for (var p = 0; p < params.length; p++) {
     var pname = (params[p].name || '').toLowerCase();
     var pty = (params[p].ty || '').toLowerCase();
     // Address-like params: use wallet address as decimal uint256
     if (walletAddr && (addrNames.indexOf(pname) >= 0 || pty === 'address')) {
-      args.push(walletAddrDec);
+      // For revoke/transfer/deregister, use secondary wallet to avoid self-referential guards
+      args.push(useSecondary && wallet2AddrDec ? wallet2AddrDec : walletAddrDec);
       types.push('u256');
     } else {
       args.push(defaultArgForType(params[p].ty));
@@ -1016,10 +1020,14 @@ async function runExecPhaseFresh(source, name) {
   var sid = sessResp.session_id;
   elog('Session: ' + sid.slice(0, 16) + '...');
 
-  // Create ephemeral keypair for EIP-712 signing
+  // Create ephemeral keypairs for EIP-712 signing
   var wallet = ethers.Wallet.createRandom();
+  var wallet2 = ethers.Wallet.createRandom();
   var evmAddr = wallet.address;
-  elog('Signer: ' + evmAddr);
+  var evmAddr2 = wallet2.address;
+  var evmAddr2Dec = BigInt(evmAddr2).toString();
+  elog('Signer 1 (admin): ' + evmAddr);
+  elog('Signer 2 (secondary): ' + evmAddr2);
   elog('');
 
   // Build EIP-712 domain (must match server: name="SynQ \u00b7 <ContractName>", chainId=1337)
@@ -1038,12 +1046,41 @@ async function runExecPhaseFresh(source, name) {
     ]
   };
 
+  // Pre-pass: grant roles to secondary wallet so revoke/transfer can target it
+  elog('  [pre] Setting up secondary wallet...');
+  var preSetup = [
+    { name: 'grantAdmin', args: [evmAddr2Dec], types: ['u256'] },
+    { name: 'grantMinter', args: [evmAddr2Dec], types: ['u256'] },
+    { name: 'register', args: [evmAddr2Dec], types: ['u256'] }
+  ];
+  for (var pi = 0; pi < preSetup.length; pi++) {
+    var ps = preSetup[pi];
+    var psCallSig = ps.name + '(' + ps.args.join(', ') + ')';
+    try {
+      var psNonce = await fetchRetry('/synq/session/' + sid + '/nonce', { method: 'GET' }, 'nonce');
+      var psMsg = { callSignature: psCallSig, sessionId: sid, nonce: psNonce.nonce };
+      var psSig = await wallet.signTypedData(domain, types, psMsg);
+      var psResp = await fetchRetry('/synq/session/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sid, function: ps.name, args: ps.args, param_types: ps.types,
+          call_signature: psCallSig, evm_address: evmAddr, evm_signature: psSig, call_nonce: psNonce.nonce
+        })
+      }, ps.name);
+      elog('    ' + (psResp.success ? '\u2713' : '\u2717') + ' ' + ps.name + '(' + evmAddr2Dec + ') ' + (psResp.success ? '' : (psResp.error || '')));
+    } catch(ex) {
+      elog('    \u2717 ' + ps.name + ' setup failed: ' + ex);
+    }
+  }
+  elog('');
+
   var execTimes = [];
   var results = [];
 
   for (var fi = 0; fi < fns.length; fi++) {
     var fn = fns[fi];
-    var da = defaultArgsForFunction(fn, evmAddr);
+    var da = defaultArgsForFunction(fn, evmAddr, evmAddr2Dec, fn.name);
     var argStr = da.args.map(fmtArg).join(', ');
     var callSig = fn.name + '(' + argStr + ')';
 
