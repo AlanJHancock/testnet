@@ -204,6 +204,7 @@ contract ComprehensiveToken {
         admin_count = admin_count - 1;
       }
       admin_role[target] = false;
+      return true;
     }
 
     function grantMinter(target: u256) -> bool as caller {
@@ -211,6 +212,7 @@ contract ComprehensiveToken {
       require(target > 0,                 "grantMinter: invalid address");
       minter_role[target] = true;
       registered[target]  = true;
+      return true;
     }
 
     function revokeMinter(target: u256) -> bool as caller {
@@ -225,6 +227,7 @@ contract ComprehensiveToken {
       require(admin_role[caller] == true, "register: not admin");
       require(target > 0,                 "register: invalid address");
       registered[target] = true;
+      return true;
     }
 
     function deregister(target: u256) -> bool as caller {
@@ -240,6 +243,7 @@ contract ComprehensiveToken {
       require(str_len(name) > 0,          "setTokenName: empty");
       require(str_len(name) <= 64,        "setTokenName: too long");
       token_name = name;
+      return true;
     }
 
     function setTokenSymbol(symbol: str) -> bool as caller {
@@ -247,6 +251,7 @@ contract ComprehensiveToken {
       require(str_len(symbol) > 0,        "setTokenSymbol: empty");
       require(str_len(symbol) <= 8,       "setTokenSymbol: too long");
       token_symbol = symbol;
+      return true;
     }
 
     // ── Per-address labels (admin only) ────────────────────────────────────
@@ -254,6 +259,7 @@ contract ComprehensiveToken {
       require(admin_role[caller] == true, "setLabel: not admin");
       require(str_len(label) <= 32,       "setLabel: label too long");
       labels[target] = label;
+      return true;
     }
 
     function getLabel(target: u256) -> str { return labels[target]; }
@@ -293,10 +299,11 @@ contract ComprehensiveToken {
     function setDebugMode(enabled: bool) -> bool as caller {
       require(admin_role[caller] == true, "setDebugMode: not admin");
       debug_mode = enabled;
+      return true;
     }
 
     // ── Diagnostics (gated on debug_mode) ─────────────────────────────────
-    function whoAmI() -> bool as caller {
+    function whoAmI() -> u256 as caller {
       require(debug_mode == true, "whoAmI: debug mode not enabled");
       return caller;
     }
