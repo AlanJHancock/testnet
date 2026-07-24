@@ -2858,7 +2858,11 @@
   var VAULT_LINES = [
     'pragma synq ^0.9;',
     '',
-    '// TokenVault -- primary entry point.',
+    '// TokenVault -- primary entry point.  Mints/burns SimpleToken via extern_call.',
+    '// IMPORTANT: TokenVault tracks totalIn/totalOut (mint/burn flow) but cannot',
+    '// see direct SimpleToken transfers. Calling transfer() on SimpleToken moves',
+    '// tokens without TokenVault knowing. withdraw() pre-checks the actual balance',
+    '// via extern_call balanceOf() to catch this and give a clear error.',
     '// Deploy this first, then deploy SimpleToken into the same workspace.',
     'contract TokenVault {',
     '',
