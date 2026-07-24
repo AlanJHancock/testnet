@@ -166,7 +166,7 @@ contract ComprehensiveToken {
     // ── Bootstrap ──────────────────────────────────────────────────────────
     // Sign with your wallet — caller becomes the first admin.
     function init(name: str, symbol: str) -> bool as caller {
-      require(initialised == false,  "init: already initialised");
+      if (initialised) { return false; }
       require(str_len(name) > 0,     "init: name empty");
       require(str_len(symbol) > 0,   "init: symbol empty");
       require(str_len(name) <= 64,   "init: name too long");
@@ -355,7 +355,7 @@ contract TypeTestContract {
 
   // ── Init ───────────────────────────────────────────────────────────────────
   function init() -> bool as caller {
-    require(!ready, "init: already initialised");
+    if (ready) { return false; }
     admin    = caller;
     u_val    = 100;
     i_val    = -42;
