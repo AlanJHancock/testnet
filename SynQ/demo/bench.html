@@ -903,9 +903,9 @@ async function runExecPhaseFresh(source, name) {
   }
 
   elog('Compiling ' + (name || 'unnamed') + ' (' + source.length + ' chars)...');
-  elog('(waiting 2s for rate-limit window to clear)...');
+  elog('(waiting 3s for rate-limit window to clear)...');
 
-  await new Promise(r => setTimeout(r, 2000));
+  await new Promise(r => setTimeout(r, 3000));
 
   var compileResp;
   try {
@@ -941,6 +941,33 @@ async function runExecPhaseFresh(source, name) {
     }
   }
 
+  // Helper: fetch with rate-limit retry
+  async function fetchRetry(url, opts, label, maxRetries) {
+    maxRetries = maxRetries || 3;
+    for (var attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        var resp = await fetch(url, opts).then(r => r.json());
+        // Check for rate limit in error field or errors array
+        var isRateLimited = false;
+        if (resp.error && resp.error.indexOf('rate limit') >= 0) isRateLimited = true;
+        if (resp.errors && resp.errors.some(function(e) { return e.indexOf('rate limit') >= 0; })) isRateLimited = true;
+        if (isRateLimited && attempt < maxRetries) {
+          elog('  ' + label + ': rate limited, retry ' + (attempt+1) + '/' + maxRetries + ' in 2s...');
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        }
+        return resp;
+      } catch(ex) {
+        if (attempt < maxRetries) {
+          elog('  ' + label + ': fetch error, retry ' + (attempt+1) + '/' + maxRetries + ' in 2s...');
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        }
+        throw ex;
+      }
+    }
+  }
+
   var fns = compileResp.functions || [];
   var bc = compileResp.bytecode || '';
   var svs = compileResp.state_vars || [];
@@ -956,7 +983,7 @@ async function runExecPhaseFresh(source, name) {
   elog('Deploying ' + cname + '...');
   var sessResp;
   try {
-    sessResp = await fetch('/synq/session/new', {
+    sessResp = await fetchRetry('/synq/session/new', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -965,7 +992,7 @@ async function runExecPhaseFresh(source, name) {
         contract_name: cname,
         fn_return_types: buildFnReturnTypes(fns)
       })
-    }).then(r => r.json());
+    }, 'session/new');
   } catch(ex) {
     elog('ERROR: session creation failed: ' + ex);
     return;
@@ -993,7 +1020,7 @@ async function runExecPhaseFresh(source, name) {
     var t0 = performance.now();
     var runResp;
     try {
-      runResp = await fetch('/synq/session/run', {
+      runResp = await fetchRetry('/synq/session/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1003,7 +1030,7 @@ async function runExecPhaseFresh(source, name) {
           param_types: da.types,
           call_signature: fn.name + '(' + argStr + ')'
         })
-      }).then(r => r.json());
+      }, fn.name);
     } catch(ex) {
       elog('    ERROR: ' + ex);
       results.push({ name: fn.name, args: argStr, ok: false, result: 'ERROR: ' + ex, time: 0 });
