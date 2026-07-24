@@ -36,7 +36,7 @@
   .btn-wallet { display: inline-flex; align-items: center; gap: 6px; padding: 7px 18px; border-radius: 8px; font-size: 0.82rem; font-weight: 600; cursor: pointer; border: 1px solid rgba(124,58,237,0.5); background: rgba(124,58,237,0.15); color: #a78bfa; }
 
   /* cards */
-  .card { max-width: 980px; margin: 0 auto 24px; background: rgba(255,255,255,0.03); border: 1px solid rgba(0,206,209,0.15); border-radius: 12px; padding: 24px; }
+  .card { max-width: 980px; margin: 0 auto 24px; background: rgba(255,255,255,0.03); border: 1px solid rgba(0,206,209,0.15); border-radius: 12px; padding: 24px;  overflow: hidden; }
   .card-title { font-size: 0.75rem; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: rgba(255,255,255,0.35); margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
   .card-title svg { opacity: 0.6; }
 
@@ -209,7 +209,7 @@
          onchange="loadFromFile(this)">
 
   <!-- Row A: Load contracts — always above compile/deploy, never reflows -->
-  <div style="display:flex;align-items:center;gap:5px;flex-wrap:nowrap;margin-bottom:6px;">
+  <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-bottom:6px;">
     <button class="btn btn-secondary" onclick="document.getElementById('contractFileInput').click()"
             title="Load a .synq or .txt contract file from disk"
             style="display:flex;align-items:center;gap:4px;padding:4px 10px;flex-shrink:0;">
