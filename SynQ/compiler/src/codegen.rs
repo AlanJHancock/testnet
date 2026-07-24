@@ -203,7 +203,8 @@ impl CodeGenerator {
                     .collect();
                 self.function_param_addrs.insert(f.name.clone(), param_addrs);
                 self.function_param_signs.insert(f.name.clone(), param_signs);
-                let has_return = f.body.statements.iter().any(|s| matches!(s, Statement::Return(Some(_))));
+                let has_return = f.body.statements.iter().any(|s| matches!(s, Statement::Return(Some(_))))
+                    || f.returns.is_some();
                 self.function_has_return.insert(f.name.clone(), has_return);
                 self.function_requires_caller.insert(f.name.clone(), f.requires_caller);
 
