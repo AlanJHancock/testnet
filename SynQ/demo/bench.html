@@ -114,13 +114,13 @@
   </div>
 </div>
 
-<div id="log"></div>
-<div id="verdict"></div>
 <div id="execPhase" style="display:none;margin-top:16px;">
   <h3 style="font-size:14px;color:#c9d1d9;margin:12px 0 8px;">⚙ Execution Phase</h3>
   <div id="execLog" style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;font-family:monospace;font-size:12px;white-space:pre-wrap;max-height:400px;overflow-y:auto;color:#8b949e;"></div>
   <div id="execResults" style="margin-top:8px;"></div>
 </div>
+<div id="log"></div>
+<div id="verdict"></div>
 <div id="faultPanel"></div>
 
 <!-- Source code embedded as raw text — HTML parser won't touch angle brackets -->
@@ -846,23 +846,13 @@ async function runBench() {
     log('Insufficient successful rounds for comparison.');
   }
 
-  // ── Execution Phase: deploy + call functions ──
+  // ── Execution Phase: fresh compile + deploy + call functions ──
   log('');
   log('─ EXECUTION PHASE ─');
-  if (ps && ps.functions && ps.functions.length > 0) {
-    await runExecPhase(ps);
-  } else {
-    log('Skipping execution phase: no functions in compile response.');
-    log('  ps.success=' + (ps ? ps.success : 'null') + '  functions=' + (ps ? (ps.functions ? ps.functions.length : 'none') : 'null'));
-    document.getElementById('execPhase').style.display = 'block';
-    document.getElementById('execLog').textContent = 'No functions found in compile response.\nps.success=' + (ps ? ps.success : 'null') + '\nfunctions=' + (ps ? JSON.stringify(ps.functions || 'none') : 'null');
-  }
+  await runExecPhaseFresh(_benchSource, _benchName);
 }
 
-// ── Execution Phase ───────────────────────────────────────────────────────
-// After compilation benchmark, deploy the contract and call each function
-// with sample inputs to measure execution time + fuel.
-
+// ── Execution Phase (fresh compile) ───────────────────────────────────────
 function defaultArgForType(ty) {
   ty = (ty || '').toLowerCase();
   if (ty === 'bool') return false;
@@ -870,7 +860,7 @@ function defaultArgForType(ty) {
   if (ty === 'u256' || ty === 'uint256' || ty === 'u128') return '1';
   if (ty === 'i32' || ty === 'int32') return 1;
   if (ty === 'bytes') return '0x';
-  return '1';  // safe default for numeric types
+  return '1';
 }
 
 function defaultArgsForFunction(fn) {
@@ -889,7 +879,15 @@ function fmtArg(a) {
   return String(a);
 }
 
-async function runExecPhase(compileResp) {
+function buildFnReturnTypes(fns) {
+  var m = {};
+  for (var i = 0; i < fns.length; i++) {
+    if (fns[i].return_type) m[fns[i].name] = fns[i].return_type;
+  }
+  return m;
+}
+
+async function runExecPhaseFresh(source, name) {
   var panel = document.getElementById('execPhase');
   var logEl = document.getElementById('execLog');
   var resultsEl = document.getElementById('execResults');
@@ -899,34 +897,57 @@ async function runExecPhase(compileResp) {
 
   function elog(msg) { logEl.textContent += msg + '\n'; logEl.scrollTop = logEl.scrollHeight; }
 
-  var fns = compileResp.functions || [];
-  if (!fns.length) {
-    elog('No functions found in compiled contract — skipping execution phase.');
+  if (!source || !source.trim()) {
+    elog('No source loaded. Click a contract button or load a .synq file first.');
     return;
   }
 
+  elog('Compiling ' + (name || 'unnamed') + ' (' + source.length + ' chars)...');
+
+  var compileResp;
+  try {
+    compileResp = await fetch('/synq/compile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: source })
+    }).then(r => r.json());
+  } catch(ex) {
+    elog('ERROR: compile request failed: ' + ex);
+    return;
+  }
+
+  if (!compileResp.success) {
+    elog('Compile failed: ' + JSON.stringify(compileResp.errors || 'unknown'));
+    return;
+  }
+
+  var fns = compileResp.functions || [];
   var bc = compileResp.bytecode || '';
   var svs = compileResp.state_vars || [];
-  var cname = compileResp.contract_name || 'unnamed';
+  var cname = compileResp.contract_name || name || 'unnamed';
 
-  elog('Deploying ' + cname + ' (' + fns.length + ' functions)...');
+  elog('Compiled OK: ' + fns.length + ' functions, ' + (bc.length / 2 | 0) + ' bytes bytecode');
 
-  // 1. Create session
-  var sessReq = JSON.stringify({
-    bytecode: bc,
-    state_vars: svs,
-    contract_name: cname
-  });
+  if (!fns.length) {
+    elog('No functions to execute.');
+    return;
+  }
 
+  elog('Deploying ' + cname + '...');
   var sessResp;
   try {
     sessResp = await fetch('/synq/session/new', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: sessReq
+      body: JSON.stringify({
+        bytecode: bc,
+        state_vars: svs,
+        contract_name: cname,
+        fn_return_types: buildFnReturnTypes(fns)
+      })
     }).then(r => r.json());
   } catch(ex) {
-    elog('ERROR creating session: ' + ex);
+    elog('ERROR: session creation failed: ' + ex);
     return;
   }
 
@@ -937,8 +958,8 @@ async function runExecPhase(compileResp) {
 
   var sid = sessResp.session_id;
   elog('Session: ' + sid.slice(0, 16) + '...');
+  elog('');
 
-  // 2. Call each function with default args
   var execTimes = [];
   var results = [];
 
@@ -973,17 +994,16 @@ async function runExecPhase(compileResp) {
     if (runResp.success) {
       var val = runResp.result;
       var valStr = val ? (val.value !== undefined ? val.value + ' (' + (val.type || '') + ')' : JSON.stringify(val)) : '(void)';
-      elog('    ✓ ' + valStr + '  [' + dt.toFixed(2) + ' ms]');
+      elog('    \u2713 ' + valStr + '  [' + dt.toFixed(2) + ' ms]');
       execTimes.push(dt);
       results.push({ name: fn.name, args: argStr, ok: true, result: valStr, time: dt });
     } else {
       var err = runResp.error || 'unknown error';
-      elog('    ✗ ' + err + '  [' + dt.toFixed(2) + ' ms]');
+      elog('    \u2717 ' + err + '  [' + dt.toFixed(2) + ' ms]');
       results.push({ name: fn.name, args: argStr, ok: false, result: err, time: dt });
     }
   }
 
-  // 3. Summary
   elog('');
   elog('=== EXEC SUMMARY ===');
   if (execTimes.length) {
@@ -997,7 +1017,6 @@ async function runExecPhase(compileResp) {
     elog('No functions executed successfully.');
   }
 
-  // 4. Results table
   var html = '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;">';
   html += '<tr style="border-bottom:1px solid #30363d;color:#8b949e;"><th style="text-align:left;padding:6px;">Function</th><th style="text-align:left;padding:6px;">Args</th><th style="text-align:left;padding:6px;">Result</th><th style="text-align:right;padding:6px;">Time</th></tr>';
   for (var r = 0; r < results.length; r++) {
@@ -1013,7 +1032,6 @@ async function runExecPhase(compileResp) {
   html += '</table>';
   resultsEl.innerHTML = html;
 
-  // Clean up session
   try { await fetch('/synq/session/' + sid, { method: 'DELETE' }); } catch(e) {}
 }
 
