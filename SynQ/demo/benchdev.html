@@ -864,15 +864,17 @@ function defaultArgForType(ty) {
   return '1';
 }
 
-function defaultArgsForFunction(fn, walletAddr, wallet2AddrDec, fnName) {
+function defaultArgsForFunction(fn, walletAddr, wallet2AddrDec, fnName, useSecondary) {
   var params = fn.params || [];
   var args = []; var types = [];
   var addrNames = ['to','from','who','target','account','admin','grantee','recipient','addr','address','spender'];
   // Convert hex address to decimal uint256 string (VM expects numeric, not hex)
   var walletAddrDec = walletAddr ? BigInt(walletAddr).toString() : '1';
-  // Functions that should target the secondary wallet (not self)
-  var useSecondaryFns = ['revokeAdmin', 'revokeMinter', 'transfer'];
-  var useSecondary = useSecondaryFns.indexOf(fnName) >= 0;
+  // If useSecondary not passed, fall back to name-based heuristic
+  if (useSecondary === undefined) {
+    var useSecondaryFns = ['revokeAdmin', 'revokeMinter', 'transfer'];
+    useSecondary = useSecondaryFns.indexOf(fnName) >= 0;
+  }
   for (var p = 0; p < params.length; p++) {
     var pname = (params[p].name || '').toLowerCase();
     var pty = (params[p].ty || '').toLowerCase();
@@ -1063,29 +1065,231 @@ async function runExecPhaseFresh(source, name) {
     return { success: resp.success, result: resp.result, error: resp.error, callSig: cs };
   }
 
-  // Step 1: Call init() first so wallet1 becomes admin
-  elog('  [pre] init(test, test)...');
-  var initResult = await signedCall('init', ['test', 'test'], ['str', 'str']);
-  elog('    ' + (initResult.success ? '\u2713' : '\u2717') + ' ' + initResult.callSig + ' ' + (initResult.success ? '' : (initResult.error || '')));
-
-  // Step 2: Grant roles to secondary wallet
-  elog('  [pre] Setting up secondary wallet...');
+  // ── Smart Setup: read requires_state/modifies metadata to build pre-pass ──
   var evmAddr1Dec = BigInt(evmAddr).toString();
-  var preSetup = [
-    { name: 'grantAdmin', args: [evmAddr2Dec], types: ['u256'] },
-    { name: 'grantMinter', args: [evmAddr1Dec], types: ['u256'] },
-    { name: 'grantMinter', args: [evmAddr2Dec], types: ['u256'] },
-    { name: 'register', args: [evmAddr2Dec], types: ['u256'] }
-  ];
-  for (var pi = 0; pi < preSetup.length; pi++) {
-    var ps = preSetup[pi];
-    try {
-      var psRes = await signedCall(ps.name, ps.args, ps.types);
-      elog('    ' + (psRes.success ? '\u2713' : '\u2717') + ' ' + psRes.callSig + ' ' + (psRes.success ? '' : (psRes.error || '')));
-    } catch(ex) {
-      elog('    \u2717 ' + ps.name + ' setup failed: ' + ex);
+
+  // Build a lookup of functions by name
+  var fnByName = {};
+  for (var fi = 0; fi < fns.length; fi++) fnByName[fns[fi].name] = fns[fi];
+
+  // Track state: which addresses are registered, admin, minter, and their balances
+  var stateTracker = {
+    registered: {},   // addr -> bool
+    admin: {},        // addr -> bool
+    minter: {},       // addr -> bool
+    balance: {},      // addr -> number
+    initialized: false
+  };
+
+  // Parse a requires_state expression into structured form
+  // e.g. "registered[who] == false" -> {var:'registered', index:'who', op:'==', val:'false'}
+  function parsePrecondition(expr) {
+    expr = expr.trim();
+    // Match: varname[param] OP value  OR  varname OP value
+    var m = expr.match(/(\w+)\[(\w+)\]\s*(==|!=|>=|<=|>|<)\s*(\S+)/);
+    if (m) return { var: m[1], index: m[2], op: m[3], val: m[4] };
+    m = expr.match(/(\w+)\s*(==|!=|>=|<=|>|<)\s*(\S+)/);
+    if (m) return { var: m[1], index: null, op: m[2], val: m[3] };
+    return null;
+  }
+
+  // Resolve a precondition index param to an actual address
+  // 'caller' -> wallet1, 'who'/'to'/'target' etc -> wallet2 (for non-self testing)
+  function resolveParam(name, useSecondary) {
+    if (name === 'caller') return evmAddr1Dec;
+    if (useSecondary) return evmAddr2Dec;
+    return evmAddr1Dec;  // default to self
+  }
+
+  // Check if a precondition is satisfied by current state
+  function isSatisfied(pre) {
+    if (!pre) return true;  // unparseable = assume satisfied
+    var idx = pre.index ? resolveParam(pre.index, true) : null;
+    if (pre.var === 'registered' && pre.index) {
+      var isReg = !!stateTracker.registered[idx];
+      if (pre.op === '==' && pre.val === 'true') return isReg;
+      if (pre.op === '==' && pre.val === 'false') return !isReg;
+    }
+    if (pre.var === 'balance_of' && pre.index) {
+      var bal = stateTracker.balance[idx] || 0;
+      var val = parseInt(pre.val) || 0;
+      if (pre.op === '==') return bal === val;
+      if (pre.op === '>=') return bal >= val;
+      if (pre.op === '>') return bal > val;
+      if (pre.op === '<=') return bal <= val;
+      if (pre.op === '<') return bal < val;
+    }
+    return true;  // unknown precondition = assume satisfied
+  }
+
+  // Find a setup function that can satisfy an unsatisfied precondition
+  // by looking at other functions' 'modifies' declarations
+  function findSetupFn(pre) {
+    if (!pre) return null;
+    var targetVar = pre.var;
+    var wantVal = pre.val;
+    var idx = pre.index ? resolveParam(pre.index, true) : null;
+
+    for (var fname in fnByName) {
+      var fn = fnByName[fname];
+      if (!fn.modifies) continue;
+      for (var mi = 0; mi < fn.modifies.length; mi++) {
+        var mod = fn.modifies[mi];
+        // mod is like "registered[who]" or "balance_of[to]"
+        var modM = mod.match(/(\w+)\[(\w+)\]/);
+        var modVar = modM ? modM[1] : mod;
+        var modIdx = modM ? modM[2] : null;
+
+        if (modVar === targetVar) {
+          // This function modifies the target variable
+          if (targetVar === 'registered' && wantVal === 'true') {
+            // Need register() — call it with the address
+            if (fname.indexOf('register') >= 0 && fname !== 'deregister') {
+              return { name: fname, args: [idx], types: ['u256'] };
+            }
+          }
+          if (targetVar === 'balance_of' && (pre.op === '>=' || pre.op === '>')) {
+            // Need mint() — call it with address and amount
+            if (fname.indexOf('mint') >= 0) {
+              var amount = parseInt(pre.val) || 1;
+              return { name: fname, args: [idx, String(amount)], types: ['u256', 'u256'] };
+            }
+          }
+          if (targetVar === 'admin' || (targetVar === 'admin_role' && wantVal === 'true')) {
+            if (fname.indexOf('grantAdmin') >= 0) {
+              return { name: fname, args: [idx], types: ['u256'] };
+            }
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  // Update state tracker after a successful function call
+  function updateState(fnName, fnMeta, callArgs) {
+    if (fnName === 'init' || fnName === 'initialize') stateTracker.initialized = true;
+    if (fnName === 'register' && callArgs[0]) stateTracker.registered[callArgs[0]] = true;
+    if (fnName === 'deregister' && callArgs[0]) stateTracker.registered[callArgs[0]] = false;
+    if (fnName === 'grantAdmin' && callArgs[0]) stateTracker.admin[callArgs[0]] = true;
+    if (fnName === 'revokeAdmin' && callArgs[0]) stateTracker.admin[callArgs[0]] = false;
+    if (fnName === 'grantMinter' && callArgs[0]) stateTracker.minter[callArgs[0]] = true;
+    if (fnName === 'revokeMinter' && callArgs[0]) stateTracker.minter[callArgs[0]] = false;
+    if (fnName === 'mint' && callArgs[0]) {
+      var amt = parseInt(callArgs[1]) || 0;
+      stateTracker.balance[callArgs[0]] = (stateTracker.balance[callArgs[0]] || 0) + amt;
+    }
+    if (fnName === 'burn' && callArgs[0]) {
+      var amt = parseInt(callArgs[1]) || 0;
+      stateTracker.balance[callArgs[0]] = Math.max(0, (stateTracker.balance[callArgs[0]] || 0) - amt);
+    }
+    if (fnName === 'transfer' && callArgs[0]) {
+      var amt = parseInt(callArgs[1]) || 0;
+      stateTracker.balance[evmAddr1Dec] = Math.max(0, (stateTracker.balance[evmAddr1Dec] || 0) - amt);
+      stateTracker.balance[callArgs[0]] = (stateTracker.balance[callArgs[0]] || 0) + amt;
     }
   }
+
+  // Determine which functions should target the secondary wallet
+  // (revoke, transfer, deregister — anything where self-targeting would conflict)
+  function shouldUseSecondary(fnName, fnMeta) {
+    // Check if any requires_state precondition would conflict with self
+    if (!fnMeta.requires_state || !fnMeta.requires_state.length) return false;
+    // revokeAdmin targeting self = can't revoke last admin
+    // transfer targeting self = "cannot transfer to self"
+    // deregister targeting self with tokens = fails
+    var conflictNames = ['revoke', 'transfer', 'deregister', 'burn'];
+    for (var ci = 0; ci < conflictNames.length; ci++) {
+      if (fnName.toLowerCase().indexOf(conflictNames[ci]) >= 0) return true;
+    }
+    return false;
+  }
+
+  // ── Auto-detect init function ──
+  var initFn = null;
+  for (var ii = 0; ii < fns.length; ii++) {
+    var nm = fns[ii].name.toLowerCase();
+    if (nm === 'init' || nm === 'initialize' || nm === 'constructor' || nm === 'setup') {
+      initFn = fns[ii]; break;
+    }
+  }
+
+  // ── Run setup sequence ──
+  elog('  [smart-setup] Analyzing ' + fns.length + ' functions for preconditions...');
+
+  // 1. Call init
+  if (initFn) {
+    var initArgs = []; var initTypes = [];
+    for (var pi = 0; pi < (initFn.params || []).length; pi++) {
+      var pty = (initFn.params[pi].ty || '').toLowerCase();
+      if (pty === 'str' || pty === 'string') { initArgs.push('test'); initTypes.push('str'); }
+      else { initArgs.push(defaultArgForType(initFn.params[pi].ty)); initTypes.push(initFn.params[pi].ty || 'u256'); }
+    }
+    elog('  [smart-setup] ' + initFn.name + '(' + initArgs.join(', ') + ')...');
+    try {
+      var initRes = await signedCall(initFn.name, initArgs, initTypes);
+      elog('    ' + (initRes.success ? '\u2713' : '\u2717') + ' ' + initRes.callSig + ' ' + (initRes.success ? '' : (initRes.error || '')));
+      if (initRes.success) updateState(initFn.name, initFn, initArgs);
+    } catch(ex) { elog('    \u2717 init failed: ' + ex); }
+  }
+
+  // 2. Grant admin + minter to wallet1 (self) so it can call admin functions
+  var adminFns = ['grantAdmin', 'grantMinter'];
+  var selfGrants = [];
+  if (fnByName['grantAdmin']) selfGrants.push({ name: 'grantAdmin', args: [evmAddr1Dec], types: ['u256'] });
+  if (fnByName['grantMinter']) selfGrants.push({ name: 'grantMinter', args: [evmAddr1Dec], types: ['u256'] });
+  // Also grant to wallet2 if any function needs it as target
+  if (fnByName['grantAdmin']) selfGrants.push({ name: 'grantAdmin', args: [evmAddr2Dec], types: ['u256'] });
+  if (fnByName['grantMinter']) selfGrants.push({ name: 'grantMinter', args: [evmAddr2Dec], types: ['u256'] });
+  // Register wallet2 if register function exists
+  if (fnByName['register']) selfGrants.push({ name: 'register', args: [evmAddr2Dec], types: ['u256'] });
+  // Register wallet1 if register function exists
+  if (fnByName['register']) selfGrants.push({ name: 'register', args: [evmAddr1Dec], types: ['u256'] });
+
+  for (var gi = 0; gi < selfGrants.length; gi++) {
+    var sg = selfGrants[gi];
+    try {
+      var sgRes = await signedCall(sg.name, sg.args, sg.types);
+      elog('    ' + (sgRes.success ? '\u2713' : '\u2717') + ' ' + sgRes.callSig + ' ' + (sgRes.success ? '' : (sgRes.error || '')));
+      if (sgRes.success) updateState(sg.name, fnByName[sg.name] || {}, sg.args);
+    } catch(ex) { elog('    \u2717 ' + sg.name + ' failed: ' + ex); }
+  }
+
+  // 3. Scan all functions for unsatisfied requires_state and build setup calls
+  var dynamicSetup = [];
+  for (var fi2 = 0; fi2 < fns.length; fi2++) {
+    var fn2 = fns[fi2];
+    if (!fn2.requires_state || !fn2.requires_state.length) continue;
+    for (var ri = 0; ri < fn2.requires_state.length; ri++) {
+      var pre = parsePrecondition(fn2.requires_state[ri]);
+      if (!pre) continue;
+      if (!isSatisfied(pre)) {
+        var setup = findSetupFn(pre);
+        if (setup) {
+          // Avoid duplicates
+          var dup = dynamicSetup.some(function(s) { return s.name === setup.name && JSON.stringify(s.args) === JSON.stringify(setup.args); });
+          if (!dup) dynamicSetup.push(setup);
+        }
+      }
+    }
+  }
+
+  if (dynamicSetup.length) {
+    elog('  [smart-setup] Running ' + dynamicSetup.length + ' dynamic setup calls...');
+    for (var di = 0; di < dynamicSetup.length; di++) {
+      var ds = dynamicSetup[di];
+      try {
+        var dsRes = await signedCall(ds.name, ds.args, ds.types);
+        elog('    ' + (dsRes.success ? '\u2713' : '\u2717') + ' ' + dsRes.callSig + ' ' + (dsRes.success ? '' : (dsRes.error || '')));
+        if (dsRes.success) updateState(ds.name, fnByName[ds.name] || {}, ds.args);
+      } catch(ex) { elog('    \u2717 ' + ds.name + ' failed: ' + ex); }
+    }
+  }
+
+  elog('  [smart-setup] Done. State: registered=' + Object.keys(stateTracker.registered).length +
+       ' admin=' + Object.keys(stateTracker.admin).length +
+       ' minter=' + Object.keys(stateTracker.minter).length +
+       ' balance=' + Object.keys(stateTracker.balance).length);
   elog('');
 
   var execTimes = [];
@@ -1122,6 +1326,7 @@ async function runExecPhaseFresh(source, name) {
       elog('    \u2713 ' + valStr + '  [' + dt.toFixed(2) + ' ms]');
       execTimes.push(dt);
       results.push({ name: fn.name, args: argStr, ok: true, result: valStr, time: dt });
+      updateState(fn.name, fn, da.args);
     } else {
       var err = runResp.error || 'unknown error';
       elog('    \u2717 ' + err + '  [' + dt.toFixed(2) + ' ms]');
