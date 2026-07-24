@@ -871,7 +871,7 @@ function defaultArgsForFunction(fn, walletAddr, wallet2AddrDec, fnName) {
   // Convert hex address to decimal uint256 string (VM expects numeric, not hex)
   var walletAddrDec = walletAddr ? BigInt(walletAddr).toString() : '1';
   // Functions that should target the secondary wallet (not self)
-  var useSecondaryFns = ['revokeAdmin', 'revokeMinter', 'transfer', 'deregister'];
+  var useSecondaryFns = ['revokeAdmin', 'revokeMinter', 'transfer'];
   var useSecondary = useSecondaryFns.indexOf(fnName) >= 0;
   for (var p = 0; p < params.length; p++) {
     var pname = (params[p].name || '').toLowerCase();
@@ -1075,8 +1075,7 @@ async function runExecPhaseFresh(source, name) {
     { name: 'grantAdmin', args: [evmAddr2Dec], types: ['u256'] },
     { name: 'grantMinter', args: [evmAddr1Dec], types: ['u256'] },
     { name: 'grantMinter', args: [evmAddr2Dec], types: ['u256'] },
-    { name: 'register', args: [evmAddr2Dec], types: ['u256'] },
-    { name: 'mint', args: [evmAddr2Dec, '1000'], types: ['u256', 'u256'] }
+    { name: 'register', args: [evmAddr2Dec], types: ['u256'] }
   ];
   for (var pi = 0; pi < preSetup.length; pi++) {
     var ps = preSetup[pi];
