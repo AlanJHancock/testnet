@@ -601,10 +601,14 @@ struct ParamMeta {
 }
 #[derive(serde::Serialize, Clone)]
 struct FunctionMeta {
-    name:        String,
-    params:      Vec<ParamMeta>,
-    has_return:  bool,
-    return_type: Option<String>,
+    name:           String,
+    params:         Vec<ParamMeta>,
+    has_return:     bool,
+    return_type:    Option<String>,
+    /// State precondition expressions (raw strings from `requires <expr>` clauses)
+    requires_state: Vec<String>,
+    /// State variables this function modifies (from `modifies` clause)
+    modifies:       Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -792,13 +796,15 @@ async fn compile_handler(
             synq_compiler::ast::SourceUnit::Contract(c) if contract_name.as_deref() == Some(c.name.as_str()) => {
                 Some(c.parts.iter().filter_map(|p| match p {
                     synq_compiler::ast::ContractPart::Function(f) => Some(FunctionMeta {
-                        name:        f.name.clone(),
-                        params:      f.params.iter().map(|p| ParamMeta {
+                        name:           f.name.clone(),
+                        params:         f.params.iter().map(|p| ParamMeta {
                             name: p.name.clone(),
                             ty:   type_name(&p.ty),
                         }).collect(),
-                        has_return:  f.returns.is_some(),
-                        return_type: f.returns.as_ref().map(type_name),
+                        has_return:     f.returns.is_some(),
+                        return_type:    f.returns.as_ref().map(type_name),
+                        requires_state: f.requires_state.clone(),
+                        modifies:       f.modifies.clone(),
                     }),
                     _ => None,
                 }).collect())

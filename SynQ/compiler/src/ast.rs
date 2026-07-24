@@ -101,6 +101,11 @@ pub struct FunctionDefinition {
     pub requires_caller: bool,
     /// Resolved capability names (caps from `requires cap::X` + expanded from `requires role::X`).
     pub capabilities:    Vec<String>,
+    /// State precondition expressions as raw strings: e.g. "balance_of[caller] >= amount"
+    /// Parsed for metadata/test-harness use — NOT compiled to bytecode (runtime guards stay in body).
+    pub requires_state:  Vec<String>,
+    /// State variables this function modifies: e.g. "balance_of[caller]", "registered[who]"
+    pub modifies:        Vec<String>,
 }
 
 // ── Events ───────────────────────────────────────────────────────────────────

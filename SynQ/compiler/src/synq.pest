@@ -72,14 +72,31 @@ function_keyword = _{ "function" | "fn" }
 return_type      = _{ "->" ~ type_decl }
 
 identity_clause   = { "as" ~ "caller" }
-capability_clause = { "requires" ~ access_req_list }
+// A function can have multiple `requires` clauses — each line is either
+// cap/role requirements ("requires cap::Admin") or state preconditions
+// ("requires balance_of[caller] >= amount").  PEG ordered choice: access_req_list
+// is tried first; if it fails (not cap::/role::), state_condition_list matches.
+requires_clauses  = { ("requires" ~ req_body)+ }
+req_body          = { access_req_list | state_condition_list }
+modifies_clauses  = { ("modifies" ~ modifies_list)+ }
+
 access_req_list   = { access_req_item ~ ("," ~ access_req_item)* }
 access_req_item   = { cap_item | role_item }
 cap_item          = { "cap"  ~ "::" ~ IDENT }
 role_item         = { "role" ~ "::" ~ IDENT }
 
+// State preconditions parsed as raw strings — not compiled to bytecode.
+// Stops at: comma (list separator), `modifies` keyword (next clause), `{` (block start)
+state_condition_list = { state_condition ~ ("," ~ state_condition)* }
+state_condition      = { (!"," ~ !"modifies" ~ !"requires" ~ !"{" ~ ANY)+ }
+
+// Modifies declarations: "modifies balance_of[caller], balance_of[to]"
+modifies_list        = { modifies_item ~ ("," ~ modifies_item)* }
+modifies_item        = { IDENT ~ ("[" ~ expression ~ "]")? }
+
 function_definition = { function_keyword ~ IDENT ~ "(" ~ param_list? ~ ")"
-                        ~ return_type? ~ identity_clause? ~ capability_clause? ~ block }
+                        ~ return_type? ~ identity_clause? ~ requires_clauses?
+                        ~ modifies_clauses? ~ block }
 param_list = { param ~ ("," ~ param)* }
 param      = { IDENT ~ ":" ~ type_decl }
 

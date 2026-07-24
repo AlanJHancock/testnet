@@ -137,6 +137,8 @@ fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
 
     let mut requires_caller = false;
     let mut capabilities: Vec<String> = vec![];
+    let mut requires_state: Vec<String> = vec![];
+    let mut modifies: Vec<String> = vec![];
 
     for p in inner {
         match p.as_rule() {
@@ -160,21 +162,70 @@ fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
                 // "as caller" — mark function as requiring authenticated caller
                 requires_caller = true;
             }
-            Rule::capability_clause => {
-                // "requires cap::X, role::Y"
-                for item in p.into_inner() {
-                    match item.as_rule() {
-                        Rule::cap_item  => {
-                            if let Some(name_pair) = item.into_inner().next() {
-                                capabilities.push(format!("cap::{}", name_pair.as_str()));
-                            }
-                        }
-                        Rule::role_item => {
-                            if let Some(name_pair) = item.into_inner().next() {
-                                capabilities.push(format!("role::{}", name_pair.as_str()));
+            Rule::requires_clauses => {
+                // One or more "requires" lines — each is either cap/role or state condition
+                for req_line in p.into_inner() {
+                    match req_line.as_rule() {
+                        Rule::req_body => {
+                            let inner = req_line.into_inner().next();
+                            if let Some(body) = inner {
+                                match body.as_rule() {
+                                    Rule::access_req_list => {
+                                        for item in body.into_inner() {
+                                            match item.as_rule() {
+                                                Rule::cap_item => {
+                                                    if let Some(np) = item.into_inner().next() {
+                                                        capabilities.push(format!("cap::{}", np.as_str()));
+                                                    }
+                                                }
+                                                Rule::role_item => {
+                                                    if let Some(np) = item.into_inner().next() {
+                                                        capabilities.push(format!("role::{}", np.as_str()));
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                    Rule::state_condition_list => {
+                                        for cond in body.into_inner() {
+                                            if cond.as_rule() == Rule::state_condition {
+                                                let raw = cond.as_str().trim().to_string();
+                                                if !raw.is_empty() {
+                                                    requires_state.push(raw);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                         _ => {}
+                    }
+                }
+            }
+            Rule::modifies_clauses => {
+                // One or more "modifies" lines
+                for mod_line in p.into_inner() {
+                    if mod_line.as_rule() == Rule::modifies_list {
+                        for item in mod_line.into_inner() {
+                            if item.as_rule() == Rule::modifies_item {
+                                let mut mi = item.into_inner();
+                                let var_name = mi.next().map(|p| p.as_str().to_string()).unwrap_or_default();
+                                let mut full = var_name;
+                                for sub in mi {
+                                    if sub.as_rule() == Rule::expression {
+                                        full.push('[');
+                                        full.push_str(sub.as_str());
+                                        full.push(']');
+                                    }
+                                }
+                                if !full.is_empty() {
+                                    modifies.push(full);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -197,6 +248,8 @@ fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
         is_public: false,
         requires_caller,
         capabilities,
+        requires_state,
+        modifies,
     })
 }
 
