@@ -1334,7 +1334,7 @@ async function runExecPhaseFresh(source, name) {
     var fn = fns[fi];
     // Skip init — already called in smart-setup
     if (fn.name === 'init' || fn.name === 'initialize' || fn.name === 'constructor' || fn.name === 'setup') {
-      results.push({ name: fn.name, args: '(smart-setup)', ok: true, result: 'true [smart-setup]', time: 0 });
+      // Don't push to results — init is setup, not a contract function test
       elog('  [' + (fi+1) + '/' + fns.length + '] ' + fn.name + ' — skipped (already called)');
       continue;
     }
@@ -1438,7 +1438,9 @@ async function runExecPhaseFresh(source, name) {
     var mn = Math.min(...execTimes);
     var mx = Math.max(...execTimes);
     var failCount = results.length - execTimes.length;
-    elog('Contract functions: ' + fns.length + ' tested, ' + execTimes.length + ' passed' + (failCount > 0 ? ', ' + failCount + ' failed' : ''));
+    var testedCount = results.length;
+    elog('Contract functions: ' + testedCount + ' tested, ' + execTimes.length + ' passed' + (failCount > 0 ? ', ' + failCount + ' failed' : ''));
+    elog('Init: called in smart-setup (excluded from function count)');
     if (preCallCount > 0) {
       elog('Pre-call setups: ' + preCallCount + ' called, ' + preCallSuccess + ' passed' + (preCallCount - preCallSuccess > 0 ? ', ' + (preCallCount - preCallSuccess) + ' failed' : ''));
     }
