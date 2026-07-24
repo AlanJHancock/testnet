@@ -185,7 +185,7 @@ contract ComprehensiveToken {
     }
 
     // ── Admin management ───────────────────────────────────────────────────
-    function grantAdmin(target: u256) as caller {
+    function grantAdmin(target: u256) -> bool as caller {
       require(admin_role[caller] == true, "grantAdmin: not admin");
       require(target > 0,                 "grantAdmin: invalid address");
       if (admin_role[target] == false) {
@@ -193,9 +193,10 @@ contract ComprehensiveToken {
       }
       admin_role[target]  = true;
       registered[target]  = true;
+      return true;
     }
 
-    function revokeAdmin(target: u256) as caller {
+    function revokeAdmin(target: u256) -> bool as caller {
       require(admin_role[caller] == true, "revokeAdmin: not admin");
       require(target != caller,           "revokeAdmin: cannot revoke self");
       require(admin_count > 1,            "revokeAdmin: cannot remove last admin");
@@ -205,41 +206,43 @@ contract ComprehensiveToken {
       admin_role[target] = false;
     }
 
-    function grantMinter(target: u256) as caller {
+    function grantMinter(target: u256) -> bool as caller {
       require(admin_role[caller] == true, "grantMinter: not admin");
       require(target > 0,                 "grantMinter: invalid address");
       minter_role[target] = true;
       registered[target]  = true;
     }
 
-    function revokeMinter(target: u256) as caller {
+    function revokeMinter(target: u256) -> bool as caller {
       require(admin_role[caller] == true, "revokeMinter: not admin");
       require(target != caller,           "revokeMinter: cannot revoke self");
       minter_role[target] = false;
+      return true;
     }
 
     // ── Registration ───────────────────────────────────────────────────────
-    function register(target: u256) as caller {
+    function register(target: u256) -> bool as caller {
       require(admin_role[caller] == true, "register: not admin");
       require(target > 0,                 "register: invalid address");
       registered[target] = true;
     }
 
-    function deregister(target: u256) as caller {
+    function deregister(target: u256) -> bool as caller {
       require(admin_role[caller] == true,  "deregister: not admin");
       require(balances[target] == 0,       "deregister: target still holds tokens");
       registered[target] = false;
+      return true;
     }
 
     // ── Token metadata (admin only) ────────────────────────────────────────
-    function setTokenName(name: str) as caller {
+    function setTokenName(name: str) -> bool as caller {
       require(admin_role[caller] == true, "setTokenName: not admin");
       require(str_len(name) > 0,          "setTokenName: empty");
       require(str_len(name) <= 64,        "setTokenName: too long");
       token_name = name;
     }
 
-    function setTokenSymbol(symbol: str) as caller {
+    function setTokenSymbol(symbol: str) -> bool as caller {
       require(admin_role[caller] == true, "setTokenSymbol: not admin");
       require(str_len(symbol) > 0,        "setTokenSymbol: empty");
       require(str_len(symbol) <= 8,       "setTokenSymbol: too long");
@@ -247,7 +250,7 @@ contract ComprehensiveToken {
     }
 
     // ── Per-address labels (admin only) ────────────────────────────────────
-    function setLabel(target: u256, label: str) as caller {
+    function setLabel(target: u256, label: str) -> bool as caller {
       require(admin_role[caller] == true, "setLabel: not admin");
       require(str_len(label) <= 32,       "setLabel: label too long");
       labels[target] = label;
@@ -287,13 +290,13 @@ contract ComprehensiveToken {
     }
 
     // ── Debug control (admin only) ─────────────────────────────────────────
-    function setDebugMode(enabled: bool) as caller {
+    function setDebugMode(enabled: bool) -> bool as caller {
       require(admin_role[caller] == true, "setDebugMode: not admin");
       debug_mode = enabled;
     }
 
     // ── Diagnostics (gated on debug_mode) ─────────────────────────────────
-    function whoAmI() as caller {
+    function whoAmI() -> bool as caller {
       require(debug_mode == true, "whoAmI: debug mode not enabled");
       return caller;
     }
@@ -430,19 +433,21 @@ contract TypeTestContract {
     return cat;
   }
 
-  function setLabel(label: str) as caller {
+  function setLabel(label: str) -> bool as caller {
     require(ready, "not initialised");
     require(!labelled, "label already set");
     s_val    = label;
     labelled = true;
+    return true;
   }
 
   // ── Map operations ─────────────────────────────────────────────────────────
-  function testMapSet(key: u256, val: u256) as caller {
+  function testMapSet(key: u256, val: u256) -> bool as caller {
     require(ready, "not initialised");
     require(key > 0, "key must be > 0");
     balances[key] = val;
     op_count = op_count + 1;
+    return true;
   }
 
   function testMapGet(key: u256) -> u256 {
