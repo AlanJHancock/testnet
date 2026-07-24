@@ -1,5 +1,5 @@
 use synq_compiler::{codegen::CodeGenerator, parser};
-use quantumvm::{QuantumVM, Value};
+use quantumvm::{CallContext, QuantumVM, Value};
 
 const SIMPLE_CONTRACT_WITH_FUNCTION_PARAMS: &str = r#"
 contract MyContract {
@@ -31,7 +31,7 @@ fn test_different_contracts_produce_different_non_fixed_size_bytecode() {
     let contract_a = r#"
         contract A {
             count: UInt256;
-            function bump() {
+            function bump() as caller {
                 count = count + 1;
             }
         }
@@ -55,7 +55,7 @@ fn test_require_arithmetic_and_assignment_execute_end_to_end() {
     let source = r#"pragma synq ^0.9;
 contract Counter {
             count: UInt256;
-            function increment(amount: UInt256) {
+            function increment(amount: UInt256) as caller {
                 require(amount > 0, "amount must be positive");
                 count = count + amount;
             }
@@ -67,6 +67,7 @@ contract Counter {
     let bytecode = compile(source);
 
     let mut vm = QuantumVM::new();
+    vm.call_context = CallContext::from_address([1; 20]);
     vm.load_bytecode(&bytecode).unwrap();
 
     // First call: count starts at 0 (Load-defaults-to-zero), + 5 = 5.
@@ -85,7 +86,7 @@ fn test_require_failure_halts_execution() {
     let source = r#"pragma synq ^0.9;
 contract Counter {
     count: UInt256;
-    function increment(amount: UInt256) {
+    function increment(amount: UInt256) as caller {
         require(amount > 0, "amount must be positive");
         count = count + amount;
         return count;
@@ -93,6 +94,7 @@ contract Counter {
 }"#;
     let bytecode = compile(source);
     let mut vm = QuantumVM::new();
+    vm.call_context = CallContext::from_address([1; 20]);
     vm.load_bytecode(&bytecode).unwrap();
 
     // amount = 0 fails the require, so `count = count + amount` must never run
@@ -116,10 +118,10 @@ fn test_multiple_functions_independently_callable_with_shared_state() {
     let source = r#"
         contract Wallet {
             balance: UInt256;
-            function deposit(amount: UInt256) {
+            function deposit(amount: UInt256) as caller {
                 balance = balance + amount;
             }
-            function withdraw(amount: UInt256) {
+            function withdraw(amount: UInt256) as caller {
                 balance = balance - amount;
             }
             function get_balance() {
@@ -129,6 +131,7 @@ fn test_multiple_functions_independently_callable_with_shared_state() {
     "#;
     let bytecode = compile(source);
     let mut vm = QuantumVM::new();
+    vm.call_context = CallContext::from_address([1; 20]);
     vm.load_bytecode(&bytecode).unwrap();
 
     vm.call_function("deposit", &[Value::I32(100)]).unwrap();
@@ -149,7 +152,7 @@ fn test_forward_referenced_inter_function_call_assigns_state() {
     let source = r#"
         contract Forwarder {
             result: UInt256;
-            function main(x: UInt256) {
+            function main(x: UInt256) as caller {
                 result = helper(x);
             }
             function helper(y: UInt256) {
@@ -162,6 +165,7 @@ fn test_forward_referenced_inter_function_call_assigns_state() {
     "#;
     let bytecode = compile(source);
     let mut vm = QuantumVM::new();
+    vm.call_context = CallContext::from_address([1; 20]);
     vm.load_bytecode(&bytecode).unwrap();
 
     vm.call_function("main", &[Value::I32(41)]).unwrap();
@@ -259,7 +263,7 @@ fn test_uint256_simple_assign() {
     let source = r#"
         contract T {
             n: UInt256;
-            fn get() -> UInt256 {
+            fn get() -> UInt256 as caller {
                 n = 100;
                 return n;
             }
@@ -276,7 +280,7 @@ fn test_uint256_large_value() {
     let source = r#"
         contract LargeVal {
             n: UInt256;
-            function get() -> UInt256 {
+            function get() -> UInt256 as caller {
                 n = 3000000000;
                 return n;
             }
@@ -291,6 +295,7 @@ fn test_uint256_large_value() {
     );
     // Execute and verify the value survives the round-trip
     let mut vm = QuantumVM::new();
+    vm.call_context = CallContext::from_address([1; 20]);
     vm.load_bytecode(&bytecode).unwrap();
     let result = vm.call_function("get", &[]).unwrap().unwrap();
     assert_eq!(result.as_u128().unwrap(), 3_000_000_000u128);
@@ -302,7 +307,7 @@ fn test_uint256_arithmetic() {
         contract Arithmetic {
             total: UInt256;
             amount: UInt256;
-            fn add_amount() {
+            fn add_amount() as caller {
                 total = total + amount;
             }
         }
@@ -319,7 +324,7 @@ fn test_uint256_overflow_detection() {
     let source = r#"pragma synq ^0.9;
 contract OverflowTest {
     n: UInt256;
-    function run() {
+    function run() as caller {
         n = 115792089237316195423570985008687907853269984665640564039457584007913129639935;
         n = n + 1;
         return n;
@@ -329,6 +334,7 @@ contract OverflowTest {
     assert!(!bytecode.is_empty());
 
     let mut vm = QuantumVM::new();
+    vm.call_context = CallContext::from_address([1; 20]);
     vm.load_bytecode(&bytecode).unwrap();
     let err = vm.call_function("run", &[]).unwrap_err();
     assert!(
@@ -342,7 +348,7 @@ fn test_i32_still_works() {
     let source = r#"
         contract Legacy {
             count: UInt256;
-            function increment(amount: UInt256) {
+            function increment(amount: UInt256) as caller {
                 count = count + amount;
             }
             function get_count() {
@@ -352,6 +358,7 @@ fn test_i32_still_works() {
     "#;
     let bytecode = compile(source);
     let mut vm = QuantumVM::new();
+    vm.call_context = CallContext::from_address([1; 20]);
     vm.load_bytecode(&bytecode).unwrap();
     vm.call_function("increment", &[Value::I32(5)]).unwrap();
     let count = vm.call_function("get_count", &[]).unwrap().unwrap();
@@ -368,11 +375,11 @@ fn test_mixed_type_comparison_u128_gt_i32() {
     let source = r#"
         contract Token {
             total: UInt256;
-            function init(supply: UInt256) {
+            function init(supply: UInt256) as caller {
                 total = supply;
                 return total;
             }
-            function burn(amount: UInt256) {
+            function burn(amount: UInt256) as caller {
                 require(total > amount, "insufficient supply");
                 total = total - amount;
                 return total;
@@ -381,6 +388,7 @@ fn test_mixed_type_comparison_u128_gt_i32() {
     "#;
     let bytecode = compile(source);
     let mut vm = QuantumVM::new();
+    vm.call_context = CallContext::from_address([1; 20]);
     vm.load_bytecode(&bytecode).unwrap();
 
     // Set total to a large U128 value
@@ -408,7 +416,7 @@ fn test_mixed_type_comparison_i32_gt_u128() {
 
     // I32 > U128 — 100 > 50
     let r = vm.call_function("check", &[Value::I32(100), Value::U128(50)]).unwrap().unwrap();
-    assert_eq!(r.as_i32().unwrap(), 100);
+    assert_eq!(r.as_u128().unwrap(), 100);
 }
 
 #[test]
@@ -417,12 +425,13 @@ fn test_u128_sub_with_i32_arg() {
     let source = r#"
         contract Sub {
             n: UInt256;
-            function set(v: UInt256) { n = v; }
-            function sub(amount: UInt256) { n = n - amount; return n; }
+            function set(v: UInt256) as caller { n = v; }
+            function sub(amount: UInt256) as caller { n = n - amount; return n; }
         }
     "#;
     let bytecode = compile(source);
     let mut vm = QuantumVM::new();
+    vm.call_context = CallContext::from_address([1; 20]);
     vm.load_bytecode(&bytecode).unwrap();
 
     vm.call_function("set", &[Value::U128(5_000_000_000u128)]).unwrap();
@@ -525,7 +534,7 @@ fn test_divide_by_zero_literal() {
     let src = r#"pragma synq ^0.9;
 contract T {
     total: UInt256;
-    function bad() { total = total / 0; return total; }
+    function bad() as caller { total = total / 0; return total; }
 }"#;
     expect_err(src, "Division by zero");
 }
@@ -535,7 +544,7 @@ fn test_modulo_by_zero_literal() {
     let src = r#"pragma synq ^0.9;
 contract T {
     total: UInt256;
-    function bad() { total = total % 0; return total; }
+    function bad() as caller { total = total % 0; return total; }
 }"#;
     expect_err(src, "Modulo by zero");
 }
@@ -545,7 +554,7 @@ fn test_modulo_nonzero_compiles() {
     let src = r#"pragma synq ^0.9;
 contract T {
     total: UInt256;
-    function mod3(x: UInt256) { total = x % 3; return total; }
+    function mod3(x: UInt256) as caller { total = x % 3; return total; }
 }"#;
     ok_bytecode(src);
 }
@@ -578,46 +587,46 @@ contract T {
 #[test]
 fn test_uint256_zero() {
     ok_bytecode(r#"pragma synq ^0.9;
-contract T { total: UInt256; function set() { total = 0; return total; } }"#);
+contract T { total: UInt256; function set() as caller { total = 0; return total; } }"#);
 }
 
 #[test]
 fn test_uint256_one() {
     ok_bytecode(r#"pragma synq ^0.9;
-contract T { total: UInt256; function set() { total = 1; return total; } }"#);
+contract T { total: UInt256; function set() as caller { total = 1; return total; } }"#);
 }
 
 #[test]
 fn test_uint256_i32_max() {
     ok_bytecode(r#"pragma synq ^0.9;
-contract T { total: UInt256; function set() { total = 2147483647; return total; } }"#);
+contract T { total: UInt256; function set() as caller { total = 2147483647; return total; } }"#);
 }
 
 #[test]
 fn test_uint256_i32_max_plus_one() {
     ok_bytecode(r#"pragma synq ^0.9;
-contract T { total: UInt256; function set() { total = 2147483648; return total; } }"#);
+contract T { total: UInt256; function set() as caller { total = 2147483648; return total; } }"#);
 }
 
 #[test]
 fn test_uint256_u128_max() {
     ok_bytecode(r#"pragma synq ^0.9;
 contract T { total: UInt256;
-    function set() { total = 340282366920938463463374607431768211455; return total; } }"#);
+    function set() as caller { total = 340282366920938463463374607431768211455; return total; } }"#);
 }
 
 #[test]
 fn test_uint256_u128_max_plus_one() {
     ok_bytecode(r#"pragma synq ^0.9;
 contract T { total: UInt256;
-    function set() { total = 340282366920938463463374607431768211456; return total; } }"#);
+    function set() as caller { total = 340282366920938463463374607431768211456; return total; } }"#);
 }
 
 #[test]
 fn test_uint256_max() {
     ok_bytecode(r#"pragma synq ^0.9;
 contract T { total: UInt256;
-    function set() { total = 115792089237316195423570985008687907853269984665640564039457584007913129639935; return total; } }"#);
+    function set() as caller { total = 115792089237316195423570985008687907853269984665640564039457584007913129639935; return total; } }"#);
 }
 
 // ─── Syntax variants ─────────────────────────────────────────────────────────
@@ -699,7 +708,7 @@ fn test_warnings_negative_literal() {
     let src = r#"pragma synq ^0.9;
 contract T {
     total: UInt256;
-    function set() { total = 0 - 5; return total; }
+    function set() as caller { total = 0 - 5; return total; }
 }"#;
     let r = synq_compiler::compile(src).expect("should compile with warning");
     assert!(r.warnings.iter().any(|w| w.contains("negative") || w.contains("underflow")),

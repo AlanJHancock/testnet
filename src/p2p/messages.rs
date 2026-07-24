@@ -92,6 +92,14 @@ pub enum NetworkMessage {
         best_block_hash: String,
         genesis_hash: String,
         #[serde(default)]
+        status_timestamp: Option<u64>,
+        #[serde(default)]
+        validator_address: Option<String>,
+        #[serde(default)]
+        source_session_id: Option<String>,
+        #[serde(default)]
+        active_validator_set_hash: Option<String>,
+        #[serde(default)]
         quarantined: bool,
         #[serde(default)]
         consensus_duties_disabled: bool,

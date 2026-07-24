@@ -210,7 +210,7 @@ fn test_step_limit() {
     asm.emit_op(OpCode::Jump);
     asm.emit_u32(fn_addr);
 
-    asm.add_function_entry("loop_forever", fn_addr, &[], false);
+    asm.add_function_entry("loop_forever", fn_addr, &[], &[], false, false, &[]);
     let bytecode = asm.build();
 
     let mut vm = QuantumVM::new();
@@ -241,7 +241,7 @@ fn test_call_depth_limit() {
     asm.emit_u32(fn_addr);
     asm.emit_op(OpCode::Halt);
 
-    asm.add_function_entry("recurse", fn_addr, &[], false);
+    asm.add_function_entry("recurse", fn_addr, &[], &[], false, false, &[]);
     let bytecode = asm.build();
 
     let mut vm = QuantumVM::new();
@@ -285,8 +285,8 @@ fn test_sequential_calls_preserve_state() {
     asm.emit_op(OpCode::Store);
     asm.emit_op(OpCode::Halt);
 
-    asm.add_function_entry("set_a", addr_a, &[], false);
-    asm.add_function_entry("set_b", addr_b, &[], false);
+    asm.add_function_entry("set_a", addr_a, &[], &[], false, false, &[]);
+    asm.add_function_entry("set_b", addr_b, &[], &[], false, false, &[]);
     let bytecode = asm.build();
 
     let mut vm = QuantumVM::new();
@@ -309,7 +309,7 @@ fn test_sequential_calls_preserve_state() {
 /// still be 0 (rollback) and we must get a Reverted error.
 #[test]
 fn test_rollback_on_revert() {
-    use synq_vm::vm::{QuantumVM, Value};
+    use synq_vm::vm::{CallContext, QuantumVM, Value};
     use synq_vm::opcode::VMError;
     use synq_compiler::compile;
 
@@ -317,7 +317,7 @@ fn test_rollback_on_revert() {
 pragma synq ^0.9;
 contract RollbackTest {
     total: UInt256;
-    function bad_mint() {
+    function bad_mint() as caller {
         total = 999;
         require(false, "always reverts");
     }
@@ -326,6 +326,7 @@ contract RollbackTest {
     let result = compile(src).expect("compile failed");
     // CompileResult.bytecode is already Vec<u8>
     let mut vm = QuantumVM::new();
+    vm.call_context = CallContext::from_address([1; 20]);
     vm.load_bytecode(&result.bytecode).expect("load bytecode");
 
     // total starts at 0

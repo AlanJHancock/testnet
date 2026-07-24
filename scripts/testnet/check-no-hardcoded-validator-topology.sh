@@ -118,6 +118,17 @@ for path in sorted(iter_files(), key=lambda item: rel(item)):
         continue
 
     for index, line in enumerate(lines, start=1):
+        if relative.startswith(("config/", "templates/")) and re.search(
+            r"^\s*(emergency_stable_committee_mode|freeze_validator_set|freeze_score_weighted_proposer_order)\s*=\s*true\s*(#.*)?$",
+            line,
+        ):
+            report(
+                relative,
+                index,
+                "permanent emergency committee freezes are not allowed in shipped runtime configuration",
+                line,
+            )
+
         if re.search(r"^\s*max_validators\s*=\s*[1-9][0-9]*\s*(#.*)?$", line):
             report(
                 relative,

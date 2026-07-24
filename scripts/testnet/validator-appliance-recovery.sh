@@ -243,15 +243,29 @@ run_node_timeout() {
   fi
 }
 rpc() {
-  python3 - "$PORT" "$1" "${2:-[]}" "${3:-6}" <<'"'"'PY'"'"' 2>/dev/null || true
+  local url="${SYNERGY_QRPC_URL:-}"
+  if [ -z "$url" ]; then
+    local bind="${SYNERGY_QRPC_BIND_ADDRESS:-}"
+    if [ -z "$bind" ] && rsudo test -f "$CONFIG_PATH"; then
+      bind="$(rsudo grep -m1 "bind_address[[:space:]]*=" "$CONFIG_PATH" 2>/dev/null | sed -E "s/.*bind_address[[:space:]]*=[[:space:]]*\\\"([^\\\"]*)\\\".*/\\1/" || true)"
+    fi
+    if [ -z "$bind" ]; then
+      bind="127.0.0.1:${PORT}"
+    fi
+    case "$bind" in
+      http://*|https://*) url="$bind" ;;
+      *) url="http://$bind" ;;
+    esac
+  fi
+  python3 - "$url" "$1" "${2:-[]}" "${3:-6}" <<'"'"'PY'"'"' 2>/dev/null || true
 import json, sys, time, urllib.request
-port, method, params_json, timeout = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
+url, method, params_json, timeout = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
 try:
     params = json.loads(params_json)
 except Exception:
     params = []
 payload=json.dumps({"jsonrpc":"2.0","id":1,"method":method,"params":params}).encode()
-req=urllib.request.Request(f"http://127.0.0.1:{port}", data=payload, headers={"content-type":"application/json"}, method="POST")
+req=urllib.request.Request(url, data=payload, headers={"content-type":"application/json"}, method="POST")
 started=time.time()
 try:
     with urllib.request.urlopen(req, timeout=timeout) as resp:

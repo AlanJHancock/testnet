@@ -289,9 +289,10 @@ fn run() -> Result<(), String> {
             println!("  synergy-node validator inspect-state --state-root <runtime-root-or-data-dir> --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator verify-state --state-root <runtime-root-or-data-dir> [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator verify-live-state --state-root <runtime-root-or-data-dir> [--expected-height <height> --expected-hash <hash>] [--max-expected-lag <blocks>] [--max-qc-ahead <blocks>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator repair-missing-qc --state-root <runtime-root-or-data-dir> --expected-height <height> --expected-qc-sha256 <sha256> --source-qc <qc.json> --source-node <validator> --source-qc <qc.json> --source-node <validator> --block <block.json> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator adopt-compacted-checkpoint --state-root <runtime-root-or-data-dir> --source-validator <source-validator> --source-bundle-path <path> --source-bundle-sha256 <sha256> --source-state-dir <path> --operator-approval-id <id> --recovery-reason <text> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
-            println!("  synergy-node validator migrate-state --state-root <runtime-root-or-data-dir> --dry-run|--force --chain-id 1264 --network-id synergy-testnet-v2");
-            println!("  synergy-node validator rebuild-derived-indexes --state-root <runtime-root-or-data-dir> [--dry-run] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator migrate-state --state-root <runtime-root-or-data-dir> --dry-run|--force [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator rebuild-derived-indexes --state-root <runtime-root-or-data-dir> [--dry-run] [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator state-sync-plan --request <request.json> --source-proof <proof.json> --transfer-proof <transfer.json> [--state-root <runtime-root-or-data-dir>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator classify-supervisor-state --evidence <evidence.json> --chain-id 1264 --network-id synergy-testnet-v2");
@@ -414,6 +415,47 @@ fn run_validator_command(args: &[String]) -> Result<(), String> {
                 return Err("validator live state verification failed closed".to_string());
             }
         }
+        "repair-missing-qc" => {
+            require_testnet_args(args)?;
+            let state_root = validator_state_root_from_args(args);
+            let expected_height =
+                optional_u64_arg(args, "--expected-height")?.ok_or_else(|| {
+                    "validator repair-missing-qc requires --expected-height <height>".to_string()
+                })?;
+            let expected_qc_sha256 = arg_value(args, "--expected-qc-sha256").ok_or_else(|| {
+                "validator repair-missing-qc requires --expected-qc-sha256 <sha256>".to_string()
+            })?;
+            let source_qc_paths = arg_values(args, "--source-qc")
+                .into_iter()
+                .map(std::path::PathBuf::from)
+                .collect();
+            let source_nodes = arg_values(args, "--source-node");
+            let block_path = arg_value(args, "--block")
+                .map(std::path::PathBuf::from)
+                .ok_or_else(|| {
+                    "validator repair-missing-qc requires --block <block.json>".to_string()
+                })?;
+            let report = synergy_testnet::recovery::repair_missing_committed_qc(
+                synergy_testnet::recovery::MissingQcRepairOptions {
+                    state_root,
+                    expected_height,
+                    expected_qc_sha256,
+                    source_qc_paths,
+                    source_nodes,
+                    block_path,
+                    dry_run: arg_flag(args, "--dry-run"),
+                    apply: arg_flag(args, "--apply"),
+                },
+            )?;
+            let ok = report.ok;
+            print_json(
+                serde_json::to_value(report)
+                    .map_err(|error| format!("serialize missing QC repair report: {error}"))?,
+            )?;
+            if !ok {
+                return Err("validator missing QC repair failed closed".to_string());
+            }
+        }
         "adopt-compacted-checkpoint" => {
             require_testnet_args(args)?;
             let state_root = validator_state_root_from_args(args);
@@ -485,11 +527,17 @@ fn run_validator_command(args: &[String]) -> Result<(), String> {
         "migrate-state" => {
             require_testnet_args(args)?;
             let state_root = validator_state_root_from_args(args);
-            let report = synergy_testnet::consensus_state::migrate_state(
+            let report = synergy_testnet::consensus_state::migrate_state_with_verification_options(
                 &state_root,
                 synergy_testnet::consensus_state::ConsensusStateMigrationOptions {
                     dry_run: arg_flag(args, "--dry-run"),
                     force: arg_flag(args, "--force"),
+                },
+                synergy_testnet::consensus_state::ConsensusStateVerificationOptions {
+                    allow_testnet_recovery_checkpoint: arg_flag(
+                        args,
+                        "--allow-testnet-recovery-checkpoint",
+                    ),
                 },
             )?;
             let ok = report.ok;
@@ -504,10 +552,16 @@ fn run_validator_command(args: &[String]) -> Result<(), String> {
         "rebuild-derived-indexes" => {
             require_testnet_args(args)?;
             let state_root = validator_state_root_from_args(args);
-            let report = synergy_testnet::consensus_state::rebuild_derived_indexes(
+            let report = synergy_testnet::consensus_state::rebuild_derived_indexes_with_verification_options(
                 &state_root,
                 synergy_testnet::consensus_state::DerivedIndexRebuildOptions {
                     dry_run: arg_flag(args, "--dry-run"),
+                },
+                synergy_testnet::consensus_state::ConsensusStateVerificationOptions {
+                    allow_testnet_recovery_checkpoint: arg_flag(
+                        args,
+                        "--allow-testnet-recovery-checkpoint",
+                    ),
                 },
             )?;
             let ok = report.ok;
@@ -906,9 +960,10 @@ fn run_validator_command(args: &[String]) -> Result<(), String> {
             println!("  synergy-node validator inspect-state --state-root <runtime-root-or-data-dir> --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator verify-state --state-root <runtime-root-or-data-dir> [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator verify-live-state --state-root <runtime-root-or-data-dir> [--expected-height <height> --expected-hash <hash>] [--max-expected-lag <blocks>] [--max-qc-ahead <blocks>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator repair-missing-qc --state-root <runtime-root-or-data-dir> --expected-height <height> --expected-qc-sha256 <sha256> --source-qc <qc.json> --source-node <validator> --source-qc <qc.json> --source-node <validator> --block <block.json> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator adopt-compacted-checkpoint --state-root <runtime-root-or-data-dir> --source-validator <source-validator> --source-bundle-path <path> --source-bundle-sha256 <sha256> --source-state-dir <path> --operator-approval-id <id> --recovery-reason <text> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
-            println!("  synergy-node validator migrate-state --state-root <runtime-root-or-data-dir> --dry-run|--force --chain-id 1264 --network-id synergy-testnet-v2");
-            println!("  synergy-node validator rebuild-derived-indexes --state-root <runtime-root-or-data-dir> [--dry-run] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator migrate-state --state-root <runtime-root-or-data-dir> --dry-run|--force [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator rebuild-derived-indexes --state-root <runtime-root-or-data-dir> [--dry-run] [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator state-sync-plan --request <request.json> --source-proof <proof.json> --transfer-proof <transfer.json> [--state-root <runtime-root-or-data-dir>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator classify-supervisor-state --evidence <evidence.json> --chain-id 1264 --network-id synergy-testnet-v2");
@@ -1670,6 +1725,8 @@ fn execute_synq_replay_once(steps: &[SynqReplayStep]) -> Result<SynqReplayRun, S
             synergy_testnet::synq_execution::SynQExecutionContext {
                 runtime_block_height:
                     aivm_core::synq_runtime::GENERIC_SYNQ_RUNTIME_ACTIVATION_HEIGHT,
+                runtime_block_timestamp_unix: 0,
+                sts_host: None,
             },
         )?
         .ok_or_else(|| format!("{} did not execute as a SynQ transaction", step.label))?;
@@ -2226,6 +2283,18 @@ fn print_validator_command_help(args: &[String]) {
                 "Read-only bounded-edge validator state verifier for live restart preflight. Exits nonzero when durable state is too stale or inconsistent."
             );
         }
+        ("repair-missing-qc", _) => {
+            println!("Usage: synergy-node validator repair-missing-qc --state-root <runtime-root-or-data-dir> --expected-height <height> --expected-qc-sha256 <sha256> --source-qc <qc.json> --source-node <validator> --source-qc <qc.json> --source-node <validator> --block <block.json> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("Repair one exact internal committed-QC gap using independently collected, byte-identical quorum evidence. Requires a stopped-validator marker and performs full Aegis, block-continuity, atomic-backup, and post-repair state verification.");
+        }
+        ("migrate-state", _) => {
+            println!("Usage: synergy-node validator migrate-state --state-root <runtime-root-or-data-dir> --dry-run|--force [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("Verify and migrate consensus state into the durable store. Compact testnet state is accepted only with the explicit recovery flag.");
+        }
+        ("rebuild-derived-indexes", _) => {
+            println!("Usage: synergy-node validator rebuild-derived-indexes --state-root <runtime-root-or-data-dir> [--dry-run] [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("Verify consensus state and rebuild derived indexes. Compact testnet state is accepted only with the explicit recovery flag.");
+        }
         ("state-sync-plan", _) => {
             println!("Usage: synergy-node validator state-sync-plan --request <request.json> --source-proof <proof.json> --transfer-proof <transfer.json> [--state-root <runtime-root-or-data-dir>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v2");
             println!("Build a protocol-native state-sync repair plan from verified request, source, and transfer proofs.");
@@ -2251,6 +2320,9 @@ fn print_validator_command_help(args: &[String]) {
             println!("  synergy-node validator inspect-state --state-root <runtime-root-or-data-dir> --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator verify-state --state-root <runtime-root-or-data-dir> [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator verify-live-state --state-root <runtime-root-or-data-dir> [--expected-height <height> --expected-hash <hash>] [--max-expected-lag <blocks>] [--max-qc-ahead <blocks>] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator repair-missing-qc --state-root <runtime-root-or-data-dir> --expected-height <height> --expected-qc-sha256 <sha256> --source-qc <qc.json> --source-node <validator> --source-qc <qc.json> --source-node <validator> --block <block.json> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator migrate-state --state-root <runtime-root-or-data-dir> --dry-run|--force [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2");
+            println!("  synergy-node validator rebuild-derived-indexes --state-root <runtime-root-or-data-dir> [--dry-run] [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator state-sync-plan --request <request.json> --source-proof <proof.json> --transfer-proof <transfer.json> [--state-root <runtime-root-or-data-dir>] [--output <plan.json>] --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator state-sync repair --plan <plan.json> --workspace <offline-workspace> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2");
             println!("  synergy-node validator supervisor-transition --evidence <evidence.json> [--previous-state <state.json>] [--output <report.json>] --chain-id 1264 --network-id synergy-testnet-v2");

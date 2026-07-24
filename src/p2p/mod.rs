@@ -5,6 +5,7 @@
 
 pub mod messages;
 pub mod networking;
+pub(crate) mod validator_transport_registry;
 
 use self::networking::P2PNetwork;
 use crate::block::BlockChain;

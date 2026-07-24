@@ -996,11 +996,14 @@ mod tests {
 
     #[test]
     fn chaos_three_cluster_fixture_halts_only_below_margin_clusters() {
-        let mut validators = validators_in_clusters(&[4, 4, 5]);
+        let mut validators = validators_in_clusters(&[7, 7, 7]);
         validators[0].fault = ChaosValidatorFault::Partitioned;
-        validators[4].fault = ChaosValidatorFault::Partitioned;
-        validators[5].fault = ChaosValidatorFault::Partitioned;
+        validators[1].fault = ChaosValidatorFault::Partitioned;
+        validators[7].fault = ChaosValidatorFault::Partitioned;
         validators[8].fault = ChaosValidatorFault::Partitioned;
+        validators[9].fault = ChaosValidatorFault::Partitioned;
+        validators[14].fault = ChaosValidatorFault::Partitioned;
+        validators[15].fault = ChaosValidatorFault::Partitioned;
         let report = run_chaos_harness(&input(
             ChaosScenario::NetworkPartition,
             ChaosBehavior::HaltsSafely,
@@ -1009,13 +1012,13 @@ mod tests {
         assert!(report.ok, "{:?}", report.findings);
         assert_eq!(report.actual_behavior, ChaosBehavior::HaltsSafely);
         assert_eq!(report.clusters.len(), 3);
-        assert_eq!(report.clusters[0].active_consensus_count, 3);
-        assert_eq!(report.clusters[0].quorum_threshold, 3);
-        assert_eq!(report.clusters[1].active_consensus_count, 2);
-        assert_eq!(report.clusters[1].quorum_threshold, 3);
+        assert_eq!(report.clusters[0].active_consensus_count, 5);
+        assert_eq!(report.clusters[0].quorum_threshold, 5);
+        assert_eq!(report.clusters[1].active_consensus_count, 4);
+        assert_eq!(report.clusters[1].quorum_threshold, 5);
         assert!(!report.clusters[1].can_finalize);
-        assert_eq!(report.clusters[2].active_consensus_count, 4);
-        assert_eq!(report.clusters[2].quorum_threshold, 4);
+        assert_eq!(report.clusters[2].active_consensus_count, 5);
+        assert_eq!(report.clusters[2].quorum_threshold, 5);
     }
 
     #[test]

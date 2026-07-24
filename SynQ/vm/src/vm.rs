@@ -613,7 +613,7 @@ impl QuantumVM {
             // ── Arithmetic — handles I32, U128, and U256 ───────────────────
             OpCode::Add => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     let av=a.as_i128()?;let bv=b.as_i128()?;let r=av.checked_add(bv).ok_or_else(||VMError::RuntimeError(format!("Signed overflow on Add: {}+{}",av,bv)))?;self.push(Value::from_i128_shrink(r))?;
                 } else if a.is_uint_compat() && b.is_uint_compat() {
                     let av=a.as_u256()?;let bv=b.as_u256()?;let r=av.checked_add(bv).ok_or_else(||VMError::RuntimeError(format!("UInt256 overflow on Add: {}+{}",av,bv)))?;self.push(Value::from_u256_shrink(r))?;
@@ -621,7 +621,7 @@ impl QuantumVM {
             }
             OpCode::Sub => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     let av=a.as_i128()?;let bv=b.as_i128()?;let r=av.checked_sub(bv).ok_or_else(||VMError::RuntimeError(format!("Signed overflow on Sub: {}-{}",av,bv)))?;self.push(Value::from_i128_shrink(r))?;
                 } else if a.is_uint_compat() && b.is_uint_compat() {
                     let av=a.as_u256()?;let bv=b.as_u256()?;let r=av.checked_sub(bv).ok_or_else(||VMError::RuntimeError(format!("UInt256 underflow on Sub: {}-{} would be negative",av,bv)))?;self.push(Value::from_u256_shrink(r))?;
@@ -629,7 +629,7 @@ impl QuantumVM {
             }
             OpCode::Mul => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     let av=a.as_i128()?;let bv=b.as_i128()?;let r=av.checked_mul(bv).ok_or_else(||VMError::RuntimeError(format!("Signed overflow on Mul: {}×{}",av,bv)))?;self.push(Value::from_i128_shrink(r))?;
                 } else if a.is_uint_compat() && b.is_uint_compat() {
                     let av=a.as_u256()?;let bv=b.as_u256()?;let r=av.checked_mul(bv).ok_or_else(||VMError::RuntimeError(format!("UInt256 overflow on Mul: {}×{}",av,bv)))?;self.push(Value::from_u256_shrink(r))?;
@@ -637,7 +637,7 @@ impl QuantumVM {
             }
             OpCode::Div => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     let av=a.as_i128()?;let bv=b.as_i128()?;
                     if bv==0 {return Err(VMError::RuntimeError(format!("Div by zero: {} / 0",av)));}
                     let r=av.checked_div(bv).ok_or_else(||VMError::RuntimeError(format!("Signed overflow on Div: {} / {}",av,bv)))?;
@@ -651,7 +651,7 @@ impl QuantumVM {
             }
             OpCode::Rem => {
                 let b = self.pop()?; let a = self.pop()?;
-                if a.is_signed() || b.is_signed() {
+                if a.is_signed() && b.is_signed() {
                     let av=a.as_i128()?;let bv=b.as_i128()?;
                     if bv==0 {return Err(VMError::RuntimeError(format!("Rem by zero: {} % 0",av)));}
                     let r=av.checked_rem(bv).ok_or_else(||VMError::RuntimeError(format!("Signed overflow on Rem: {} % {}",av,bv)))?;

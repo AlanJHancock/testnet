@@ -290,7 +290,7 @@ impl VRFConsensus {
 
     /// Calculate epoch transition
     pub fn should_transition_epoch(&self, current_height: u64) -> bool {
-        current_height % self.epoch_length == 0
+        crate::epoch::is_epoch_end_height(current_height, self.epoch_length)
     }
 
     /// Get validator clusters for distributed consensus

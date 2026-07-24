@@ -287,12 +287,6 @@ impl WalletManager {
             return Err("Invalid receiver Synergy address".to_string());
         }
 
-        // Check balance
-        let balance = token_manager.get_balance(from, token_symbol);
-        if balance < amount {
-            return Err("Insufficient balance".to_string());
-        }
-
         // Create transaction
         let mut tx = Transaction::new(
             from.to_string(),
@@ -312,6 +306,26 @@ impl WalletManager {
             )),
             "fndsa".to_string(), // signature algorithm
         );
+        tx.set_gas_limit(tx.estimate_gas())?;
+
+        let balance = token_manager.get_balance(from, token_symbol) as u128;
+        let fee_reserve = tx.get_max_network_fee_reserve_nwei();
+        let required_balance = (amount as u128).saturating_add(fee_reserve);
+        if token_symbol == crate::token::SNRG_SYMBOL && balance < required_balance {
+            return Err(format!(
+                "Insufficient balance for transfer amount and network fee reserve: requires {required_balance} nWei"
+            ));
+        }
+        if token_symbol != crate::token::SNRG_SYMBOL && balance < amount as u128 {
+            return Err("Insufficient token balance".to_string());
+        }
+        if token_symbol != crate::token::SNRG_SYMBOL
+            && (token_manager.get_balance(from, crate::token::SNRG_SYMBOL) as u128) < fee_reserve
+        {
+            return Err(format!(
+                "Insufficient SNRG balance for network fee reserve: requires {fee_reserve} nWei"
+            ));
+        }
 
         // Sign transaction
         self.sign_transaction(from, &mut tx)?;
@@ -339,12 +353,6 @@ impl WalletManager {
             return Err("Invalid validator Synergy address".to_string());
         }
 
-        // Check balance
-        let balance = token_manager.get_balance(staker, token_symbol);
-        if balance < amount {
-            return Err("Insufficient balance for staking".to_string());
-        }
-
         // Create staking transaction
         let mut tx = Transaction::new(
             staker.to_string(),
@@ -360,6 +368,26 @@ impl WalletManager {
             )),
             "fndsa".to_string(), // signature algorithm
         );
+        tx.set_gas_limit(tx.estimate_gas())?;
+
+        let balance = token_manager.get_balance(staker, token_symbol) as u128;
+        let fee_reserve = tx.get_max_network_fee_reserve_nwei();
+        let required_balance = (amount as u128).saturating_add(fee_reserve);
+        if token_symbol == crate::token::SNRG_SYMBOL && balance < required_balance {
+            return Err(format!(
+                "Insufficient balance for staking amount and network fee reserve: requires {required_balance} nWei"
+            ));
+        }
+        if token_symbol != crate::token::SNRG_SYMBOL && balance < amount as u128 {
+            return Err("Insufficient token balance for staking".to_string());
+        }
+        if token_symbol != crate::token::SNRG_SYMBOL
+            && (token_manager.get_balance(staker, crate::token::SNRG_SYMBOL) as u128) < fee_reserve
+        {
+            return Err(format!(
+                "Insufficient SNRG balance for staking fee reserve: requires {fee_reserve} nWei"
+            ));
+        }
 
         // Sign transaction
         self.sign_transaction(staker, &mut tx)?;
@@ -405,6 +433,7 @@ impl WalletManager {
             Some(format!("validator_activation:{payload}")),
             "fndsa".to_string(),
         );
+        tx.set_gas_limit(tx.estimate_gas())?;
 
         self.sign_transaction(validator, &mut tx)?;
 
@@ -987,6 +1016,268 @@ mod tests {
             !wallet_manager.verify_signature(&tx),
             "unknown signature algorithm should be rejected"
         );
+    }
+
+    #[test]
+    fn staking_requires_a_fee_reserve_and_uses_the_estimated_gas_limit() {
+        let mut wallet_manager = WalletManager::new();
+        let staker = wallet_manager
+            .create_wallet()
+            .expect("wallet creation should succeed");
+        let validator = crate::address::generate_validator_address("wallet-stake-gas", 7);
+        let token_manager = crate::token::TokenManager::new();
+        let amount = 50_000_000_000_000u64;
+        let funded_genesis_wallet = "synw10fe72rg3xe94pwcyq65pktqz5avx67yr47h5";
+        token_manager
+            .transfer_tokens(
+                funded_genesis_wallet,
+                &staker,
+                crate::token::SNRG_SYMBOL,
+                amount,
+                0,
+            )
+            .expect("test wallet should receive the exact staking amount");
+
+        let error = wallet_manager
+            .stake_tokens(
+                &staker,
+                &validator,
+                crate::token::SNRG_SYMBOL,
+                amount,
+                &token_manager,
+            )
+            .expect_err("the exact bond amount cannot also pay the network fee");
+        assert!(error.contains("network fee reserve"));
+
+        token_manager
+            .transfer_tokens(
+                funded_genesis_wallet,
+                &staker,
+                crate::token::SNRG_SYMBOL,
+                1_000_000_000,
+                0,
+            )
+            .expect("test wallet should receive a one-SNRG fee reserve");
+        let tx = wallet_manager
+            .stake_tokens(
+                &staker,
+                &validator,
+                crate::token::SNRG_SYMBOL,
+                amount,
+                &token_manager,
+            )
+            .expect("the buffered self-bond should be signed");
+
+        assert_eq!(tx.get_gas_limit(), tx.minimum_required_gas());
+        assert!(tx.get_gas_limit() > 21_000);
+    }
+
+    #[test]
+    fn snrg_transfer_requires_the_amount_protocol_fee_and_gas_reserve() {
+        let mut wallet_manager = WalletManager::new();
+        let sender = wallet_manager
+            .create_wallet()
+            .expect("wallet creation should succeed");
+        let receiver = wallet_manager
+            .create_wallet()
+            .expect("receiver wallet creation should succeed");
+        let token_manager = crate::token::TokenManager::new();
+        let amount = 50_001_000_000_000u64;
+        let funded_genesis_wallet = "synw10fe72rg3xe94pwcyq65pktqz5avx67yr47h5";
+        token_manager
+            .transfer_tokens(
+                funded_genesis_wallet,
+                &sender,
+                crate::token::SNRG_SYMBOL,
+                amount,
+                0,
+            )
+            .expect("test wallet should receive the exact transfer amount");
+
+        let error = wallet_manager
+            .send_tokens(
+                &sender,
+                &receiver,
+                crate::token::SNRG_SYMBOL,
+                amount,
+                Some("validator self-bond funding"),
+                &token_manager,
+            )
+            .expect_err("the transfer amount cannot also pay its network fee");
+        assert!(error.contains("network fee reserve"));
+
+        token_manager
+            .transfer_tokens(
+                funded_genesis_wallet,
+                &sender,
+                crate::token::SNRG_SYMBOL,
+                20_000_000_000,
+                0,
+            )
+            .expect("test wallet should receive enough fee reserve");
+        let tx = wallet_manager
+            .send_tokens(
+                &sender,
+                &receiver,
+                crate::token::SNRG_SYMBOL,
+                amount,
+                Some("validator self-bond funding"),
+                &token_manager,
+            )
+            .expect("the buffered funding transfer should be signed");
+
+        assert_eq!(tx.get_gas_limit(), tx.minimum_required_gas());
+        assert!(tx.get_max_network_fee_reserve_nwei() < 20_000_000_000);
+    }
+
+    #[test]
+    fn non_snrg_transfer_pays_native_snrg_gas_through_token_manager() {
+        let mut wallet_manager = WalletManager::new();
+        let sender = wallet_manager
+            .create_wallet()
+            .expect("wallet creation should succeed");
+        let receiver = wallet_manager
+            .create_wallet()
+            .expect("receiver wallet creation should succeed");
+        let token_manager = crate::token::TokenManager::new();
+        let amount = 500_000u64;
+        token_manager
+            .create_token(
+                "TEST".to_string(),
+                "Wallet Test Token".to_string(),
+                6,
+                amount,
+                Some(amount),
+                false,
+                false,
+                sender.clone(),
+            )
+            .expect("custom token should be created for the sender");
+        let funded_genesis_wallet = "synw10fe72rg3xe94pwcyq65pktqz5avx67yr47h5";
+        token_manager
+            .transfer_tokens(
+                funded_genesis_wallet,
+                &sender,
+                crate::token::SNRG_SYMBOL,
+                20_000_000_000,
+                0,
+            )
+            .expect("sender should receive native SNRG fee reserve");
+
+        let before_snrg = token_manager.get_balance(&sender, crate::token::SNRG_SYMBOL);
+        let tx = wallet_manager
+            .send_tokens(
+                &sender,
+                &receiver,
+                "TEST",
+                amount,
+                Some("custom-token transfer"),
+                &token_manager,
+            )
+            .expect("custom-token transfer should be signed with native fee reserve");
+        let fee = tx
+            .get_total_network_fee_u64()
+            .expect("network fee should fit in u64");
+        let breakdown = tx
+            .get_network_fee_breakdown()
+            .expect("network fee breakdown should be available");
+        assert_eq!(breakdown.amount_protocol_fee_nwei, 0);
+        assert_eq!(breakdown.total_network_fee_nwei, breakdown.gas_fee_nwei);
+
+        token_manager
+            .process_transaction(&tx)
+            .expect("TokenManager should charge native SNRG and transfer the custom token");
+        assert_eq!(token_manager.get_balance(&sender, "TEST"), 0);
+        assert_eq!(token_manager.get_balance(&receiver, "TEST"), amount);
+        assert_eq!(
+            token_manager.get_balance(&sender, crate::token::SNRG_SYMBOL),
+            before_snrg - fee
+        );
+        assert_eq!(
+            token_manager.get_balance(
+                crate::token::FEE_COLLECTOR_ADDRESS,
+                crate::token::SNRG_SYMBOL
+            ),
+            fee
+        );
+    }
+
+    #[test]
+    fn non_snrg_stake_pays_native_snrg_gas_through_token_manager() {
+        let mut wallet_manager = WalletManager::new();
+        let staker = wallet_manager
+            .create_wallet()
+            .expect("wallet creation should succeed");
+        let validator = crate::address::generate_validator_address("wallet-custom-stake", 8);
+        let token_manager = crate::token::TokenManager::new();
+        let amount = 500_000u64;
+        token_manager
+            .create_token(
+                "TEST".to_string(),
+                "Wallet Stake Token".to_string(),
+                6,
+                amount,
+                Some(amount),
+                false,
+                false,
+                staker.clone(),
+            )
+            .expect("custom token should be created for the staker");
+        let funded_genesis_wallet = "synw10fe72rg3xe94pwcyq65pktqz5avx67yr47h5";
+        token_manager
+            .transfer_tokens(
+                funded_genesis_wallet,
+                &staker,
+                crate::token::SNRG_SYMBOL,
+                20_000_000_000,
+                0,
+            )
+            .expect("staker should receive native SNRG fee reserve");
+
+        let before_snrg = token_manager.get_balance(&staker, crate::token::SNRG_SYMBOL);
+        let tx = wallet_manager
+            .stake_tokens(&staker, &validator, "TEST", amount, &token_manager)
+            .expect("custom-token stake should be signed with native fee reserve");
+        let fee = tx
+            .get_total_network_fee_u64()
+            .expect("network fee should fit in u64");
+        let breakdown = tx
+            .get_network_fee_breakdown()
+            .expect("network fee breakdown should be available");
+        assert_eq!(breakdown.amount_protocol_fee_nwei, 0);
+        assert_eq!(breakdown.total_network_fee_nwei, breakdown.gas_fee_nwei);
+
+        token_manager
+            .process_transaction(&tx)
+            .expect("TokenManager should charge native SNRG and stake the custom token");
+        assert_eq!(token_manager.get_balance(&staker, "TEST"), 0);
+        assert_eq!(token_manager.get_staked_balance(&staker, "TEST"), amount);
+        assert_eq!(
+            token_manager.get_balance(&staker, crate::token::SNRG_SYMBOL),
+            before_snrg - fee
+        );
+        assert_eq!(
+            token_manager.get_balance(
+                crate::token::FEE_COLLECTOR_ADDRESS,
+                crate::token::SNRG_SYMBOL
+            ),
+            fee
+        );
+    }
+
+    #[test]
+    fn validator_activation_uses_the_operation_specific_gas_limit() {
+        let mut wallet_manager = WalletManager::new();
+        let validator = wallet_manager
+            .create_wallet()
+            .expect("wallet creation should succeed");
+
+        let tx = wallet_manager
+            .activate_validator(&validator, "Community Validator", 50_000_000_000_000)
+            .expect("validator activation should be signed");
+
+        assert_eq!(tx.get_gas_limit(), tx.minimum_required_gas());
+        assert!(tx.get_gas_limit() > 21_000);
     }
 
     #[test]

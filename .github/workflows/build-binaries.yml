@@ -24,7 +24,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Keep release binaries compatible with the Ubuntu 22.04 baseline used
+          # by the control-panel installer and documented Linux requirements.
+          - os: ubuntu-22.04
             label: linux-amd64
             binary_suffix: ""
           - os: windows-latest
@@ -98,12 +100,26 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Install Linux release dependencies
+        if: matrix.label == 'linux-amd64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends ripgrep
+
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.os }}-${{ matrix.label }}
 
       - name: Enforce PQC-only consensus-critical paths
         shell: bash
         run: scripts/testnet/check-pqc-consensus-guard.sh
+
+      - name: Enforce PQC RNG symbol ownership
+        shell: bash
+        run: scripts/testnet/check-pqc-rng-symbol-ownership.sh
 
       - name: Enforce release manifest portability
         shell: bash
@@ -124,10 +140,32 @@ jobs:
             --bin generate-node-keys \
             --bin synergy-address-engine \
             --bin wallet-pqc-cli \
+            --bin synergy-sts \
             --bin synergy-rpc-gateway-node \
             --bin synergy-archive \
             --bin synergy-node \
             --bin synergy-indexer-and-explorer-node
+
+      - name: Verify Linux glibc compatibility baseline
+        if: matrix.label == 'linux-amd64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          max_glibc="$(
+            readelf --version-info target/release/synergy-testnet \
+              | sed -n 's/.*Name: GLIBC_\([0-9.]\+\).*/\1/p' \
+              | sort -V \
+              | tail -n 1
+          )"
+          if [[ -z "${max_glibc}" ]]; then
+            echo "Unable to determine the Linux runtime glibc requirement." >&2
+            exit 1
+          fi
+          if [[ "$(printf '%s\n%s\n' '2.35' "${max_glibc}" | sort -V | tail -n 1)" != '2.35' ]]; then
+            echo "Linux runtime requires GLIBC_${max_glibc}; maximum supported baseline is GLIBC_2.35." >&2
+            exit 1
+          fi
+          echo "Linux runtime glibc requirement verified: GLIBC_${max_glibc} <= GLIBC_2.35"
 
       - name: Package binaries
         id: package
@@ -163,6 +201,7 @@ jobs:
               "generate-node-keys",
               "synergy-address-engine",
               "wallet-pqc-cli",
+              "synergy-sts",
               "synergy-rpc-gateway-node",
               "synergy-archive",
               "synergy-node",
@@ -204,6 +243,8 @@ jobs:
           PY
 
           if [[ "${MATRIX_LABEL}" == "linux-amd64" ]]; then
+            cp scripts/install-synergy-sts.sh dist/install-synergy-sts.sh
+            cp scripts/install-synergy-sts.ps1 dist/install-synergy-sts.ps1
             install -m 0755 "target/release/synergy-archive${MATRIX_SUFFIX}" archive-validator/bin/synergy-archive
             ./archive-validator/package-archive-validator.sh --linux
             cp archive-validator/synergy-archive-validator-testnet-v2-linux-x64.zip dist/

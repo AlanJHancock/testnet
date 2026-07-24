@@ -2,21 +2,21 @@
 set -euo pipefail
 
 PACKAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${PACKAGE_ROOT}/archive-paths.sh"
 TEST_ROOT=""
 PUBLIC_HOST=""
 SNAPSHOT_API_BIND="0.0.0.0:48640"
 SKIP_LAUNCHD_LOAD="false"
 YES="false"
 SERVICE_TIMEOUT_SECS="${ARCHIVE_VALIDATOR_SERVICE_TIMEOUT_SECS:-120}"
-STORAGE_VOLUME_REL="/Volumes/Synergy_Archive"
-LOCAL_ROOT_REL="/Users/Shared/Synergy/archive-validator"
-SMB_ROOT_REL="${STORAGE_VOLUME_REL}/archive-validator"
-PUBLISH_ROOT_REL="${SMB_ROOT_REL}/snapshots"
-INCOMING_BOOTSTRAP_REL="${SMB_ROOT_REL}/incoming/bootstrap"
+archive_paths_load_defaults
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --test-root) TEST_ROOT="$2"; shift 2 ;;
+    --app-root) ARCHIVE_APP_ROOT="$2"; shift 2 ;;
+    --publish-root) ARCHIVE_PUBLISH_ROOT="$2"; shift 2 ;;
+    --storage-volume) ARCHIVE_STORAGE_VOLUME="$2"; shift 2 ;;
     --public-host) PUBLIC_HOST="$2"; shift 2 ;;
     --snapshot-api-bind) SNAPSHOT_API_BIND="$2"; shift 2 ;;
     --skip-launchd-load) SKIP_LAUNCHD_LOAD="true"; shift ;;
@@ -25,6 +25,8 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+
+archive_paths_validate
 
 [[ "$(uname -s)" == "Darwin" ]] || { echo "The M4 archive installer requires macOS." >&2; exit 1; }
 [[ "$(uname -m)" == "arm64" ]] || { echo "The M4 archive installer requires Apple Silicon arm64." >&2; exit 1; }
@@ -234,7 +236,7 @@ verify_runtime_listeners() {
   wait_for_qrpc_latest_block 5640 "${timeout}"
 }
 
-STORAGE_VOLUME="$(prefix_path "${STORAGE_VOLUME_REL}")"
+STORAGE_VOLUME="$(archive_paths_prefix "${TEST_ROOT}" "${ARCHIVE_STORAGE_VOLUME}")"
 if [[ -n "${TEST_ROOT}" ]]; then
   [[ -d "${STORAGE_VOLUME}" ]] || {
     echo "archive storage volume missing in test root: ${STORAGE_VOLUME}" >&2
@@ -254,12 +256,12 @@ fi
 
 BIN_ROOT="$(prefix_path /usr/local/synergy/bin)"
 SHARE_ROOT="$(prefix_path /usr/local/synergy/share/archive-validator)"
-APP_ROOT="$(prefix_path "${LOCAL_ROOT_REL}")"
+APP_ROOT="$(archive_paths_prefix "${TEST_ROOT}" "${ARCHIVE_APP_ROOT}")"
 WORKSPACE="${APP_ROOT}/workspace"
 LOG_ROOT="${APP_ROOT}/logs"
-SMB_ROOT="$(prefix_path "${SMB_ROOT_REL}")"
-PUBLISH_ROOT="$(prefix_path "${PUBLISH_ROOT_REL}")"
-INCOMING_BOOTSTRAP="$(prefix_path "${INCOMING_BOOTSTRAP_REL}")"
+SMB_ROOT="$(archive_paths_prefix "${TEST_ROOT}" "${ARCHIVE_STORAGE_VOLUME}/archive-validator")"
+PUBLISH_ROOT="$(archive_paths_prefix "${TEST_ROOT}" "${ARCHIVE_PUBLISH_ROOT}")"
+INCOMING_BOOTSTRAP="${SMB_ROOT}/incoming/bootstrap"
 LAUNCHD_ROOT="$(prefix_path /Library/LaunchDaemons)"
 PROOF_MARKER="${APP_ROOT}/evidence/source-majority-branch-proven.json"
 PYTHON3_PATH="$(command -v python3 || true)"
@@ -388,6 +390,7 @@ render_plist() {
     -e "s|__PROOF_MARKER__|${PROOF_MARKER}|g" \
     -e "s|__PYTHON3__|${PYTHON3_PATH}|g" \
     -e "s|__SNAPSHOT_API_BIND__|${SNAPSHOT_API_BIND}|g" \
+    -e "s|__STORAGE_VOLUME__|${STORAGE_VOLUME}|g" \
     "${template}" > "${output}"
   chmod 0644 "${output}"
   if is_production_install; then

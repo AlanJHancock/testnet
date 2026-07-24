@@ -38,8 +38,20 @@ class HostRow:
 
 def load_hosts(workbook: Path) -> dict[str, HostRow]:
     wb = load_workbook(workbook, data_only=True, read_only=True)
-    ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
+    rows = []
+    for candidate in wb.worksheets:
+        candidate_rows = list(candidate.iter_rows(values_only=True))
+        if not candidate_rows:
+            continue
+        candidate_headers = [
+            str(value).strip() if value is not None else ""
+            for value in candidate_rows[0]
+        ]
+        if "Node" in candidate_headers and "Access Via SSH with" in candidate_headers:
+            rows = candidate_rows
+            break
+    if not rows:
+        rows = list(wb.active.iter_rows(values_only=True))
     headers = [str(value).strip() if value is not None else "" for value in rows[0]]
     hosts: dict[str, HostRow] = {}
 

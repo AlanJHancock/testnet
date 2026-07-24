@@ -16,6 +16,70 @@ SPEC.loader.exec_module(archive_authority)
 
 
 class ArchiveAuthorityPolicyTests(unittest.TestCase):
+    def test_sign_json_replaces_prior_signature_before_signing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            aegis = root / "synergy-aegis"
+            aegis.write_text("#!/bin/sh\n", encoding="utf-8")
+            aegis.chmod(0o700)
+            payload = root / "payload.json"
+            payload.write_text("{}\n", encoding="utf-8")
+            signature = root / "payload.sig"
+            signature.write_text("stale", encoding="utf-8")
+
+            original_run = archive_authority.run
+
+            def fake_run(_command):
+                self.assertFalse(signature.exists())
+                return '{"ok": true}'
+
+            try:
+                archive_authority.run = fake_run
+                result = archive_authority.sign_json(
+                    aegis,
+                    root,
+                    "SYNERGY_TEST_DOMAIN",
+                    payload,
+                    signature,
+                )
+            finally:
+                archive_authority.run = original_run
+
+            self.assertEqual(result, {"ok": True})
+
+    def test_public_catalog_entry_has_consumer_urls_and_compatibility(self) -> None:
+        entry = {
+            "height": 843613,
+            "size_compressed": 123,
+            "mirror_urls": ["https://archive.example/"],
+        }
+
+        archive_authority.enrich_public_catalog_entry(entry)
+
+        self.assertEqual(entry["producer_role"], "archive_validator")
+        self.assertEqual(entry["producer_node_kind"], "archive-validator")
+        self.assertEqual(
+            entry["binary_compatibility"],
+            "synergy-testnet-v2-validator-pruned-v1",
+        )
+        self.assertEqual(
+            entry["snapshot_url"],
+            "https://archive.example/snapshots/843613/snapshot.tar.zst",
+        )
+        self.assertEqual(
+            entry["manifest_signature_url"],
+            "https://archive.example/snapshots/843613/signature.sig",
+        )
+        self.assertEqual(entry["compressed_size_bytes"], 123)
+
+    def test_catalog_content_root_is_stable_for_key_order(self) -> None:
+        left = [{"height": 10, "hash": "abc"}]
+        right = [{"hash": "abc", "height": 10}]
+        self.assertEqual(
+            archive_authority.catalog_content_root(left),
+            archive_authority.catalog_content_root(right),
+        )
+
     def valid_consensus_fork(self) -> dict:
         return {
             "fork_height": archive_authority.FORK_HEIGHT,
@@ -182,6 +246,30 @@ class ArchiveAuthorityPolicyTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "archive-contained"):
             archive_authority.enforce_snapshot_publication_gate(args, report)
+
+    def test_worker_requires_proof_marker_to_match_latest_archive_lock(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "proof marker is stale"):
+            archive_authority.require_current_majority_proof(
+                {"height": 100, "hash": "public-hash"},
+                {"height": 101, "hash": "local-hash"},
+            )
+        with self.assertRaisesRegex(RuntimeError, "has no block hash"):
+            archive_authority.require_current_majority_proof(
+                {"height": 100, "hash": "public-hash"},
+                {"height": 100, "hash": None},
+            )
+        archive_authority.require_current_majority_proof(
+            {"height": 100, "hash": "Public-Hash"},
+            {"height": 100, "hash": "public-hash"},
+        )
+
+    def test_worker_rejects_publish_root_outside_storage_volume(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            storage = root / "storage"
+            storage.mkdir()
+            with self.assertRaisesRegex(RuntimeError, "outside storage volume"):
+                archive_authority.require_publish_storage(root / "local-publish", storage)
 
     def test_record_majority_proof_refuses_known_noncanonical_archive_branch(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

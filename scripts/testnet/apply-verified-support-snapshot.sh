@@ -6,8 +6,8 @@ usage() {
 apply-verified-support-snapshot.sh \
   --distribution-manifest <distribution-manifest.json> \
   --snapshot-root <extracted-snapshot-root> \
-  --snapshot-class <support-relayer|support-rpc|support-observer|indexer-replay|indexer-full> \
-  --target-role <relayer|rpc|observer|indexer> \
+  --snapshot-class <support-relayer|support-rpc|support-observer|indexer-replay|indexer-full|archive-full|archive-bootstrap> \
+  --target-role <relayer|rpc|observer|indexer|archive|archive_validator> \
   --target-data-dir <data-dir> \
   --evidence-path <dir> \
   --rollback-path <dir> \
@@ -48,7 +48,7 @@ if [[ "$confirm_target_stopped" != "true" ]]; then
   exit 3
 fi
 case "$snapshot_class:$target_role" in
-  support-relayer:relayer|support-rpc:rpc|support-observer:observer|indexer-replay:indexer|indexer-full:indexer) ;;
+  support-relayer:relayer|support-rpc:rpc|support-observer:observer|indexer-replay:indexer|indexer-full:indexer|archive-full:archive|archive-full:archive_validator|archive-bootstrap:archive|archive-bootstrap:archive_validator) ;;
   *) echo "snapshot class $snapshot_class is not compatible with target role $target_role" >&2; exit 4 ;;
 esac
 if [[ ! -f "$distribution_manifest" || ! -d "$snapshot_root" || ! -d "$target_data_dir" ]]; then
@@ -57,6 +57,14 @@ if [[ ! -f "$distribution_manifest" || ! -d "$snapshot_root" || ! -d "$target_da
 fi
 
 mkdir -p "$evidence_path/target-before" "$evidence_path/source" "$rollback_path"
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1"
+  else
+    shasum -a 256 "$1"
+  fi
+}
 
 python3 - "$distribution_manifest" "$snapshot_root" "$snapshot_class" "$target_role" <<'PY'
 import json
@@ -159,9 +167,9 @@ for file in "${allowed_files[@]}"; do
       exit 6
       ;;
   esac
-  sha256sum "$source" >> "$evidence_path/source/source-sha256.txt"
+  sha256_file "$source" >> "$evidence_path/source/source-sha256.txt"
   if [[ -f "$target" ]]; then
-    sha256sum "$target" >> "$evidence_path/target-before/target-sha256.txt"
+    sha256_file "$target" >> "$evidence_path/target-before/target-sha256.txt"
     mv "$target" "$rollback_path/$file"
   fi
   tmp="$target.tmp-support-snapshot-$$"
@@ -318,7 +326,7 @@ PY
     cp -p "$source" "$tmp"
   fi
   mv "$tmp" "$target"
-  sha256sum "$target" >> "$evidence_path/target-after-sha256.txt"
+  sha256_file "$target" >> "$evidence_path/target-after-sha256.txt"
 done
 
 support_marker_files=(
@@ -340,7 +348,7 @@ for marker in "${support_marker_files[@]}"; do
   esac
   cp -p "$target" "$evidence_path/target-before/$marker"
   cp -p "$target" "$rollback_path/$marker"
-  sha256sum "$target" >> "$evidence_path/target-before/support-marker-sha256.txt"
+  sha256_file "$target" >> "$evidence_path/target-before/support-marker-sha256.txt"
   rm -f "$target"
   printf '%s\n' "$marker" >> "$evidence_path/support-markers-removed.txt"
 done

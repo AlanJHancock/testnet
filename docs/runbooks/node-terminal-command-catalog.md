@@ -53,8 +53,8 @@ Core validator commands:
 synergy-node validator inspect-state --state-root <state-root> --chain-id 1264 --network-id synergy-testnet-v2
 synergy-node validator verify-state --state-root <state-root> [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2
 synergy-node validator adopt-compacted-checkpoint --state-root <state-root> --source-validator <node> --source-bundle-path <bundle.tar.gz> --source-bundle-sha256 <sha256> --source-state-dir <state-root> --operator-approval-id <id> --recovery-reason <text> --dry-run|--apply --chain-id 1264 --network-id synergy-testnet-v2
-synergy-node validator migrate-state --state-root <state-root> --dry-run|--force --chain-id 1264 --network-id synergy-testnet-v2
-synergy-node validator rebuild-derived-indexes --state-root <state-root> [--dry-run] --chain-id 1264 --network-id synergy-testnet-v2
+synergy-node validator migrate-state --state-root <state-root> --dry-run|--force [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2
+synergy-node validator rebuild-derived-indexes --state-root <state-root> [--dry-run] [--allow-testnet-recovery-checkpoint] --chain-id 1264 --network-id synergy-testnet-v2
 synergy-node validator export-compat-json --state-root <state-root> [--output <state.json>] --chain-id 1264 --network-id synergy-testnet-v2
 ```
 
@@ -111,8 +111,9 @@ Risk notes:
 
 - `adopt-compacted-checkpoint` is for the guarded compacted recovery checkpoint
   path only.
-- `verify-state --allow-testnet-recovery-checkpoint` is the explicit compact
-  boundary gate for this branch.
+- `--allow-testnet-recovery-checkpoint` is an explicit compact-state gate for
+  `verify-state`, `migrate-state`, and `rebuild-derived-indexes`. All three
+  commands remain strict by default.
 - `migrate-state --force`, `state-sync repair --apply`, and
   `supervisor-write --apply` are live-mutation commands only after the target is
   stopped and a rollback/report is reviewed.
@@ -356,8 +357,10 @@ command or qRPC method and records evidence.
 - `synergy-node validator adopt-compacted-checkpoint` is the guarded compacted
   recovery checkpoint adoption path for validators that must accept the testnet
   recovery checkpoint.
-- `synergy-node validator verify-state --allow-testnet-recovery-checkpoint` is
-  the branch-specific verification exception for compacted state.
+- `synergy-node validator verify-state`, `migrate-state`, and
+  `rebuild-derived-indexes` accept `--allow-testnet-recovery-checkpoint` only as
+  the branch-specific verification exception for compacted state. Without the
+  flag they remain strict.
 - `synergy-node validator migrate-state --force`, `state-sync repair --apply`,
   `supervisor-write --apply`, `recovery apply-plan`, and the live recovery
   helpers under `scripts/testnet` should only run after the target validator is

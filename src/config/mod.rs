@@ -117,15 +117,15 @@ fn default_min_validators() -> usize {
 }
 
 fn default_emergency_stable_committee_mode() -> bool {
-    true
+    false
 }
 
 fn default_freeze_validator_set() -> bool {
-    true
+    false
 }
 
 fn default_freeze_score_weighted_proposer_order() -> bool {
-    true
+    false
 }
 
 fn default_vote_only_rejoin_enabled() -> bool {
@@ -212,6 +212,10 @@ pub struct P2PConfig {
     pub discovery_public_address: String,
     pub node_name: String,
     pub enable_discovery: bool,
+    #[serde(default = "default_enable_peer_exchange")]
+    pub enable_peer_exchange: bool,
+    #[serde(default = "default_reject_private_advertise_addrs")]
+    pub reject_private_advertise_addrs: bool,
     pub discovery_port: u16,
     pub heartbeat_interval: u64,
     #[serde(default = "default_bootstrap_refresh_secs")]
@@ -220,6 +224,14 @@ pub struct P2PConfig {
 
 fn default_bootstrap_refresh_secs() -> u64 {
     10
+}
+
+fn default_enable_peer_exchange() -> bool {
+    false
+}
+
+fn default_reject_private_advertise_addrs() -> bool {
+    true
 }
 
 fn default_network_id() -> String {
@@ -393,6 +405,8 @@ impl Default for NodeConfig {
                 discovery_public_address: "127.0.0.1:5680".to_string(),
                 node_name: "synergy-node-01".to_string(),
                 enable_discovery: false,
+                enable_peer_exchange: default_enable_peer_exchange(),
+                reject_private_advertise_addrs: default_reject_private_advertise_addrs(),
                 discovery_port: 5680,
                 heartbeat_interval: 10,
                 bootstrap_refresh_secs: default_bootstrap_refresh_secs(),
@@ -613,6 +627,22 @@ fn apply_env_overrides(mut config: NodeConfig) -> Result<NodeConfig, Box<dyn Err
         "P2P_PUBLIC_ADDRESS",
     ]) {
         config.p2p.public_address = val;
+    }
+    if let Some(val) = first_env_value(&[
+        "SYNERGY_P2P_ENABLE_PEER_EXCHANGE",
+        "P2P_ENABLE_PEER_EXCHANGE",
+    ]) {
+        if let Some(enabled) = parse_env_bool(&val) {
+            config.p2p.enable_peer_exchange = enabled;
+        }
+    }
+    if let Some(val) = first_env_value(&[
+        "SYNERGY_P2P_REJECT_PRIVATE_ADVERTISE_ADDRS",
+        "P2P_REJECT_PRIVATE_ADVERTISE_ADDRS",
+    ]) {
+        if let Some(enabled) = parse_env_bool(&val) {
+            config.p2p.reject_private_advertise_addrs = enabled;
+        }
     }
     if let Some(val) = first_env_value(&["SYNERGY_DISCOVERY_PORT", "DISCOVERY_PORT"]) {
         config.p2p.discovery_port = val.parse()?;
@@ -935,6 +965,19 @@ fn apply_compatibility_overrides(config: &mut NodeConfig, raw: &toml::Value) {
 
     if let Some(enable_discovery) = get_bool(raw, &["p2p", "enable_discovery"]) {
         config.p2p.enable_discovery = enable_discovery;
+        if get_bool(raw, &["p2p", "enable_peer_exchange"]).is_none() {
+            config.p2p.enable_peer_exchange = enable_discovery;
+        }
+    }
+
+    if let Some(enable_peer_exchange) = get_bool(raw, &["p2p", "enable_peer_exchange"]) {
+        config.p2p.enable_peer_exchange = enable_peer_exchange;
+    }
+
+    if let Some(reject_private_advertise_addrs) =
+        get_bool(raw, &["p2p", "reject_private_advertise_addrs"])
+    {
+        config.p2p.reject_private_advertise_addrs = reject_private_advertise_addrs;
     }
 
     if let Some(discovery_port) =
@@ -1626,6 +1669,34 @@ external_addr = "genesisval1.synergy-network.io:5680"
     }
 
     #[test]
+    fn parses_peer_exchange_runtime_controls() {
+        let content = r#"
+[p2p]
+enable_discovery = true
+enable_peer_exchange = false
+reject_private_advertise_addrs = false
+"#;
+
+        let config = parse_node_config_content(content, None).expect("config should parse");
+
+        assert!(!config.p2p.enable_peer_exchange);
+        assert!(!config.p2p.reject_private_advertise_addrs);
+    }
+
+    #[test]
+    fn legacy_discovery_configs_enable_peer_exchange_compatibly() {
+        let content = r#"
+[p2p]
+enable_discovery = true
+"#;
+
+        let config = parse_node_config_content(content, None).expect("config should parse");
+
+        assert!(config.p2p.enable_peer_exchange);
+        assert!(config.p2p.reject_private_advertise_addrs);
+    }
+
+    #[test]
     fn parses_validator_state_sync_before_join() {
         let content = r#"
 [validator]
@@ -1707,7 +1778,7 @@ state_sync_before_join = true
     }
 
     #[test]
-    fn stable_committee_templates_keep_four_validator_safety_floor_without_growth_cap() {
+    fn dynamic_committee_templates_keep_safety_floor_without_freezing_growth() {
         let templates_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../templates");
         let entries = fs::read_dir(&templates_dir).expect("templates directory should be readable");
         let mut checked = 0usize;
@@ -1759,13 +1830,25 @@ state_sync_before_join = true
                     "{} must keep max_validators dynamic instead of capping the network at 6",
                     path.display()
                 );
+                for flag in [
+                    "emergency_stable_committee_mode",
+                    "freeze_validator_set",
+                    "freeze_score_weighted_proposer_order",
+                ] {
+                    assert_eq!(
+                        consensus.get(flag).and_then(toml::Value::as_bool),
+                        Some(false),
+                        "{} must leave {flag} disabled for automatic validator growth",
+                        path.display()
+                    );
+                }
                 checked += 1;
             }
         }
 
         assert!(
             checked > 0,
-            "expected at least one stable committee template"
+            "expected at least one dynamic committee template"
         );
     }
 

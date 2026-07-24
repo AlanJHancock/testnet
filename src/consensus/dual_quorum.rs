@@ -9,20 +9,26 @@ use crate::consensus::validator_keys::{
     verify_signer_key_matches_validator_at_height,
 };
 use crate::crypto::pqc::{PQCCiphertext, PQCManager, PQCPrivateKey, PQCPublicKey, PQCSignature};
+use crate::token::TOKEN_MANAGER;
 use crate::validator::{
-    consensus_membership_validators, target_validator_cluster_count, Validator, ValidatorManager,
-    ValidatorPerformanceUpdate, TESTNET_VALIDATOR_CLUSTER_SIZE, VALIDATOR_MANAGER,
+    assert_epoch_validator_set_compatible_for_height, canonical_validator_clusters_for_epoch,
+    consensus_membership_validators, consensus_membership_validators_for_height,
+    is_validator_activation_transaction, validate_validator_activation_transaction, Validator,
+    ValidatorManager, ValidatorPerformanceUpdate, TESTNET_VALIDATOR_CLUSTER_SIZE,
+    VALIDATOR_MANAGER,
 };
 use crate::{debug, warn};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_512};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -32,6 +38,8 @@ lazy_static::lazy_static! {
         Arc::new(Mutex::new(HashMap::new()));
     static ref COMMITTED_QC_STORE: Arc<Mutex<HashMap<String, QuorumCertificate>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    static ref COMMITTED_QC_LOG_LOOKUP_INDEX: Mutex<CommittedQcLogLookupIndex> =
+        Mutex::new(CommittedQcLogLookupIndex::default());
     static ref OBSERVED_VOTES: Arc<Mutex<HashMap<String, Vote>>> = Arc::new(Mutex::new(HashMap::new()));
     static ref EQUIVOCATION_EVIDENCE_LOG: Arc<Mutex<HashMap<String, VoteEquivocationEvidence>>> =
         Arc::new(Mutex::new(HashMap::new()));
@@ -41,6 +49,11 @@ lazy_static::lazy_static! {
 }
 
 static COMMITTED_QC_STORE_INIT: Once = Once::new();
+
+const COMMITTED_QC_HISTORICAL_INDEX_MAX_ENTRIES: usize = 4096;
+
+#[cfg(test)]
+static COMMITTED_QC_LOG_PARSE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 pub const VALIDATOR_QUORUM_NUMERATOR: usize = 2;
 pub const VALIDATOR_QUORUM_DENOMINATOR: usize = 3;
@@ -54,6 +67,9 @@ pub const MIN_LAUNCH_VOTE_TIMEOUT_SECS: u64 = FAST_CONSENSUS_VOTE_TIMEOUT_SECS;
 const LOCAL_VOTE_LOCK_COMPACTION_MIN_LOCKS: usize = 1024;
 const LOCAL_VOTE_LOCK_FINALIZED_RETENTION_DEPTH: u64 = 16;
 const COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV: &str = "SYNERGY_COMMITTED_QC_HOT_RETENTION_BLOCKS";
+const COMMITTED_QC_HOT_LOAD_MAX_BYTES_ENV: &str = "SYNERGY_COMMITTED_QC_HOT_LOAD_MAX_BYTES";
+const DEFAULT_COMMITTED_QC_HOT_LOAD_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const HARD_MAX_COMMITTED_QC_HOT_LOAD_BYTES: u64 = 64 * 1024 * 1024;
 const COMMITTED_QC_RETENTION_PRUNE_INTERVAL: usize = 1024;
 
 #[derive(Debug, Clone, Default)]
@@ -182,6 +198,8 @@ pub struct TransientVoteLockRecoveryReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuorumCertificate {
     pub block_hash: String,
+    #[serde(default)]
+    pub cluster_id: Option<u64>,
     pub epoch_number: u64,
     pub round_number: u64,
     pub aggregate_signature: Vec<u8>,
@@ -194,10 +212,75 @@ pub struct QuorumCertificate {
     pub votes: Vec<Vote>,
 }
 
+#[derive(Debug, Clone)]
+struct ConsensusClusterContext {
+    cluster_id: Option<u64>,
+    validators: Vec<Validator>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CommittedQcLogEntry {
     block_hash: String,
     qc: QuorumCertificate,
+}
+
+#[derive(Default)]
+struct CommittedQcLogLookupIndex {
+    path: Option<PathBuf>,
+    initialized: bool,
+    indexed_file_len: u64,
+    indexed_end: u64,
+    forward_scan_offset: u64,
+    offsets: HashMap<String, u64>,
+    order: VecDeque<String>,
+}
+
+impl CommittedQcLogLookupIndex {
+    fn reset_for_path(&mut self, path: &Path) {
+        if self.path.as_deref() == Some(path) {
+            return;
+        }
+
+        *self = Self {
+            path: Some(path.to_path_buf()),
+            ..Self::default()
+        };
+    }
+
+    fn clear_entries(&mut self) {
+        self.offsets.clear();
+        self.order.clear();
+    }
+
+    fn reset_after_truncation(&mut self) {
+        self.initialized = false;
+        self.indexed_file_len = 0;
+        self.indexed_end = 0;
+        self.forward_scan_offset = 0;
+        self.clear_entries();
+    }
+
+    fn insert(&mut self, block_hash: String, offset: u64) {
+        if self.offsets.contains_key(&block_hash) {
+            self.order.retain(|hash| hash != &block_hash);
+        }
+        self.offsets.insert(block_hash.clone(), offset);
+        self.order.push_back(block_hash);
+
+        while self.order.len() > COMMITTED_QC_HISTORICAL_INDEX_MAX_ENTRIES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.offsets.remove(&oldest);
+            }
+        }
+    }
+
+    fn remove_if_matches(&mut self, block_hash: &str, offset: u64) {
+        if self.offsets.get(block_hash) != Some(&offset) {
+            return;
+        }
+        self.offsets.remove(block_hash);
+        self.order.retain(|hash| hash != block_hash);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,8 +298,6 @@ pub struct DualQuorumConsensus {
     pub penalization_enabled: bool,
     pub minimum_validator_count: usize,
     pub validator_vote_threshold: usize,
-    pub validation_quorum_threshold: f64,
-    pub cooperation_quorum_threshold: f64,
     pub vote_timeout: u64,
     pub block_timeout: u64,
     pub current_epoch: u64,
@@ -242,8 +323,6 @@ impl DualQuorumConsensus {
             penalization_enabled,
             minimum_validator_count: minimum_validator_count.max(1),
             validator_vote_threshold,
-            validation_quorum_threshold: VALIDATOR_QUORUM_RATIO,
-            cooperation_quorum_threshold: VALIDATOR_QUORUM_RATIO,
             vote_timeout: vote_timeout_secs
                 .max(FAST_CONSENSUS_VOTE_TIMEOUT_SECS)
                 .min(MAX_FAST_CONSENSUS_VOTE_TIMEOUT_SECS),
@@ -351,12 +430,13 @@ impl DualQuorumConsensus {
         )?;
 
         // Phase 3: Commitment
-        self.check_quorums_and_commit(&block_hash, epoch_number, round_number, &votes)
+        self.check_quorums_and_commit(proposed_block, epoch_number, round_number, &votes)
     }
 
     fn validate_block_proposal(&self, block: &Block) -> Result<(), String> {
         Self::validate_block_proposal_static(block)?;
-        verify_block_proposer_key_matches_validator(block, &self.validator_manager)
+        verify_block_proposer_key_matches_validator(block, &self.validator_manager)?;
+        Self::validate_validator_activations(block, &self.validator_manager)
     }
 
     pub fn validate_block_proposal_static(block: &Block) -> Result<(), String> {
@@ -374,6 +454,30 @@ impl DualQuorumConsensus {
         Ok(())
     }
 
+    fn validate_validator_activations(
+        block: &Block,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<(), String> {
+        for tx in &block.transactions {
+            if !is_validator_activation_transaction(tx) {
+                continue;
+            }
+            validate_validator_activation_transaction(
+                tx,
+                TOKEN_MANAGER.as_ref(),
+                validator_manager,
+            )
+            .map_err(|error| {
+                format!(
+                    "validator activation preflight failed at height {} for transaction {}: {error}",
+                    block.block_index,
+                    tx.hash()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
     fn collect_votes(
         &mut self,
         proposed_block: &Block,
@@ -382,7 +486,7 @@ impl DualQuorumConsensus {
         round_number: u64,
         transient_vote_recovery_min_age_secs: u64,
     ) -> Result<Vec<Vote>, String> {
-        let active_validators = self.collect_active_validators();
+        let active_validators = self.consensus_membership_for_height(proposed_block.block_index)?;
         if active_validators.len() < self.minimum_validator_count {
             return Err(format!(
                 "Insufficient active validators: {} active in consensus membership, {} required",
@@ -391,7 +495,10 @@ impl DualQuorumConsensus {
             ));
         }
 
-        let expected_validators = active_validators
+        let cluster_context = self.cluster_context_for_proposal(proposed_block, epoch_number)?;
+        let consensus_validators = &cluster_context.validators;
+
+        let expected_validators = consensus_validators
             .iter()
             .map(|validator| validator.address.clone())
             .collect::<BTreeSet<_>>();
@@ -440,7 +547,8 @@ impl DualQuorumConsensus {
         let effective_vote_timeout_secs = self.effective_vote_timeout_secs(round_number);
         let timeout_mode = Self::timeout_mode_for_round(round_number);
         let retry_number = round_number.saturating_sub(1);
-        let required_validator_votes = self.required_validator_votes(active_validators.len());
+        let required_validator_votes =
+            self.required_validator_votes_for_cluster_context(&cluster_context);
         Self::record_consensus_runtime_metrics(
             proposed_block,
             round_number,
@@ -546,21 +654,28 @@ impl DualQuorumConsensus {
         while Instant::now() < deadline {
             self.apply_recorded_equivocations();
             votes.retain(|vote| {
-                self.vote_is_eligible_for_collection(vote, block_hash, epoch_number, round_number)
+                self.vote_is_eligible_for_collection_for_cluster(
+                    vote,
+                    block_hash,
+                    epoch_number,
+                    round_number,
+                    cluster_context.cluster_id,
+                )
             });
 
             let pending_votes =
                 Self::snapshot_network_votes(block_hash, epoch_number, round_number);
-            self.merge_remote_votes(
+            self.merge_remote_votes_for_cluster(
                 &mut votes,
                 &expected_validators,
                 block_hash,
                 epoch_number,
                 round_number,
+                cluster_context.cluster_id,
                 pending_votes,
             );
 
-            if self.has_commit_quorum(&active_validators, &votes) {
+            if self.has_commit_quorum_for_cluster(&cluster_context, &votes) {
                 if !qc_threshold_reported {
                     timing_trace::emit(
                         "qc_threshold_reached",
@@ -587,20 +702,27 @@ impl DualQuorumConsensus {
         // Drain the mailbox one final time after the wait window closes so votes
         // that arrive right on the timeout edge still count toward this round.
         let pending_votes = Self::snapshot_network_votes(block_hash, epoch_number, round_number);
-        self.merge_remote_votes(
+        self.merge_remote_votes_for_cluster(
             &mut votes,
             &expected_validators,
             block_hash,
             epoch_number,
             round_number,
+            cluster_context.cluster_id,
             pending_votes,
         );
 
         self.apply_recorded_equivocations();
         votes.retain(|vote| {
-            self.vote_is_eligible_for_collection(vote, block_hash, epoch_number, round_number)
+            self.vote_is_eligible_for_collection_for_cluster(
+                vote,
+                block_hash,
+                epoch_number,
+                round_number,
+                cluster_context.cluster_id,
+            )
         });
-        let final_quorum_met = self.has_commit_quorum(&active_validators, &votes);
+        let final_quorum_met = self.has_commit_quorum_for_cluster(&cluster_context, &votes);
         if final_quorum_met && !qc_threshold_reported {
             timing_trace::emit(
                 "qc_threshold_reached",
@@ -620,7 +742,7 @@ impl DualQuorumConsensus {
         }
         self.record_vote_participation(&votes);
         if self.penalization_enabled {
-            self.record_missed_vote_timeouts(&active_validators, &votes);
+            self.record_missed_vote_timeouts(consensus_validators, &votes);
         }
 
         if !final_quorum_met {
@@ -641,7 +763,7 @@ impl DualQuorumConsensus {
             "epoch" => epoch_number,
             "round" => round_number,
             "vote_count" => votes.len() as u64,
-                "required_validator_votes" => self.required_validator_votes(active_validators.len()) as u64,
+                "required_validator_votes" => required_validator_votes as u64,
                 "missing_validators" => serde_json::to_string(&missing_validators).unwrap_or_default(),
                 "elapsed_ms" => timing_trace::duration_ms(collection_started.elapsed()),
                 "leader" => proposed_block.validator_id.clone(),
@@ -677,7 +799,7 @@ impl DualQuorumConsensus {
                 "epoch": epoch_number,
                 "round": round_number,
                 "vote_count": votes.len(),
-                "required_validator_votes": self.required_validator_votes(active_validators.len()),
+                "required_validator_votes": required_validator_votes,
                 "missing_validators": expected_validators
                     .iter()
                     .filter(|validator| {
@@ -720,16 +842,37 @@ impl DualQuorumConsensus {
     ) -> Result<Vote, String> {
         Self::validate_block_proposal_static(proposed_block)?;
         verify_block_proposer_key_matches_validator(proposed_block, &VALIDATOR_MANAGER)?;
+        Self::validate_validator_activations(proposed_block, &VALIDATOR_MANAGER)?;
+
+        let active_validators = consensus_membership_validators_for_height(
+            VALIDATOR_MANAGER.get_all_validators(),
+            proposed_block.block_index,
+        )?;
+        let cluster_context = Self::cluster_context_for_validators(
+            &VALIDATOR_MANAGER,
+            &active_validators,
+            epoch_number,
+            &proposed_block.validator_id,
+        )?;
+        if cluster_context.cluster_id.is_some()
+            && VALIDATOR_MANAGER.get_current_epoch() != epoch_number
+        {
+            return Err(format!(
+                "multi-cluster vote epoch {} does not match validator registry epoch {}",
+                epoch_number,
+                VALIDATOR_MANAGER.get_current_epoch()
+            ));
+        }
 
         let local_validator_address = Self::resolve_local_validator_address()
             .ok_or_else(|| "Local validator address is not configured for voting".to_string())?;
-        let local_validator_is_active =
-            consensus_membership_validators(VALIDATOR_MANAGER.get_active_validators())
-                .into_iter()
-                .any(|validator| validator.address == local_validator_address);
-        if !local_validator_is_active {
+        if !cluster_context
+            .validators
+            .iter()
+            .any(|validator| validator.address == local_validator_address)
+        {
             return Err(format!(
-                "Local validator {} is not an active consensus validator",
+                "Local validator {} is not in the canonical proposal cluster",
                 local_validator_address
             ));
         }
@@ -835,6 +978,34 @@ impl DualQuorumConsensus {
         Ok(())
     }
 
+    pub fn record_committed_qcs_checked(qcs: &[QuorumCertificate]) -> Result<(), String> {
+        if qcs.is_empty() {
+            return Ok(());
+        }
+
+        Self::ensure_committed_qc_store_loaded();
+        let mut store = COMMITTED_QC_STORE
+            .lock()
+            .map_err(|_| "failed to lock committed QC store".to_string())?;
+        let mut pending = Vec::new();
+        let mut pending_hashes = HashSet::new();
+        for qc in qcs {
+            if !store.contains_key(&qc.block_hash) && pending_hashes.insert(qc.block_hash.clone()) {
+                pending.push(qc.clone());
+            }
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        Self::append_committed_qcs_to_log(&pending)?;
+        for qc in pending {
+            store.insert(qc.block_hash.clone(), qc);
+        }
+        Self::prune_committed_qc_store_for_retention(&mut store);
+        Ok(())
+    }
+
     pub fn committed_qc_for_block_hash(block_hash: &str) -> Option<QuorumCertificate> {
         Self::ensure_committed_qc_store_loaded();
         COMMITTED_QC_STORE
@@ -896,37 +1067,330 @@ impl DualQuorumConsensus {
         }
 
         let log_path = Self::committed_qc_log_path();
-        let file = fs::File::open(&log_path)
+        let mut file = fs::File::open(&log_path)
             .map_err(|err| format!("failed to open committed QC log {:?}: {err}", log_path))?;
+        let file_len = file
+            .metadata()
+            .map_err(|err| format!("failed to stat committed QC log {:?}: {err}", log_path))?
+            .len();
+        let mut index = COMMITTED_QC_LOG_LOOKUP_INDEX
+            .lock()
+            .map_err(|_| "failed to lock committed QC log lookup index".to_string())?;
+        Self::refresh_committed_qc_log_lookup_index(&mut index, &mut file, &log_path, file_len)?;
+
         let mut remaining = block_hashes.clone();
         let mut found = Vec::new();
-        for (line_number, line) in BufReader::new(file).lines().enumerate() {
-            let line = line.map_err(|err| {
-                format!(
-                    "failed to read committed QC log {:?} line {}: {err}",
-                    log_path,
-                    line_number + 1
-                )
-            })?;
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let entry = serde_json::from_str::<CommittedQcLogEntry>(trimmed).map_err(|err| {
-                format!(
-                    "failed to parse committed QC log {:?} line {}: {err}",
-                    log_path,
-                    line_number + 1
-                )
-            })?;
-            if remaining.remove(&entry.block_hash) {
-                found.push(entry.qc);
-                if remaining.is_empty() {
-                    break;
-                }
+        Self::load_committed_qcs_from_log_index(
+            &mut index,
+            &mut file,
+            &log_path,
+            &mut remaining,
+            &mut found,
+        )?;
+
+        if !remaining.is_empty() {
+            let scan_start = index.forward_scan_offset;
+            let scan_end = Self::scan_committed_qc_log_forward(
+                &mut index,
+                &mut file,
+                &log_path,
+                scan_start,
+                file_len,
+                &mut remaining,
+                &mut found,
+            )?;
+            index.forward_scan_offset = scan_end;
+
+            // A request can move backwards after the cursor has advanced. The
+            // bounded index may have evicted that older entry, so fall back to
+            // a complete forward scan to preserve historical correctness.
+            if !remaining.is_empty() && scan_start > 0 {
+                let fallback_end = Self::scan_committed_qc_log_forward(
+                    &mut index,
+                    &mut file,
+                    &log_path,
+                    0,
+                    file_len,
+                    &mut remaining,
+                    &mut found,
+                )?;
+                index.forward_scan_offset = fallback_end;
             }
         }
         Ok(found)
+    }
+
+    fn refresh_committed_qc_log_lookup_index(
+        index: &mut CommittedQcLogLookupIndex,
+        file: &mut fs::File,
+        log_path: &Path,
+        file_len: u64,
+    ) -> Result<(), String> {
+        index.reset_for_path(log_path);
+        if index.initialized && file_len < index.indexed_file_len {
+            index.reset_after_truncation();
+        }
+
+        if !index.initialized {
+            if file_len > 0 {
+                Self::index_committed_qc_log_tail(index, file, log_path, file_len)?;
+            }
+            index.initialized = true;
+            index.indexed_file_len = file_len;
+            index.indexed_end = file_len;
+            return Ok(());
+        }
+
+        if file_len == index.indexed_file_len {
+            return Ok(());
+        }
+
+        let append_start = index.indexed_end;
+        let append_is_line_aligned = append_start <= file_len
+            && (append_start == 0
+                || Self::committed_qc_log_byte_is_newline(file, append_start - 1)?);
+        if !append_is_line_aligned {
+            index.reset_after_truncation();
+            if file_len > 0 {
+                Self::index_committed_qc_log_tail(index, file, log_path, file_len)?;
+            }
+            index.initialized = true;
+            index.indexed_file_len = file_len;
+            index.indexed_end = file_len;
+            return Ok(());
+        }
+
+        Self::index_committed_qc_log_range(index, file, log_path, append_start, file_len, false)?;
+        index.indexed_file_len = file_len;
+        index.indexed_end = file_len;
+        Ok(())
+    }
+
+    fn index_committed_qc_log_tail(
+        index: &mut CommittedQcLogLookupIndex,
+        file: &mut fs::File,
+        log_path: &Path,
+        file_len: u64,
+    ) -> Result<(), String> {
+        index.clear_entries();
+        index.forward_scan_offset = 0;
+        let start = file_len.saturating_sub(Self::configured_committed_qc_hot_load_max_bytes());
+        let skip_partial_first_line =
+            start > 0 && !Self::committed_qc_log_byte_is_newline(file, start - 1)?;
+        Self::index_committed_qc_log_range(
+            index,
+            file,
+            log_path,
+            start,
+            file_len,
+            skip_partial_first_line,
+        )?;
+        index.initialized = true;
+        index.indexed_file_len = file_len;
+        index.indexed_end = file_len;
+        Ok(())
+    }
+
+    fn index_committed_qc_log_range(
+        index: &mut CommittedQcLogLookupIndex,
+        file: &mut fs::File,
+        log_path: &Path,
+        start: u64,
+        end: u64,
+        skip_partial_first_line: bool,
+    ) -> Result<(), String> {
+        if start >= end {
+            return Ok(());
+        }
+
+        file.seek(SeekFrom::Start(start)).map_err(|err| {
+            format!(
+                "failed to seek committed QC log {:?} to byte {}: {err}",
+                log_path, start
+            )
+        })?;
+        let mut reader = BufReader::new(file.take(end.saturating_sub(start)));
+        let mut offset = start;
+        let mut line = String::new();
+
+        if skip_partial_first_line {
+            let bytes_read = reader.read_line(&mut line).map_err(|err| {
+                format!(
+                    "failed to read committed QC log {:?} at byte offset {}: {err}",
+                    log_path, offset
+                )
+            })?;
+            offset = offset.saturating_add(bytes_read as u64);
+            line.clear();
+        }
+
+        loop {
+            let line_start = offset;
+            let bytes_read = reader.read_line(&mut line).map_err(|err| {
+                format!(
+                    "failed to read committed QC log {:?} at byte offset {}: {err}",
+                    log_path, line_start
+                )
+            })?;
+            if bytes_read == 0 {
+                break;
+            }
+            offset = offset.saturating_add(bytes_read as u64);
+            if let Some(entry) = Self::parse_committed_qc_log_line(&line, log_path, line_start)? {
+                index.insert(entry.block_hash, line_start);
+            }
+            line.clear();
+        }
+        Ok(())
+    }
+
+    fn scan_committed_qc_log_forward(
+        index: &mut CommittedQcLogLookupIndex,
+        file: &mut fs::File,
+        log_path: &Path,
+        start: u64,
+        end: u64,
+        remaining: &mut HashSet<String>,
+        found: &mut Vec<QuorumCertificate>,
+    ) -> Result<u64, String> {
+        if start >= end {
+            return Ok(start);
+        }
+
+        file.seek(SeekFrom::Start(start)).map_err(|err| {
+            format!(
+                "failed to seek committed QC log {:?} to byte {}: {err}",
+                log_path, start
+            )
+        })?;
+        let mut reader = BufReader::new(file.take(end.saturating_sub(start)));
+        let mut offset = start;
+        let mut line = String::new();
+
+        loop {
+            let line_start = offset;
+            let bytes_read = reader.read_line(&mut line).map_err(|err| {
+                format!(
+                    "failed to read committed QC log {:?} at byte offset {}: {err}",
+                    log_path, line_start
+                )
+            })?;
+            if bytes_read == 0 {
+                break;
+            }
+            offset = offset.saturating_add(bytes_read as u64);
+            if let Some(entry) = Self::parse_committed_qc_log_line(&line, log_path, line_start)? {
+                let block_hash = entry.block_hash.clone();
+                index.insert(block_hash.clone(), line_start);
+                if remaining.remove(&block_hash) {
+                    found.push(entry.qc);
+                    if remaining.is_empty() {
+                        return Ok(offset);
+                    }
+                }
+            }
+            line.clear();
+        }
+        Ok(offset)
+    }
+
+    fn load_committed_qcs_from_log_index(
+        index: &mut CommittedQcLogLookupIndex,
+        file: &mut fs::File,
+        log_path: &Path,
+        remaining: &mut HashSet<String>,
+        found: &mut Vec<QuorumCertificate>,
+    ) -> Result<(), String> {
+        let indexed_offsets = remaining
+            .iter()
+            .filter_map(|block_hash| {
+                index
+                    .offsets
+                    .get(block_hash)
+                    .copied()
+                    .map(|offset| (block_hash.clone(), offset))
+            })
+            .collect::<Vec<_>>();
+
+        for (requested_hash, offset) in indexed_offsets {
+            let entry = Self::read_committed_qc_log_entry_at_offset(file, log_path, offset)?;
+            if entry.block_hash != requested_hash {
+                index.remove_if_matches(&requested_hash, offset);
+                continue;
+            }
+            if remaining.remove(&requested_hash) {
+                found.push(entry.qc);
+            }
+        }
+        Ok(())
+    }
+
+    fn read_committed_qc_log_entry_at_offset(
+        file: &fs::File,
+        log_path: &Path,
+        offset: u64,
+    ) -> Result<CommittedQcLogEntry, String> {
+        let mut reader = BufReader::new(file.try_clone().map_err(|err| {
+            format!(
+                "failed to clone committed QC log {:?} for byte offset {}: {err}",
+                log_path, offset
+            )
+        })?);
+        reader.seek(SeekFrom::Start(offset)).map_err(|err| {
+            format!(
+                "failed to seek committed QC log {:?} to byte {}: {err}",
+                log_path, offset
+            )
+        })?;
+        let mut line = String::new();
+        let bytes_read = reader.read_line(&mut line).map_err(|err| {
+            format!(
+                "failed to read committed QC log {:?} at byte offset {}: {err}",
+                log_path, offset
+            )
+        })?;
+        if bytes_read == 0 {
+            return Err(format!(
+                "committed QC log {:?} offset {} is past EOF",
+                log_path, offset
+            ));
+        }
+        Self::parse_committed_qc_log_line(&line, log_path, offset)?.ok_or_else(|| {
+            format!(
+                "committed QC log {:?} offset {} points to an empty line",
+                log_path, offset
+            )
+        })
+    }
+
+    fn parse_committed_qc_log_line(
+        line: &str,
+        log_path: &Path,
+        offset: u64,
+    ) -> Result<Option<CommittedQcLogEntry>, String> {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        #[cfg(test)]
+        COMMITTED_QC_LOG_PARSE_COUNT.fetch_add(1, Ordering::Relaxed);
+        serde_json::from_str::<CommittedQcLogEntry>(trimmed)
+            .map(Some)
+            .map_err(|err| {
+                format!(
+                    "failed to parse committed QC log {:?} at byte offset {}: {err}",
+                    log_path, offset
+                )
+            })
+    }
+
+    fn committed_qc_log_byte_is_newline(file: &mut fs::File, offset: u64) -> Result<bool, String> {
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|err| format!("failed to inspect committed QC log byte {}: {err}", offset))?;
+        let mut byte = [0_u8; 1];
+        file.read_exact(&mut byte)
+            .map_err(|err| format!("failed to read committed QC log byte {}: {err}", offset))?;
+        Ok(byte[0] == b'\n')
     }
 
     fn ensure_committed_qc_store_loaded() {
@@ -977,61 +1441,58 @@ impl DualQuorumConsensus {
     }
 
     fn load_committed_qc_store_from_disk() -> Result<HashMap<String, QuorumCertificate>, String> {
+        // The JSONL journal is archival. Only its bounded tail is materialized into the hot store.
         let path = Self::committed_qc_store_path();
         let mut loaded = HashMap::new();
         let retention_blocks = Self::configured_committed_qc_hot_retention_blocks();
+        let max_load_bytes = Self::configured_committed_qc_hot_load_max_bytes();
         let mut latest_height = 0_u64;
         let mut seen_log_entries = 0_usize;
 
         if path.exists() {
-            let data = fs::read(&path)
-                .map_err(|err| format!("failed to read committed QC store {:?}: {err}", path))?;
-            if !data.is_empty() {
-                let legacy = serde_json::from_slice::<BTreeMap<String, QuorumCertificate>>(&data)
-                    .map_err(|err| {
-                    format!("failed to parse committed QC store {:?}: {err}", path)
+            let legacy_size = fs::metadata(&path)
+                .map_err(|err| format!("failed to stat committed QC store {:?}: {err}", path))?
+                .len();
+            if legacy_size <= max_load_bytes {
+                let data = fs::read(&path).map_err(|err| {
+                    format!("failed to read committed QC store {:?}: {err}", path)
                 })?;
-                for (block_hash, qc) in legacy {
-                    Self::insert_committed_qc_with_retention(
+                if !data.is_empty() {
+                    let legacy =
+                        serde_json::from_slice::<BTreeMap<String, QuorumCertificate>>(&data)
+                            .map_err(|err| {
+                                format!("failed to parse committed QC store {:?}: {err}", path)
+                            })?;
+                    for (block_hash, qc) in legacy {
+                        Self::insert_committed_qc_with_retention(
+                            &mut loaded,
+                            block_hash,
+                            qc,
+                            retention_blocks,
+                            &mut latest_height,
+                        );
+                    }
+                    Self::prune_committed_qc_store_for_retention_with_latest(
                         &mut loaded,
-                        block_hash,
-                        qc,
                         retention_blocks,
-                        &mut latest_height,
+                        latest_height,
                     );
                 }
-                Self::prune_committed_qc_store_for_retention_with_latest(
-                    &mut loaded,
-                    retention_blocks,
-                    latest_height,
+            } else {
+                warn!(
+                    "consensus",
+                    "Skipping oversized legacy committed QC snapshot during bounded startup load",
+                    "path" => path.display().to_string(),
+                    "bytes" => legacy_size,
+                    "max_load_bytes" => max_load_bytes
                 );
             }
         }
 
         let log_path = Self::committed_qc_log_path();
         if log_path.exists() {
-            let file = fs::File::open(&log_path)
-                .map_err(|err| format!("failed to open committed QC log {:?}: {err}", log_path))?;
-            for (line_number, line) in BufReader::new(file).lines().enumerate() {
-                let line = line.map_err(|err| {
-                    format!(
-                        "failed to read committed QC log {:?} line {}: {err}",
-                        log_path,
-                        line_number + 1
-                    )
-                })?;
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let entry =
-                    serde_json::from_str::<CommittedQcLogEntry>(trimmed).map_err(|err| {
-                        format!(
-                            "failed to parse committed QC log {:?} line {}: {err}",
-                            log_path,
-                            line_number + 1
-                        )
-                    })?;
+            let tail = Self::read_committed_qc_log_tail(&log_path, max_load_bytes)?;
+            for entry in tail {
                 Self::insert_committed_qc_with_retention(
                     &mut loaded,
                     entry.block_hash,
@@ -1059,6 +1520,88 @@ impl DualQuorumConsensus {
         );
         Self::trim_allocator_after_hot_retention();
         Ok(loaded)
+    }
+
+    fn read_committed_qc_log_tail(
+        log_path: &Path,
+        max_load_bytes: u64,
+    ) -> Result<Vec<CommittedQcLogEntry>, String> {
+        let mut file = fs::File::open(log_path)
+            .map_err(|err| format!("failed to open committed QC log {:?}: {err}", log_path))?;
+        let file_len = file
+            .metadata()
+            .map_err(|err| format!("failed to stat committed QC log {:?}: {err}", log_path))?
+            .len();
+        if file_len == 0 {
+            return Ok(Vec::new());
+        }
+
+        let start = file_len.saturating_sub(max_load_bytes);
+        let starts_mid_line = if start == 0 {
+            false
+        } else {
+            file.seek(SeekFrom::Start(start - 1)).map_err(|err| {
+                format!(
+                    "failed to inspect bounded committed QC log boundary {:?}: {err}",
+                    log_path
+                )
+            })?;
+            let mut previous = [0_u8; 1];
+            file.read_exact(&mut previous).map_err(|err| {
+                format!(
+                    "failed to read bounded committed QC log boundary {:?}: {err}",
+                    log_path
+                )
+            })?;
+            previous[0] != b'\n'
+        };
+        file.seek(SeekFrom::Start(start)).map_err(|err| {
+            format!(
+                "failed to seek to bounded committed QC log tail {:?}: {err}",
+                log_path
+            )
+        })?;
+        let read_len = file_len.saturating_sub(start);
+        let mut tail = Vec::with_capacity(read_len.min(usize::MAX as u64) as usize);
+        file.take(read_len).read_to_end(&mut tail).map_err(|err| {
+            format!(
+                "failed to read bounded committed QC log tail {:?}: {err}",
+                log_path
+            )
+        })?;
+
+        let mut entries = Vec::new();
+        for (index, line) in tail.split(|byte| *byte == b'\n').enumerate() {
+            if starts_mid_line && index == 0 {
+                continue;
+            }
+            let trimmed = Self::trim_ascii_whitespace(line);
+            if trimmed.is_empty() {
+                continue;
+            }
+            let entry = serde_json::from_slice::<CommittedQcLogEntry>(trimmed).map_err(|err| {
+                format!(
+                    "failed to parse bounded committed QC log tail {:?} segment {}: {err}",
+                    log_path,
+                    index + 1
+                )
+            })?;
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+
+    fn trim_ascii_whitespace(bytes: &[u8]) -> &[u8] {
+        let start = bytes
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(bytes.len());
+        let end = bytes
+            .iter()
+            .rposition(|byte| !byte.is_ascii_whitespace())
+            .map(|index| index + 1)
+            .unwrap_or(start);
+        &bytes[start..end]
     }
 
     fn insert_committed_qc_with_retention(
@@ -1091,6 +1634,15 @@ impl DualQuorumConsensus {
             .ok()
             .and_then(|value| value.trim().parse::<u64>().ok())
             .filter(|value| *value > 0)
+    }
+
+    fn configured_committed_qc_hot_load_max_bytes() -> u64 {
+        env::var(COMMITTED_QC_HOT_LOAD_MAX_BYTES_ENV)
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(DEFAULT_COMMITTED_QC_HOT_LOAD_MAX_BYTES)
+            .min(HARD_MAX_COMMITTED_QC_HOT_LOAD_BYTES)
     }
 
     fn committed_qc_is_within_retention(
@@ -1160,18 +1712,19 @@ impl DualQuorumConsensus {
     }
 
     fn append_committed_qc_to_log(qc: &QuorumCertificate) -> Result<(), String> {
+        Self::append_committed_qcs_to_log(std::slice::from_ref(qc))
+    }
+
+    fn append_committed_qcs_to_log(qcs: &[QuorumCertificate]) -> Result<(), String> {
+        if qcs.is_empty() {
+            return Ok(());
+        }
+
         let path = Self::committed_qc_log_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|err| format!("failed to create committed QC log directory: {err}"))?;
         }
-
-        let entry = CommittedQcLogEntry {
-            block_hash: qc.block_hash.clone(),
-            qc: qc.clone(),
-        };
-        let serialized = serde_json::to_vec(&entry)
-            .map_err(|err| format!("failed to encode committed QC log entry: {err}"))?;
 
         let mut options = OpenOptions::new();
         options.create(true).append(true);
@@ -1180,10 +1733,18 @@ impl DualQuorumConsensus {
         let mut file = options
             .open(&path)
             .map_err(|err| format!("failed to open committed QC log file: {err}"))?;
-        file.write_all(&serialized)
-            .map_err(|err| format!("failed to write committed QC log entry: {err}"))?;
-        file.write_all(b"\n")
-            .map_err(|err| format!("failed to write committed QC log newline: {err}"))?;
+        for qc in qcs {
+            let entry = CommittedQcLogEntry {
+                block_hash: qc.block_hash.clone(),
+                qc: qc.clone(),
+            };
+            let serialized = serde_json::to_vec(&entry)
+                .map_err(|err| format!("failed to encode committed QC log entry: {err}"))?;
+            file.write_all(&serialized)
+                .map_err(|err| format!("failed to write committed QC log entry: {err}"))?;
+            file.write_all(b"\n")
+                .map_err(|err| format!("failed to write committed QC log newline: {err}"))?;
+        }
         file.sync_all()
             .map_err(|err| format!("failed to sync committed QC log file: {err}"))
     }
@@ -1210,6 +1771,41 @@ impl DualQuorumConsensus {
         round_number: u64,
         validator_manager: &Arc<ValidatorManager>,
     ) -> Result<Vote, String> {
+        Self::validate_validator_activations(proposed_block, validator_manager)?;
+        assert_epoch_validator_set_compatible_for_height(proposed_block.block_index).map_err(
+            |error| {
+                format!("refusing vote because validator-set snapshot is incompatible: {error}")
+            },
+        )?;
+        let active_validators = consensus_membership_validators_for_height(
+            validator_manager.get_all_validators(),
+            proposed_block.block_index,
+        )?;
+        let cluster_context = Self::cluster_context_for_validators(
+            validator_manager,
+            &active_validators,
+            epoch_number,
+            &proposed_block.validator_id,
+        )?;
+        if cluster_context.cluster_id.is_some()
+            && validator_manager.get_current_epoch() != epoch_number
+        {
+            return Err(format!(
+                "multi-cluster vote epoch {} does not match validator registry epoch {}",
+                epoch_number,
+                validator_manager.get_current_epoch()
+            ));
+        }
+        if !cluster_context
+            .validators
+            .iter()
+            .any(|validator| validator.address == validator_address)
+        {
+            return Err(format!(
+                "validator {} is not in the canonical proposal cluster",
+                validator_address
+            ));
+        }
         let timestamp = Self::current_timestamp();
         let message = Self::vote_signature_payload(
             validator_address,
@@ -1217,6 +1813,7 @@ impl DualQuorumConsensus {
             proposed_block.block_index,
             epoch_number,
             round_number,
+            cluster_context.cluster_id,
         );
 
         let sign_started = Instant::now();
@@ -1298,6 +1895,27 @@ impl DualQuorumConsensus {
         round_number: u64,
         pending_votes: Vec<Vote>,
     ) {
+        self.merge_remote_votes_for_cluster(
+            votes,
+            expected_validators,
+            block_hash,
+            epoch_number,
+            round_number,
+            None,
+            pending_votes,
+        );
+    }
+
+    fn merge_remote_votes_for_cluster(
+        &self,
+        votes: &mut Vec<Vote>,
+        expected_validators: &BTreeSet<String>,
+        block_hash: &str,
+        epoch_number: u64,
+        round_number: u64,
+        expected_cluster_id: Option<u64>,
+        pending_votes: Vec<Vote>,
+    ) {
         let mut seen_validators = votes
             .iter()
             .map(|vote| vote.validator_address.clone())
@@ -1345,8 +1963,13 @@ impl DualQuorumConsensus {
             if !expected_validators.contains(&vote.validator_address) {
                 continue;
             }
-            if !self.vote_is_eligible_for_collection(&vote, block_hash, epoch_number, round_number)
-            {
+            if !self.vote_is_eligible_for_collection_for_cluster(
+                &vote,
+                block_hash,
+                epoch_number,
+                round_number,
+                expected_cluster_id,
+            ) {
                 continue;
             }
             if seen_validators.contains(&vote.validator_address) {
@@ -1446,24 +2069,28 @@ impl DualQuorumConsensus {
 
     fn check_quorums_and_commit(
         &mut self,
-        block_hash: &str,
+        proposed_block: &Block,
         epoch_number: u64,
         round_number: u64,
         votes: &[Vote],
     ) -> Result<QuorumCertificate, String> {
-        let cumulative_weight = self.calculate_cumulative_vote_weight(votes);
-        let validator_count = votes.len();
-        let active_validators = self.collect_active_validators();
-        let total_validators = active_validators.len();
+        let cluster_context = self.cluster_context_for_proposal(proposed_block, epoch_number)?;
+        let (validator_count, _) = self
+            .cluster_vote_summary(&cluster_context.validators, votes)
+            .map_err(|error| format!("invalid cluster vote set: {error}"))?;
 
-        if total_validators < self.minimum_validator_count {
+        let consensus_membership =
+            self.consensus_membership_for_height(proposed_block.block_index)?;
+        if consensus_membership.len() < self.minimum_validator_count {
             return Err(format!(
                 "Insufficient active validators: {} active, {} required",
-                total_validators, self.minimum_validator_count
+                consensus_membership.len(),
+                self.minimum_validator_count
             ));
         }
 
-        let required_validator_votes = self.required_validator_votes(total_validators);
+        let required_validator_votes =
+            self.required_validator_votes_for_cluster_context(&cluster_context);
         if validator_count < required_validator_votes {
             return Err(format!(
                 "Insufficient validator votes: {} votes, {} required for quorum",
@@ -1471,78 +2098,103 @@ impl DualQuorumConsensus {
             ));
         }
 
-        // Check validation quorum against the total live validator weight for the round.
-        let total_live_weight = self.total_validator_weight(&active_validators);
-        let validation_ratio = if total_live_weight > 0.0 {
-            cumulative_weight / total_live_weight
-        } else {
-            0.0
-        };
-        let required_validation_ratio =
-            self.validation_quorum_threshold.max(VALIDATOR_QUORUM_RATIO);
-        let validation_quorum_met = validation_ratio + 0.000_001 >= required_validation_ratio;
-
-        // Check cooperation quorum using the same dynamic integer threshold.
+        // Consensus vote power is one active validator, one vote. Synergy Score
+        // affects rewards and rotation policy, never finality.
+        let validation_quorum_met = validator_count >= required_validator_votes;
         let cooperation_quorum_met = validator_count >= required_validator_votes;
 
         if validation_quorum_met && cooperation_quorum_met {
-            // Create quorum certificate
-            let qc =
-                self.create_quorum_certificate(block_hash, epoch_number, round_number, votes)?;
+            let qc = self.create_quorum_certificate(
+                &proposed_block.hash,
+                epoch_number,
+                round_number,
+                votes,
+                &cluster_context,
+            )?;
             self.quorum_certificates
-                .insert(block_hash.to_string(), qc.clone());
+                .insert(proposed_block.hash.clone(), qc.clone());
             Ok(qc)
         } else {
             Err("Quorum thresholds not met".to_string())
         }
     }
 
-    fn calculate_cumulative_vote_weight(&self, votes: &[Vote]) -> f64 {
-        let mut total_weight = 0.0;
-
-        for vote in votes {
-            if let Some(validator) = self
-                .validator_manager
-                .get_validator(&vote.validator_address)
-            {
-                // Use normalized synergy score as vote weight
-                total_weight += validator.synergy_score / 100.0;
-            }
-        }
-
-        total_weight
-    }
-
-    fn total_validator_weight(&self, validators: &[Validator]) -> f64 {
-        validators
-            .iter()
-            .map(|validator| (validator.synergy_score / 100.0).max(0.0))
-            .sum()
-    }
-
     fn required_validator_votes(&self, total_validators: usize) -> usize {
         required_validator_quorum(total_validators).max(1)
     }
 
+    fn required_validator_votes_for_cluster_context(
+        &self,
+        cluster_context: &ConsensusClusterContext,
+    ) -> usize {
+        if cluster_context.cluster_id.is_some() {
+            required_cluster_quorum(cluster_context.validators.len()).max(1)
+        } else {
+            self.required_validator_votes(cluster_context.validators.len())
+        }
+    }
+
+    #[cfg(test)]
     fn has_commit_quorum(&self, live_validators: &[Validator], votes: &[Vote]) -> bool {
         if live_validators.is_empty() {
             return false;
         }
 
+        let Ok((validator_count, _)) = self.cluster_vote_summary(live_validators, votes) else {
+            return false;
+        };
         let required_validator_votes = self.required_validator_votes(live_validators.len());
-        if votes.len() < required_validator_votes {
+        validator_count >= required_validator_votes
+    }
+
+    fn cluster_vote_summary(
+        &self,
+        cluster_validators: &[Validator],
+        votes: &[Vote],
+    ) -> Result<(usize, f64), String> {
+        let weights = cluster_validators
+            .iter()
+            .map(|validator| (validator.address.clone(), 1.0f64))
+            .collect::<HashMap<_, _>>();
+        let mut seen = BTreeSet::new();
+        let mut cumulative_weight = 0.0;
+
+        for vote in votes {
+            let Some(weight) = weights.get(&vote.validator_address) else {
+                return Err(format!(
+                    "vote from {} is outside the canonical target cluster",
+                    vote.validator_address
+                ));
+            };
+            if !seen.insert(vote.validator_address.clone()) {
+                return Err(format!(
+                    "duplicate vote from {} in canonical target cluster",
+                    vote.validator_address
+                ));
+            }
+            cumulative_weight += *weight;
+        }
+
+        Ok((seen.len(), cumulative_weight))
+    }
+
+    fn has_commit_quorum_for_cluster(
+        &self,
+        cluster_context: &ConsensusClusterContext,
+        votes: &[Vote],
+    ) -> bool {
+        if cluster_context.validators.is_empty() {
             return false;
         }
 
-        let total_live_weight = self.total_validator_weight(live_validators);
-        if total_live_weight <= 0.0 {
+        let Ok((validator_count, _)) =
+            self.cluster_vote_summary(&cluster_context.validators, votes)
+        else {
             return false;
-        }
-
-        let cumulative_weight = self.calculate_cumulative_vote_weight(votes);
-        let required_validation_ratio =
-            self.validation_quorum_threshold.max(VALIDATOR_QUORUM_RATIO);
-        cumulative_weight + 0.000_001 >= total_live_weight * required_validation_ratio
+        };
+        let required_validator_votes =
+            self.required_validator_votes_for_cluster_context(cluster_context);
+        validator_count >= required_validator_votes
     }
 
     fn record_missed_vote_timeouts(&self, live_validators: &[Validator], votes: &[Vote]) {
@@ -1594,18 +2246,22 @@ impl DualQuorumConsensus {
         epoch_number: u64,
         round_number: u64,
         votes: &[Vote],
+        cluster_context: &ConsensusClusterContext,
     ) -> Result<QuorumCertificate, String> {
         // Aggregate signatures
-        let aggregate_sig = self.aggregate_signatures(votes)?;
+        let aggregate_sig = self.aggregate_signatures(votes, &cluster_context.validators)?;
 
         // Create participation bitmap
-        let participant_bitmap = self.create_participant_bitmap(votes);
+        let participant_bitmap =
+            self.create_participant_bitmap_for_validators(votes, &cluster_context.validators);
 
         // Calculate cumulative weight
-        let cumulative_weight = self.calculate_cumulative_vote_weight(votes);
+        let (_, cumulative_weight) =
+            self.cluster_vote_summary(&cluster_context.validators, votes)?;
 
         let qc = QuorumCertificate {
             block_hash: block_hash.to_string(),
+            cluster_id: cluster_context.cluster_id,
             epoch_number,
             round_number,
             aggregate_signature: aggregate_sig.combined_signature,
@@ -1623,13 +2279,18 @@ impl DualQuorumConsensus {
         Ok(qc)
     }
 
-    fn aggregate_signatures(&self, votes: &[Vote]) -> Result<AggregateSignature, String> {
+    fn aggregate_signatures(
+        &self,
+        votes: &[Vote],
+        cluster_validators: &[Validator],
+    ) -> Result<AggregateSignature, String> {
         // Sort votes by validator address for deterministic ordering
         let mut sorted_votes = votes.to_vec();
         sorted_votes.sort_by(|a, b| a.validator_address.cmp(&b.validator_address));
 
         // Create participation bitmap
-        let participant_bitmap = self.create_participant_bitmap(&sorted_votes);
+        let participant_bitmap =
+            self.create_participant_bitmap_for_validators(&sorted_votes, cluster_validators);
 
         // Collect all individual signatures and verify each one before aggregation.
         let mut signatures = Vec::new();
@@ -1662,11 +2323,21 @@ impl DualQuorumConsensus {
         })
     }
 
-    fn create_participant_bitmap(&self, votes: &[Vote]) -> Vec<u8> {
-        let active_validators = self.collect_active_validators();
-        let mut bitmap = vec![0u8; (active_validators.len() + 7) / 8];
+    fn create_participant_bitmap_for_validators(
+        &self,
+        votes: &[Vote],
+        validators: &[Validator],
+    ) -> Vec<u8> {
+        Self::participant_bitmap_for_validators_static(votes, validators)
+    }
 
-        for (i, validator) in active_validators.iter().enumerate() {
+    fn participant_bitmap_for_validators_static(
+        votes: &[Vote],
+        validators: &[Validator],
+    ) -> Vec<u8> {
+        let mut bitmap = vec![0u8; (validators.len() + 7) / 8];
+
+        for (i, validator) in validators.iter().enumerate() {
             let byte_index = i / 8;
             let bit_index = i % 8;
 
@@ -1681,8 +2352,183 @@ impl DualQuorumConsensus {
         bitmap
     }
 
-    fn collect_active_validators(&self) -> Vec<Validator> {
-        consensus_membership_validators(self.validator_manager.get_active_validators())
+    fn cluster_context_for_validators(
+        validator_manager: &Arc<ValidatorManager>,
+        active_validators: &[Validator],
+        epoch: u64,
+        target_validator: &str,
+    ) -> Result<ConsensusClusterContext, String> {
+        if active_validators.is_empty() {
+            return Err("cannot resolve cluster context without active validators".to_string());
+        }
+
+        let canonical_clusters = canonical_validator_clusters_for_epoch(active_validators, epoch);
+        let expected_cluster_count = canonical_clusters.len();
+        if expected_cluster_count == 0 {
+            return Err("canonical validator cluster assignment is empty".to_string());
+        }
+
+        if expected_cluster_count == 1 {
+            return Ok(ConsensusClusterContext {
+                cluster_id: None,
+                validators: active_validators.to_vec(),
+            });
+        }
+
+        if !active_validators
+            .iter()
+            .any(|validator| validator.address == target_validator)
+        {
+            return Err(format!(
+                "validator {} is not in the canonical active validator set",
+                target_validator
+            ));
+        }
+
+        let has_scheduled_activation = active_validators
+            .iter()
+            .any(|validator| validator.status == crate::validator::ValidatorStatus::Shadow);
+        if validator_manager.get_current_epoch() == epoch && !has_scheduled_activation {
+            if validator_manager.get_cluster_count() != expected_cluster_count {
+                return Err(format!(
+                    "validator registry cluster count {} does not match canonical count {}",
+                    validator_manager.get_cluster_count(),
+                    expected_cluster_count
+                ));
+            }
+
+            for validator in active_validators {
+                let (expected_cluster_id, expected_members) = canonical_clusters
+                    .iter()
+                    .find(|(_, members)| {
+                        members
+                            .iter()
+                            .any(|member| member.address == validator.address)
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "validator {} is missing from canonical epoch {} clusters",
+                            validator.address, epoch
+                        )
+                    })?;
+                let Some(actual_cluster_id) = validator.cluster_id else {
+                    return Err(format!(
+                        "validator {} is missing canonical cluster context",
+                        validator.address
+                    ));
+                };
+                if actual_cluster_id != *expected_cluster_id {
+                    return Err(format!(
+                        "validator {} has cluster {} but canonical epoch {} assignment is {}",
+                        validator.address, actual_cluster_id, epoch, expected_cluster_id
+                    ));
+                }
+
+                let cluster = validator_manager
+                    .get_validator_cluster(&validator.address)
+                    .ok_or_else(|| {
+                        format!(
+                            "validator {} has no persisted canonical cluster record",
+                            validator.address
+                        )
+                    })?;
+                let mut actual_members = cluster.validators.clone();
+                actual_members.sort();
+                let mut expected_addresses = expected_members
+                    .iter()
+                    .map(|member| member.address.clone())
+                    .collect::<Vec<_>>();
+                expected_addresses.sort();
+                if cluster.id != *expected_cluster_id
+                    || actual_members != expected_addresses
+                    || validator.cluster_address.as_deref() != Some(cluster.address.as_str())
+                {
+                    return Err(format!(
+                        "validator {} has malformed persisted cluster membership",
+                        validator.address
+                    ));
+                }
+            }
+        }
+
+        let (cluster_id, validators) = canonical_clusters
+            .into_iter()
+            .find(|(_, members)| {
+                members
+                    .iter()
+                    .any(|member| member.address == target_validator)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "validator {} has no canonical cluster assignment for epoch {}",
+                    target_validator, epoch
+                )
+            })?;
+
+        Ok(ConsensusClusterContext {
+            cluster_id: Some(cluster_id),
+            validators,
+        })
+    }
+
+    fn cluster_context_for_proposal(
+        &self,
+        proposed_block: &Block,
+        epoch: u64,
+    ) -> Result<ConsensusClusterContext, String> {
+        let active_validators = self.consensus_membership_for_height(proposed_block.block_index)?;
+        let context = Self::cluster_context_for_validators(
+            &self.validator_manager,
+            &active_validators,
+            epoch,
+            &proposed_block.validator_id,
+        )?;
+        if context.cluster_id.is_some() && self.validator_manager.get_current_epoch() != epoch {
+            return Err(format!(
+                "multi-cluster proposal epoch {} does not match validator registry epoch {}",
+                epoch,
+                self.validator_manager.get_current_epoch()
+            ));
+        }
+        Ok(context)
+    }
+
+    fn cluster_context_for_vote(
+        vote: &Vote,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Result<ConsensusClusterContext, String> {
+        let active_validators = consensus_membership_validators_for_height(
+            validator_manager.get_all_validators(),
+            vote.block_index,
+        )?;
+        Self::cluster_context_for_validators(
+            validator_manager,
+            &active_validators,
+            vote.epoch_number,
+            &vote.validator_address,
+        )
+    }
+
+    fn validate_qc_cluster_context(
+        context: &ConsensusClusterContext,
+        qc_cluster_id: Option<u64>,
+    ) -> Result<(), String> {
+        if let Some(cluster_id) = context.cluster_id {
+            if qc_cluster_id != Some(cluster_id) {
+                return Err(format!(
+                    "QC cluster context is missing or does not match canonical cluster {}",
+                    cluster_id
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn consensus_membership_for_height(&self, height: u64) -> Result<Vec<Validator>, String> {
+        consensus_membership_validators_for_height(
+            self.validator_manager.get_all_validators(),
+            height,
+        )
     }
 
     fn resolve_local_validator_address() -> Option<String> {
@@ -1756,12 +2602,14 @@ impl DualQuorumConsensus {
         vote: &Vote,
         validator_manager: &Arc<ValidatorManager>,
     ) -> Result<(), String> {
+        let cluster_context = Self::cluster_context_for_vote(vote, validator_manager)?;
         let message = Self::vote_signature_payload(
             &vote.validator_address,
             &vote.block_hash,
             vote.block_index,
             vote.epoch_number,
             vote.round_number,
+            cluster_context.cluster_id,
         );
         let public_key = verify_signer_key_matches_validator_at_height(
             vote.block_index,
@@ -1815,18 +2663,36 @@ impl DualQuorumConsensus {
             return Err("QC does not include individually verifiable Aegis PQC votes".to_string());
         }
 
-        let active_validators =
-            consensus_membership_validators(validator_manager.get_active_validators());
+        let active_validators = consensus_membership_validators_for_height(
+            validator_manager.get_all_validators(),
+            block.block_index,
+        )
+        .map_err(|error| {
+            format!(
+                "QC verification cannot resolve validator set for height {}: {error}",
+                block.block_index
+            )
+        })?;
         if active_validators.is_empty() {
-            return Err("QC verification has no active validator set".to_string());
+            return Err(format!(
+                "QC verification has no active validator set for height {}",
+                block.block_index
+            ));
         }
-        let active_by_address = active_validators
+        let cluster_context = Self::cluster_context_for_validators(
+            validator_manager,
+            &active_validators,
+            qc.epoch_number,
+            &block.validator_id,
+        )?;
+        Self::validate_qc_cluster_context(&cluster_context, qc.cluster_id)?;
+        let active_by_address = cluster_context
+            .validators
             .iter()
             .map(|validator| (validator.address.clone(), validator))
             .collect::<HashMap<_, _>>();
 
         let mut seen = BTreeSet::new();
-        let mut signed_weight = 0.0;
         for vote in &qc.votes {
             if vote.block_hash != block.hash {
                 return Err("QC vote signs a different block hash".to_string());
@@ -1840,14 +2706,32 @@ impl DualQuorumConsensus {
             if !seen.insert(vote.validator_address.clone()) {
                 return Err("QC contains duplicate signer".to_string());
             }
-            let Some(validator) = active_by_address.get(&vote.validator_address) else {
-                return Err("QC contains signer outside active validator set".to_string());
+            let Some(_validator) = active_by_address.get(&vote.validator_address) else {
+                return Err(if cluster_context.cluster_id.is_some() {
+                    "QC contains signer outside the canonical proposal cluster".to_string()
+                } else {
+                    "QC contains signer outside active validator set".to_string()
+                });
             };
             Self::verify_vote_signature_uncached(vote, validator_manager)?;
-            signed_weight += (validator.synergy_score / 100.0).max(0.0);
         }
 
-        let required_votes = Self::required_qc_validator_votes(active_validators.len());
+        if cluster_context.cluster_id.is_some() {
+            let expected_bitmap = Self::participant_bitmap_for_validators_static(
+                &qc.votes,
+                &cluster_context.validators,
+            );
+            if qc.participant_bitmap != expected_bitmap {
+                return Err(
+                    "QC signer bitmap does not match canonical cluster membership".to_string(),
+                );
+            }
+        }
+
+        let required_votes = Self::required_qc_validator_votes(
+            cluster_context.validators.len(),
+            cluster_context.cluster_id.is_some(),
+        );
         if seen.len() < required_votes {
             return Err(format!(
                 "QC has {} signer(s), {} required for dynamic validator quorum",
@@ -1856,22 +2740,23 @@ impl DualQuorumConsensus {
             ));
         }
 
-        let total_weight = active_validators
-            .iter()
-            .map(|validator| (validator.synergy_score / 100.0).max(0.0))
-            .sum::<f64>();
-        if total_weight <= 0.0 {
-            return Err("active validator set has zero voting weight".to_string());
-        }
-        if signed_weight + 0.000_001 < total_weight * VALIDATOR_QUORUM_RATIO {
-            return Err("QC signed weight is below validator quorum threshold".to_string());
+        let signer_count = seen.len() as f64;
+        if qc.cumulative_weight > 0.0 && (qc.cumulative_weight - signer_count).abs() > 0.000_001 {
+            return Err(format!(
+                "QC cumulative_weight mismatch: computed {signer_count}, declared {}",
+                qc.cumulative_weight
+            ));
         }
 
         Ok(())
     }
 
-    fn required_qc_validator_votes(total_validators: usize) -> usize {
-        required_validator_quorum(total_validators).max(1)
+    fn required_qc_validator_votes(total_validators: usize, clustered: bool) -> usize {
+        if clustered {
+            required_cluster_quorum(total_validators).max(1)
+        } else {
+            required_validator_quorum(total_validators).max(1)
+        }
     }
 
     fn vote_signature_cache_contains(&self, cache_key: &str) -> bool {
@@ -1911,11 +2796,16 @@ impl DualQuorumConsensus {
         block_index: u64,
         epoch_number: u64,
         round_number: u64,
+        cluster_id: Option<u64>,
     ) -> String {
-        format!(
+        let payload = format!(
             "{}:{}:{}:{}:{}",
             validator_address, block_index, round_number, block_hash, epoch_number
-        )
+        );
+        match cluster_id {
+            Some(cluster_id) => format!("{payload}:{cluster_id}"),
+            None => payload,
+        }
     }
 
     fn scoped_local_vote_lock_key(
@@ -2865,6 +3755,23 @@ impl DualQuorumConsensus {
         epoch_number: u64,
         round_number: u64,
     ) -> bool {
+        self.vote_is_eligible_for_collection_for_cluster(
+            vote,
+            block_hash,
+            epoch_number,
+            round_number,
+            None,
+        )
+    }
+
+    fn vote_is_eligible_for_collection_for_cluster(
+        &self,
+        vote: &Vote,
+        block_hash: &str,
+        epoch_number: u64,
+        round_number: u64,
+        expected_cluster_id: Option<u64>,
+    ) -> bool {
         if vote.block_hash != block_hash
             || vote.epoch_number != epoch_number
             || vote.round_number > round_number
@@ -2874,6 +3781,26 @@ impl DualQuorumConsensus {
 
         if !self.vote_validator_is_active(vote) {
             return false;
+        }
+
+        if let Some(expected_cluster_id) = expected_cluster_id {
+            let Ok(active_validators) = consensus_membership_validators_for_height(
+                self.validator_manager.get_all_validators(),
+                vote.block_index,
+            ) else {
+                return false;
+            };
+            let Ok(cluster_context) = Self::cluster_context_for_validators(
+                &self.validator_manager,
+                &active_validators,
+                epoch_number,
+                &vote.validator_address,
+            ) else {
+                return false;
+            };
+            if cluster_context.cluster_id != Some(expected_cluster_id) {
+                return false;
+            }
         }
 
         if Self::has_equivocation_evidence(
@@ -2889,9 +3816,16 @@ impl DualQuorumConsensus {
     }
 
     fn vote_validator_is_active(&self, vote: &Vote) -> bool {
-        consensus_membership_validators(self.validator_manager.get_active_validators())
-            .into_iter()
-            .any(|validator| validator.address == vote.validator_address)
+        consensus_membership_validators_for_height(
+            self.validator_manager.get_all_validators(),
+            vote.block_index,
+        )
+        .map(|validators| {
+            validators
+                .into_iter()
+                .any(|validator| validator.address == vote.validator_address)
+        })
+        .unwrap_or(false)
     }
 
     fn vote_mailbox_key(block_hash: &str, epoch_number: u64, round_number: u64) -> String {
@@ -2977,6 +3911,10 @@ impl DualQuorumConsensus {
         if let Ok(mut qcs) = COMMITTED_QC_STORE.lock() {
             qcs.clear();
         }
+        if let Ok(mut index) = COMMITTED_QC_LOG_LOOKUP_INDEX.lock() {
+            *index = CommittedQcLogLookupIndex::default();
+        }
+        COMMITTED_QC_LOG_PARSE_COUNT.store(0, Ordering::Relaxed);
         let qc_store_path = Self::committed_qc_store_path();
         let _ = fs::remove_file(qc_store_path.with_extension("json.tmp"));
         let _ = fs::remove_file(qc_store_path);
@@ -3004,17 +3942,59 @@ pub fn required_validator_quorum(total_validators: usize) -> usize {
     }
 }
 
+pub fn required_cluster_quorum(cluster_size: usize) -> usize {
+    if cluster_size == 0 {
+        0
+    } else if cluster_size == 5 {
+        3
+    } else {
+        required_validator_quorum(cluster_size)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::consensus::validator_keys::{
         consensus_algorithm_label, register_test_validator_signing_key,
+        sign_with_local_validator_key_for_height,
     };
     use crate::crypto::pqc::PQCAlgorithm;
-    use crate::validator::{Validator, ValidatorRegistration, ValidatorStatus};
+    use crate::validator::{
+        Validator, ValidatorRegistration, ValidatorStatus, EPOCH_VALIDATOR_SETS_ENV,
+    };
     use base64::{engine::general_purpose, Engine as _};
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::OnceLock;
+
+    fn epoch_set_env_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = env::var(key).ok();
+            env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = self.previous.as_ref() {
+                env::set_var(self.key, previous);
+            } else {
+                env::remove_var(self.key);
+            }
+        }
+    }
 
     fn approved_validator_manager(addresses: &[&str]) -> Arc<ValidatorManager> {
         let manager = Arc::new(ValidatorManager::new());
@@ -3091,6 +4071,7 @@ mod tests {
     fn test_qc(block_hash: &str) -> QuorumCertificate {
         QuorumCertificate {
             block_hash: block_hash.to_string(),
+            cluster_id: None,
             epoch_number: 0,
             round_number: 1,
             aggregate_signature: vec![1, 2, 3],
@@ -3101,6 +4082,240 @@ mod tests {
             timestamp: 1_700_000_000,
             votes: Vec::new(),
         }
+    }
+
+    fn signed_block_for_manager(
+        height: u64,
+        nonce: u64,
+        validator_id: &str,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Block {
+        let mut block = Block::new(
+            height,
+            Vec::new(),
+            "parent-hash".to_string(),
+            validator_id.to_string(),
+            nonce,
+        );
+        let (public_key, signature) = sign_with_local_validator_key_for_height(
+            height,
+            validator_id,
+            block.hash.as_bytes(),
+            validator_manager,
+        )
+        .expect("test proposer should sign block");
+        block.proposer_public_key = public_key.key_data;
+        block.block_signature = signature.signature_data;
+        block.block_signature_algorithm = "fndsa".to_string();
+        block
+    }
+
+    fn signed_vote_with_explicit_cluster_context(
+        validator: &Validator,
+        block: &Block,
+        epoch_number: u64,
+        round_number: u64,
+        validator_manager: &Arc<ValidatorManager>,
+    ) -> Vote {
+        let message = DualQuorumConsensus::vote_signature_payload(
+            &validator.address,
+            &block.hash,
+            block.block_index,
+            epoch_number,
+            round_number,
+            validator.cluster_id,
+        );
+        let (public_key, signature) = sign_with_local_validator_key_for_height(
+            block.block_index,
+            &validator.address,
+            message.as_bytes(),
+            validator_manager,
+        )
+        .expect("test validator should sign its cluster-scoped vote");
+
+        Vote {
+            validator_address: validator.address.clone(),
+            block_hash: block.hash.clone(),
+            block_index: block.block_index,
+            epoch_number,
+            round_number,
+            signature,
+            signer_public_key: public_key.key_data,
+            timestamp: DualQuorumConsensus::current_timestamp(),
+        }
+    }
+
+    #[test]
+    fn multi_cluster_quorum_finalizes_each_cluster_and_rejects_other_cluster_votes() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        let validator_manager = approved_validator_manager(&[
+            "validator1",
+            "validator2",
+            "validator3",
+            "validator4",
+            "validator5",
+            "validator6",
+            "validator7",
+            "validator8",
+            "validator9",
+            "validator10",
+        ]);
+        validator_manager.reorganize_clusters_for_epoch(0);
+        let active_validators =
+            consensus_membership_validators(validator_manager.get_active_validators());
+        let clusters = canonical_validator_clusters_for_epoch(&active_validators, 0);
+        assert_eq!(clusters.len(), 2);
+        assert_eq!(
+            clusters
+                .iter()
+                .map(|(_, members)| members.len())
+                .collect::<Vec<_>>(),
+            vec![5, 5]
+        );
+
+        let pqc_manager = Arc::new(Mutex::new(PQCManager::new()));
+        let mut consensus = DualQuorumConsensus::new(
+            Arc::clone(&validator_manager),
+            Arc::clone(&pqc_manager),
+            false,
+            1,
+            1,
+            1,
+            2,
+        );
+
+        for (cluster_index, (cluster_id, members)) in clusters.iter().enumerate() {
+            let proposer = members
+                .first()
+                .expect("canonical cluster should have a proposer")
+                .address
+                .clone();
+            let block = signed_block_for_manager(
+                42,
+                100 + cluster_index as u64,
+                &proposer,
+                &validator_manager,
+            );
+            let own_votes = members
+                .iter()
+                .take(3)
+                .map(|validator| {
+                    DualQuorumConsensus::create_vote_for_validator_with_manager(
+                        &validator.address,
+                        &block,
+                        0,
+                        1,
+                        &validator_manager,
+                    )
+                    .expect("cluster validator should sign its proposal vote")
+                })
+                .collect::<Vec<_>>();
+            let context = ConsensusClusterContext {
+                cluster_id: Some(*cluster_id),
+                validators: members.clone(),
+            };
+            assert!(
+                consensus.has_commit_quorum_for_cluster(&context, &own_votes),
+                "cluster {} should reach quorum with three of its five validators",
+                cluster_id
+            );
+            let insufficient_votes = own_votes.iter().take(2).cloned().collect::<Vec<_>>();
+            assert!(
+                !consensus.has_commit_quorum_for_cluster(&context, &insufficient_votes),
+                "cluster {} must not reach quorum with only two of its five validators",
+                cluster_id
+            );
+            let qc = consensus
+                .check_quorums_and_commit(&block, 0, 1, &own_votes)
+                .expect("cluster quorum should finalize its proposal");
+            assert_eq!(qc.cluster_id, Some(*cluster_id));
+            DualQuorumConsensus::verify_commit_certificate_for_block_static(
+                &block,
+                &qc,
+                &validator_manager,
+            )
+            .expect("finalized cluster QC should verify against canonical membership");
+
+            let other_members = clusters
+                .iter()
+                .find(|(other_id, _)| other_id != cluster_id)
+                .map(|(_, other_members)| other_members)
+                .expect("two-cluster fixture should have another cluster");
+            let cross_cluster_votes = other_members
+                .iter()
+                .take(3)
+                .map(|validator| {
+                    signed_vote_with_explicit_cluster_context(
+                        validator,
+                        &block,
+                        0,
+                        1,
+                        &validator_manager,
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                !consensus.has_commit_quorum_for_cluster(&context, &cross_cluster_votes),
+                "votes from cluster {} must not satisfy cluster {}",
+                other_members
+                    .first()
+                    .and_then(|validator| validator.cluster_id)
+                    .expect("other cluster id should be present"),
+                cluster_id
+            );
+            assert!(
+                consensus
+                    .check_quorums_and_commit(&block, 0, 1, &cross_cluster_votes)
+                    .is_err(),
+                "finality must reject a QC assembled from the other cluster"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_cluster_context_fails_closed_for_missing_assignment_and_qc_context() {
+        let validator_manager = equal_weight_validator_manager(10);
+        validator_manager.reorganize_clusters_for_epoch(0);
+        let active_validators =
+            consensus_membership_validators(validator_manager.get_active_validators());
+        let proposer = active_validators
+            .first()
+            .expect("multi-cluster fixture should have an active validator")
+            .address
+            .clone();
+        let context = DualQuorumConsensus::cluster_context_for_validators(
+            &validator_manager,
+            &active_validators,
+            0,
+            &proposer,
+        )
+        .expect("canonical multi-cluster context should resolve");
+        assert!(context.cluster_id.is_some());
+        assert!(DualQuorumConsensus::validate_qc_cluster_context(&context, None).is_err());
+
+        {
+            let mut registry = validator_manager
+                .registry
+                .lock()
+                .expect("test validator registry should lock");
+            registry
+                .validators
+                .get_mut(&proposer)
+                .expect("proposer should exist")
+                .cluster_id = None;
+        }
+        let malformed_active =
+            consensus_membership_validators(validator_manager.get_active_validators());
+        let error = DualQuorumConsensus::cluster_context_for_validators(
+            &validator_manager,
+            &malformed_active,
+            0,
+            &proposer,
+        )
+        .expect_err("missing persisted cluster assignment must fail closed");
+        assert!(error.contains("missing canonical cluster context"));
     }
 
     fn test_qc_at_height(block_hash: &str, height: u64) -> QuorumCertificate {
@@ -3125,19 +4340,19 @@ mod tests {
     }
 
     #[test]
-    fn qc_verification_requires_dynamic_quorum_for_five_validators() {
+    fn qc_verification_requires_three_of_five_cluster_quorum() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
 
-        let required = DualQuorumConsensus::required_qc_validator_votes(5);
+        let required = DualQuorumConsensus::required_qc_validator_votes(5, true);
 
-        assert_eq!(required, required_validator_quorum(5));
+        assert_eq!(required, 3);
     }
 
     #[test]
     fn qc_verification_requires_dynamic_four_of_six_quorum() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
 
-        let required = DualQuorumConsensus::required_qc_validator_votes(6);
+        let required = DualQuorumConsensus::required_qc_validator_votes(6, true);
 
         assert_eq!(required, 4);
         assert_eq!(required, required_validator_quorum(6));
@@ -3147,9 +4362,369 @@ mod tests {
     fn qc_verification_requires_dynamic_quorum_for_expanded_set() {
         let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
 
-        let required = DualQuorumConsensus::required_qc_validator_votes(10);
+        let required = DualQuorumConsensus::required_qc_validator_votes(10, false);
 
         assert_eq!(required, required_validator_quorum(10));
+    }
+
+    #[test]
+    fn qc_verification_requires_five_of_seven_cluster_quorum() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+
+        let required = DualQuorumConsensus::required_qc_validator_votes(7, true);
+
+        assert_eq!(required, 5);
+    }
+
+    #[test]
+    fn historical_qc_verification_uses_epoch_validator_set_for_block_height() {
+        let _epoch_set_env_guard = epoch_set_env_test_lock()
+            .lock()
+            .expect("epoch validator set env test lock should succeed");
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        let validator_manager = approved_validator_manager(&[
+            "validator1",
+            "validator2",
+            "validator3",
+            "validator4",
+            "validator5",
+            "validator6",
+            "validator7",
+        ]);
+        {
+            let mut registry = validator_manager
+                .registry
+                .lock()
+                .expect("transition test registry should lock");
+            let validator = registry
+                .validators
+                .get_mut("validator7")
+                .expect("transition validator should be registered");
+            validator.status = ValidatorStatus::Shadow;
+            validator.activation_recorded_height = Some(99);
+            validator.activation_effective_height = Some(100);
+        }
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = env::temp_dir().join(format!("synergy-qc-epoch-set-{unique}"));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        fs::write(
+            &snapshot_path,
+            serde_json::json!({
+                "epoch_validator_sets": [{
+                    "chain_id": 1264,
+                    "epoch_id": 0,
+                    "validator_set_version": 1,
+                    "effective_from_height": 1,
+                    "effective_to_height": 99,
+                    "active_validators": [
+                        "validator1",
+                        "validator2",
+                        "validator3",
+                        "validator4",
+                        "validator5",
+                        "validator6"
+                    ],
+                    "pending_validators": ["validator7"],
+                    "quorum_threshold": 4,
+                    "validator_set_hash": "historical-dynamic-validator-set"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let mut block = Block::new(
+            1,
+            vec![],
+            "parent-hash".to_string(),
+            "validator1".to_string(),
+            1,
+        );
+        let (proposer_public_key, proposer_signature) = sign_with_local_validator_key_for_height(
+            block.block_index,
+            "validator1",
+            block.hash.as_bytes(),
+            &validator_manager,
+        )
+        .expect("validator1 proposer key should sign test block");
+        block.proposer_public_key = proposer_public_key.key_data;
+        block.block_signature = proposer_signature.signature_data;
+        block.block_signature_algorithm = "fndsa".to_string();
+        let mut qc = test_qc(&block.hash);
+        qc.votes = vec![Vote {
+            validator_address: "validator7".to_string(),
+            block_hash: block.hash.clone(),
+            block_index: block.block_index,
+            epoch_number: qc.epoch_number,
+            round_number: qc.round_number,
+            signature: PQCSignature {
+                algorithm: PQCAlgorithm::FNDSA,
+                signature_data: Vec::new(),
+                message_hash: Vec::new(),
+                public_key_id: String::new(),
+                created_at: 0,
+            },
+            signer_public_key: Vec::new(),
+            timestamp: block.timestamp,
+        }];
+
+        let result = DualQuorumConsensus::verify_commit_certificate_for_block_static(
+            &block,
+            &qc,
+            &validator_manager,
+        );
+
+        fs::remove_dir_all(temp_dir).ok();
+
+        let error = result.expect_err("validator7 is pending in the historical epoch set");
+        assert!(
+            error.contains("outside active validator set"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn vote_creation_and_qc_verification_agree_at_validator_set_transition() {
+        let _epoch_set_env_guard = epoch_set_env_test_lock()
+            .lock()
+            .expect("epoch validator set env test lock should succeed");
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        let validator_manager = approved_validator_manager(&[
+            "validator1",
+            "validator2",
+            "validator3",
+            "validator4",
+            "validator5",
+            "validator6",
+            "validator7",
+        ]);
+        {
+            let mut registry = validator_manager
+                .registry
+                .lock()
+                .expect("transition test registry should lock");
+            let validator = registry
+                .validators
+                .get_mut("validator7")
+                .expect("transition validator should be registered");
+            validator.status = ValidatorStatus::Shadow;
+            validator.activation_recorded_height = Some(99);
+            validator.activation_effective_height = Some(100);
+        }
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = env::temp_dir().join(format!("synergy-membership-transition-{unique}"));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        fs::write(
+            &snapshot_path,
+            serde_json::json!({
+                "epoch_validator_sets": [
+                    {
+                        "chain_id": 1264,
+                        "epoch_id": 0,
+                        "validator_set_version": 1,
+                        "effective_from_height": 1,
+                        "effective_to_height": 99,
+                        "active_validators": [
+                            "validator1",
+                            "validator2",
+                            "validator3",
+                            "validator4",
+                            "validator5",
+                            "validator6"
+                        ],
+                        "pending_validators": ["validator7"],
+                        "quorum_threshold": 4,
+                        "validator_set_hash": "pre-transition-set"
+                    },
+                    {
+                        "chain_id": 1264,
+                        "epoch_id": 1,
+                        "validator_set_version": 2,
+                        "effective_from_height": 100,
+                        "active_validators": [
+                            "validator1",
+                            "validator2",
+                            "validator3",
+                            "validator4",
+                            "validator5",
+                            "validator6",
+                            "validator7"
+                        ],
+                        "quorum_threshold": 5,
+                        "validator_set_hash": "post-transition-set"
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _snapshot_guard =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+
+        let mut before_boundary = Block::new(
+            99,
+            vec![],
+            "parent-hash".to_string(),
+            "validator1".to_string(),
+            1,
+        );
+        let (proposer_public_key, proposer_signature) = sign_with_local_validator_key_for_height(
+            before_boundary.block_index,
+            "validator1",
+            before_boundary.hash.as_bytes(),
+            &validator_manager,
+        )
+        .expect("validator1 proposer key should sign pre-transition block");
+        before_boundary.proposer_public_key = proposer_public_key.key_data;
+        before_boundary.block_signature = proposer_signature.signature_data;
+        before_boundary.block_signature_algorithm = "fndsa".to_string();
+
+        let vote_error = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator7",
+            &before_boundary,
+            0,
+            1,
+            &validator_manager,
+        )
+        .expect_err("pending validator must not create a pre-transition vote");
+        assert!(
+            vote_error.contains("not in the canonical proposal cluster"),
+            "unexpected vote error: {vote_error}"
+        );
+
+        let mut pre_transition_qc = test_qc(&before_boundary.hash);
+        pre_transition_qc.votes = vec![Vote {
+            validator_address: "validator7".to_string(),
+            block_hash: before_boundary.hash.clone(),
+            block_index: before_boundary.block_index,
+            epoch_number: 0,
+            round_number: 1,
+            signature: PQCSignature {
+                algorithm: PQCAlgorithm::FNDSA,
+                signature_data: Vec::new(),
+                message_hash: Vec::new(),
+                public_key_id: String::new(),
+                created_at: 0,
+            },
+            signer_public_key: Vec::new(),
+            timestamp: before_boundary.timestamp,
+        }];
+        let qc_error = DualQuorumConsensus::verify_commit_certificate_for_block_static(
+            &before_boundary,
+            &pre_transition_qc,
+            &validator_manager,
+        )
+        .expect_err("the QC verifier must reject the same pending signer");
+        assert!(
+            qc_error.contains("outside active validator set"),
+            "unexpected QC error: {qc_error}"
+        );
+
+        let after_boundary = Block::new(
+            100,
+            vec![],
+            "parent-hash".to_string(),
+            "validator1".to_string(),
+            1,
+        );
+        assert_eq!(
+            validator_manager
+                .get_validator("validator7")
+                .expect("validator7 should remain registered")
+                .status,
+            ValidatorStatus::Shadow,
+            "the height-scoped membership resolver must not require an early registry mutation"
+        );
+        let vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator7",
+            &after_boundary,
+            1,
+            1,
+            &validator_manager,
+        )
+        .expect("validator7 must create a vote at its effective height");
+        assert_eq!(vote.block_index, 100);
+        assert_eq!(
+            validator_manager
+                .get_validator("validator7")
+                .expect("validator7 should remain registered")
+                .status,
+            ValidatorStatus::Shadow,
+            "vote construction must not mutate finalized validator state"
+        );
+
+        fs::remove_dir_all(temp_dir).ok();
+    }
+
+    #[test]
+    fn incompatible_epoch_validator_set_blocks_vote_signing() {
+        let _epoch_set_env_guard = epoch_set_env_test_lock()
+            .lock()
+            .expect("epoch validator set env test lock should succeed");
+        let validator_manager = approved_validator_manager(&["validator1"]);
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = env::temp_dir().join(format!("synergy-vote-epoch-compat-{unique}"));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let snapshot_path = temp_dir.join("epoch-validator-sets.json");
+        fs::write(
+            &snapshot_path,
+            serde_json::json!({
+                "epoch_validator_sets": [{
+                    "snapshot_format_version": crate::validator::SUPPORTED_EPOCH_VALIDATOR_SET_FORMAT_VERSION,
+                    "chain_id": 1264,
+                    "epoch_id": 0,
+                    "validator_set_version": 1,
+                    "effective_from_height": 1,
+                    "active_validators": ["validator1"],
+                    "quorum_threshold": 1,
+                    "validator_set_hash": "wrong-runtime-set",
+                    "required_binary_version": "0.0.0-incompatible"
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let _snapshot_path =
+            EnvVarGuard::set(EPOCH_VALIDATOR_SETS_ENV, &snapshot_path.to_string_lossy());
+        let block = Block::new(
+            1,
+            vec![],
+            "parent-hash".to_string(),
+            "validator1".to_string(),
+            1,
+        );
+
+        let error = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator1",
+            &block,
+            0,
+            1,
+            &validator_manager,
+        )
+        .expect_err("wrong binary version must prevent local vote signing");
+
+        fs::remove_dir_all(temp_dir).ok();
+        assert!(
+            error.contains("refusing vote because validator-set snapshot is incompatible"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            error.contains("requires binary version 0.0.0-incompatible"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -3177,6 +4752,87 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("\"block-z\""));
         assert!(lines[1].contains("\"block-a\""));
+    }
+
+    #[test]
+    fn committed_qc_hot_load_reads_only_a_bounded_tail_and_preserves_archive() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let _retention = EnvVarGuard::set(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV, "100");
+
+        let first_qc = test_qc_at_height("block-1", 1);
+        let line_size = serde_json::to_vec(&CommittedQcLogEntry {
+            block_hash: first_qc.block_hash.clone(),
+            qc: first_qc.clone(),
+        })
+        .unwrap()
+        .len()
+        .saturating_add(1);
+        let _max_load =
+            EnvVarGuard::set(COMMITTED_QC_HOT_LOAD_MAX_BYTES_ENV, &line_size.to_string());
+
+        for height in 1..=8 {
+            DualQuorumConsensus::append_committed_qc_to_log(&test_qc_at_height(
+                &format!("block-{height}"),
+                height,
+            ))
+            .unwrap();
+        }
+        let archive_before = fs::read(DualQuorumConsensus::committed_qc_log_path()).unwrap();
+
+        let loaded = DualQuorumConsensus::load_committed_qc_store_from_disk()
+            .expect("bounded committed QC tail should load");
+
+        assert!(!loaded.contains_key("block-1"));
+        assert!(loaded.contains_key("block-8"));
+        assert_eq!(
+            fs::read(DualQuorumConsensus::committed_qc_log_path()).unwrap(),
+            archive_before,
+            "hot loading must not rewrite or truncate the archival journal"
+        );
+    }
+
+    #[test]
+    fn committed_qc_hot_load_skips_oversized_legacy_snapshot() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+        let _retention = EnvVarGuard::set(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV, "100");
+        let journal_qc = test_qc_at_height("journal-current", 8);
+        let journal_line_size = serde_json::to_vec(&CommittedQcLogEntry {
+            block_hash: journal_qc.block_hash.clone(),
+            qc: journal_qc.clone(),
+        })
+        .unwrap()
+        .len()
+        .saturating_add(1);
+        let _max_load = EnvVarGuard::set(
+            COMMITTED_QC_HOT_LOAD_MAX_BYTES_ENV,
+            &journal_line_size.to_string(),
+        );
+
+        let mut legacy = BTreeMap::new();
+        for index in 0..16 {
+            let legacy_qc = test_qc(&format!("legacy-{index}"));
+            legacy.insert(legacy_qc.block_hash.clone(), legacy_qc);
+        }
+        fs::write(
+            DualQuorumConsensus::committed_qc_store_path(),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            fs::metadata(DualQuorumConsensus::committed_qc_store_path())
+                .unwrap()
+                .len()
+                > journal_line_size as u64
+        );
+
+        DualQuorumConsensus::append_committed_qc_to_log(&journal_qc).unwrap();
+        let loaded = DualQuorumConsensus::load_committed_qc_store_from_disk()
+            .expect("oversized legacy snapshot must not prevent journal tail load");
+
+        assert!(!loaded.contains_key("legacy-0"));
+        assert!(loaded.contains_key("journal-current"));
     }
 
     #[test]
@@ -3255,6 +4911,117 @@ mod tests {
             Some(value) => env::set_var(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV, value),
             None => env::remove_var(COMMITTED_QC_HOT_RETENTION_BLOCKS_ENV),
         }
+    }
+
+    #[test]
+    fn committed_qc_historical_lookup_uses_bounded_tail_index() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        for height in 1..=64 {
+            DualQuorumConsensus::append_committed_qc_to_log(&test_qc_at_height(
+                &format!("block-{height}"),
+                height,
+            ))
+            .unwrap();
+        }
+        let raw = fs::read(DualQuorumConsensus::committed_qc_log_path()).unwrap();
+        let line_size = raw.lines().next().unwrap().unwrap().len() + 1;
+        let _max_load = EnvVarGuard::set(
+            COMMITTED_QC_HOT_LOAD_MAX_BYTES_ENV,
+            &(line_size.saturating_mul(2)).to_string(),
+        );
+        COMMITTED_QC_LOG_PARSE_COUNT.store(0, Ordering::Relaxed);
+
+        let requested = HashSet::from(["block-64".to_string()]);
+        let qcs = DualQuorumConsensus::committed_qcs_from_log_for_block_hashes(&requested)
+            .expect("near-tail historical lookup should succeed");
+
+        assert_eq!(
+            qcs.iter()
+                .map(|qc| qc.block_hash.as_str())
+                .collect::<Vec<_>>(),
+            vec!["block-64"]
+        );
+        let parsed = COMMITTED_QC_LOG_PARSE_COUNT.load(Ordering::Relaxed);
+        assert!(
+            parsed < 64,
+            "near-tail lookup parsed the full prefix: {parsed} entries"
+        );
+    }
+
+    #[test]
+    fn committed_qc_historical_lookup_reuses_forward_cursor_for_catch_up_batches() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        for height in 1..=32 {
+            DualQuorumConsensus::append_committed_qc_to_log(&test_qc_at_height(
+                &format!("block-{height}"),
+                height,
+            ))
+            .unwrap();
+        }
+        let raw = fs::read(DualQuorumConsensus::committed_qc_log_path()).unwrap();
+        let line_size = raw.lines().next().unwrap().unwrap().len() + 1;
+        let _max_load = EnvVarGuard::set(
+            COMMITTED_QC_HOT_LOAD_MAX_BYTES_ENV,
+            &(line_size.saturating_mul(2)).to_string(),
+        );
+        COMMITTED_QC_LOG_PARSE_COUNT.store(0, Ordering::Relaxed);
+
+        let lookup = |first: u64, last: u64| {
+            let requested = (first..=last)
+                .map(|height| format!("block-{height}"))
+                .collect::<HashSet<_>>();
+            DualQuorumConsensus::committed_qcs_from_log_for_block_hashes(&requested)
+                .expect("forward historical lookup should succeed")
+        };
+
+        let first = lookup(1, 2);
+        assert_eq!(first.len(), 2);
+        let after_first = COMMITTED_QC_LOG_PARSE_COUNT.load(Ordering::Relaxed);
+
+        let second = lookup(3, 4);
+        assert_eq!(second.len(), 2);
+        let after_second = COMMITTED_QC_LOG_PARSE_COUNT.load(Ordering::Relaxed);
+
+        let third = lookup(5, 6);
+        assert_eq!(third.len(), 2);
+        let after_third = COMMITTED_QC_LOG_PARSE_COUNT.load(Ordering::Relaxed);
+
+        assert!(after_first < 32, "initial lookup parsed the full log");
+        assert!(
+            after_second.saturating_sub(after_first) <= 2,
+            "second catch-up batch rescanned the prefix: {} entries",
+            after_second.saturating_sub(after_first)
+        );
+        assert!(
+            after_third.saturating_sub(after_second) <= 2,
+            "third catch-up batch rescanned the prefix: {} entries",
+            after_third.saturating_sub(after_second)
+        );
+    }
+
+    #[test]
+    fn committed_qc_historical_lookup_fails_closed_on_malformed_tail() {
+        let _guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        DualQuorumConsensus::append_committed_qc_to_log(&test_qc_at_height("block-1", 1)).unwrap();
+        let log_path = DualQuorumConsensus::committed_qc_log_path();
+        let mut file = OpenOptions::new().append(true).open(&log_path).unwrap();
+        file.write_all(b"{not-json}\n").unwrap();
+        file.sync_all().unwrap();
+        let _max_load = EnvVarGuard::set(COMMITTED_QC_HOT_LOAD_MAX_BYTES_ENV, "4096");
+
+        let requested = HashSet::from(["block-1".to_string()]);
+        let error = DualQuorumConsensus::committed_qcs_from_log_for_block_hashes(&requested)
+            .expect_err("malformed historical log data must fail closed");
+        assert!(
+            error.contains("failed to parse committed QC log"),
+            "unexpected error: {error}"
+        );
     }
 
     fn signed_block(block_index: u64, nonce: u64, validator_id: &str) -> Block {
@@ -3401,14 +5168,24 @@ mod tests {
         let first_block = signed_block(7, 1, "validator1");
         let conflicting_block = signed_block(7, 2, "validator1");
 
-        let first_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator2", &first_block, 12, 1)
-                .expect("first vote should be created");
+        let first_vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator2",
+            &first_block,
+            12,
+            1,
+            &validator_manager,
+        )
+        .expect("first vote should be created");
         assert!(DualQuorumConsensus::register_vote_observation(&first_vote).is_none());
 
-        let conflicting_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator2", &conflicting_block, 12, 1)
-                .expect("conflicting vote should be created");
+        let conflicting_vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator2",
+            &conflicting_block,
+            12,
+            1,
+            &validator_manager,
+        )
+        .expect("conflicting vote should be created");
         let evidence = DualQuorumConsensus::register_vote_observation(&conflicting_vote)
             .expect("conflicting vote should emit equivocation evidence");
 
@@ -3433,14 +5210,24 @@ mod tests {
         let validator_manager = approved_validator_manager(&["validator1", "validator2"]);
         let block = signed_block(9, 1, "validator1");
 
-        let first_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator2", &block, 21, 1)
-                .expect("round one vote should be created");
+        let first_vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator2",
+            &block,
+            21,
+            1,
+            &validator_manager,
+        )
+        .expect("round one vote should be created");
         assert!(DualQuorumConsensus::register_vote_observation(&first_vote).is_none());
 
-        let next_round_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator2", &block, 21, 2)
-                .expect("round two vote should be created");
+        let next_round_vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator2",
+            &block,
+            21,
+            2,
+            &validator_manager,
+        )
+        .expect("round two vote should be created");
         assert!(DualQuorumConsensus::register_vote_observation(&next_round_vote).is_none());
 
         let validator = validator_manager
@@ -3469,14 +5256,24 @@ mod tests {
         let first_block = signed_block(10, 1, "validator1");
         let conflicting_block = signed_block(10, 2, "validator1");
 
-        let first_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator2", &first_block, 22, 1)
-                .expect("round one vote should be created");
+        let first_vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator2",
+            &first_block,
+            22,
+            1,
+            &validator_manager,
+        )
+        .expect("round one vote should be created");
         assert!(DualQuorumConsensus::register_vote_observation(&first_vote).is_none());
 
-        let conflicting_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator2", &conflicting_block, 22, 2)
-                .expect("round two vote should be created");
+        let conflicting_vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator2",
+            &conflicting_block,
+            22,
+            2,
+            &validator_manager,
+        )
+        .expect("round two vote should be created");
         assert!(
             DualQuorumConsensus::register_vote_observation(&conflicting_vote).is_none(),
             "vote observation is round-scoped; local vote intent enforces supersede safety before signing"
@@ -4137,8 +5934,14 @@ mod tests {
         );
 
         let block = signed_block(8, 1, "validator1");
-        let vote = DualQuorumConsensus::create_vote_for_validator("validator2", &block, 12, 1)
-            .expect("vote should be created");
+        let vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator2",
+            &block,
+            12,
+            1,
+            &validator_manager,
+        )
+        .expect("vote should be created");
 
         consensus
             .verify_vote_signature(&vote)
@@ -4177,15 +5980,30 @@ mod tests {
         );
 
         let block = signed_block(9, 1, "validator1");
-        let local_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator1", &block, 12, 1)
-                .expect("local vote should be created");
-        let remote_vote_a =
-            DualQuorumConsensus::create_vote_for_validator("validator2", &block, 12, 1)
-                .expect("remote vote should be created");
-        let remote_vote_b =
-            DualQuorumConsensus::create_vote_for_validator("validator3", &block, 12, 1)
-                .expect("remote vote should be created");
+        let local_vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator1",
+            &block,
+            12,
+            1,
+            &validator_manager,
+        )
+        .expect("local vote should be created");
+        let remote_vote_a = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator2",
+            &block,
+            12,
+            1,
+            &validator_manager,
+        )
+        .expect("remote vote should be created");
+        let remote_vote_b = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator3",
+            &block,
+            12,
+            1,
+            &validator_manager,
+        )
+        .expect("remote vote should be created");
 
         let expected_validators = ["validator1", "validator2", "validator3", "validator4"]
             .into_iter()
@@ -4226,16 +6044,32 @@ mod tests {
         );
 
         let block = signed_block(10, 1, "validator1");
-        let local_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator1", &block, 12, 4)
-                .expect("local vote should be created");
-        let prior_round_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator2", &block, 12, 2)
-                .expect("prior round vote should be created");
+        let local_vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator1",
+            &block,
+            12,
+            4,
+            &validator_manager,
+        )
+        .expect("local vote should be created");
+        let prior_round_vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator2",
+            &block,
+            12,
+            2,
+            &validator_manager,
+        )
+        .expect("prior round vote should be created");
         let conflicting_block = signed_block(10, 1, "validator3");
         let conflicting_prior_round_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator2", &conflicting_block, 12, 2)
-                .expect("conflicting prior round vote should be created");
+            DualQuorumConsensus::create_vote_for_validator_with_manager(
+                "validator2",
+                &conflicting_block,
+                12,
+                2,
+                &validator_manager,
+            )
+            .expect("conflicting prior round vote should be created");
         assert!(
             DualQuorumConsensus::register_vote_observation(&conflicting_prior_round_vote).is_none()
         );
@@ -4283,16 +6117,31 @@ mod tests {
         );
 
         let block = signed_block(10, 1, "validator1");
-        let local_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator1", &block, 12, 4)
-                .expect("local vote should be created");
-        let mut invalid_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator2", &block, 12, 2)
-                .expect("invalid candidate vote should be created");
+        let local_vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator1",
+            &block,
+            12,
+            4,
+            &validator_manager,
+        )
+        .expect("local vote should be created");
+        let mut invalid_vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator2",
+            &block,
+            12,
+            2,
+            &validator_manager,
+        )
+        .expect("invalid candidate vote should be created");
         invalid_vote.signature.signature_data = b"invalid".to_vec();
-        let valid_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator2", &block, 12, 3)
-                .expect("valid duplicate candidate vote should be created");
+        let valid_vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator2",
+            &block,
+            12,
+            3,
+            &validator_manager,
+        )
+        .expect("valid duplicate candidate vote should be created");
 
         let expected_validators = ["validator1", "validator2", "validator3"]
             .into_iter()
@@ -4489,6 +6338,88 @@ mod tests {
     }
 
     #[test]
+    fn synergy_score_does_not_change_single_cluster_vote_power() {
+        let _vote_tracking_guard = DualQuorumConsensus::test_vote_tracking_guard();
+        DualQuorumConsensus::reset_test_vote_tracking();
+
+        let validator_manager = approved_validator_manager(&[
+            "validator1",
+            "validator2",
+            "validator3",
+            "validator4",
+            "validator5",
+            "validator6",
+        ]);
+        {
+            let mut registry = validator_manager
+                .registry
+                .lock()
+                .expect("score-divergence registry should lock");
+            for (address, score) in [
+                ("validator1", 100.0),
+                ("validator2", 100.0),
+                ("validator3", 1.0),
+                ("validator4", 1.0),
+                ("validator5", 1.0),
+                ("validator6", 1.0),
+            ] {
+                registry
+                    .validators
+                    .get_mut(address)
+                    .expect("validator should be registered")
+                    .synergy_score = score;
+            }
+        }
+
+        let pqc_manager = Arc::new(Mutex::new(PQCManager::new()));
+        let mut consensus = DualQuorumConsensus::new(
+            Arc::clone(&validator_manager),
+            Arc::clone(&pqc_manager),
+            false,
+            3,
+            4,
+            2,
+            6,
+        );
+        let block = signed_block_for_manager(42, 1, "validator1", &validator_manager);
+        let votes = ["validator3", "validator4", "validator5", "validator6"]
+            .into_iter()
+            .map(|address| {
+                DualQuorumConsensus::create_vote_for_validator_with_manager(
+                    address,
+                    &block,
+                    1,
+                    1,
+                    &validator_manager,
+                )
+                .expect("active validator should sign a vote")
+            })
+            .collect::<Vec<_>>();
+        let active_validators =
+            consensus_membership_validators(validator_manager.get_active_validators());
+
+        assert_eq!(
+            consensus.required_validator_votes(active_validators.len()),
+            4
+        );
+        assert!(
+            consensus.has_commit_quorum(&active_validators, &votes),
+            "the required dynamic quorum must be independent of Synergy Score"
+        );
+
+        let qc = consensus
+            .check_quorums_and_commit(&block, 1, 1, &votes)
+            .expect("four valid signers must produce a single-cluster QC");
+        assert_eq!(qc.cumulative_weight, 4.0);
+        DualQuorumConsensus::verify_commit_certificate_for_block_static(
+            &block,
+            &qc,
+            &validator_manager,
+        )
+        .expect("QC verification must use signer count rather than Synergy Score");
+    }
+
+    #[test]
     fn exact_two_thirds_equal_weight_votes_commit() {
         let validator_manager = equal_weight_validator_manager(100);
         let pqc_manager = Arc::new(Mutex::new(PQCManager::new()));
@@ -4651,16 +6582,26 @@ mod tests {
         let first_block = signed_block(11, 1, "validator1");
         let conflicting_block = signed_block(11, 2, "validator1");
 
-        let first_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator2", &first_block, 30, 1)
-                .expect("first local vote should be created");
+        let first_vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator2",
+            &first_block,
+            30,
+            1,
+            &validator_manager,
+        )
+        .expect("first local vote should be created");
         consensus
             .register_local_vote_or_slash(&first_vote)
             .expect("first local vote should be accepted");
 
-        let conflicting_vote =
-            DualQuorumConsensus::create_vote_for_validator("validator2", &conflicting_block, 30, 1)
-                .expect("conflicting local vote should be created");
+        let conflicting_vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator2",
+            &conflicting_block,
+            30,
+            1,
+            &validator_manager,
+        )
+        .expect("conflicting local vote should be created");
         let error = consensus
             .register_local_vote_or_slash(&conflicting_vote)
             .expect_err("conflicting local vote should be rejected");
@@ -4702,8 +6643,14 @@ mod tests {
         );
 
         let block = signed_block(12, 1, "validator1");
-        let vote = DualQuorumConsensus::create_vote_for_validator("validator2", &block, 31, 1)
-            .expect("vote should be created");
+        let vote = DualQuorumConsensus::create_vote_for_validator_with_manager(
+            "validator2",
+            &block,
+            31,
+            1,
+            &validator_manager,
+        )
+        .expect("vote should be created");
 
         consensus
             .register_local_vote_or_slash(&vote)
@@ -4731,6 +6678,7 @@ mod tests {
     fn epoch_randomness_is_deterministic_for_shared_qc() {
         let previous_qc = QuorumCertificate {
             block_hash: "shared-block-hash".to_string(),
+            cluster_id: None,
             epoch_number: 7,
             round_number: 3,
             aggregate_signature: vec![1, 2, 3],
@@ -4754,6 +6702,7 @@ mod tests {
     fn epoch_randomness_ignores_qc_timestamp_differences() {
         let previous_qc_a = QuorumCertificate {
             block_hash: "shared-block-hash".to_string(),
+            cluster_id: None,
             epoch_number: 7,
             round_number: 3,
             aggregate_signature: vec![1, 2, 3],
@@ -4780,6 +6729,7 @@ mod tests {
     fn epoch_randomness_ignores_local_beacon_epoch_drift() {
         let previous_qc = QuorumCertificate {
             block_hash: "shared-block-hash".to_string(),
+            cluster_id: None,
             epoch_number: 7,
             round_number: 3,
             aggregate_signature: vec![1, 2, 3],
@@ -4876,6 +6826,10 @@ impl EntropyBeacon {
         hasher.update(qc.block_hash.as_bytes());
         hasher.update(qc.epoch_number.to_be_bytes());
         hasher.update(qc.round_number.to_be_bytes());
+        hasher.update([qc.cluster_id.is_some() as u8]);
+        if let Some(cluster_id) = qc.cluster_id {
+            hasher.update(cluster_id.to_be_bytes());
+        }
         hasher.update(&qc.aggregate_signature);
         hasher.update(&qc.participant_bitmap);
         hasher.update([qc.validation_quorum_met as u8]);
@@ -4912,42 +6866,11 @@ impl ValidatorRotation {
     }
 
     pub fn rotate_validators(&self) {
-        let active_validators = self.validator_manager.get_active_validators();
-        let epoch_randomness = self.get_current_epoch_randomness();
-
-        // Use the canonical cluster policy so a new cluster is not created
-        // until it can contain at least five validators.
-        let num_clusters = target_validator_cluster_count(active_validators.len());
-        if num_clusters == 0 {
-            return;
-        }
-
-        // Assign validators to clusters using deterministic randomness
-        for validator in &active_validators {
-            self.assign_to_cluster(&validator.address, &epoch_randomness, num_clusters);
-            // Update validator's cluster assignment
-        }
-    }
-
-    fn assign_to_cluster(
-        &self,
-        validator_address: &str,
-        epoch_randomness: &[u8],
-        num_clusters: usize,
-    ) -> usize {
-        // Create hash of epoch_randomness + validator_address
-        let mut hasher = Sha3_512::new();
-        hasher.update(epoch_randomness);
-        hasher.update(validator_address.as_bytes());
-        let hash = hasher.finalize();
-
-        // Use first 8 bytes as cluster assignment
-        let cluster_hash = u64::from_be_bytes(hash[..8].try_into().unwrap());
-        (cluster_hash % num_clusters as u64) as usize
-    }
-
-    fn get_current_epoch_randomness(&self) -> Vec<u8> {
-        let beacon = self.entropy_beacon.lock().unwrap();
-        beacon.epoch_randomness.clone()
+        let epoch = self
+            .entropy_beacon
+            .lock()
+            .map(|beacon| beacon.current_epoch)
+            .unwrap_or_else(|_| self.validator_manager.get_current_epoch());
+        self.validator_manager.reorganize_clusters_for_epoch(epoch);
     }
 }

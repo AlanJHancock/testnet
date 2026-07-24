@@ -830,7 +830,7 @@ mod tests {
     use super::*;
     use crate::consensus::self_realign::{
         create_snapshot_manifest, sign_snapshot_manifest, SnapshotBuildInput, SnapshotQcEvidence,
-        SNAPSHOT_CLASS_VALIDATOR_PRUNED,
+        SNAPSHOT_CLASS_VALIDATOR_PRUNED, VALIDATOR_PRUNED_REQUIRED_STATE_FILES,
     };
     use crate::crypto::aegis_pqvm::AegisPqvmSigner;
     use crate::synergy_types::{AegisPqPublicKey, Epoch};
@@ -851,9 +851,14 @@ mod tests {
             .as_nanos();
         let root = std::env::temp_dir().join(format!("synergy-archive-reseed-{label}-{unique}"));
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("chain.json"), b"[]").unwrap();
-        std::fs::write(root.join("canonical_locks.json"), b"{}").unwrap();
-        std::fs::write(root.join("committed_qcs.jsonl"), b"{}\n").unwrap();
+        for file_name in VALIDATOR_PRUNED_REQUIRED_STATE_FILES {
+            let contents = match *file_name {
+                "chain.json" => b"[]".as_slice(),
+                "committed_blocks.jsonl" | "committed_qcs.jsonl" => b"{}\n".as_slice(),
+                _ => b"{}".as_slice(),
+            };
+            std::fs::write(root.join(file_name), contents).unwrap();
+        }
         root
     }
 
@@ -1350,10 +1355,12 @@ mod tests {
         let m4_setup = std::fs::read_to_string(root.join("macos-m4/setup-archive-validator-m4.sh"))
             .expect("m4 setup script");
         for required in [
-            "STORAGE_VOLUME_REL=\"/Volumes/Synergy_Archive\"",
-            "LOCAL_ROOT_REL=\"/Users/Shared/Synergy/archive-validator\"",
-            "PUBLISH_ROOT_REL=\"${SMB_ROOT_REL}/snapshots\"",
-            "INCOMING_BOOTSTRAP_REL=\"${SMB_ROOT_REL}/incoming/bootstrap\"",
+            "source \"${PACKAGE_ROOT}/archive-paths.sh\"",
+            "archive_paths_load_defaults",
+            "archive_paths_validate",
+            "SMB_ROOT=\"$(archive_paths_prefix \"${TEST_ROOT}\" \"${ARCHIVE_STORAGE_VOLUME}/archive-validator\")\"",
+            "PUBLISH_ROOT=\"$(archive_paths_prefix \"${TEST_ROOT}\" \"${ARCHIVE_PUBLISH_ROOT}\")\"",
+            "INCOMING_BOOTSTRAP=\"${SMB_ROOT}/incoming/bootstrap\"",
             "xattr -dr com.apple.quarantine",
             "codesign --force --sign -",
             "launchctl kickstart -k",
@@ -1369,13 +1376,32 @@ mod tests {
             );
         }
 
+        let m4_paths = std::fs::read_to_string(root.join("macos-m4/archive-paths.sh"))
+            .expect("m4 path contract");
+        for required in [
+            "ARCHIVE_STORAGE_VOLUME=\"${SYNERGY_ARCHIVE_STORAGE_VOLUME:-/Volumes/Synergy_Archive}\"",
+            "ARCHIVE_APP_ROOT=\"${SYNERGY_ARCHIVE_APP_ROOT:-${SYNERGY_ARCHIVE_ROOT:-/Users/Shared/Synergy/archive-validator}}\"",
+            "ARCHIVE_PUBLISH_ROOT=\"${SYNERGY_SNAPSHOT_PUBLISH_ROOT:-${ARCHIVE_STORAGE_VOLUME}/archive-validator/snapshots}\"",
+            "archive_paths_validate()",
+            "archive app root and publish root must be separate trees",
+            "archive publish root must be below storage volume",
+        ] {
+            assert!(
+                m4_paths.contains(required),
+                "M4 path contract must contain {required}"
+            );
+        }
+
         let m4_verify =
             std::fs::read_to_string(root.join("macos-m4/verify-archive-validator-m4.sh"))
                 .expect("m4 verify script");
         for required in [
-            "LOCAL_ROOT_REL=\"/Users/Shared/Synergy/archive-validator\"",
-            "PUBLISH_ROOT_REL=\"${SMB_ROOT_REL}/snapshots\"",
-            "INCOMING_BOOTSTRAP_REL=\"${SMB_ROOT_REL}/incoming/bootstrap\"",
+            "source \"${PACKAGE_ROOT}/archive-paths.sh\"",
+            "archive_paths_load_defaults",
+            "archive_paths_validate",
+            "SMB_ROOT=\"$(archive_paths_prefix \"${TEST_ROOT}\" \"${ARCHIVE_STORAGE_VOLUME}/archive-validator\")\"",
+            "PUBLISH_ROOT=\"$(archive_paths_prefix \"${TEST_ROOT}\" \"${ARCHIVE_PUBLISH_ROOT}\")\"",
+            "INCOMING_BOOTSTRAP=\"${SMB_ROOT}/incoming/bootstrap\"",
             "assert_no_quarantine",
             "assert_codesign_valid",
             "assert_launchd_running",
@@ -1394,8 +1420,12 @@ mod tests {
             std::fs::read_to_string(root.join("macos-m4/restore-archive-bootstrap-m4.sh"))
                 .expect("m4 restore script");
         for required in [
-            "LOCAL_ROOT_REL=\"/Users/Shared/Synergy/archive-validator\"",
-            "INCOMING_BOOTSTRAP_REL=\"${SMB_ROOT_REL}/incoming/bootstrap\"",
+            "source \"${PACKAGE_ROOT}/archive-paths.sh\"",
+            "archive_paths_load_defaults",
+            "archive_paths_validate",
+            "APP_ROOT=\"$(archive_paths_prefix \"${TEST_ROOT}\" \"${ARCHIVE_APP_ROOT}\")\"",
+            "SMB_ROOT=\"$(archive_paths_prefix \"${TEST_ROOT}\" \"${ARCHIVE_STORAGE_VOLUME}/archive-validator\")\"",
+            "INCOMING_BOOTSTRAP=\"${SMB_ROOT}/incoming/bootstrap\"",
             "archive storage volume missing in test root",
             "archive-bootstrap",
             "archive-validator-bootstrap",
@@ -1417,7 +1447,12 @@ mod tests {
             std::fs::read_to_string(root.join("macos-m4/run-isolated-mac-acceptance.sh"))
                 .expect("m4 acceptance script");
         for required in [
-            "APP_ROOT=\"${TEST_ROOT}/Users/Shared/Synergy/archive-validator\"",
+            "source \"${PACKAGE_ROOT}/archive-paths.sh\"",
+            "archive_paths_load_defaults",
+            "archive_paths_validate",
+            "STORAGE_VOLUME=\"${TEST_ROOT}${ARCHIVE_STORAGE_VOLUME}\"",
+            "APP_ROOT=\"${TEST_ROOT}${ARCHIVE_APP_ROOT}\"",
+            "PUBLISH_ROOT=\"${TEST_ROOT}${ARCHIVE_PUBLISH_ROOT}\"",
             "INCOMING_BOOTSTRAP=\"${SMB_ROOT}/incoming/bootstrap\"",
             "mkdir -p \"${STORAGE_VOLUME}\"",
             "start_plist_service",
