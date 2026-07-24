@@ -375,7 +375,17 @@
         }
       }
     }).catch(function() {});
-  })();
+  
+  function loadLoopDemo() {
+    evictWorkspaceContractByName('LoopDemo');
+    document.getElementById('editor').value = LOOP_LINES.join('\n');
+    updateLineNums();
+    clearResults();
+    syncCompileBtn();
+    setStatus('LoopDemo loaded — compile and deploy, then call init() before runIterations(). Try factorial(5), sumRange(1,100), countEven(10), sqrtFloor(16), power(2,10).', 'info');
+  }
+  window.loadLoopDemo = loadLoopDemo;
+})();
   var SESSION_RUN_URL = 'https://hanksweb.co.uk/synq/session/run';
   var SESSION_DEL_URL   = 'https://hanksweb.co.uk/synq/session/';
   var SESSION_NONCE_URL = 'https://hanksweb.co.uk/synq/session/';
@@ -2856,7 +2866,34 @@
     }
   }
 
-  var VAULT_LINES = [
+  var BLANK_LINES = [
+  'pragma synq ^0.9;',
+  '',
+  'contract Blank {',
+  '  state {',
+  '    value: u256;',
+  '    initialised: bool;',
+  '  }',
+  '',
+  '  function init() -> bool as caller {',
+  '    if (initialised) { return false; }',
+  '    value = 0;',
+  '    initialised = true;',
+  '    return true;',
+  '  }',
+  '',
+  '  function setValue(v: u256) -> bool as caller {',
+  '    value = v;',
+  '    return true;',
+  '  }',
+  '',
+  '  function getValue() -> u256 {',
+  '    return value;',
+  '  }',
+  '}',
+];
+
+var VAULT_LINES = [
     'pragma synq ^0.9;',
     '',
     '// TokenVault -- primary entry point.  Mints/burns SimpleToken via extern_call.',
@@ -3873,11 +3910,6 @@ var LOOP_LINES = [
   window.loadTypeTest = loadTypeTest;
 }
 
-function loadLoopDemo() {
-  evictWorkspaceContractByName('LoopDemo');
-  document.getElementById('editor').value = LOOP_LINES.join('\n');
-  setStatus('LoopDemo loaded — compile and deploy, then call init() before runIterations(). Try factorial(5), sumRange(1,100), countEven(10), sqrtFloor(16), power(2,10).', 'info');
-}
 )();
 </script>
 </body>
