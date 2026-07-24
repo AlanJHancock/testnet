@@ -856,7 +856,7 @@ async function runBench() {
 // ── Execution Phase (fresh compile) ───────────────────────────────────────
 function defaultArgForType(ty) {
   ty = (ty || '').toLowerCase();
-  if (ty === 'bool') return false;
+  if (ty === 'bool') return 'false';
   if (ty === 'str' || ty === 'string') return 'test';
   if (ty === 'u256' || ty === 'uint256' || ty === 'u128') return '1';
   if (ty === 'i32' || ty === 'int32') return 1;
@@ -864,19 +864,26 @@ function defaultArgForType(ty) {
   return '1';
 }
 
-function defaultArgsForFunction(fn) {
+function defaultArgsForFunction(fn, walletAddr) {
   var params = fn.params || [];
   var args = []; var types = [];
+  var addrNames = ['to','from','who','target','account','admin','grantee','recipient','addr','address','spender'];
   for (var p = 0; p < params.length; p++) {
-    args.push(defaultArgForType(params[p].ty));
-    types.push(params[p].ty || 'u256');
+    var pname = (params[p].name || '').toLowerCase();
+    var pty = (params[p].ty || '').toLowerCase();
+    // Address-like params: use wallet address
+    if (walletAddr && (addrNames.indexOf(pname) >= 0 || pty === 'address')) {
+      args.push(walletAddr);
+      types.push('u256');
+    } else {
+      args.push(defaultArgForType(params[p].ty));
+      types.push(params[p].ty || 'u256');
+    }
   }
   return { args: args, types: types };
 }
 
 function fmtArg(a) {
-  if (typeof a === 'string') return a;
-  if (typeof a === 'boolean') return a ? 'true' : 'false';
   return String(a);
 }
 
@@ -1034,7 +1041,7 @@ async function runExecPhaseFresh(source, name) {
 
   for (var fi = 0; fi < fns.length; fi++) {
     var fn = fns[fi];
-    var da = defaultArgsForFunction(fn);
+    var da = defaultArgsForFunction(fn, evmAddr);
     var argStr = da.args.map(fmtArg).join(', ');
     var callSig = fn.name + '(' + argStr + ')';
 
