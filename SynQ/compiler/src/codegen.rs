@@ -357,7 +357,35 @@ impl CodeGenerator {
         //   LoadCaller, LoadImm256(keccak256(cap_name)), ExternCall(__CapRegistry, hasCapability, 2)
         //   JumpIf past revert, Revert "missing capability: <cap>"
 
-        for stmt in &f.body.statements {
+        // ── Implicit return from extern_call ─────────────────────
+        // If the last statement is an extern_call, the function declares a
+        // return type (has_return), and there is no explicit `return` in the
+        // body, skip the Pop so the extern_call's return value stays on the
+        // stack and becomes the function's return value.
+        let fn_has_return = *self.function_has_return.get(&f.name).unwrap_or(&false);
+        let has_explicit_return = f.body.statements.iter().any(|s| matches!(s, Statement::Return(_)));
+        let stmt_count = f.body.statements.len();
+        for (i, stmt) in f.body.statements.iter().enumerate() {
+            let is_last = i + 1 == stmt_count;
+            if is_last && fn_has_return && !has_explicit_return {
+                if let Statement::ExternCall { contract, function, args } = stmt {
+                    // Push args onto stack left-to-right
+                    for arg in args.iter() {
+                        self.gen_expression(arg, &mut scope)?;
+                    }
+                    let contract_bytes = contract.as_bytes();
+                    let fn_bytes       = function.as_bytes();
+                    let arg_count      = args.len() as u8;
+                    self.assembler.emit_op(OpCode::ExternCall);
+                    self.assembler.emit_u32(contract_bytes.len() as u32);
+                    self.assembler.emit_raw(contract_bytes);
+                    self.assembler.emit_u32(fn_bytes.len() as u32);
+                    self.assembler.emit_raw(fn_bytes);
+                    self.assembler.emit_raw(&[arg_count]);
+                    // Skip Pop — return value stays on stack for the trailing Return
+                    continue;
+                }
+            }
             self.gen_statement(stmt, &mut scope)?;
         }
 
