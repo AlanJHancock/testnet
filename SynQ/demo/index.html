@@ -3578,10 +3578,10 @@
 
     // Sort pills: init first, then setters, then getters, then alphabetical
     var PILL_ORDER = ['init', 'deposit', 'withdraw', 'netFlow', 'balance', 'assertSync', 'getTotalIn', 'getTotalOut', 'getTotal', 'assertBalance', 'getOwner', 'getPaused', 'mint', 'burn', 'setPaused', 'testArithmetic', 'testSigned', 'testCompare', 'testBool', 'testString', 'testMapSet', 'testMapGet', 'testMapUpdate', 'testSetAdd', 'testSetContains', 'testSetRemove', 'testRequirePass', 'testRequireFail', 'adminOnly', 'setLabel', 'getUVal', 'getIVal', 'getBVal', 'getSVal', 'getOpCount', 'getAdmin', 'isReady'];
-    // mint/burn are hidden ONLY on SimpleToken to prevent direct calls that bypass
+    // Internal functions hidden on SimpleToken — called via extern_call by TokenVault,
     // vault accounting. Any other contract (including user contracts) shows them normally.
     if (currentContractName === 'SimpleToken') {
-      var VAULT_INTERNAL = ['mint', 'burn'];
+      var VAULT_INTERNAL = ['mint', 'burn', 'checkBalance', 'assertBalance'];
       parsedFunctions = parsedFunctions.filter(function(fn) {
         return VAULT_INTERNAL.indexOf(fn.name) === -1;
       });
