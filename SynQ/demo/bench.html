@@ -1070,8 +1070,10 @@ async function runExecPhaseFresh(source, name) {
 
   // Step 2: Grant roles to secondary wallet
   elog('  [pre] Setting up secondary wallet...');
+  var evmAddr1Dec = BigInt(evmAddr).toString();
   var preSetup = [
     { name: 'grantAdmin', args: [evmAddr2Dec], types: ['u256'] },
+    { name: 'grantMinter', args: [evmAddr1Dec], types: ['u256'] },
     { name: 'grantMinter', args: [evmAddr2Dec], types: ['u256'] },
     { name: 'register', args: [evmAddr2Dec], types: ['u256'] },
     { name: 'mint', args: [evmAddr2Dec, '1000'], types: ['u256', 'u256'] }
