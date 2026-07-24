@@ -51,6 +51,7 @@
   #log { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; font-size: 12px; white-space: pre-wrap; min-height: 200px; max-height: 500px; overflow-y: auto; line-height: 1.5; }
   .verdict { border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-top: 12px; background: #161b22; font-size: 13px; line-height: 1.6; }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
 </head>
 <body>
 
@@ -1005,7 +1006,28 @@ async function runExecPhaseFresh(source, name) {
 
   var sid = sessResp.session_id;
   elog('Session: ' + sid.slice(0, 16) + '...');
+
+  // Create ephemeral keypair for EIP-712 signing
+  var wallet = ethers.Wallet.createRandom();
+  var evmAddr = wallet.address;
+  elog('Signer: ' + evmAddr);
   elog('');
+
+  // Build EIP-712 domain (must match server: name="SynQ \u00b7 <ContractName>", chainId=1337)
+  var verifyingContract = '0x' + ethers.keccak256(ethers.toUtf8Bytes('SynQ:' + cname)).slice(26, 66);
+  var domain = {
+    name: 'SynQ \u00b7 ' + cname,
+    version: '1',
+    chainId: 1337,
+    verifyingContract: verifyingContract
+  };
+  var types = {
+    ContractCall: [
+      { name: 'callSignature', type: 'string' },
+      { name: 'sessionId', type: 'string' },
+      { name: 'nonce', type: 'string' }
+    ]
+  };
 
   var execTimes = [];
   var results = [];
@@ -1014,9 +1036,33 @@ async function runExecPhaseFresh(source, name) {
     var fn = fns[fi];
     var da = defaultArgsForFunction(fn);
     var argStr = da.args.map(fmtArg).join(', ');
+    var callSig = fn.name + '(' + argStr + ')';
 
-    elog('  [' + (fi+1) + '/' + fns.length + '] ' + fn.name + '(' + argStr + ')...');
+    elog('  [' + (fi+1) + '/' + fns.length + '] ' + callSig + '...');
 
+    // Step 1: Get nonce
+    var nonceResp;
+    try {
+      nonceResp = await fetchRetry('/synq/session/' + sid + '/nonce', { method: 'GET' }, 'nonce');
+    } catch(ex) {
+      elog('    ERROR getting nonce: ' + ex);
+      results.push({ name: fn.name, args: argStr, ok: false, result: 'nonce error: ' + ex, time: 0 });
+      continue;
+    }
+    var nonce = nonceResp.nonce || nonceResp;
+
+    // Step 2: Sign EIP-712 typed data
+    var message = { callSignature: callSig, sessionId: sid, nonce: nonce };
+    var sig;
+    try {
+      sig = await wallet.signTypedData(domain, types, message);
+    } catch(ex) {
+      elog('    ERROR signing: ' + ex);
+      results.push({ name: fn.name, args: argStr, ok: false, result: 'sign error: ' + ex, time: 0 });
+      continue;
+    }
+
+    // Step 3: Call function with auth
     var t0 = performance.now();
     var runResp;
     try {
@@ -1028,7 +1074,10 @@ async function runExecPhaseFresh(source, name) {
           function: fn.name,
           args: da.args,
           param_types: da.types,
-          call_signature: fn.name + '(' + argStr + ')'
+          call_signature: callSig,
+          evm_address: evmAddr,
+          evm_signature: sig,
+          call_nonce: nonce
         })
       }, fn.name);
     } catch(ex) {
