@@ -1255,6 +1255,25 @@ async function runExecPhaseFresh(source, name) {
     } catch(ex) { elog('    \u2717 ' + sg.name + ' failed: ' + ex); }
   }
 
+  // 2b. Proactively mint tokens to both wallets if mint exists
+  //     (covers burn/transfer which need non-zero balance even without requires_state)
+  var MINT_AMOUNT = '1000';
+  if (fnByName['mint']) {
+    var mintTargets = [
+      { name: 'mint', args: [evmAddr1Dec, MINT_AMOUNT], types: ['u256', 'u256'] },
+      { name: 'mint', args: [evmAddr2Dec, MINT_AMOUNT], types: ['u256', 'u256'] }
+    ];
+    elog('  [smart-setup] Minting ' + MINT_AMOUNT + ' tokens to both wallets...');
+    for (var mti = 0; mti < mintTargets.length; mti++) {
+      var mt = mintTargets[mti];
+      try {
+        var mtRes = await signedCall(mt.name, mt.args, mt.types);
+        elog('    ' + (mtRes.success ? '\u2713' : '\u2717') + ' ' + mtRes.callSig + ' ' + (mtRes.success ? '' : (mtRes.error || '')));
+        if (mtRes.success) updateState(mt.name, fnByName['mint'], mt.args);
+      } catch(ex) { elog('    \u2717 mint failed: ' + ex); }
+    }
+  }
+
   // 3. Scan all functions for unsatisfied requires_state and build setup calls
   var dynamicSetup = [];
   for (var fi2 = 0; fi2 < fns.length; fi2++) {
@@ -1286,10 +1305,14 @@ async function runExecPhaseFresh(source, name) {
     }
   }
 
-  elog('  [smart-setup] Done. State: registered=' + Object.keys(stateTracker.registered).length +
+  var balSummary = '';
+  for (var ba in stateTracker.balance) {
+    balSummary += ba.slice(0,10) + '..=' + stateTracker.balance[ba] + ' ';
+  }
+  elog('  [smart-setup] Done. registered=' + Object.keys(stateTracker.registered).length +
        ' admin=' + Object.keys(stateTracker.admin).length +
        ' minter=' + Object.keys(stateTracker.minter).length +
-       ' balance=' + Object.keys(stateTracker.balance).length);
+       ' balances=[' + balSummary.trim() + ']');
   elog('');
 
   var execTimes = [];
