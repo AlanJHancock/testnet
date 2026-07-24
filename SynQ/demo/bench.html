@@ -903,6 +903,9 @@ async function runExecPhaseFresh(source, name) {
   }
 
   elog('Compiling ' + (name || 'unnamed') + ' (' + source.length + ' chars)...');
+  elog('(waiting 2s for rate-limit window to clear)...');
+
+  await new Promise(r => setTimeout(r, 2000));
 
   var compileResp;
   try {
@@ -917,8 +920,25 @@ async function runExecPhaseFresh(source, name) {
   }
 
   if (!compileResp.success) {
-    elog('Compile failed: ' + JSON.stringify(compileResp.errors || 'unknown'));
-    return;
+    var errs = compileResp.errors || [];
+    if (errs.some(function(e) { return e.indexOf('rate limit') >= 0; })) {
+      elog('Rate limited, waiting 3s and retrying...');
+      await new Promise(r => setTimeout(r, 3000));
+      try {
+        compileResp = await fetch('/synq/compile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ source: source })
+        }).then(r => r.json());
+      } catch(ex) {
+        elog('ERROR: retry compile failed: ' + ex);
+        return;
+      }
+    }
+    if (!compileResp.success) {
+      elog('Compile failed: ' + JSON.stringify(compileResp.errors || 'unknown'));
+      return;
+    }
   }
 
   var fns = compileResp.functions || [];
