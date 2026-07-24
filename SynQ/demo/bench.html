@@ -856,7 +856,7 @@ async function runBench() {
 // ── Execution Phase (fresh compile) ───────────────────────────────────────
 function defaultArgForType(ty) {
   ty = (ty || '').toLowerCase();
-  if (ty === 'bool') return '0';
+  if (ty === 'bool') return '1';
   if (ty === 'str' || ty === 'string') return 'test';
   if (ty === 'u256' || ty === 'uint256' || ty === 'u128') return '1';
   if (ty === 'i32' || ty === 'int32') return 1;
