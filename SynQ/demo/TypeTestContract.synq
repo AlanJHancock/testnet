@@ -95,19 +95,21 @@ contract TypeTestContract {
     return cat;
   }
 
-  function setLabel(label: str) as caller {
+  function setLabel(label: str) -> bool as caller {
     require(ready, "not initialised");
     require(!labelled, "label already set");
     s_val    = label;
     labelled = true;
+    return true;
   }
 
   // ── Map operations ─────────────────────────────────────────────────────────
-  function testMapSet(key: u256, val: u256) as caller {
+  function testMapSet(key: u256, val: u256) -> bool as caller {
     require(ready, "not initialised");
     require(key > 0, "key must be > 0");
     balances[key] = val;
     op_count = op_count + 1;
+    return true;
   }
 
   function testMapGet(key: u256) -> u256 {
