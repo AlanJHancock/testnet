@@ -1339,17 +1339,58 @@ async function runExecPhaseFresh(source, name) {
     var argStr = da.args.map(fmtArg).join(', ');
     var callSig = fn.name + '(' + argStr + ')';
 
-    // Pre-call setup: deregister(target) fails if target has tokens — burn them first
-    if (fn.name.toLowerCase().indexOf('deregister') >= 0 && fnByName['burn'] && da.args[0]) {
-      var dTarget = da.args[0];
-      var dBal = stateTracker.balance[dTarget] || 0;
+    // ── Pre-call setup: fix state conflicts before calling the target function ──
+    var targetAddr = da.args[0] || null;
+
+    // deregister(target): burn target's tokens first
+    if (fn.name.toLowerCase().indexOf('deregister') >= 0 && fnByName['burn'] && targetAddr) {
+      var dBal = stateTracker.balance[targetAddr] || 0;
       if (dBal > 0) {
-        elog('  [' + (fi+1) + '/' + fns.length + '] [pre-call] burn(' + dTarget.slice(0,10) + '..., ' + dBal + ') to clear balance for deregister...');
+        elog('  [' + (fi+1) + '/' + fns.length + '] [pre-call] burn(' + targetAddr.slice(0,10) + '..., ' + dBal + ') to clear balance for deregister...');
         try {
-          var burnRes = await signedCall('burn', [dTarget, String(dBal)], ['u256', 'u256']);
+          var burnRes = await signedCall('burn', [targetAddr, String(dBal)], ['u256', 'u256']);
           elog('    ' + (burnRes.success ? '✓' : '✗') + ' ' + burnRes.callSig + ' ' + (burnRes.success ? '' : (burnRes.error || '')));
-          if (burnRes.success) updateState('burn', fnByName['burn'] || {}, [dTarget, String(dBal)]);
+          if (burnRes.success) updateState('burn', fnByName['burn'] || {}, [targetAddr, String(dBal)]);
         } catch(ex) { elog('    ✗ pre-call burn failed: ' + ex); }
+      }
+    }
+
+    // transfer(target): ensure recipient is registered, re-register if needed
+    if (fn.name.toLowerCase() === 'transfer' && targetAddr) {
+      if (!stateTracker.registered[targetAddr] && fnByName['register']) {
+        elog('  [' + (fi+1) + '/' + fns.length + '] [pre-call] register(' + targetAddr.slice(0,10) + '...) to re-register recipient...');
+        try {
+          var regRes = await signedCall('register', [targetAddr], ['u256']);
+          elog('    ' + (regRes.success ? '✓' : '✗') + ' ' + regRes.callSig + ' ' + (regRes.success ? '' : (regRes.error || '')));
+          if (regRes.success) updateState('register', fnByName['register'] || {}, [targetAddr]);
+        } catch(ex) { elog('    ✗ pre-call register failed: ' + ex); }
+      }
+      // Also ensure caller (wallet1) has enough balance for the transfer
+      var callerBal = stateTracker.balance[evmAddr1Dec] || 0;
+      var xferAmt = parseInt(da.args[1]) || 1;
+      if (callerBal < xferAmt && fnByName['mint']) {
+        var mintAmt = String(xferAmt + 10);  // mint a bit extra
+        elog('  [' + (fi+1) + '/' + fns.length + '] [pre-call] mint(' + evmAddr1Dec.slice(0,10) + '..., ' + mintAmt + ') to ensure caller has balance...');
+        try {
+          var mtRes = await signedCall('mint', [evmAddr1Dec, mintAmt], ['u256', 'u256']);
+          elog('    ' + (mtRes.success ? '✓' : '✗') + ' ' + mtRes.callSig + ' ' + (mtRes.success ? '' : (mtRes.error || '')));
+          if (mtRes.success) updateState('mint', fnByName['mint'] || {}, [evmAddr1Dec, mintAmt]);
+        } catch(ex) { elog('    ✗ pre-call mint failed: ' + ex); }
+      }
+    }
+
+    // burn(target): ensure target has enough balance — mint if needed
+    if (fn.name.toLowerCase() === 'burn' && targetAddr) {
+      var burnAmt = parseInt(da.args[1]) || 1;
+      var burnBal = stateTracker.balance[targetAddr] || 0;
+      if (burnBal < burnAmt && fnByName['mint']) {
+        var mintAmt = String(burnAmt + 10);  // mint a bit extra
+        elog('  [' + (fi+1) + '/' + fns.length + '] [pre-call] mint(' + targetAddr.slice(0,10) + '..., ' + mintAmt + ') to ensure burn target has balance...');
+        try {
+          var mtRes = await signedCall('mint', [targetAddr, mintAmt], ['u256', 'u256']);
+          elog('    ' + (mtRes.success ? '✓' : '✗') + ' ' + mtRes.callSig + ' ' + (mtRes.success ? '' : (mtRes.error || '')));
+          if (mtRes.success) updateState('mint', fnByName['mint'] || {}, [targetAddr, mintAmt]);
+        } catch(ex) { elog('    ✗ pre-call mint failed: ' + ex); }
       }
     }
 
