@@ -856,7 +856,7 @@ async function runBench() {
 // ── Execution Phase (fresh compile) ───────────────────────────────────────
 function defaultArgForType(ty) {
   ty = (ty || '').toLowerCase();
-  if (ty === 'bool') return 'false';
+  if (ty === 'bool') return '0';
   if (ty === 'str' || ty === 'string') return 'test';
   if (ty === 'u256' || ty === 'uint256' || ty === 'u128') return '1';
   if (ty === 'i32' || ty === 'int32') return 1;
@@ -868,12 +868,14 @@ function defaultArgsForFunction(fn, walletAddr) {
   var params = fn.params || [];
   var args = []; var types = [];
   var addrNames = ['to','from','who','target','account','admin','grantee','recipient','addr','address','spender'];
+  // Convert hex address to decimal uint256 string (VM expects numeric, not hex)
+  var walletAddrDec = walletAddr ? BigInt(walletAddr).toString() : '1';
   for (var p = 0; p < params.length; p++) {
     var pname = (params[p].name || '').toLowerCase();
     var pty = (params[p].ty || '').toLowerCase();
-    // Address-like params: use wallet address
+    // Address-like params: use wallet address as decimal uint256
     if (walletAddr && (addrNames.indexOf(pname) >= 0 || pty === 'address')) {
-      args.push(walletAddr);
+      args.push(walletAddrDec);
       types.push('u256');
     } else {
       args.push(defaultArgForType(params[p].ty));
