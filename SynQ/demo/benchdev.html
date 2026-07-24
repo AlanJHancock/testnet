@@ -1237,7 +1237,8 @@ async function runExecPhaseFresh(source, name) {
     elog('  [smart-setup] ' + initFn.name + '(' + initArgs.join(', ') + ')...');
     try {
       var initRes = await signedCall(initFn.name, initArgs, initTypes);
-      elog('    ' + (initRes.success ? '\u2713' : '\u2717') + ' ' + initRes.callSig + ' ' + (initRes.success ? '' : (initRes.error || '')));
+      var initRet = initRes.success && initRes.result ? (initRes.result.value !== undefined ? initRes.result.value : initRes.result) : (initRes.success ? 'true' : 'false');
+      elog('    ' + (initRes.success ? '\u2713' : '\u2717') + ' ' + initRes.callSig + ' -> ' + initRet + ' ' + (initRes.success ? '' : (initRes.error || '')));
       if (initRes.success) updateState(initFn.name, initFn, initArgs);
     } catch(ex) { elog('    \u2717 init failed: ' + ex); }
   }
