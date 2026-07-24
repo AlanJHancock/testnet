@@ -116,6 +116,11 @@
 
 <div id="log"></div>
 <div id="verdict"></div>
+<div id="execPhase" style="display:none;margin-top:16px;">
+  <h3 style="font-size:14px;color:#c9d1d9;margin:12px 0 8px;">⚙ Execution Phase</h3>
+  <div id="execLog" style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;font-family:monospace;font-size:12px;white-space:pre-wrap;max-height:400px;overflow-y:auto;color:#8b949e;"></div>
+  <div id="execResults" style="margin-top:8px;"></div>
+</div>
 <div id="faultPanel"></div>
 
 <!-- Source code embedded as raw text — HTML parser won't touch angle brackets -->
@@ -576,6 +581,9 @@ async function runBench() {
   var _v = document.getElementById('verdict');
   _v.className = 'verdict';
   _v.innerHTML = '<p style="color:#8b949e;">\u23F3 Running benchmark\u2026</p>';
+  document.getElementById('execPhase').style.display = 'none';
+  document.getElementById('execLog').textContent = '';
+  document.getElementById('execResults').innerHTML = '';
 
   log('Contract: ' + (_benchName || 'unnamed') + ' — ' + _benchSource.length + ' chars · ' + _benchSource.split('\n').length + ' lines');
   log('Rounds: ' + ROUNDS + '   (4 calls/round: WASM → loopback → HTTP → wasmtime)');
@@ -837,6 +845,171 @@ async function runBench() {
   } else {
     log('Insufficient successful rounds for comparison.');
   }
+
+  // ── Execution Phase: deploy + call functions ──
+  if (_running && ps && ps.success !== false && ps.functions && ps.functions.length) {
+    log('');
+    log('─ EXECUTION PHASE ─');
+    await runExecPhase(ps);
+  }
+}
+
+// ── Execution Phase ───────────────────────────────────────────────────────
+// After compilation benchmark, deploy the contract and call each function
+// with sample inputs to measure execution time + fuel.
+
+function defaultArgForType(ty) {
+  ty = (ty || '').toLowerCase();
+  if (ty === 'bool') return false;
+  if (ty === 'str' || ty === 'string') return 'test';
+  if (ty === 'u256' || ty === 'uint256' || ty === 'u128') return '1';
+  if (ty === 'i32' || ty === 'int32') return 1;
+  if (ty === 'bytes') return '0x';
+  return '1';  // safe default for numeric types
+}
+
+function defaultArgsForFunction(fn) {
+  var params = fn.params || [];
+  var args = []; var types = [];
+  for (var p = 0; p < params.length; p++) {
+    args.push(defaultArgForType(params[p].ty));
+    types.push(params[p].ty || 'u256');
+  }
+  return { args: args, types: types };
+}
+
+function fmtArg(a) {
+  if (typeof a === 'string') return a;
+  if (typeof a === 'boolean') return a ? 'true' : 'false';
+  return String(a);
+}
+
+async function runExecPhase(compileResp) {
+  var panel = document.getElementById('execPhase');
+  var logEl = document.getElementById('execLog');
+  var resultsEl = document.getElementById('execResults');
+  panel.style.display = 'block';
+  logEl.textContent = '';
+  resultsEl.innerHTML = '';
+
+  function elog(msg) { logEl.textContent += msg + '\n'; logEl.scrollTop = logEl.scrollHeight; }
+
+  var fns = compileResp.functions || [];
+  if (!fns.length) {
+    elog('No functions found in compiled contract — skipping execution phase.');
+    return;
+  }
+
+  var bc = compileResp.bytecode || '';
+  var svs = compileResp.state_vars || [];
+  var cname = compileResp.contract_name || 'unnamed';
+
+  elog('Deploying ' + cname + ' (' + fns.length + ' functions)...');
+
+  // 1. Create session
+  var sessReq = JSON.stringify({
+    bytecode: bc,
+    state_vars: svs,
+    contract_name: cname
+  });
+
+  var sessResp;
+  try {
+    sessResp = await fetch('/synq/session/new', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: sessReq
+    }).then(r => r.json());
+  } catch(ex) {
+    elog('ERROR creating session: ' + ex);
+    return;
+  }
+
+  if (!sessResp.success || !sessResp.session_id) {
+    elog('Session creation failed: ' + (sessResp.error || 'unknown'));
+    return;
+  }
+
+  var sid = sessResp.session_id;
+  elog('Session: ' + sid.slice(0, 16) + '...');
+
+  // 2. Call each function with default args
+  var execTimes = [];
+  var results = [];
+
+  for (var fi = 0; fi < fns.length; fi++) {
+    var fn = fns[fi];
+    var da = defaultArgsForFunction(fn);
+    var argStr = da.args.map(fmtArg).join(', ');
+
+    elog('  [' + (fi+1) + '/' + fns.length + '] ' + fn.name + '(' + argStr + ')...');
+
+    var t0 = performance.now();
+    var runResp;
+    try {
+      runResp = await fetch('/synq/session/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: sid,
+          function: fn.name,
+          args: da.args,
+          param_types: da.types,
+          call_signature: fn.name + '(' + argStr + ')'
+        })
+      }).then(r => r.json());
+    } catch(ex) {
+      elog('    ERROR: ' + ex);
+      results.push({ name: fn.name, args: argStr, ok: false, result: 'ERROR: ' + ex, time: 0 });
+      continue;
+    }
+    var dt = performance.now() - t0;
+
+    if (runResp.success) {
+      var val = runResp.result;
+      var valStr = val ? (val.value !== undefined ? val.value + ' (' + (val.type || '') + ')' : JSON.stringify(val)) : '(void)';
+      elog('    ✓ ' + valStr + '  [' + dt.toFixed(2) + ' ms]');
+      execTimes.push(dt);
+      results.push({ name: fn.name, args: argStr, ok: true, result: valStr, time: dt });
+    } else {
+      var err = runResp.error || 'unknown error';
+      elog('    ✗ ' + err + '  [' + dt.toFixed(2) + ' ms]');
+      results.push({ name: fn.name, args: argStr, ok: false, result: err, time: dt });
+    }
+  }
+
+  // 3. Summary
+  elog('');
+  elog('=== EXEC SUMMARY ===');
+  if (execTimes.length) {
+    var med = execTimes.length > 1 ? execTimes.sort((a,b)=>a-b)[Math.floor(execTimes.length/2)] : execTimes[0];
+    var avg = execTimes.reduce((s,v)=>s+v,0) / execTimes.length;
+    var mn = Math.min(...execTimes);
+    var mx = Math.max(...execTimes);
+    elog('Functions called: ' + results.length + '  (' + execTimes.length + ' succeeded)');
+    elog('Execution time: median ' + med.toFixed(2) + ' ms  avg ' + avg.toFixed(2) + ' ms  min ' + mn.toFixed(2) + '  max ' + mx.toFixed(2));
+  } else {
+    elog('No functions executed successfully.');
+  }
+
+  // 4. Results table
+  var html = '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;">';
+  html += '<tr style="border-bottom:1px solid #30363d;color:#8b949e;"><th style="text-align:left;padding:6px;">Function</th><th style="text-align:left;padding:6px;">Args</th><th style="text-align:left;padding:6px;">Result</th><th style="text-align:right;padding:6px;">Time</th></tr>';
+  for (var r = 0; r < results.length; r++) {
+    var row = results[r];
+    var color = row.ok ? '#7ee787' : '#ff7b72';
+    html += '<tr style="border-bottom:1px solid #21262d;">';
+    html += '<td style="padding:6px;color:#c9d1d9;font-weight:600;">' + row.name + '</td>';
+    html += '<td style="padding:6px;color:#8b949e;font-family:monospace;">' + row.args + '</td>';
+    html += '<td style="padding:6px;color:' + color + ';font-family:monospace;">' + row.result + '</td>';
+    html += '<td style="padding:6px;text-align:right;color:#8b949e;">' + row.time.toFixed(2) + ' ms</td>';
+    html += '</tr>';
+  }
+  html += '</table>';
+  resultsEl.innerHTML = html;
+
+  // Clean up session
+  try { await fetch('/synq/session/' + sid, { method: 'DELETE' }); } catch(e) {}
 }
 
 var _flipEnabled = false;
