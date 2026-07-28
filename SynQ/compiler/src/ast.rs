@@ -106,6 +106,33 @@ pub struct FunctionDefinition {
     pub requires_state:  Vec<String>,
     /// State variables this function modifies: e.g. "balance_of[caller]", "registered[who]"
     pub modifies:        Vec<String>,
+    /// Parsed `@attribute` declarations (spec v7.0)
+    pub attributes:      Vec<Attribute>,
+}
+
+
+// ── Attributes (spec v7.0) ─────────────────────────────────────────────────────
+/// Parsed attributes from `@name(args)` syntax before function definitions.
+#[derive(Debug, PartialEq, Clone)]
+pub enum Attribute {
+    /// `@public` — function is callable from outside the contract
+    Public,
+    /// `@authority(ScopeName)` — requires caller to hold the named authority scope
+    Authority(String),
+    /// `@effects(var1, var2, ...)` — declares state variables this function modifies
+    Effects(Vec<String>),
+    /// `@requires(expr)` — state precondition (metadata, not compiled)
+    Requires(String),
+    /// `@ensures(expr)` — state postcondition (metadata, not compiled)
+    Ensures(String),
+    /// `@fails(ErrorName)` — declares a named error this function may revert with
+    Fails(String),
+    /// `@bounded(n)` — declares a step/fuel bound for this function
+    Bounded(String),
+    /// `@manifest` — function appears in the contract's public manifest
+    Manifest,
+    /// `@ai` — function may perform AI inference (requires cap::AI)
+    Ai,
 }
 
 // ── Events ───────────────────────────────────────────────────────────────────

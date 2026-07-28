@@ -293,7 +293,12 @@ impl CodeGenerator {
         // scope.locals (function parameters only at this point, since
         // Let bindings are added to scope during gen_statement).
         // The pre-pass checks the raw statement list before gen runs.
-        if !f.requires_caller {
+        // Allow @public or @authority as alternative to 'as caller' for authority
+        let has_attr_authority = f.attributes.iter().any(|a| {
+            matches!(a, crate::ast::Attribute::Public)
+            || matches!(a, crate::ast::Attribute::Authority(_))
+        });
+        if !f.requires_caller && !has_attr_authority {
             fn writes_state(stmt: &Statement, state_vars: &HashMap<String, u32>) -> bool {
                 match stmt {
                     Statement::Assignment(name, _) => state_vars.contains_key(name.as_str()),
@@ -350,6 +355,52 @@ impl CodeGenerator {
             self.assembler.emit_raw(mb);
             let body_pos = self.assembler.current_pos() as u32;
             self.assembler.patch_u32(patch_to_body, body_pos);
+        }
+
+        // ── @authority(Scope) check ──────────────────────────────────────────
+        // Emits: LoadAuthority → Push(scope_hash) → AuthRequire → JumpIf revert → Jump body
+        // The scope hash is derived from the scope name via a simple hash.
+        // On devnet, the server constructs the envelope with scope_hash = all-zeros
+        // (accept any scope), so this check always passes.
+        for attr in &f.attributes {
+            if let crate::ast::Attribute::Authority(scope_name) = attr {
+                // LoadAuthority pushes the current call's envelope as Bytes
+                self.assembler.emit_op(OpCode::LoadAuthority);
+                // Push scope hash as Bytes — using a simple hash of the scope name
+                // For devnet compatibility, if the scope name is empty, push all-zeros
+                let scope_bytes = if scope_name.is_empty() {
+                    vec![0u8; 32]
+                } else {
+                    // Simple hash: repeat the name bytes to fill 32 bytes
+                    let name_bytes = scope_name.as_bytes();
+                    let mut hash = [0u8; 32];
+                    for (i, b) in name_bytes.iter().cycle().take(32).enumerate() {
+                        hash[i] = *b;
+                    }
+                    hash.to_vec()
+                };
+                // Push scope hash as U256 via LoadImm256 (0x44)
+                self.assembler.emit_op(OpCode::LoadImm256);
+                self.assembler.emit_raw(&scope_bytes);
+                // AuthRequire: pops scope_hash (top) + envelope (below), pushes Bool
+                self.assembler.emit_op(OpCode::AuthRequire);
+                // If false, jump to revert
+                self.assembler.emit_op(OpCode::JumpIf);
+                let auth_revert_patch = self.assembler.emit_placeholder_u32();
+                self.assembler.emit_op(OpCode::Jump);
+                let auth_body_patch = self.assembler.emit_placeholder_u32();
+                let auth_revert_pos = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(auth_revert_patch, auth_revert_pos);
+                let auth_msg = format!("{}: authority scope '{}' required", f.name, scope_name);
+                let auth_mb = auth_msg.as_bytes();
+                self.assembler.emit_op(OpCode::Revert);
+                self.assembler.emit_raw(&(auth_mb.len() as u32).to_le_bytes());
+                self.assembler.emit_raw(auth_mb);
+                let auth_body_pos = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(auth_body_patch, auth_body_pos);
+                // Pop the Bool result (true) from the stack
+                self.assembler.emit_op(OpCode::Pop);
+            }
         }
 
         // ── Capability stubs ─────────────────────────────────────────────────

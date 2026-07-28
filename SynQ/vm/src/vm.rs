@@ -851,8 +851,20 @@ impl QuantumVM {
             // Pops: scope_hash (Bytes, 32B), envelope (Bytes, ≥80B)
             // Pushes: Bool(true) if valid + scope matches, Bool(false) otherwise
             OpCode::AuthRequire => {
-                let scope_hash = self.pop()?.as_bytes()?.to_vec();
-                let envelope   = self.pop()?.as_bytes()?.to_vec();
+                let scope_hash = match self.pop()? {
+                    Value::Bytes(b) => b,
+                    Value::U256(v) => v.to_be_bytes::<32>().to_vec(),
+                    Value::I32(n) => {
+                        let mut b = vec![0u8; 28];
+                        b.extend_from_slice(&n.to_be_bytes());
+                        b
+                    }
+                    _ => return Err(VMError::RuntimeError("AuthRequire: scope_hash must be Bytes or U256".into())),
+                };
+                let envelope = match self.pop()? {
+                    Value::Bytes(b) => b,
+                    _ => return Err(VMError::RuntimeError("AuthRequire: envelope must be Bytes".into())),
+                };
 
                 if envelope.len() < 80 {
                     self.stack.push(Value::Bool(false));

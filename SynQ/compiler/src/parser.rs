@@ -39,7 +39,21 @@ pub fn parse(source: &str) -> Result<Vec<SourceUnit>, String> {
 
 fn parse_struct(pair: Pair<Rule>) -> StructDefinition {
     let mut inner = pair.into_inner();
-    let name = inner.next().unwrap().as_str().to_string();
+    // The first inner pair may be attribute_list (if present) or IDENT (if not).
+    // We need to save attribute_list for processing in the loop below.
+    let mut saved_attr_list: Option<Pair<Rule>> = None;
+    let name = {
+        let first = inner.next().unwrap();
+        match first.as_rule() {
+            Rule::attribute_list => {
+                // Save it for later processing, get the next pair (IDENT)
+                let name = inner.next().unwrap().as_str().to_string();
+                saved_attr_list = Some(first);
+                name
+            }
+            _ => first.as_str().to_string()
+        }
+    };
     let fields = inner.map(|p| {
         let mut fi = p.into_inner();
         let n = fi.next().unwrap().as_str().to_string();
@@ -52,7 +66,21 @@ fn parse_struct(pair: Pair<Rule>) -> StructDefinition {
 fn parse_contract(pair: Pair<Rule>) -> Result<ContractDefinition, String> {
     use std::collections::HashSet;
     let mut inner = pair.into_inner();
-    let name = inner.next().unwrap().as_str().to_string();
+    // The first inner pair may be attribute_list (if present) or IDENT (if not).
+    // We need to save attribute_list for processing in the loop below.
+    let mut saved_attr_list: Option<Pair<Rule>> = None;
+    let name = {
+        let first = inner.next().unwrap();
+        match first.as_rule() {
+            Rule::attribute_list => {
+                // Save it for later processing, get the next pair (IDENT)
+                let name = inner.next().unwrap().as_str().to_string();
+                saved_attr_list = Some(first);
+                name
+            }
+            _ => first.as_str().to_string()
+        }
+    };
     let mut parts = vec![];
     let mut fn_names: HashSet<String> = HashSet::new();
     let mut sv_names: HashSet<String> = HashSet::new();
@@ -129,7 +157,21 @@ fn parse_contract(pair: Pair<Rule>) -> Result<ContractDefinition, String> {
 fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
     use std::collections::HashSet;
     let mut inner = pair.into_inner();
-    let name = inner.next().unwrap().as_str().to_string();
+    // The first inner pair may be attribute_list (if present) or IDENT (if not).
+    // We need to save attribute_list for processing in the loop below.
+    let mut saved_attr_list: Option<Pair<Rule>> = None;
+    let name = {
+        let first = inner.next().unwrap();
+        match first.as_rule() {
+            Rule::attribute_list => {
+                // Save it for later processing, get the next pair (IDENT)
+                let name = inner.next().unwrap().as_str().to_string();
+                saved_attr_list = Some(first);
+                name
+            }
+            _ => first.as_str().to_string()
+        }
+    };
     let mut params = vec![];
     let mut returns: Option<Type> = None;
     let mut body_stmts = vec![];
@@ -139,6 +181,37 @@ fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
     let mut capabilities: Vec<String> = vec![];
     let mut requires_state: Vec<String> = vec![];
     let mut modifies: Vec<String> = vec![];
+    let mut attributes: Vec<Attribute> = vec![];
+
+    // Process saved attribute_list first
+    if let Some(attr_pair) = saved_attr_list {
+        for attr_item in attr_pair.into_inner() {
+            if attr_item.as_rule() == Rule::attribute {
+                let mut ai = attr_item.into_inner();
+                let attr_name = ai.next().map(|p| p.as_str().to_string()).unwrap_or_default();
+                let attr_args = ai.next()
+                    .map(|p| p.as_str().trim().to_string())
+                    .unwrap_or_default();
+                let attr = match attr_name.as_str() {
+                    "public" => Attribute::Public,
+                    "authority" => Attribute::Authority(attr_args.trim_matches('"').to_string()),
+                    "effects" => Attribute::Effects(
+                        attr_args.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                    ),
+                    "requires" => Attribute::Requires(attr_args.to_string()),
+                    "ensures" => Attribute::Ensures(attr_args.to_string()),
+                    "fails" => Attribute::Fails(attr_args.trim_matches('"').to_string()),
+                    "bounded" => Attribute::Bounded(attr_args.to_string()),
+                    "manifest" => Attribute::Manifest,
+                    "ai" => Attribute::Ai,
+                    other => {
+                        return Err(format!("unknown attribute: @{}", other));
+                    }
+                };
+                attributes.push(attr);
+            }
+        }
+    }
 
     for p in inner {
         match p.as_rule() {
@@ -240,16 +313,35 @@ fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
         }
     }
 
+    // Process attributes: derive is_public, merge with legacy clauses
+    let is_public = attributes.iter().any(|a| matches!(a, Attribute::Public));
+    // @effects merges with modifies
+    for attr in &attributes {
+        if let Attribute::Effects(vars) = attr {
+            for v in vars {
+                if !modifies.contains(v) {
+                    modifies.push(v.clone());
+                }
+            }
+        }
+        if let Attribute::Requires(expr) = attr {
+            if !requires_state.contains(expr) {
+                requires_state.push(expr.clone());
+            }
+        }
+    }
+
     Ok(FunctionDefinition {
         name,
         params,
         returns,
         body: Block { statements: body_stmts },
-        is_public: false,
+        is_public,
         requires_caller,
         capabilities,
         requires_state,
         modifies,
+        attributes,
     })
 }
 
@@ -529,5 +621,31 @@ fn parse_type(pair: Pair<Rule>) -> Type {
             other                                         => Type::Named(other.to_string()),
         },
         _ => Type::UInt256,
+    }
+}
+
+
+#[cfg(test)]
+mod attribute_parse_tests {
+    use crate::parser::parse;
+
+    #[test]
+    fn test_minimal_attribute() {
+        let src = "pragma synq ^0.9;\ncontract T {\n  state { x: u256; }\n  impl {\n    @public\n    function get_x() -> u256 { return x; }\n  }\n}\n";
+        let result = parse(src);
+        if let Err(ref e) = result {
+            eprintln!("PARSE ERROR: {}", e);
+        }
+        assert!(result.is_ok(), "parse failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_attribute_with_args() {
+        let src = "pragma synq ^0.9;\ncontract T {\n  state { x: u256; }\n  impl {\n    @public\n    @authority(Admin)\n    function set_x(v: u256) -> bool { x = v; return true; }\n  }\n}\n";
+        let result = parse(src);
+        if let Err(ref e) = result {
+            eprintln!("PARSE ERROR: {}", e);
+        }
+        assert!(result.is_ok(), "parse failed: {:?}", result.err());
     }
 }

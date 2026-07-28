@@ -94,7 +94,22 @@ state_condition      = { (!"," ~ !"modifies" ~ !"requires" ~ !"{" ~ ANY)+ }
 modifies_list        = { modifies_item ~ ("," ~ modifies_item)* }
 modifies_item        = { IDENT ~ ("[" ~ expression ~ "]")? }
 
-function_definition = { function_keyword ~ IDENT ~ "(" ~ param_list? ~ ")"
+// ── Attributes (spec v7.0) ────────────────────────────────────────────────────
+// Attributes appear before a function definition, one per line:
+//   @public
+//   @authority(AdminScope)
+//   @effects(balance, supply)
+//   @requires(balance_of[caller] >= amount)
+//   @ensures(balance == old_balance + amount)
+//   @fails(InsufficientFunds)
+//   @bounded(1000000)
+//   @manifest
+//   @ai
+attribute_list      = { attribute+ }
+attribute           = { "@" ~ IDENT ~ ("(" ~ attribute_args ~ ")")? }
+attribute_args      = { (!")" ~ ANY)+ }
+
+function_definition = { attribute_list? ~ function_keyword ~ IDENT ~ "(" ~ param_list? ~ ")"
                         ~ return_type? ~ identity_clause? ~ requires_clauses?
                         ~ modifies_clauses? ~ block }
 param_list = { param ~ ("," ~ param)* }
