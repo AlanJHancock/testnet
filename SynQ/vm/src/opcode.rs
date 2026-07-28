@@ -106,11 +106,13 @@ pub enum OpCode {
     IsOk         = 0xA9,
     IsSome       = 0xAA,
 
-    // PQC operations
+    // PQC operations — legacy algorithm-specific opcodes (backward compat)
     DilithiumVerify  = 0x80,
     KyberKeyExchange = 0x81,
     FalconVerify     = 0x82,
     SphincsVerify    = 0x83,
+    // AEG1 unified dispatch — preferred for spec v7.0 alignment
+    AegisCall        = 0x8F,
 
     // Utility
     Print = 0xF0,
@@ -181,6 +183,7 @@ impl TryFrom<u8> for OpCode {
             0x81 => Ok(OpCode::KyberKeyExchange),
             0x82 => Ok(OpCode::FalconVerify),
             0x83 => Ok(OpCode::SphincsVerify),
+            0x8F => Ok(OpCode::AegisCall),
             0xF0 => Ok(OpCode::Print),
             0xFF => Ok(OpCode::Halt),
             _    => Err(VMError::InvalidInstruction(value)),

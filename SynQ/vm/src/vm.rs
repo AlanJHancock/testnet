@@ -3,6 +3,8 @@ use super::opcode::{OpCode, VMError};
 use ruint::aliases::U256;
 #[cfg(feature = "native")]
 use pqc_shims::{dilithium, kyber, falcon, sphincs};
+#[cfg(feature = "native")]
+use pqc_shims::aeg1;
 
 // ── PR-B constants ──────────────────────────────────────────────────────────
 
@@ -1037,9 +1039,47 @@ impl QuantumVM {
                 let result = sphincs::verify(&message, &signature, &public_key);
                 self.push(Value::Bool(result))?;
             }
+
+            // ── AEG1 unified PQC dispatch (0x8F) ──────────────────────────────
+            // Pops an AEG1 frame from the stack, dispatches to the appropriate
+            // PQC shim, and pushes the response frame back.
+            // This is the spec v7.0 aligned interface — replaces algorithm-
+            // specific opcodes 0x80-0x83 for new contracts.
+            OpCode::AegisCall => {
+                let frame = self.pop()?.as_bytes()?.to_vec();
+                match aeg1::process_frame(&frame) {
+                    Ok(response_frame) => {
+                        // Decode the response to determine VM-level result
+                        match aeg1::Aeg1Response::decode(&response_frame) {
+                            Ok(aeg1::Aeg1Response::Ok(result)) => {
+                                if result.is_empty() {
+                                    // Verify operations return empty body → push Bool(true)
+                                    self.push(Value::Bool(true))?;
+                                } else {
+                                    // Decapsulate returns shared secret → push Bytes
+                                    self.push(Value::Bytes(result))?;
+                                }
+                            }
+                            Ok(aeg1::Aeg1Response::Error(code, msg)) => {
+                                eprintln!("[AEG1] error: {:?} - {}", code, msg);
+                                self.push(Value::Bool(false))?;
+                            }
+                            Err(e) => {
+                                eprintln!("[AEG1] response decode error: {}", e);
+                                self.push(Value::Bool(false))?;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[AEG1] dispatch error: {}", e);
+                        self.push(Value::Bool(false))?;
+                    }
+                }
+            }
 #[cfg(not(feature = "native"))]
             OpCode::DilithiumVerify | OpCode::KyberKeyExchange |
-            OpCode::FalconVerify    | OpCode::SphincsVerify => {
+            OpCode::FalconVerify    | OpCode::SphincsVerify |
+            OpCode::AegisCall => {
                 return Err(VMError::RuntimeError(
                     "PQC opcodes require native build — use synq-server for signing".into()
                 ));

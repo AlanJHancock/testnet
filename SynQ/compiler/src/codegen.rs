@@ -46,6 +46,9 @@ const FUNCTION_LOCAL_STRIDE: u32 = 16;
 /// The tuple is (arg count, opcode, pushes a Bool/Bytes result).
 fn pqc_builtin_opcode(name: &str) -> Option<OpCode> {
     match name {
+        // AEG1 unified dispatch (spec v7.0 aligned)
+        "aegis_call" | "aegis_verify" | "aegis_decaps" => Some(OpCode::AegisCall),
+        // Legacy algorithm-specific builtins (backward compat)
         "dilithium_verify"                        => Some(OpCode::DilithiumVerify),
         "falcon_verify" | "falcon_sign"           => Some(OpCode::FalconVerify),
         "sphincs_verify"                          => Some(OpCode::SphincsVerify),
@@ -910,6 +913,14 @@ impl CodeGenerator {
             // the reverse of natural source-code argument order for
             // these specific ops.
             match name {
+                "aegis_call" | "aegis_verify" | "aegis_decaps" => {
+                    // AEG1: single Bytes argument (the pre-encoded AEG1 frame).
+                    // The VM pops the frame and dispatches it via aeg1::process_frame.
+                    if args.len() != 1 {
+                        return Err(format!("{} expects 1 argument (AEG1 frame)", name));
+                    }
+                    self.gen_expression(&args[0], scope)?;
+                }
                 "dilithium_verify" | "falcon_verify" | "sphincs_verify" => {
                     // Source order: (message, signature, public_key).
                     // VM pops: public_key, then message, then signature.
