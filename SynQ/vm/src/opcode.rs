@@ -71,6 +71,10 @@ pub enum OpCode {
     LoadImm128 = 0x43,   // push a 16-byte big-endian u128 (UInt256 values ≤ 2^128)
     LoadImm256 = 0x44,   // push a 32-byte big-endian U256 (full Ethereum address / real UInt256)
     LoadCaller = 0x50,   // push authenticated EVM caller address as U256 (zero if unauthenticated)
+    // Authority model opcodes (spec v7.0 alignment)
+    LoadAuthority = 0x51,  // push current call's AuthorityEnvelope as Bytes
+    AuthRequire   = 0x52,  // pop envelope + scope_hash → push Bool (validated)
+    AuthIdentity  = 0x53,  // pop envelope → push UMA identity (U256)
     ExternCall = 0x60,   // call a function on another contract in the same workspace
 
     // Map operations (0x90-0x96)
@@ -150,6 +154,9 @@ impl TryFrom<u8> for OpCode {
             0x43 => Ok(OpCode::LoadImm128),
             0x44 => Ok(OpCode::LoadImm256),
             0x50 => Ok(OpCode::LoadCaller),
+            0x51 => Ok(OpCode::LoadAuthority),
+            0x52 => Ok(OpCode::AuthRequire),
+            0x53 => Ok(OpCode::AuthIdentity),
             0x60 => Ok(OpCode::ExternCall),
             // Map ops
             0x90 => Ok(OpCode::MapNew),

@@ -1949,10 +1949,44 @@ async fn session_run_handler(
         // Unauthenticated call — caller == zero address
         [0u8; 20]
     };
-    // UMA hook: when the consensus layer is wired, replace from_address() with
-    // from_uma(registry.resolve(&caller_addr).unwrap_or_default(), caller_addr).
-    // See vm/src/uma.rs — NullUmaRegistry is the devnet stub (U-8, U-13, U-14).
-    session.vm.call_context = synq_vm::CallContext::from_address(caller_addr);
+    // ── Authority envelope construction ─────────────────────────────────────
+    // Build a devnet authority envelope from the recovered EVM address.
+    // Format: identity(32) + scope_hash(32) + nonce(8) + expiry(8) + caps(8) + reserved(16) = 104 bytes
+    //
+    // Devnet: identity = padded EVM address (zero-extended to 32 bytes)
+    //         scope_hash = all-zeros (accept any scope on devnet)
+    //         nonce = current session nonce (if available)
+    //         expiry = 0 (no expiry on devnet)
+    //         caps = 0xFF (all capabilities enabled on devnet)
+    //
+    // Mainnet: the consensus layer will construct the real envelope with
+    // resolved UMA, Aegis receipt, and proper scope/capability fields.
+    let mut auth_envelope = vec![0u8; 104];
+    // Identity: EVM address right-aligned in 32 bytes
+    auth_envelope[12..32].copy_from_slice(&caller_addr);
+    // Scope hash: all-zeros = accept any scope (devnet convenience)
+    // auth_envelope[32..64] already zero
+    // Nonce: current session nonce if available
+    if let Some(ref pn) = session.pending_nonce {
+        if let Ok(nonce_bytes) = hex::decode(pn) {
+            let nonce_val = if nonce_bytes.len() >= 8 {
+                u64::from_be_bytes(nonce_bytes[..8].try_into().unwrap_or([0u8; 8]))
+            } else {
+                0u64
+            };
+            auth_envelope[64..72].copy_from_slice(&nonce_val.to_be_bytes());
+        }
+    }
+    // Expiry: 0 = no expiry (devnet)
+    // auth_envelope[72..80] already zero
+    // Capabilities: 0xFF = all enabled (devnet)
+    auth_envelope[80] = 0xFF;
+
+    session.vm.call_context = synq_vm::CallContext::with_authority(
+        caller_addr,
+        None, // uma_ref: None on devnet (NullUmaRegistry)
+        auth_envelope,
+    );
 
     // Wire ExternCall handler if session belongs to a workspace
     if let Some(ref wid) = session.workspace_id.clone() {

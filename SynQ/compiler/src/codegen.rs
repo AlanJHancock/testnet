@@ -907,6 +907,36 @@ impl CodeGenerator {
             return Ok(());
         }
         // ── End string builtins ───────────────────────────────────────────────
+        // ── Authority builtins (spec v7.0 authority model) ───────────────
+        match name {
+            "authority_envelope" => {
+                // No args — pushes the current call's authority envelope as Bytes
+                self.assembler.emit_op(OpCode::LoadAuthority);
+                return Ok(());
+            }
+            "authority_require" => {
+                // (envelope: Bytes, scope_hash: Bytes) → Bool
+                if args.len() != 2 {
+                    return Err("authority_require expects 2 arguments (envelope, scope_hash)".into());
+                }
+                // Push order reversed: scope_hash pushed last (popped first)
+                self.gen_expression(&args[0], scope)?;  // envelope
+                self.gen_expression(&args[1], scope)?;  // scope_hash
+                self.assembler.emit_op(OpCode::AuthRequire);
+                return Ok(());
+            }
+            "authority_identity" => {
+                // (envelope: Bytes) → U256 (UMA identity)
+                if args.len() != 1 {
+                    return Err("authority_identity expects 1 argument (envelope)".into());
+                }
+                self.gen_expression(&args[0], scope)?;
+                self.assembler.emit_op(OpCode::AuthIdentity);
+                return Ok(());
+            }
+            _ => {}
+        }
+
         if let Some(opcode) = pqc_builtin_opcode(name) {
             // PQC/KEM builtins: argument push order matches the VM
             // opcode handler's pop order exactly (see vm.rs), which is

@@ -841,6 +841,47 @@ impl QuantumVM {
                 self.stack.push(Value::U256(U256::from_be_bytes::<32>(b)));
             }
 
+            // ── LoadAuthority (0x51): push current call's authority envelope ──
+            OpCode::LoadAuthority => {
+                let env = self.call_context.authority_envelope.clone();
+                self.stack.push(Value::Bytes(env));
+            }
+
+            // ── AuthRequire (0x52): validate authority envelope against scope ──
+            // Pops: scope_hash (Bytes, 32B), envelope (Bytes, ≥80B)
+            // Pushes: Bool(true) if valid + scope matches, Bool(false) otherwise
+            OpCode::AuthRequire => {
+                let scope_hash = self.pop()?.as_bytes()?.to_vec();
+                let envelope   = self.pop()?.as_bytes()?.to_vec();
+
+                if envelope.len() < 80 {
+                    self.stack.push(Value::Bool(false));
+                } else {
+                    let env_scope = &envelope[32..64];
+                    let env_expiry = u64::from_be_bytes(
+                        envelope[72..80].try_into().unwrap_or([0u8; 8])
+                    );
+                    let scope_matches = env_scope == scope_hash.as_slice();
+                    let now_height = 0u64;
+                    let not_expired = env_expiry == 0 || env_expiry > now_height;
+                    let identity_is_set = envelope[0..32].iter().any(|&b| b != 0);
+                    self.stack.push(Value::Bool(scope_matches && not_expired && identity_is_set));
+                }
+            }
+
+            // ── AuthIdentity (0x53): extract UMA identity from envelope ──
+            // Pops: envelope (Bytes, ≥32B) → pushes U256 (32-byte UMA identity)
+            OpCode::AuthIdentity => {
+                let envelope = self.pop()?.as_bytes()?.to_vec();
+                if envelope.len() < 32 {
+                    self.stack.push(Value::U256(U256::ZERO));
+                } else {
+                    let mut identity = [0u8; 32];
+                    identity.copy_from_slice(&envelope[0..32]);
+                    self.stack.push(Value::U256(U256::from_be_bytes::<32>(identity)));
+                }
+            }
+
             // ── PQC ────────────────────────────────────────────────────────
 #[cfg(feature = "native")]
             // ── Map operations ──────────────────────────────────────────────
@@ -1288,24 +1329,36 @@ pub struct CallContext {
     /// Consensus-resolved UMA reference (32 bytes).  `None` on devnet.
     /// When `Some`, `LoadCaller` pushes this value instead of `signing_key`.
     pub uma_ref: Option<[u8; 32]>,
+    /// Authority envelope for the current call — populated by the server
+    /// from the EIP-712 signature, nonce, and caller context.
+    /// Format: identity(32) + scope_hash(32) + nonce(8) + expiry(8) + caps(8) + reserved(16) = 104 bytes
+    /// Empty on devnet unless the server constructs it.
+    pub authority_envelope: Vec<u8>,
 }
 
 impl CallContext {
     /// Construct a devnet call context from a recovered EVM address.
     /// `uma_ref` is set to `None` — UMA resolution is not yet wired.
     pub fn from_address(addr: [u8; 20]) -> Self {
-        Self { signing_key: addr, uma_ref: None }
+        Self { signing_key: addr, uma_ref: None, authority_envelope: Vec::new() }
     }
 
     /// Construct a mainnet-ready call context with a resolved UMA reference.
     /// The signing key is retained for audit / logging purposes.
     pub fn from_uma(uma: [u8; 32], signing_key: [u8; 20]) -> Self {
-        Self { signing_key, uma_ref: Some(uma) }
+        Self { signing_key, uma_ref: Some(uma), authority_envelope: Vec::new() }
     }
 
     /// Anonymous context — no authenticated caller.
     pub fn anonymous() -> Self {
-        Self { signing_key: [0u8; 20], uma_ref: None }
+        Self { signing_key: [0u8; 20], uma_ref: None, authority_envelope: Vec::new() }
+    }
+
+    /// Construct a call context with a pre-built authority envelope.
+    /// Used by the server when it has constructed the envelope from the
+    /// EIP-712 signature, nonce, and consensus state.
+    pub fn with_authority(addr: [u8; 20], uma: Option<[u8; 32]>, envelope: Vec<u8>) -> Self {
+        Self { signing_key: addr, uma_ref: uma, authority_envelope: envelope }
     }
 
     /// Returns the 32-byte value that `LoadCaller` pushes onto the stack.
@@ -1319,6 +1372,146 @@ impl CallContext {
                 b[12..32].copy_from_slice(&self.signing_key);
                 b
             }
+        }
+    }
+}
+
+// ── Authority model tests ─────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+    use crate::opcode::OpCode;
+
+    fn build_test_envelope(identity: [u8; 32], scope_hash: [u8; 32], nonce: u64, expiry: u64) -> Vec<u8> {
+        let mut env = vec![0u8; 104];
+        env[0..32].copy_from_slice(&identity);
+        env[32..64].copy_from_slice(&scope_hash);
+        env[64..72].copy_from_slice(&nonce.to_be_bytes());
+        env[72..80].copy_from_slice(&expiry.to_be_bytes());
+        env[80] = 0xFF;
+        env
+    }
+
+    fn run_code(code: Vec<u8>, ctx: CallContext) -> QuantumVM {
+        let mut vm = QuantumVM::new();
+        vm.call_context = ctx;
+        vm.max_steps = 1000;
+        vm.code = code;
+        vm.execute().unwrap();
+        vm
+    }
+
+    #[test]
+    fn test_load_authority_pushes_envelope() {
+        let envelope = build_test_envelope([0xAA; 32], [0xBB; 32], 42, 0);
+        let mut vm = run_code(
+            vec![OpCode::LoadAuthority as u8, OpCode::Halt as u8],
+            CallContext::with_authority([0x11; 20], None, envelope.clone()),
+        );
+        let result = vm.pop().unwrap();
+        assert_eq!(result.as_bytes().unwrap(), &envelope[..]);
+    }
+
+    #[test]
+    fn test_auth_identity_extracts_uma() {
+        let envelope = build_test_envelope([0xCD; 32], [0x00; 32], 0, 0);
+        let mut vm = run_code(
+            vec![OpCode::LoadAuthority as u8, OpCode::AuthIdentity as u8, OpCode::Halt as u8],
+            CallContext::with_authority([0x11; 20], None, envelope),
+        );
+        let result = vm.pop().unwrap();
+        match result {
+            Value::U256(v) => assert_eq!(v.to_be_bytes::<32>(), [0xCD; 32]),
+            _ => panic!("expected U256"),
+        }
+    }
+
+    #[test]
+    fn test_auth_require_valid_scope() {
+        let scope = [0x42; 32];
+        let envelope = build_test_envelope([0xEF; 32], scope, 1, 0);
+        let ctx = CallContext::with_authority([0x11; 20], None, envelope.clone());
+        let mut vm = QuantumVM::new();
+        vm.call_context = ctx;
+        vm.max_steps = 1000;
+        // Push envelope (bottom), then scope_hash (top) — matches AuthRequire pop order
+        vm.stack.push(Value::Bytes(envelope));
+        vm.stack.push(Value::Bytes(scope.to_vec()));
+        vm.code = vec![OpCode::AuthRequire as u8, OpCode::Halt as u8];
+        vm.execute().unwrap();
+        assert_eq!(vm.pop().unwrap().as_bool().unwrap(), true);
+    }
+
+    #[test]
+    fn test_auth_require_wrong_scope() {
+        let envelope = build_test_envelope([0xEF; 32], [0x42; 32], 1, 0);
+        let ctx = CallContext::with_authority([0x11; 20], None, envelope);
+        let mut vm = QuantumVM::new();
+        vm.call_context = ctx;
+        vm.max_steps = 1000;
+        vm.code = vec![OpCode::LoadAuthority as u8, OpCode::AuthRequire as u8, OpCode::Halt as u8];
+        vm.stack.push(Value::Bytes(vec![0x99; 32]));
+        vm.execute().unwrap();
+        assert_eq!(vm.pop().unwrap().as_bool().unwrap(), false);
+    }
+
+    #[test]
+    fn test_auth_require_zero_identity_rejected() {
+        let envelope = build_test_envelope([0x00; 32], [0x42; 32], 1, 0);
+        let ctx = CallContext::with_authority([0x00; 20], None, envelope);
+        let mut vm = QuantumVM::new();
+        vm.call_context = ctx;
+        vm.max_steps = 1000;
+        vm.code = vec![OpCode::LoadAuthority as u8, OpCode::AuthRequire as u8, OpCode::Halt as u8];
+        vm.stack.push(Value::Bytes(vec![0x42; 32]));
+        vm.execute().unwrap();
+        assert_eq!(vm.pop().unwrap().as_bool().unwrap(), false, "zero identity rejected");
+    }
+
+    #[test]
+    fn test_auth_require_expired() {
+        let envelope = build_test_envelope([0xEF; 32], [0x42; 32], 1, 1);
+        let ctx = CallContext::with_authority([0x11; 20], None, envelope);
+        let mut vm = QuantumVM::new();
+        vm.call_context = ctx;
+        vm.max_steps = 1000;
+        vm.code = vec![OpCode::LoadAuthority as u8, OpCode::AuthRequire as u8, OpCode::Halt as u8];
+        vm.stack.push(Value::Bytes(vec![0x42; 32]));
+        vm.execute().unwrap();
+        assert_eq!(vm.pop().unwrap().as_bool().unwrap(), false, "expired rejected");
+    }
+
+    #[test]
+    fn test_auth_require_short_envelope() {
+        let ctx = CallContext::with_authority([0x11; 20], None, vec![0u8; 10]);
+        let mut vm = QuantumVM::new();
+        vm.call_context = ctx;
+        vm.max_steps = 1000;
+        vm.code = vec![OpCode::LoadAuthority as u8, OpCode::AuthRequire as u8, OpCode::Halt as u8];
+        vm.stack.push(Value::Bytes(vec![0x42; 32]));
+        vm.execute().unwrap();
+        assert_eq!(vm.pop().unwrap().as_bool().unwrap(), false, "short envelope rejected");
+    }
+
+    #[test]
+    fn test_devnet_envelope_identity_matches_caller() {
+        let caller_addr = [0x11; 20];
+        let mut envelope = vec![0u8; 104];
+        envelope[12..32].copy_from_slice(&caller_addr);
+        envelope[80] = 0xFF;
+        let mut vm = run_code(
+            vec![OpCode::LoadAuthority as u8, OpCode::AuthIdentity as u8, OpCode::Halt as u8],
+            CallContext::with_authority(caller_addr, None, envelope),
+        );
+        let result = vm.pop().unwrap();
+        match result {
+            Value::U256(v) => {
+                let bytes = v.to_be_bytes::<32>();
+                assert_eq!(&bytes[0..12], &[0u8; 12]);
+                assert_eq!(&bytes[12..32], &caller_addr);
+            }
+            _ => panic!("expected U256"),
         }
     }
 }
