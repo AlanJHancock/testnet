@@ -1,6 +1,6 @@
 //! synq-server — HTTP compile + run server for the SynQ IDE
 //!
-//! POST /compile        — compile SynQ source, sign with ephemeral ML-DSA-65
+//! POST /compile        — compile SynQ source, sign with ML-DSA-87 (V3 account-domain)
 //! POST /attest         — EIP-191 EVM verification + PQC attestation (SynQAttestationV1)
 //! POST /session/new    — load bytecode into a fresh persistent VM session
 //! POST /session/run    — call a function on a persistent session
@@ -11,7 +11,7 @@
 //!   • CSPRNG session IDs, session cap, body size limit, source size limit,
 //!     mutex released before VM execution, configurable CORS
 //!
-//! PR-G: persistent ML-DSA-65 compiler-attestation key (this commit):
+//! PR-G: persistent ML-DSA-87 compiler-attestation key (V3 account-domain):
 //!   - CompilerKey enum: Persistent { private_key, public_key, key_id } | Ephemeral
 //!   - SYNQ_COMPILER_KEY_PATH env var: path to private key hex file on disk
 //!   - SYNQ_COMPILER_PUBKEY env var: public key hex
@@ -76,7 +76,20 @@ mod wasm_compiler;
 
 // ─── Security constants ───────────────────────────────────────────────────────
 
-const SIGNING_ALGORITHM: &str  = "ML-DSA-65";
+const SIGNING_ALGORITHM: &str  = "ML-DSA-87";  // V3: account-domain uses ML-DSA-87 (not consensus ML-DSA-65)
+
+// ── V3 Signature domain tags ──────────────────────────────────────────────────
+// V3 requires domain-separated signatures for deploy, call, governance, and attest.
+// Each domain tag is prepended to the signed payload to prevent cross-domain replay.
+const V3_DOMAIN_DEPLOY:     &str = "SYNQ-DEPLOY-v3";
+const V3_DOMAIN_CALL:       &str = "SYNQ-CALL-v3";
+const V3_DOMAIN_GOVERNANCE: &str = "SYNQ-GOVERNANCE-v3";
+const V3_DOMAIN_ATTEST:     &str = "SYNQ-ATTEST-v3";
+
+// V3 chain parameters
+const V3_CHAIN_ID: u64 = 1266;
+const V3_NETWORK_ID: &str = "synergy-testnet-v3";
+
 
 // ─── PR-F Item 2: Per-IP rate limiting ───────────────────────────────────────
 // Token-bucket: 10 burst, refill 1 token/2s → 30 req/min sustained.
@@ -625,6 +638,40 @@ struct CompileResponse {
     warnings:           Vec<String>,
     functions:          Vec<FunctionMeta>,
     state_var_types:    std::collections::HashMap<String, String>,
+    /// V3 manifest metadata
+    manifest:           Option<ManifestInfo>,
+}
+
+/// V3 artifact manifest — matches the Testnet-v3 schema-v2 manifest structure.
+#[derive(Debug, Clone, serde::Serialize)]
+struct ManifestInfo {
+    /// Account-domain signature algorithm (ML-DSA-87 for V3)
+    required_signature_algorithm: String,
+    /// Consensus signature algorithm (ML-DSA-65 for V3)
+    consensus_signature_algorithm: String,
+    /// Chain ID (1266 for Testnet-v3)
+    chain_id: u64,
+    /// Network ID
+    network_id: String,
+    /// SHA-256 of the bytecode (artifact hash)
+    artifact_hash: String,
+    /// SHA-256 of the source (for provenance)
+    source_hash: String,
+    /// Trust model (compiler-attested)
+    trust_model: String,
+    /// Compiler key fingerprint
+    key_id: String,
+    /// Signature domain tags
+    signature_domains: SignatureDomains,
+}
+
+/// Domain-separated signature tags — V3 requires distinct domains for deploy, call, and governance.
+#[derive(Debug, Clone, serde::Serialize)]
+struct SignatureDomains {
+    deploy: String,
+    call: String,
+    governance: String,
+    attest: String,
 }
 
 /// Convert AST Type to a canonical string name for IDE use
@@ -652,6 +699,7 @@ async fn compile_handler(
             extern_contracts: vec![], errors: vec![format!("rate limit exceeded — retry in {}s", wait)], warnings: vec![],
             functions:        Vec::new(),
             state_var_types:  std::collections::HashMap::new(),
+            manifest:           None,
         }));
     }
     if req.source.len() > MAX_SOURCE_BYTES {
@@ -661,6 +709,7 @@ async fn compile_handler(
             warnings: vec![],
             functions:        Vec::new(),
             state_var_types:  std::collections::HashMap::new(),
+            manifest:           None,
         }));
     }
 
@@ -671,6 +720,7 @@ async fn compile_handler(
             errors: vec![format!("Parse error: {}", e)], warnings: vec![],
             functions:        Vec::new(),
             state_var_types:  std::collections::HashMap::new(),
+            manifest:           None,
         })),
     };
 
@@ -735,6 +785,7 @@ async fn compile_handler(
             errors: vec![format!("Codegen error: {}", e)], warnings: vec![],
             functions:        Vec::new(),
             state_var_types:  std::collections::HashMap::new(),
+            manifest:           None,
         })),
     };
 
@@ -748,6 +799,7 @@ async fn compile_handler(
                     success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
                     errors: vec![format!("PQC signing failed: {}", e)], warnings: vec![],
                     functions:        Vec::new(), state_var_types: std::collections::HashMap::new(),
+            manifest:           None,
                 })),
             };
             json!({
@@ -768,6 +820,7 @@ async fn compile_handler(
                     success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
                     errors: vec![format!("PQC keygen failed: {}", e)], warnings: vec![],
                     functions:        Vec::new(), state_var_types: std::collections::HashMap::new(),
+                    manifest:           None,
                 })),
             };
             let sig = match pqc.sign_message(&keypair.private_key, &bytecode, SIGNING_ALGORITHM) {
@@ -776,6 +829,7 @@ async fn compile_handler(
                     success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
                     errors: vec![format!("PQC signing failed: {}", e)], warnings: vec![],
                     functions:        Vec::new(), state_var_types: std::collections::HashMap::new(),
+            manifest:           None,
                 })),
             };
             json!({
@@ -870,13 +924,39 @@ async fn compile_handler(
                         )],
                         warnings: vec![],
                         functions:        Vec::new(), state_var_types: std::collections::HashMap::new(),
-                    }));
+            manifest:           None,
+                        }));
                 }
             }
             ec
         },
         errors: vec![], warnings: compile_warnings,
         functions,
+        manifest: {
+            use sha3::{Digest, Sha3_256};
+            let artifact_hash = hex::encode(Sha3_256::digest(&bytecode));
+            let source_hash    = hex::encode(Sha3_256::digest(req.source.as_bytes()));
+            let key_id = match state.compiler_key.as_ref() {
+                CompilerKey::Persistent { key_id, .. } => key_id.clone(),
+                CompilerKey::Ephemeral                   => "ephemeral".to_string(),
+            };
+            Some(ManifestInfo {
+                required_signature_algorithm: SIGNING_ALGORITHM.to_string(),
+                consensus_signature_algorithm: "ML-DSA-65".to_string(),
+                chain_id: V3_CHAIN_ID,
+                network_id: V3_NETWORK_ID.to_string(),
+                artifact_hash,
+                source_hash,
+                trust_model: "compiler-attested".to_string(),
+                key_id,
+                signature_domains: SignatureDomains {
+                    deploy:     V3_DOMAIN_DEPLOY.to_string(),
+                    call:       V3_DOMAIN_CALL.to_string(),
+                    governance: V3_DOMAIN_GOVERNANCE.to_string(),
+                    attest:     V3_DOMAIN_ATTEST.to_string(),
+                },
+            })
+        },
     }))
 }
 
@@ -1084,6 +1164,7 @@ async fn sign_source_handler(
                 extern_contracts: vec![], errors: vec![$err.into()], warnings: vec![],
                 functions:        Vec::new(),
             state_var_types:  std::collections::HashMap::new(),
+            manifest:           None,
             }))
         };
     }
@@ -1124,6 +1205,7 @@ async fn sign_source_handler(
             errors: vec![format!("Parse error: {}", e)], warnings: vec![],
             functions:        Vec::new(),
             state_var_types:  std::collections::HashMap::new(),
+            manifest:           None,
         })),
     };
     let contract_name: Option<String> = ast.iter().find_map(|unit| match unit {
@@ -1200,6 +1282,7 @@ async fn sign_source_handler(
             errors: vec![format!("Codegen error: {}", e)], warnings: compile_warnings,
             functions:        Vec::new(),
             state_var_types:  std::collections::HashMap::new(),
+            manifest:           None,
         })),
     };
     let bytecode_hash_bytes: [u8; 32] = Keccak256::digest(&bytecode).into();
@@ -1313,6 +1396,7 @@ async fn sign_source_handler(
         errors:            vec![],
         warnings:          compile_warnings,
         functions:        Vec::new(),
+            manifest:           None,
     }))
 }
 
@@ -2155,7 +2239,7 @@ async fn pubkey_handler(State(state): State<AppState>) -> RespJson<serde_json::V
                 "algorithm":   SIGNING_ALGORITHM,
                 "key_id":      key_id,
                 "public_key":  hex_encode(public_key),
-                "note":        "Use this public key to verify ML-DSA-65 signatures in /compile and /attest sidecars.",
+                "note":        "Use this public key to verify ML-DSA-87 signatures in /compile and /attest sidecars (V3 account-domain).",
             }))
         }
         CompilerKey::Ephemeral => {

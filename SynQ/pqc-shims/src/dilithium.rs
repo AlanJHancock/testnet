@@ -8,6 +8,7 @@ mod native_impl {
     //! perform genuine key generation, signing, and verification.
     
     use pqcrypto_mldsa::mldsa65;
+    use pqcrypto_mldsa::mldsa87;
     use pqcrypto_traits::sign::{PublicKey, SecretKey, SignedMessage};
     
     pub const DILITHIUM_PUBLIC_KEY_BYTES: usize = mldsa65::public_key_bytes();
@@ -96,10 +97,48 @@ mod native_impl {
             assert_eq!(sign(b"msg", &[0u8; 4]).len(), DILITHIUM_SIGNATURE_BYTES);
         }
     }
+
+    // ── ML-DSA-87 (Dilithium5 / NIST Level 5) — V3 account-domain ──────────
+
+    pub const MLDSA87_PUBLIC_KEY_BYTES: usize = mldsa87::public_key_bytes();
+    pub const MLDSA87_SECRET_KEY_BYTES: usize = mldsa87::secret_key_bytes();
+    pub const MLDSA87_SIGNATURE_BYTES: usize = mldsa87::signature_bytes();
+
+    /// Generates a real ML-DSA-87 keypair (V3 account-domain).
+    pub fn keygen_87() -> (Vec<u8>, Vec<u8>) {
+        let (pk, sk) = mldsa87::keypair();
+        (pk.as_bytes().to_vec(), sk.as_bytes().to_vec())
+    }
+
+    /// Signs a message with ML-DSA-87.
+    pub fn sign_87(msg: &[u8], sk: &[u8]) -> Vec<u8> {
+        let secret_key = match mldsa87::SecretKey::from_bytes(sk) {
+            Ok(k)  => k,
+            Err(_) => return vec![],
+        };
+        let signed = mldsa87::sign(msg, &secret_key);
+        signed.as_bytes().to_vec()
+    }
+
+    /// Verifies an ML-DSA-87 signed message against a public key.
+    pub fn verify_87(msg: &[u8], sig: &[u8], pk: &[u8]) -> bool {
+        let public_key = match mldsa87::PublicKey::from_bytes(pk) {
+            Ok(k)  => k,
+            Err(_) => return false,
+        };
+        let signed_message = match mldsa87::SignedMessage::from_bytes(sig) {
+            Ok(s)  => s,
+            Err(_) => return false,
+        };
+        match mldsa87::open(&signed_message, &public_key) {
+            Ok(recovered_msg) => recovered_msg == msg,
+            Err(_)            => false,
+        }
+    }
 }
 
 #[cfg(feature = "native")]
-pub use native_impl::{keygen, sign, verify};
+pub use native_impl::{keygen, sign, verify, keygen_87, sign_87, verify_87};
 
 /// WASM stub — returns deterministic zero-filled bytes.
 /// PQC signing is performed server-side when running in the browser.

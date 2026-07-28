@@ -37,6 +37,7 @@ mod native {
         match algorithm.to_lowercase().as_str() {
             // ML-DSA-65 (FIPS 204)
             "ml-dsa-65" | "mldsa65" | "dilithium" | "dilithium3" => "ML-DSA-65",
+            "ml-dsa-87" | "mldsa87" | "dilithium5" => "ML-DSA-87",
             // FN-DSA-512 (FIPS 206)
             "fn-dsa-512" | "fndsa512" | "falcon" | "falcon512" | "falcon-512" => "FN-DSA-512",
             // SLH-DSA-SHAKE-128s (FIPS 205)
@@ -94,6 +95,7 @@ mod native {
                     }
                 }
                 "ML-DSA-65"            => dilithium::keygen(),
+            "ML-DSA-87"            => dilithium::keygen_87(),
                 "FN-DSA-512"           => falcon::keygen(),
                 "SLH-DSA-SHAKE-128s"   => sphincs::keygen(),
                 "Classic-McEliece-348864" => mceliece_keygen(),
@@ -125,6 +127,7 @@ mod native {
         pub fn verify_signature(&self, public_key: &[u8], signature: &[u8], message: &[u8], algorithm: &str) -> Result<bool, String> {
             let result = match canonical_name(algorithm) {
                 "ML-DSA-65"          => dilithium::verify(message, signature, public_key),
+            "ML-DSA-87"          => dilithium::verify_87(message, signature, public_key),
                 "FN-DSA-512"         => falcon::verify(message, signature, public_key),
                 "SLH-DSA-SHAKE-128s" => sphincs::verify(message, signature, public_key),
                 _ => return Err(format!("Unsupported signature algorithm: {}", algorithm)),
@@ -163,6 +166,7 @@ mod native {
         fn create_signature(&self, private_key: &[u8], message: &[u8], canon: &str) -> Result<Vec<u8>, String> {
             match canon {
                 "ML-DSA-65"          => Ok(dilithium::sign(message, private_key)),
+            "ML-DSA-87"          => Ok(dilithium::sign_87(message, private_key)),
                 "FN-DSA-512"         => Ok(falcon::sign(message, private_key)),
                 "SLH-DSA-SHAKE-128s" => Ok(sphincs::sign(message, private_key)),
                 _ => Err(format!("Unsupported signature algorithm: {}", canon)),

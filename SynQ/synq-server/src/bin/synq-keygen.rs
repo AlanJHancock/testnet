@@ -11,7 +11,7 @@ fn main() {
     // Simple command-line argument parsing
     if args.len() > 1 {
         if args[1] == "--help" || args[1] == "-h" {
-            println!("synq-keygen: Generate persistent ML-DSA-65 compiler-attestation keys");
+            println!("synq-keygen: Generate persistent ML-DSA-87 compiler-attestation keys (V3 account-domain)");
             println!("Usage: synq-keygen [OUTPUT_PATH]");
             println!("Default output path: compiler.key");
             return;
@@ -21,8 +21,8 @@ fn main() {
     
     let path = PathBuf::from(output_path);
     
-    // Generate real ML-DSA-65 keypair
-    let (pk, sk) = dilithium::keygen();
+    // Generate real ML-DSA-87 keypair (V3 account-domain)
+    let (pk, sk) = dilithium::keygen_87();
     
     // Hex encode keys
     let pk_hex = hex::encode(&pk);
