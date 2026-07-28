@@ -79,10 +79,21 @@ struct FunctionScope {
     continue_targets: Vec<u32>,
 }
 
+/// Enum info for codegen — variant name → tag mapping
+struct EnumInfo {
+    variants: Vec<EnumVariant>,
+    tags: HashMap<String, i32>,
+}
+
 pub struct CodeGenerator {
     assembler: Assembler,
+    /// Struct definitions — field layout for struct literal/field access codegen
+    struct_defs: HashMap<String, StructDefinition>,
+    /// Enum definitions — variant tag mappings
+    enum_defs: HashMap<String, EnumInfo>,
     /// Contract-wide state variable addresses, shared across all functions.
     state_vars: HashMap<String, u32>,
+    state_var_types: HashMap<String, Type>,
     map_vars:   HashMap<String, u32>,
     set_vars:   HashMap<String, u32>,
     next_state_addr: u32,
@@ -118,6 +129,9 @@ impl CodeGenerator {
             function_param_signs: HashMap::new(),
             function_has_return: HashMap::new(),
             function_requires_caller: HashMap::new(),
+            struct_defs: HashMap::new(),
+            enum_defs: HashMap::new(),
+            state_var_types: HashMap::new(),
             function_capabilities: HashMap::new(),
             pending_call_patches: Vec::new(),
             current_function: None,
@@ -183,6 +197,7 @@ impl CodeGenerator {
                 let addr = self.next_state_addr;
                 self.next_state_addr += 1;
                 self.state_vars.insert(sv.name.clone(), addr);
+                self.state_var_types.insert(sv.name.clone(), sv.ty.clone());
                 match &sv.ty {
                     Type::Mapping(_, _) => { self.map_vars.insert(sv.name.clone(), addr); }
                     Type::Array(_)      => { self.set_vars.insert(sv.name.clone(), addr); }
@@ -235,14 +250,29 @@ impl CodeGenerator {
     fn gen_source_unit(&mut self, unit: &SourceUnit) -> Result<(), String> {
         match unit {
             SourceUnit::Struct(s)    => self.gen_struct(s),
+            SourceUnit::Enum(e)     => self.gen_enum(e),
             SourceUnit::Contract(c)  => self.gen_contract(c),
             SourceUnit::Interface(_) => Ok(()), // interfaces are compile-time only
             SourceUnit::Event(_)     => Ok(()), // top-level events: metadata only
         }
     }
 
-    fn gen_struct(&mut self, _s: &StructDefinition) -> Result<(), String> {
-        // Structs don't generate executable code (metadata only, for now).
+    fn gen_struct(&mut self, s: &StructDefinition) -> Result<(), String> {
+        // Register struct field layout for codegen (field index mapping)
+        self.struct_defs.insert(s.name.clone(), s.clone());
+        Ok(())
+    }
+
+    fn gen_enum(&mut self, e: &EnumDefinition) -> Result<(), String> {
+        // Register enum variants — each variant gets a sequential tag (I32)
+        let mut tags = std::collections::HashMap::new();
+        for (i, v) in e.variants.iter().enumerate() {
+            tags.insert(v.name.clone(), i as i32);
+        }
+        self.enum_defs.insert(e.name.clone(), EnumInfo {
+            variants: e.variants.clone(),
+            tags,
+        });
         Ok(())
     }
 
@@ -786,6 +816,45 @@ impl CodeGenerator {
             Expression::Err(inner) => {
                 self.gen_expression(inner, scope)?;
                 self.assembler.emit_op(OpCode::ResultErr);
+                Ok(())
+            }
+            Expression::FieldAccess { object, field } => {
+                self.gen_expression(object, scope)?;
+                // Look up field index from struct definitions
+                let field_idx = if let Expression::Identifier(name) = object.as_ref() {
+                    let ty = scope.local_types.get(name.as_str())
+                        .cloned()
+                        .or_else(|| self.state_var_types.get(name.as_str()).cloned());
+                    if let Some(Type::Named(struct_name)) = ty {
+                        if let Some(sd) = self.struct_defs.get(&struct_name) {
+                            sd.fields.iter().position(|f| f.name == *field)
+                                .map(|p| p as i32)
+                        } else { None }
+                    } else { None }
+                } else { None };
+
+                if let Some(idx) = field_idx {
+                    self.assembler.emit_op(OpCode::Push);
+                    self.assembler.emit_i32(idx);
+                    // TODO: Add TupleGet opcode to VM for proper field extraction
+                    // For now, pop both and push 0 as placeholder
+                    self.assembler.emit_op(OpCode::Pop);
+                    self.assembler.emit_op(OpCode::Pop);
+                    self.assembler.emit_op(OpCode::Push);
+                    self.assembler.emit_i32(0);
+                } else {
+                    self.assembler.emit_op(OpCode::Pop);
+                    self.assembler.emit_op(OpCode::Push);
+                    self.assembler.emit_i32(0);
+                }
+                Ok(())
+            }
+            Expression::StructLiteral { type_name: _, fields } => {
+                // Push field values in order — they become stack values
+                for (_, expr) in fields {
+                    self.gen_expression(expr, scope)?;
+                }
+                // TODO: Add MakeTuple opcode to VM to bundle as Tuple value
                 Ok(())
             }
             Expression::MapIndex(map, key) => {

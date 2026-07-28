@@ -5,8 +5,23 @@
 pub enum SourceUnit {
     Contract(ContractDefinition),
     Struct(StructDefinition),
+    Enum(EnumDefinition),
     Interface(InterfaceDefinition),
     Event(EventDefinition),
+}
+
+
+// ── Enum ───────────────────────────────────────────────────────────────────────
+#[derive(Debug, PartialEq, Clone)]
+pub struct EnumDefinition {
+    pub name:     String,
+    pub variants: Vec<EnumVariant>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct EnumVariant {
+    pub name:   String,
+    pub fields: Vec<Parameter>,  // empty for simple C-style enum
 }
 
 // ── Interface ────────────────────────────────────────────────────────────────
@@ -214,6 +229,10 @@ pub enum Expression {
     None,
     Ok(Box<Expression>),
     Err(Box<Expression>),
+    /// `expr.field` — access a struct field
+    FieldAccess { object: Box<Expression>, field: String },
+    /// `TypeName { field1: val1, field2: val2 }` — struct literal
+    StructLiteral { type_name: String, fields: Vec<(String, Expression)> },
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -247,8 +266,21 @@ pub enum Type {
     Tuple(Vec<Type>),
     Mapping(Box<Type>, Box<Type>),
     Array(Box<Type>),
-    // User-defined (struct name)
+    // User-defined (struct/enum name)
     Named(String),
+    // ── New primitive types (spec v7.0) ──
+    /// Fixed-size byte array: Bytes<N>
+    BytesN(usize),
+    /// 32-byte hash (alias for Bytes<32>)
+    Hash32,
+    /// 64-byte hash
+    Hash64,
+    /// UMA identity (32-byte)
+    UMAIdentity,
+    /// Block height
+    Height,
+    /// AI model identifier
+    ModelId,
 }
 
 // ── Literals ─────────────────────────────────────────────────────────────────

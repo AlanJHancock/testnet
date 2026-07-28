@@ -7,7 +7,7 @@ COMMENT    = _{ "//" ~ (!"\n" ~ ANY)* ~ ("\n" | EOI)
 
 source_file = { SOI ~ top_level_item* ~ EOI }
 top_level_item = { pragma_directive | synq_pragma | struct_definition
-                 | interface_definition | contract_definition }
+                 | enum_definition | interface_definition | contract_definition }
 
 // ── Pragmas ──────────────────────────────────────────────────────────────────
 pragma_directive = { "@" ~ IDENT ~ string_literal }
@@ -17,6 +17,10 @@ version_number   = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)* }
 // ── Struct ───────────────────────────────────────────────────────────────────
 struct_definition = { "struct" ~ IDENT ~ "{" ~ struct_field* ~ "}" }
 struct_field = { IDENT ~ ":" ~ type_decl ~ ";" }
+
+// ── Enum ──────────────────────────────────────────────────────────────────────
+enum_definition = { "enum" ~ IDENT ~ "{" ~ enum_variant* ~ "}" }
+enum_variant    = { IDENT ~ ("(" ~ param_list? ~ ")")? ~ (",")? }
 
 // ── Interface ────────────────────────────────────────────────────────────────
 interface_definition = { "interface" ~ IDENT ~ "{" ~ interface_fn* ~ "}" }
@@ -109,9 +113,11 @@ attribute_list      = { attribute+ }
 attribute           = { "@" ~ IDENT ~ ("(" ~ attribute_args ~ ")")? }
 attribute_args      = { (!")" ~ ANY)+ }
 
+// identity_clause? ~ return_type? ~ identity_clause? — supports both
+// `as caller -> T` and `-> T as caller` orderings (either clause is optional)
 function_definition = { attribute_list? ~ function_keyword ~ IDENT ~ "(" ~ param_list? ~ ")"
-                        ~ return_type? ~ identity_clause? ~ requires_clauses?
-                        ~ modifies_clauses? ~ block }
+                        ~ identity_clause? ~ return_type? ~ identity_clause?
+                        ~ requires_clauses? ~ modifies_clauses? ~ block }
 param_list = { param ~ ("," ~ param)* }
 param      = { IDENT ~ ":" ~ type_decl }
 
@@ -166,7 +172,9 @@ multiplicative = { unary ~ (mul_op ~ unary)* }
 mul_op         = { "*" | "/" | "%" }
 
 unary   = { ("-" ~ unary) | ("!" ~ unary) | primary }
-primary = { map_index_expr | method_call_expr | some_expr | none_expr | ok_expr | err_expr | call_expr | tuple_literal | literal | "(" ~ expression ~ ")" | IDENT }
+primary = { map_index_expr | method_call_expr | field_access_expr | struct_literal
+             | some_expr | none_expr | ok_expr | err_expr | call_expr
+             | tuple_literal | literal | "(" ~ expression ~ ")" | IDENT }
 map_index_expr  = { IDENT ~ "[" ~ expression ~ "]" }
 method_call_expr = { IDENT ~ "." ~ IDENT ~ "(" ~ arg_list? ~ ")" }
 
@@ -180,7 +188,15 @@ hex_literal    = @{ "0x" ~ ASCII_HEX_DIGIT+ }
 string_literal = @{ "\"" ~ (!("\"") ~ ANY)* ~ "\"" }
 bool_literal   = { "true" | "false" }
 
-// ── Constructed expressions ───────────────────────────────────────────────────
+// ── Field access & struct literal ──────────────────────────────────────────────
+// `expr.field` — access a field on a struct value (no parens → not a method call)
+field_access_expr = { IDENT ~ "." ~ IDENT ~ !"(" }
+
+// `TypeName { field1: expr, field2: expr }` — construct a struct value
+struct_literal = { IDENT ~ "{" ~ struct_field_init ~ ("," ~ struct_field_init)* ~ "}" }
+struct_field_init = { IDENT ~ ":" ~ expression }
+
+// ── Constructed expressions ──────────────────────────────────────────────────────
 tuple_literal = { "(" ~ expression ~ ("," ~ expression)+ ~ ")" }
 some_expr     = { "Some" ~ "(" ~ expression ~ ")" }
 none_expr     = { "None" }
@@ -189,7 +205,12 @@ err_expr      = { "Err"  ~ "(" ~ expression ~ ")" }
 
 // ── Types ────────────────────────────────────────────────────────────────────
 // Full numeric tower: u8..u256, i8..i256 + aliases + option/result/tuple
-type_decl = { option_type | result_type | tuple_type | mapping_type | set_type | array_type | IDENT }
+type_decl = { option_type | result_type | tuple_type | mapping_type | set_type | array_type
+                 | bytes_type | hash_type | uma_type | IDENT }
+
+bytes_type = { "Bytes" ~ "<" ~ number_literal ~ ">" }
+hash_type  = { "Hash32" | "Hash64" }
+uma_type   = { "UMAIdentity" | "ModelId" | "Height" }
 
 option_type  = { "Option"  ~ "<" ~ type_decl ~ ">" }
 result_type  = { "Result"  ~ "<" ~ type_decl ~ "," ~ type_decl ~ ">" }

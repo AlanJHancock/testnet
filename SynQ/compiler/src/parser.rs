@@ -20,6 +20,7 @@ pub fn parse(source: &str) -> Result<Vec<SourceUnit>, String> {
                     Rule::pragma_directive => {} // standard pragma -- consumed silently
                     Rule::synq_pragma      => {} // `pragma synq ^x.y;` -- consumed silently
                     Rule::struct_definition   => ast.push(SourceUnit::Struct(parse_struct(inner))),
+                    Rule::enum_definition    => ast.push(SourceUnit::Enum(parse_enum(inner))),
                     Rule::contract_definition => {
                         let c = parse_contract(inner)?;
                         if !contract_names.insert(c.name.clone()) {
@@ -61,6 +62,35 @@ fn parse_struct(pair: Pair<Rule>) -> StructDefinition {
         Parameter { name: n, ty: t, is_indexed: false }
     }).collect();
     StructDefinition { name, fields }
+}
+
+
+fn parse_enum(pair: Pair<Rule>) -> EnumDefinition {
+    let mut inner = pair.into_inner();
+    let name = inner.next().unwrap().as_str().to_string();
+    let mut variants = vec![];
+    for p in inner {
+        if p.as_rule() == Rule::enum_variant {
+            let mut vi = p.into_inner();
+            let vname = vi.next().unwrap().as_str().to_string();
+            let mut fields = vec![];
+            // Check if there's a param_list (algebraic variant)
+            for sub in vi {
+                if sub.as_rule() == Rule::param_list {
+                    for param in sub.into_inner() {
+                        if param.as_rule() == Rule::param {
+                            let mut pi = param.into_inner();
+                            let pn = pi.next().unwrap().as_str().to_string();
+                            let pt = parse_type(pi.next().unwrap());
+                            fields.push(Parameter { name: pn, ty: pt, is_indexed: false });
+                        }
+                    }
+                }
+            }
+            variants.push(EnumVariant { name: vname, fields });
+        }
+    }
+    EnumDefinition { name, variants }
 }
 
 fn parse_contract(pair: Pair<Rule>) -> Result<ContractDefinition, String> {
