@@ -592,6 +592,28 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
             let inner = pair.into_inner().next().unwrap();
             Expression::Err(Box::new(parse_expression(inner)))
         }
+        Rule::struct_literal => {
+            let mut inner = pair.into_inner();
+            let type_name = inner.next().unwrap().as_str().to_string();
+            let mut fields: Vec<(String, Expression)> = Vec::new();
+            for field_pair in inner {
+                // Each field_pair is a struct_field_init: IDENT ~ ":" ~ expression
+                let mut fi = field_pair.into_inner();
+                let fname = fi.next().unwrap().as_str().to_string();
+                let fval  = parse_expression(fi.next().unwrap());
+                fields.push((fname, fval));
+            }
+            Expression::StructLiteral { type_name, fields }
+        }
+        Rule::field_access_expr => {
+            let mut inner = pair.into_inner();
+            let obj_name = inner.next().unwrap().as_str().to_string();
+            let field    = inner.next().unwrap().as_str().to_string();
+            Expression::FieldAccess {
+                object: Box::new(Expression::Identifier(obj_name)),
+                field,
+            }
+        }
         _ => Expression::Literal(Literal::Number(0)),
     }
 }

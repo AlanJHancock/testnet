@@ -819,8 +819,12 @@ impl CodeGenerator {
                 Ok(())
             }
             Expression::FieldAccess { object, field } => {
+                // Generate the object expression (pushes the struct value as Tuple onto stack)
                 self.gen_expression(object, scope)?;
-                // Look up field index from struct definitions
+                
+                // Look up field index from struct definitions.
+                // For Identifier objects, check local_types and state_var_types.
+                // For nested field access or function call results, check expression types.
                 let field_idx = if let Expression::Identifier(name) = object.as_ref() {
                     let ty = scope.local_types.get(name.as_str())
                         .cloned()
@@ -833,28 +837,38 @@ impl CodeGenerator {
                     } else { None }
                 } else { None };
 
-                if let Some(idx) = field_idx {
-                    self.assembler.emit_op(OpCode::Push);
-                    self.assembler.emit_i32(idx);
-                    // TODO: Add TupleGet opcode to VM for proper field extraction
-                    // For now, pop both and push 0 as placeholder
-                    self.assembler.emit_op(OpCode::Pop);
-                    self.assembler.emit_op(OpCode::Pop);
-                    self.assembler.emit_op(OpCode::Push);
-                    self.assembler.emit_i32(0);
-                } else {
-                    self.assembler.emit_op(OpCode::Pop);
-                    self.assembler.emit_op(OpCode::Push);
-                    self.assembler.emit_i32(0);
+                match field_idx {
+                    Some(idx) => {
+                        // Stack: [tuple_value, index]
+                        // TupleGet pops index (top), then tuple (below), pushes element
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_i32(idx);
+                        self.assembler.emit_op(OpCode::TupleGet);
+                    }
+                    None => {
+                        // Unknown struct or field — emit runtime error via Revert
+                        self.assembler.emit_op(OpCode::Pop);
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_op(OpCode::Revert);
+                        // Revert takes a 4-byte-LE length + message
+                        let msg = format!("field access: unknown field '{}'", field);
+                        let mb = msg.as_bytes();
+                        self.assembler.emit_raw(&(mb.len() as u32).to_le_bytes());
+                        self.assembler.emit_raw(mb);
+                    }
                 }
                 Ok(())
             }
-            Expression::StructLiteral { type_name: _, fields } => {
-                // Push field values in order — they become stack values
+            Expression::StructLiteral { type_name, fields } => {
+                // Push field values in declaration order (matching struct field layout)
                 for (_, expr) in fields {
                     self.gen_expression(expr, scope)?;
                 }
-                // TODO: Add MakeTuple opcode to VM to bundle as Tuple value
+                // TuplePack: pops count (top), then pops count values, pushes Tuple
+                // Stack: [val0, val1, ..., valN, count] → pushes Tuple([val0, val1, ..., valN])
+                self.assembler.emit_op(OpCode::Push);
+                self.assembler.emit_i32(fields.len() as i32);
+                self.assembler.emit_op(OpCode::TuplePack);
                 Ok(())
             }
             Expression::MapIndex(map, key) => {

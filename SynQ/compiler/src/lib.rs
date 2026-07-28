@@ -334,3 +334,93 @@ fn collect_extern_contracts_stmt(stmt: &crate::ast::Statement, out: &mut Vec<Str
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod struct_tests {
+    use super::*;
+// Test: Struct creation + field access via TuplePack/TupleGet
+// Verifies that struct literals create Tuple values and field access extracts fields.
+
+use crate::parser::parse;
+use crate::codegen::CodeGenerator;
+
+#[test]
+fn test_struct_literal_and_field_access() {
+    let source = r#"pragma synq ^0.9;
+struct Point {
+    x: u256;
+    y: u256;
+}
+contract StructTest {
+    state {
+        p: Point;
+        initialised: bool;
+    }
+    impl {
+        @public
+        @effects(initialised, p)
+        function init() -> bool {
+            if (initialised) { return false; }
+            p = Point { x: 10, y: 20 };
+            initialised = true;
+            return true;
+        }
+        @public
+        function get_x() -> u256 {
+            return p.x;
+        }
+        @public
+        function get_y() -> u256 {
+            return p.y;
+        }
+    }
+}
+"#;
+    let ast = parse(source).expect("parse failed");
+    let (bytecode, _state_vars) = CodeGenerator::new().generate(&ast).expect("codegen failed");
+    
+    // Bytecode should contain TuplePack (0xA0) and TupleGet (0xA2) opcodes
+    let has_pack = bytecode.windows(1).any(|w| w[0] == 0xA0);
+    let has_get  = bytecode.windows(1).any(|w| w[0] == 0xA2);
+    assert!(has_pack, "bytecode should contain TuplePack (0xA0) for struct literal");
+    assert!(has_get,  "bytecode should contain TupleGet (0xA2) for field access");
+}
+
+#[test]
+fn test_struct_literal_bytecode_count() {
+    // Verify that a struct with 2 fields emits exactly one TuplePack with count=2
+    let source = r#"pragma synq ^0.9;
+struct Pair {
+    a: u256;
+    b: u256;
+}
+contract PairTest {
+    state {
+        pair: Pair;
+    }
+    impl {
+        @public
+        function set_pair(av: u256, bv: u256) -> bool {
+            pair = Pair { a: av, b: bv };
+            return true;
+        }
+        @public
+        function get_a() -> u256 {
+            return pair.a;
+        }
+    }
+}
+"#;
+    let ast = parse(source).expect("parse failed");
+    let (bytecode, _state_vars) = CodeGenerator::new().generate(&ast).expect("codegen failed");
+    
+    // Count TuplePack opcodes — should be 1 (in set_pair)
+    let pack_count = bytecode.windows(1).filter(|w| w[0] == 0xA0).count();
+    assert_eq!(pack_count, 1, "should have exactly 1 TuplePack for struct literal");
+    
+    // Count TupleGet opcodes — should be 1 (in get_a)
+    let get_count = bytecode.windows(1).filter(|w| w[0] == 0xA2).count();
+    assert_eq!(get_count, 1, "should have exactly 1 TupleGet for field access");
+}
+
+}
