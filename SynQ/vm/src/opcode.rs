@@ -75,6 +75,9 @@ pub enum OpCode {
     LoadAuthority = 0x51,  // push current call's AuthorityEnvelope as Bytes
     AuthRequire   = 0x52,  // pop envelope + scope_hash → push Bool (validated)
     AuthIdentity  = 0x53,  // pop envelope → push UMA identity (U256)
+    AddrEncode   = 0x54,  // pop 20-byte value → push syna... Bech32 string as Bytes
+    AddrDecode   = 0x55,  // pop Bech32 string (Bytes) → push 20-byte value as U256
+    ContractAddr = 0x56,  // pop deployer(U256) + nonce(U256) + artifact_hash(Bytes32) → push sync... Bech32 string
     ExternCall = 0x60,   // call a function on another contract in the same workspace
 
     // Map operations (0x90-0x96)
@@ -157,6 +160,9 @@ impl TryFrom<u8> for OpCode {
             0x51 => Ok(OpCode::LoadAuthority),
             0x52 => Ok(OpCode::AuthRequire),
             0x53 => Ok(OpCode::AuthIdentity),
+            0x54 => Ok(OpCode::AddrEncode),
+            0x55 => Ok(OpCode::AddrDecode),
+            0x56 => Ok(OpCode::ContractAddr),
             0x60 => Ok(OpCode::ExternCall),
             // Map ops
             0x90 => Ok(OpCode::MapNew),

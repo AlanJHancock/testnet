@@ -1068,6 +1068,37 @@ impl CodeGenerator {
                 self.assembler.emit_op(OpCode::AuthIdentity);
                 return Ok(());
             }
+            // ── Address builtins (V3 Bech32 address model) ──────────────────
+            "to_syna" => {
+                // to_syna(address) → syna... Bech32 string as Bytes
+                if args.len() != 1 {
+                    return Err("to_syna expects 1 argument (20-byte address)".into());
+                }
+                self.gen_expression(&args[0], scope)?;
+                self.assembler.emit_op(OpCode::AddrEncode);
+                return Ok(());
+            }
+            "from_syna" => {
+                // from_syna(s) → 20-byte value as U256
+                if args.len() != 1 {
+                    return Err("from_syna expects 1 argument (Bech32 string)".into());
+                }
+                self.gen_expression(&args[0], scope)?;
+                self.assembler.emit_op(OpCode::AddrDecode);
+                return Ok(());
+            }
+            "contract_address" => {
+                // contract_address(deployer, nonce, artifact_hash) → sync... Bech32 string
+                if args.len() != 3 {
+                    return Err("contract_address expects 3 arguments (deployer, nonce, artifact_hash)".into());
+                }
+                // Stack order: artifact_hash (bottom), nonce, deployer (top)
+                self.gen_expression(&args[2], scope)?;  // artifact_hash
+                self.gen_expression(&args[1], scope)?;  // nonce
+                self.gen_expression(&args[0], scope)?;  // deployer (top of stack)
+                self.assembler.emit_op(OpCode::ContractAddr);
+                return Ok(());
+            }
             _ => {}
         }
 

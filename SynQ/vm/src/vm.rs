@@ -899,7 +899,139 @@ impl QuantumVM {
             // ── Map operations ──────────────────────────────────────────────
             // MapNew: reads inline name, initialises an empty Map at the named
             // state address and pushes that address (I32) as the handle.
-            OpCode::MapNew => {
+            
+            // ── AddrEncode (0x54): pop value → push syna... Bech32 string ──
+            // Accepts: Bytes (any length, left-padded to 20), U256 (low 20 bytes), I32
+            OpCode::AddrEncode => {
+                let v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
+                let addr20 = match v {
+                    Value::Bytes(ref b) if b.len() == 20 => {
+                        let mut a = [0u8; 20];
+                        a.copy_from_slice(b);
+                        a
+                    }
+                    Value::Bytes(ref b) if b.len() < 20 => {
+                        // Left-pad to 20 bytes
+                        let mut a = [0u8; 20];
+                        a[20 - b.len()..].copy_from_slice(b);
+                        a
+                    }
+                    Value::Bytes(ref b) if b.len() <= 32 => {
+                        // Right-truncate to 20 bytes (take last 20)
+                        let mut a = [0u8; 20];
+                        a.copy_from_slice(&b[b.len() - 20..]);
+                        a
+                    }
+                    Value::U256(ref u) => {
+                        let bytes = u.to_be_bytes::<32>();
+                        let mut a = [0u8; 20];
+                        a.copy_from_slice(&bytes[12..32]);
+                        a
+                    }
+                    Value::I32(i) => {
+                        let mut a = [0u8; 20];
+                        a[19] = (i & 0xFF) as u8;
+                        a[18] = ((i >> 8) & 0xFF) as u8;
+                        a[17] = ((i >> 16) & 0xFF) as u8;
+                        a[16] = ((i >> 24) & 0xFF) as u8;
+                        a
+                    }
+                    _ => return Err(VMError::RuntimeError("AddrEncode: expected address value (Bytes/U256/I32)".into())),
+                };
+                match crate::bech32::evm_to_syna(&addr20) {
+                    Ok(encoded) => self.stack.push(Value::Bytes(encoded.into_bytes())),
+                    Err(e) => return Err(VMError::RuntimeError(format!("AddrEncode: {}", e))),
+                }
+            }
+
+            // ── AddrDecode (0x55): pop Bech32 string → push 20-byte value ──
+            OpCode::AddrDecode => {
+                let v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
+                let s = match v {
+                    Value::Bytes(b) => String::from_utf8(b)
+                        .map_err(|_| VMError::RuntimeError("AddrDecode: invalid UTF-8".into()))?,
+                    _ => return Err(VMError::RuntimeError("AddrDecode: expected Bytes (Bech32 string)".into())),
+                };
+                let addr = crate::bech32::syna_to_evm(&s)
+                    .or_else(|_| crate::bech32::from_sync(&s))
+                    .map_err(|e| VMError::RuntimeError(format!("AddrDecode: {}", e)))?;
+                let mut b32 = [0u8; 32];
+                b32[12..32].copy_from_slice(&addr);
+                self.stack.push(Value::U256(U256::from_be_bytes::<32>(b32)));
+            }
+
+            // ── ContractAddr (0x56): pop deployer + nonce + artifact_hash → push sync... ──
+            OpCode::ContractAddr => {
+                let deployer_v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
+                let nonce_v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
+                let artifact_v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
+
+                let deployer = match deployer_v {
+                    Value::U256(ref u) => {
+                        let bytes = u.to_be_bytes::<32>();
+                        let mut a = [0u8; 20];
+                        a.copy_from_slice(&bytes[12..32]);
+                        a
+                    }
+                    Value::Bytes(ref b) if b.len() <= 20 => {
+                        let mut a = [0u8; 20];
+                        a[20 - b.len()..].copy_from_slice(b);
+                        a
+                    }
+                    Value::Bytes(ref b) => {
+                        let mut a = [0u8; 20];
+                        a.copy_from_slice(&b[b.len() - 20..]);
+                        a
+                    }
+                    Value::I32(i) => {
+                        let mut a = [0u8; 20];
+                        a[16..20].copy_from_slice(&(i as u32).to_be_bytes());
+                        a
+                    }
+                    _ => return Err(VMError::RuntimeError("ContractAddr: expected address value for deployer".into())),
+                };
+
+                let nonce: u64 = match nonce_v {
+                    Value::I32(i) => i as u64,
+                    Value::U256(ref u) => u.try_into().map_err(|_| VMError::RuntimeError("ContractAddr: nonce overflow".into()))?,
+                    _ => return Err(VMError::RuntimeError("ContractAddr: expected integer nonce".into())),
+                };
+
+                let artifact_hash = match artifact_v {
+                    Value::Bytes(ref b) if b.len() == 32 => {
+                        let mut h = [0u8; 32];
+                        h.copy_from_slice(b);
+                        h
+                    }
+                    Value::Bytes(ref b) if b.len() < 32 => {
+                        let mut h = [0u8; 32];
+                        h[32 - b.len()..].copy_from_slice(b);
+                        h
+                    }
+                    Value::Bytes(ref b) => {
+                        let mut h = [0u8; 32];
+                        h.copy_from_slice(&b[b.len() - 32..]);
+                        h
+                    }
+                    Value::U256(ref u) => u.to_be_bytes::<32>(),
+                    Value::I32(i) => {
+                        let mut h = [0u8; 32];
+                        h[28..32].copy_from_slice(&(i as u32).to_be_bytes());
+                        h
+                    }
+                    _ => return Err(VMError::RuntimeError("ContractAddr: expected hash value for artifact".into())),
+                };
+
+                let constructor_hash = [0u8; 32];
+                let network = std::option_env!("SYNQ_NETWORK_ID").unwrap_or("synergy-testnet-v3");
+
+                match crate::bech32::derive_contract_address(&deployer, nonce, &artifact_hash, &constructor_hash, network) {
+                    Ok(encoded) => self.stack.push(Value::Bytes(encoded.into_bytes())),
+                    Err(e) => return Err(VMError::RuntimeError(format!("ContractAddr: {}", e))),
+                }
+            }
+
+OpCode::MapNew => {
                 if self.pc + 4 > self.code.len() {
                     return Err(VMError::InvalidBytecode("MapNew: truncated name_len".into()));
                 }

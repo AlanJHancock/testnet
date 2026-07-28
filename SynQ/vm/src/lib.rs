@@ -1,4 +1,5 @@
 pub mod opcode;
+pub mod bech32;
 pub mod vm;
 pub mod assembler;
 

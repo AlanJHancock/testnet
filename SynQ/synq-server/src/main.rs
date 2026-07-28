@@ -2103,7 +2103,8 @@ async fn session_run_handler(
         }));
     }
 
-    eprintln!("[RUN] sid={} signing_key={} fn={} args_len={}", &req.session_id, hex_encode(&caller_addr), req.function, vm_args.len());
+    let caller_syna = synq_vm::bech32::evm_to_syna(&caller_addr).unwrap_or_else(|_| hex_encode(&caller_addr));
+    eprintln!("[RUN] sid={} caller={} fn={} args_len={}", &req.session_id, caller_syna, req.function, vm_args.len());
 
     // ── Runtime fault injection (cosmic ray / Rowhammer simulation) ────────
     if let (Some(step), Some(offset), Some(mask)) = (req.fault_step, req.fault_byte_offset, req.fault_xor_mask) {
