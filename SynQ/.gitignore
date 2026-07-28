@@ -6,3 +6,4 @@ Cargo.lock
 demo/wasm/synq_compiler_wasm_bg.*.wasm
 demo/wasm/synq_compiler_wasm.*.js
 demo/*.bak*
+docs/spec-v7/
