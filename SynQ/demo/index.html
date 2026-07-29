@@ -1162,6 +1162,56 @@
     return '0x'+r+s+v;
   }
 
+  /* ── Chain switch — ensure MetaMask is on chain 1266 before signing ─────── */
+  var V3_CHAIN_ID_HEX = '0x4f2'; // 1266 decimal
+  var _chainEnsured = false;
+
+  async function _ensureChain() {
+    if (_chainEnsured) return; // already on the right chain
+    var provider = _walletProvider();
+    if (!provider || _walletMode === 'ephemeral') return;
+
+    try {
+      // Try switching to chain 1266
+      await provider.request({
+        method: 'wallet_switchEthereumChain',
+        params: [{ chainId: V3_CHAIN_ID_HEX }]
+      });
+      _chainEnsured = true;
+      console.log('[SynQ Wallet] Switched to chain 1266 (synergy-testnet-v3)');
+    } catch(switchErr) {
+      // 4902 = chain not added yet
+      if (switchErr.code === 4902 || (switchErr.message && switchErr.message.includes('4902'))) {
+        console.log('[SynQ Wallet] Chain 1266 not in MetaMask — adding...');
+        try {
+          await provider.request({
+            method: 'wallet_addEthereumChain',
+            params: [{
+              chainId: V3_CHAIN_ID_HEX,
+              chainName: 'Synergy Testnet V3',
+              nativeCurrency: { name: 'SYNR', symbol: 'SYNR', decimals: 18 },
+              rpcUrls: ['https://hanksweb.co.uk/synq-rpc/'],
+              blockExplorerUrls: []
+            }]
+          });
+          _chainEnsured = true;
+          console.log('[SynQ Wallet] Added and switched to chain 1266');
+        } catch(addErr) {
+          console.warn('[SynQ Wallet] Could not add chain 1266:', addErr.message || addErr);
+          throw new Error('Could not add Synergy Testnet V3 to wallet. ' +
+            'Manually add chainId 1266 with RPC https://hanksweb.co.uk/synq-rpc/ and try again.');
+        }
+      } else if (switchErr.code === 4001) {
+        throw new Error('Chain switch rejected — approve in wallet to continue.');
+      } else {
+        // Some wallets don't support wallet_switchEthereumChain
+        // Try signing anyway — the error might be non-fatal
+        console.warn('[SynQ Wallet] Chain switch failed (non-fatal):', switchErr.message || switchErr);
+        _chainEnsured = true; // don't keep retrying
+      }
+    }
+  }
+
   /* ── Master signing dispatcher ────────────────────────────────────────────── */
   async function getSignature(typedData) {
     if (_walletMode === 'synergy' || _walletMode === 'ethereum') {
@@ -1170,6 +1220,8 @@
         console.warn('[SynQ Wallet] No provider for ' + _walletMode + ' signing — falling back to ephemeral');
         return await signEIP712Ephemeral(typedData);
       }
+      // Ensure wallet is on chain 1266 before signing (MetaMask enforces domain chainId match)
+      await _ensureChain();
       var json = typeof typedData === 'string' ? typedData : JSON.stringify(typedData);
       console.log('[SynQ Wallet] Requesting signature from extension...', 'method: eth_signTypedData_v4');
       try {
@@ -1300,7 +1352,7 @@
     }
     provider.on('accountsChanged', function(accs) {
       if (!accs || accs.length === 0) {
-        walletAddress = null; walletSyna = null; _walletMode = 'none';
+        walletAddress = null; walletSyna = null; _walletMode = 'none'; _chainEnsured = false;
         document.querySelectorAll('[data-uma-btn]').forEach(function(b){ b.style.display='none'; });
         updateWalletUI();
         document.getElementById('attestPanel').classList.remove('show');
@@ -1518,7 +1570,7 @@
   })();
 
   function disconnectWallet() {
-    walletAddress = null; walletSyna = null; _walletMode = 'none'; updateWalletUI();
+    walletAddress = null; walletSyna = null; _walletMode = 'none'; _chainEnsured = false; updateWalletUI();
     document.getElementById('attestPanel').classList.remove('show');
   }
   window.disconnectWallet = disconnectWallet;
@@ -2048,7 +2100,7 @@
             setStatus('Compiled ▶ ' + (currentContractName || 'contract') + ' (wallet signature declined)', 'success');
           } else if (we.code === 4902 || we.code === -32603 ||
                      (we.message && we.message.toLowerCase().includes('chain'))) {
-            setStatus('Wallet error: domain chain mismatch — SynQ uses chainId 1266 (synergy-testnet-v3). Try again.', 'error');
+            setStatus('Wallet error: chain mismatch — switching to chain 1266 — SynQ uses chainId 1266 (synergy-testnet-v3). Try again.', 'error');
           } else {
             setStatus('Source signing error: ' + (we.message || we.toString()), 'error');
           }
@@ -2755,7 +2807,7 @@
           if (sigErr.code === 4001 || sigErr.code === 'ACTION_REJECTED') {
             sigErrMsg = 'Signature declined — call not sent.';
           } else if (sigErr.code === 4902 || sigErr.code === -32603 || (sigErr.message && sigErr.message.toLowerCase().includes('chain'))) {
-            sigErrMsg = 'Wallet error: domain chain mismatch — SynQ uses chainId 1266 (synergy-testnet-v3) for signing only, no network switch needed. Try again.';
+            sigErrMsg = 'Wallet error: chain mismatch — switching to chain 1266 — SynQ uses chainId 1266 (synergy-testnet-v3) for signing only, no network switch needed. Try again.';
           } else {
             sigErrMsg = 'Signing error: ' + (sigErr.message || sigErr.toString());
           }
