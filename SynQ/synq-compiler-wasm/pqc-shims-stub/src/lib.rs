@@ -1,5 +1,22 @@
 //! Pure-Rust no-op stub for synq-pqc-shims — used in WASM builds only.
-//! All PQC operations are performed server-side.
+//!
+//! ## ARCHITECTURE DECISION
+//!
+//! All PQC operations are deferred to the native server. This stub exists
+//! because the `pqrust-*` backends require C compilation (PQClean) which
+//! cannot target `wasm32-unknown-unknown`. The WASM compiler crate serves
+//! in-browser compilation only; PQC signing, verification, key encapsulation,
+//! and AEG1 protocol operations are performed exclusively by `synq-server`.
+//!
+//! See: `docs/PQC_DEFERRAL.md` or `SynQ/docs/WASM_PQC_DEFERRAL.md` for the
+//! full Architecture Decision Record.
+//!
+//! ## SECURITY
+//!
+//! This stub cannot perform any real cryptographic operation. All `verify()`
+//! calls return `false`, all `keygen()` calls return zero-filled vectors,
+//! and all `sign()` calls return zero-filled signatures. This ensures the
+//! WASM binary can never produce a false positive PQC attestation.
 
 pub mod dilithium {
     pub fn keygen() -> (Vec<u8>, Vec<u8>) { (vec![0u8;32], vec![0u8;32]) }
