@@ -669,6 +669,10 @@ fn parse_type(pair: Pair<Rule>) -> Type {
             let inner = pair.into_inner().next().unwrap();
             Type::Array(Box::new(parse_type(inner)))
         }
+        Rule::asset_type => {
+            let inner = pair.into_inner().next().unwrap();
+            Type::Asset(Box::new(parse_type(inner)))
+        }
         Rule::IDENT => match pair.as_str() {
             "address" | "Address"                         => Type::Address,
             "u8"  | "UInt8"  | "uint8"                   => Type::UInt8,

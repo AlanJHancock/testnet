@@ -354,6 +354,14 @@ struct CallFrame {
 }
 
 // The main VM struct
+/// Runtime record for a linear asset.
+pub struct AssetRecord {
+    pub owner:    U256,
+    pub value:    U256,
+    pub type_tag: u32,
+    pub active:   bool,
+}
+
 pub struct QuantumVM {
     pub extern_call_handler: Option<std::sync::Arc<dyn Fn(&str, &str, &[Value]) -> Result<Option<Value>, VMError> + Send + Sync>>,
     pub call_context: CallContext,
@@ -384,6 +392,10 @@ pub struct QuantumVM {
     /// Hard limit on call_stack depth enforced at the Call opcode.
     /// Default: DEFAULT_MAX_CALL_DEPTH.
     pub max_call_depth: usize,
+
+    // ── Linear asset registry ────────────────────────────────────────────
+    pub assets: HashMap<u64, AssetRecord>,
+    pub next_asset_id: u64,
 }
 
 /// Format a VM Value for Print/emit output.
@@ -420,6 +432,8 @@ impl QuantumVM {
             steps: 0,
             max_steps: DEFAULT_MAX_STEPS,
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
+            assets: HashMap::new(),
+            next_asset_id: 1,
         }
     }
 
@@ -1211,6 +1225,57 @@ impl QuantumVM {
                 let msg = String::from_utf8(msg_bytes.to_vec())
                     .unwrap_or_else(|e| format!("revert(0x{})", hex::encode(&msg_bytes[..e.utf8_error().valid_up_to()])));
                 return Err(VMError::RevertedNamed { code, message: msg });
+            }
+            // ── Linear asset opcodes (0x57-0x5B) ─────────────────────────────
+            OpCode::AssetCreate => {
+                let type_tag = self.stack.pop().ok_or(VMError::StackUnderflow)?.as_i32()? as u32;
+                let value = self.stack.pop().ok_or(VMError::StackUnderflow)?.as_u256()?;
+                let id = self.next_asset_id;
+                self.next_asset_id += 1;
+                let owner = {
+                    let mut arr = [0u8; 32];
+                    arr[12..32].copy_from_slice(&self.call_context.signing_key);
+                    U256::from_be_bytes::<32>(arr)
+                };
+                self.assets.insert(id, AssetRecord { owner, value, type_tag, active: true });
+                self.stack.push(Value::U256(U256::from(id)));
+            }
+            OpCode::AssetTransfer => {
+                let new_owner = self.stack.pop().ok_or(VMError::StackUnderflow)?.as_u256()?;
+                let asset_id = self.stack.pop().ok_or(VMError::StackUnderflow)?.as_u256()?;
+                let id: u64 = asset_id.try_into().map_err(|_| VMError::RuntimeError("AssetTransfer: asset_id overflow".into()))?;
+                let record = self.assets.get(&id)
+                    .filter(|r| r.active)
+                    .ok_or_else(|| VMError::RuntimeError(format!("AssetTransfer: asset {} not found or inactive", id)))?;
+                let value = record.value;
+                let type_tag = record.type_tag;
+                self.assets.get_mut(&id).unwrap().active = false;
+                let new_id = self.next_asset_id;
+                self.next_asset_id += 1;
+                self.assets.insert(new_id, AssetRecord { owner: new_owner, value, type_tag, active: true });
+                self.stack.push(Value::U256(U256::from(new_id)));
+            }
+            OpCode::AssetBurn => {
+                let asset_id = self.stack.pop().ok_or(VMError::StackUnderflow)?.as_u256()?;
+                let id: u64 = asset_id.try_into().map_err(|_| VMError::RuntimeError("AssetBurn: asset_id overflow".into()))?;
+                let record = self.assets.get(&id)
+                    .filter(|r| r.active)
+                    .ok_or_else(|| VMError::RuntimeError(format!("AssetBurn: asset {} not found or inactive", id)))?;
+                let value = record.value;
+                self.assets.get_mut(&id).unwrap().active = false;
+                self.stack.push(Value::U256(value));
+            }
+            OpCode::AssetBalance => {
+                let asset_id = self.stack.pop().ok_or(VMError::StackUnderflow)?.as_u256()?;
+                let id: u64 = asset_id.try_into().map_err(|_| VMError::RuntimeError("AssetBalance: asset_id overflow".into()))?;
+                let value = self.assets.get(&id).filter(|r| r.active).map(|r| r.value).unwrap_or(U256::ZERO);
+                self.stack.push(Value::U256(value));
+            }
+            OpCode::AssetOwner => {
+                let asset_id = self.stack.pop().ok_or(VMError::StackUnderflow)?.as_u256()?;
+                let id: u64 = asset_id.try_into().map_err(|_| VMError::RuntimeError("AssetOwner: asset_id overflow".into()))?;
+                let owner = self.assets.get(&id).filter(|r| r.active).map(|r| r.owner).unwrap_or(U256::ZERO);
+                self.stack.push(Value::U256(owner));
             }
         }
 

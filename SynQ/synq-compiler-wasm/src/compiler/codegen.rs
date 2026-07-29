@@ -1174,6 +1174,51 @@ Statement::Emit { event, args } => {
             self.assembler.emit_op(OpCode::StrEq);
             return Ok(());
         }
+        // ── Asset builtins ─────────────────────────────────────────────────────
+        if name == "asset_create" && args.len() == 2 {
+            // asset_create(type_name: str, value: u256) -> u256 (asset_id)
+            // Hash the type_name to a u32 type_tag using FNV-1a.
+            self.gen_expression(&args[1], scope)?;  // push value
+            if let crate::compiler::ast::Expression::Literal(crate::compiler::ast::Literal::String(ref tn)) = args[0] {
+                let mut hash: u32 = 2166136261;
+                for byte in tn.bytes() {
+                    hash ^= byte as u32;
+                    hash = hash.wrapping_mul(16777619);
+                }
+                self.assembler.emit_op(OpCode::Push);
+                self.assembler.emit_i32(hash as i32);
+            } else {
+                return Err("asset_create: type_name must be a string literal".into());
+            }
+            self.assembler.emit_op(OpCode::AssetCreate);
+            return Ok(());
+        }
+        if name == "asset_transfer" && args.len() == 2 {
+            // asset_transfer(asset_id: u256, to: u256) -> u256 (new_asset_id)
+            self.gen_expression(&args[0], scope)?;  // push asset_id
+            self.gen_expression(&args[1], scope)?;  // push new_owner
+            self.assembler.emit_op(OpCode::AssetTransfer);
+            return Ok(());
+        }
+        if name == "asset_burn" && args.len() == 1 {
+            // asset_burn(asset_id: u256) -> u256 (burned value)
+            self.gen_expression(&args[0], scope)?;
+            self.assembler.emit_op(OpCode::AssetBurn);
+            return Ok(());
+        }
+        if name == "asset_balance" && args.len() == 1 {
+            // asset_balance(asset_id: u256) -> u256
+            self.gen_expression(&args[0], scope)?;
+            self.assembler.emit_op(OpCode::AssetBalance);
+            return Ok(());
+        }
+        if name == "asset_owner" && args.len() == 1 {
+            // asset_owner(asset_id: u256) -> u256
+            self.gen_expression(&args[0], scope)?;
+            self.assembler.emit_op(OpCode::AssetOwner);
+            return Ok(());
+        }
+
         // ── End string builtins ───────────────────────────────────────────────
         // ── Authority builtins (spec v7.0 authority model) ───────────────
         match name {

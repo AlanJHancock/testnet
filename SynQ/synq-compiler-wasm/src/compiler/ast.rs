@@ -280,6 +280,8 @@ pub enum Type {
     // ── New primitive types (spec v7.0) ──
     /// Fixed-size byte array: Bytes<N>
     BytesN(usize),
+    /// Linear asset wrapper: Asset<T>
+    Asset(Box<Type>),
     /// 32-byte hash (alias for Bytes<32>)
     Hash32,
     /// 64-byte hash

@@ -214,7 +214,7 @@ err_expr      = { "Err"  ~ "(" ~ expression ~ ")" }
 
 // ── Types ────────────────────────────────────────────────────────────────────
 // Full numeric tower: u8..u256, i8..i256 + aliases + option/result/tuple
-type_decl = { option_type | result_type | tuple_type | mapping_type | set_type | array_type
+type_decl = { option_type | result_type | tuple_type | mapping_type | set_type | array_type | asset_type
                  | bytes_type | hash_type | uma_type | IDENT }
 
 bytes_type = { "Bytes" ~ "<" ~ number_literal ~ ">" }
@@ -227,5 +227,6 @@ tuple_type   = { "(" ~ type_decl ~ ("," ~ type_decl)+ ~ ")" }
 mapping_type = { ("mapping" | "map") ~ "<" ~ type_decl ~ "," ~ type_decl ~ ">" }
 set_type     = { "set" ~ "<" ~ type_decl ~ ">" }
 array_type   = { "[" ~ type_decl ~ "]" }
+asset_type   = { "Asset" ~ "<" ~ type_decl ~ ">" }
 
 IDENT = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }

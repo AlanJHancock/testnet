@@ -119,6 +119,12 @@ pub enum OpCode {
     AddrEncode   = 0x54,   // pop 20-byte U256 → push syna Bech32 string
     AddrDecode   = 0x55,   // pop syna/sync Bech32 string → push 20-byte U256
     ContractAddr = 0x56,   // pop deployer+nonce+artifact_hash → push sync Bech32 string
+    // ── Linear asset tracking (0x57-0x5B) ──────────────────────────────
+    AssetCreate   = 0x57,  // pop type_tag(I32) + value(U256) → push asset_id(U256)
+    AssetTransfer = 0x58,  // pop new_owner(U256) + asset_id(U256) → push new_asset_id(U256)
+    AssetBurn     = 0x59,  // pop asset_id(U256) → push value(U256)
+    AssetBalance  = 0x5A,  // pop asset_id(U256) → push value(U256)
+    AssetOwner    = 0x5B,  // pop asset_id(U256) → push owner(U256)
 
     // PQC operations
     DilithiumVerify  = 0x80,
@@ -200,6 +206,11 @@ impl TryFrom<u8> for OpCode {
             0x54 => Ok(OpCode::AddrEncode),
             0x55 => Ok(OpCode::AddrDecode),
             0x56 => Ok(OpCode::ContractAddr),
+            0x57 => Ok(OpCode::AssetCreate),
+            0x58 => Ok(OpCode::AssetTransfer),
+            0x59 => Ok(OpCode::AssetBurn),
+            0x5A => Ok(OpCode::AssetBalance),
+            0x5B => Ok(OpCode::AssetOwner),
             0x80 => Ok(OpCode::DilithiumVerify),
             0x81 => Ok(OpCode::KyberKeyExchange),
             0x82 => Ok(OpCode::FalconVerify),
