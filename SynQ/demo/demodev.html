@@ -25,7 +25,36 @@
   .wallet-dot { width: 9px; height: 9px; border-radius: 50%; background: #9333ea; }
   .wallet-dot.connected { background: #10b981; animation: pulse 2s infinite; }
   .wallet-label { font-size: 0.82rem; color: rgba(255,255,255,0.55); }
-  .wallet-address { font-family: ui-monospace, monospace; font-size: 0.82rem; color: #a78bfa; }
+  .wallet-address { font-family: ui-monospace, monospace; font-size: 0.82rem; color: #a78bfa; cursor: pointer; }
+  .wallet-address::after { content: ' ℹ'; font-size: 0.7rem; opacity: 0.5; }
+  /* Address info popup — fixed position to avoid overflow clipping */
+  .addr-popup-overlay {
+    position: fixed; inset: 0; z-index: 9998; background: rgba(0,0,0,0.4);
+    display: none; align-items: flex-start; justify-content: center; padding-top: 80px;
+  }
+  .addr-popup-overlay.show { display: flex; }
+  .addr-popup {
+    background: #111521; border: 1px solid #4f46e5; border-radius: 12px;
+    padding: 20px 24px; max-width: 420px; width: calc(100% - 40px);
+    font-size: 0.78rem; line-height: 1.6; color: #d1d5db; text-align: left;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.7); font-family: -apple-system, sans-serif;
+    z-index: 9999;
+  }
+  .addr-popup h3 { margin: 0 0 12px; font-size: 0.92rem; color: #a78bfa; font-weight: 600; }
+  .addr-popup .addr-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 4px 0; }
+  .addr-popup .addr-row code { font-family: ui-monospace, monospace; color: #6ee7b7; font-size: 0.72rem; word-break: break-all; }
+  .addr-popup .addr-row .label { color: #6b7280; font-size: 0.72rem; }
+  .addr-popup .addr-type-badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 0.62rem; font-weight: 600; }
+  .addr-popup .addr-type-synw { background: rgba(99,102,241,0.2); color: #818cf8; }
+  .addr-popup .addr-type-syna { background: rgba(16,185,129,0.2); color: #6ee7b7; }
+  .addr-popup .addr-type-sync { background: rgba(245,158,11,0.2); color: #fbbf24; }
+  .addr-popup .addr-source { color: #6b7280; font-style: italic; font-size: 0.68rem; margin: 2px 0 8px; }
+  .addr-popup hr { border: none; border-top: 1px solid #1f2937; margin: 12px 0; }
+  .addr-popup .legend-item { display: flex; align-items: flex-start; gap: 6px; margin: 4px 0; }
+  .addr-popup .legend-item code { font-size: 0.68rem; min-width: 48px; color: #9ca3af; }
+  .addr-popup .legend-item span { font-size: 0.72rem; color: #6b7280; }
+  .addr-popup .close-btn { display: block; margin: 16px auto 0; padding: 6px 24px; background: rgba(124,58,237,0.2); border: 1px solid rgba(124,58,237,0.4); border-radius: 8px; color: #a78bfa; font-size: 0.78rem; cursor: pointer; }
+  .addr-popup .close-btn:hover { background: rgba(124,58,237,0.3); }
   .wallet-right { display: flex; align-items: center; gap: 10px; }
   .wallet-mode { font-size: 0.72rem; padding: 3px 10px; border-radius: 12px; font-weight: 600; }
   .wallet-mode.hybrid { background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.4); color: #6ee7b7; }
@@ -177,7 +206,7 @@
   <div class="wallet-left" style="flex-wrap:wrap;gap:6px 10px;">
     <div class="wallet-dot" id="walletDot"></div>
     <span class="wallet-label" id="walletLabel">No wallet connected</span>
-    <span class="wallet-address" id="walletAddress"></span>
+    <span class="wallet-address" id="walletAddress" onclick="showAddrPopup()"></span>
     <!-- UMA row — hidden until wallet connected -->
     <div id="umaRow" style="display:none;width:100%;align-items:center;gap:6px;margin-top:2px;">
       <span style="font-size:0.72rem;color:rgba(255,255,255,0.38);font-family:ui-monospace,monospace;">UMA:</span>
@@ -191,6 +220,14 @@
     <span class="sig-note" id="sigNote">Signing: ML-DSA-65 · key_id —</span>
     <button class="btn-wallet" id="walletBtn" onclick="connectWallet()">Connect Synergy Wallet</button>
         <label class="btn-wallet" style="cursor:pointer;font-size:0.78rem;padding:4px 10px;opacity:0.75;" title="Import Synergy device-link JSON">Import device link<input type="file" accept=".json" style="display:none" onchange="(function(e){var f=e.target.files[0];if(!f)return;var r=new FileReader();r.onload=function(ev){importDeviceLink(ev.target.result);};r.readAsText(f);})(event)"></label>
+  </div>
+</div>
+<!-- Address info popup -->
+<div class="addr-popup-overlay" id="addrPopupOverlay" onclick="if(event.target===this)closeAddrPopup()">
+  <div class="addr-popup" id="addrPopup">
+    <h3>📋 Address Info</h3>
+    <div id="addrPopupContent"></div>
+    <button class="close-btn" onclick="closeAddrPopup()">Close</button>
   </div>
 </div>
 
@@ -1137,6 +1174,50 @@
     return await signEIP712Ephemeral(typedData);
   }
 
+  /* ── Address info popup ────────────────────────────────────────────────── */
+  function showAddrPopup() {
+    var info = window._addrInfo || {};
+    var syna = info.syna || '';
+    var evm = info.evm || '';
+    var isSynw = info.isSynw || false;
+    var mode = info.mode || 'none';
+    var content = document.getElementById('addrPopupContent');
+    if (!content) return;
+    var addrType = isSynw ? 'synw' : 'syna';
+    var badgeClass = isSynw ? 'addr-type-synw' : 'addr-type-syna';
+    var badgeLabel = isSynw ? 'Wallet Native' : 'V3 Protocol';
+    var sourceDesc = isSynw
+      ? 'From Synergy Wallet extension or device-link import'
+      : (mode === 'synergy'
+        ? 'Derived from EVM address via Bech32 — extension did not expose native address'
+        : 'Derived from ephemeral EVM key via BIP-173 Bech32');
+    content.innerHTML =
+      '<div class="addr-row"><span class="label">Full address</span><code>' + (syna || evm) + '</code></div>' +
+      '<div class="addr-row"><span class="label">EVM hex</span><code>' + evm + '</code></div>' +
+      '<div class="addr-row"><span class="label">Type</span><span class="addr-type-badge ' + badgeClass + '">' + addrType + ' · ' + badgeLabel + '</span></div>' +
+      '<div class="addr-source">' + sourceDesc + '</div>' +
+      '<hr>' +
+      '<div class="legend-item"><code>syna…</code><span>V3 protocol accounts — Bech32 (BIP-173), derived from EVM address</span></div>' +
+      '<div class="legend-item"><code>sync…</code><span>V3 deployed contract instances — deterministic from deployer + nonce + artifact hash</span></div>' +
+      '<div class="legend-item"><code>synw…</code><span>Synergy Wallet native address — from the wallet extension or device-link JSON</span></div>' +
+      '<hr>' +
+      '<div style="text-align:center"><button class="close-btn" style="display:inline-block;margin:4px" onclick="copyAddr(\''+ (syna || evm) +'\')">Copy Address</button></div>';
+    document.getElementById('addrPopupOverlay').classList.add('show');
+  }
+  function closeAddrPopup() {
+    var ov = document.getElementById('addrPopupOverlay');
+    if (ov) ov.classList.remove('show');
+  }
+  function copyAddr(addr) {
+    if (navigator.clipboard) navigator.clipboard.writeText(addr).then(function() {
+      var btn = event.target; btn.textContent = '✓ Copied';
+      setTimeout(function() { btn.textContent = 'Copy Address'; }, 1500);
+    });
+  }
+  window.showAddrPopup = showAddrPopup;
+  window.closeAddrPopup = closeAddrPopup;
+  window.copyAddr = copyAddr;
+
   async function connectWallet() {
     // Try Synergy extension first; fall back to ephemeral if not available/approved
     var provider = window.ethereum;
@@ -1250,9 +1331,17 @@
       label.textContent = 'Connected:';
       // Display syna... Bech32 address (derived from EVM or from extension)
       var _syna = walletSyna || evmToSyna(walletAddress) || '';
+      var _isSynw = _syna && _syna.startsWith('synw');
       addr.textContent  = _syna ? _syna.slice(0,12) + '...' + _syna.slice(-6) : (walletAddress.slice(0,6) + '...' + walletAddress.slice(-4));
-      addr.title        = _syna ? (_syna + ' (from ' + walletAddress + ')') : walletAddress;
+      addr.title        = '';
       addr.style.fontFamily = 'ui-monospace, monospace';
+      // Address info popup will be built by showAddrPopup() on click
+      window._addrInfo = {
+        syna: _syna,
+        evm: walletAddress,
+        isSynw: _isSynw,
+        mode: _walletMode
+      };
       var _isSyn = (_walletMode === 'synergy');
       mode.textContent  = _isSyn ? 'Synergy Wallet' : 'Ephemeral Devnet Key';
       mode.className    = 'wallet-mode hybrid';
