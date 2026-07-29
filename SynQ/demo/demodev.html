@@ -409,10 +409,84 @@
   var currentContractName     = null;  // from compile response
   var currentContractAddress  = null;  // keccak256("SynQ:"+name)[12..] — used in EIP-712 domain
   var walletAddress   = null;
+  var walletSyna      = null;  // Native V3 syna... Bech32 address
   var walletUma       = null;
   var _walletMode = "none"; // "synergy" | "ethereum" | "none"
   var _ephemeralPrivKey  = null;
   var _ephemeralAddress  = null; // always the address derived from _ephemeralPrivKey        // Uint8Array — secp256k1 private key
+
+  /* ── Client-side Bech32 encoder (BIP-173) for EVM → syna conversion ──────── */
+  var BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+  function bech32Polymod(values) {
+    var GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+    var chk = 1;
+    for (var i = 0; i < values.length; i++) {
+      var b = chk >> 25; chk = ((chk & 0x1ffffff) << 5) ^ values[i];
+      for (var j = 0; j < 5; j++) { if ((b >> j) & 1) chk ^= GEN[j]; }
+    }
+    return chk;
+  }
+  function bech32HrpExpand(hrp) {
+    var ret = [];
+    for (var i = 0; i < hrp.length; i++) { ret.push(hrp.charCodeAt(i) >> 5); }
+    ret.push(0);
+    for (var i = 0; i < hrp.length; i++) { ret.push(hrp.charCodeAt(i) & 31); }
+    return ret;
+  }
+  function bech32CreateChecksum(hrp, data) {
+    var values = bech32HrpExpand(hrp).concat(data);
+    var polymod = bech32Polymod(values.concat([0,0,0,0,0,0])) ^ 1;
+    var ret = [];
+    for (var i = 0; i < 6; i++) ret.push((polymod >> 5 * (5 - i)) & 31);
+    return ret;
+  }
+  function bech32VerifyChecksum(hrp, data) {
+    return bech32Polymod(bech32HrpExpand(hrp).concat(data)) === 1;
+  }
+  function convertbits(data, frombits, tobits, pad) {
+    var acc = 0, bits = 0, ret = [], maxv = (1 << tobits) - 1;
+    for (var i = 0; i < data.length; i++) {
+      acc = (acc << frombits) | data[i]; bits += frombits;
+      while (bits >= tobits) { bits -= tobits; ret.push((acc >> bits) & maxv); }
+    }
+    if (pad) { if (bits) ret.push((acc << (tobits - bits)) & maxv); }
+    else if (bits >= frombits || ((acc << (tobits - bits)) & maxv)) { return null; }
+    return ret;
+  }
+  function evmToSyna(evmHex) {
+    // Convert EVM hex address (0x...) to syna... Bech32 string
+    var hex = evmHex.replace(/^0x/i, '');
+    var bytes = [];
+    for (var i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.substr(i, 2), 16));
+    // If < 20 bytes, left-pad
+    while (bytes.length < 20) bytes.unshift(0);
+    var data5 = convertbits(bytes, 8, 5, true);
+    if (!data5) return null;
+    var hrp = 'syna';
+    var checksum = bech32CreateChecksum(hrp, data5);
+    var combined = data5.concat(checksum);
+    return hrp + '1' + combined.map(function(v) { return BECH32_CHARSET[v]; }).join('');
+  }
+  function bech32Decode(bech) {
+    var pos = bech.lastIndexOf('1');
+    if (pos < 1 || pos + 7 > bech.length) return null;
+    var hrp = bech.slice(0, pos);
+    var data = [];
+    for (var i = pos + 1; i < bech.length; i++) {
+      var v = BECH32_CHARSET.indexOf(bech[i]);
+      if (v < 0) return null;
+      data.push(v);
+    }
+    if (!bech32VerifyChecksum(hrp, data)) return null;
+    return { hrp: hrp, data: data.slice(0, -6) };
+  }
+  function synaToEvm(syna) {
+    var dec = bech32Decode(syna);
+    if (!dec || dec.hrp !== 'syna') return null;
+    var bytes = convertbits(dec.data, 5, 8, false);
+    if (!bytes) return null;
+    return '0x' + bytes.map(function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+  }
 
   /* ── Wallet — Synergy extension integration ─────────────────────────────── */
   // The Synergy browser extension injects window.ethereum (EIP-1193 compatible)
@@ -813,7 +887,8 @@
     if (walletAddress) {
       dot.classList.add('connected');
       label.textContent = 'Connected:';
-      addr.textContent  = walletAddress.slice(0,6) + '...' + walletAddress.slice(-4);
+      addr.textContent  = walletSyna || (walletAddress ? evmToSyna(walletAddress) : '') || (walletAddress.slice(0,6) + '...' + walletAddress.slice(-4));
+      addr.title        = walletAddress + ' → ' + (walletSyna || evmToSyna(walletAddress) || '');
       mode.textContent  = 'Hybrid PQC + EVM signing';
       mode.className    = 'wallet-mode hybrid';
       note.textContent  = 'Signing: EVM wallet + ML-DSA-65 wrapper';
@@ -878,7 +953,9 @@
 
   if (window.ethereum) {
     window.ethereum.on('accountsChanged', function(accounts) {
-      walletAddress = accounts.length ? accounts[0] : null; updateWalletUI();
+      walletAddress = accounts.length ? accounts[0] : null;
+      walletSyna = walletAddress ? evmToSyna(walletAddress) : null;
+      updateWalletUI();
     });
   }
 
@@ -933,8 +1010,9 @@
             var _addrHex = _deriveAddress(_ephemeralPrivKey, _noble);
             _ephemeralAddress = _addrHex;
             walletAddress     = _addrHex;
+            walletSyna = evmToSyna(_addrHex);
             _walletMode = 'ephemeral';
-            console.log('[SynQ] Restored ephemeral devnet address:', walletAddress);
+            console.log('[SynQ] Restored ephemeral devnet address:', walletAddress, '→ syna:', walletSyna);
             return true;
           }
         }
@@ -949,8 +1027,9 @@
     var _addrHex = _deriveAddress(_ephemeralPrivKey, _noble);
     _ephemeralAddress = _addrHex;
     walletAddress     = _addrHex;
+    walletSyna = evmToSyna(_addrHex);
     _walletMode = 'ephemeral';
-    console.log('[SynQ] New ephemeral devnet address:', walletAddress);
+    console.log('[SynQ] New ephemeral devnet address:', walletAddress, '→ syna:', walletSyna);
     return true;
   }
 
@@ -977,6 +1056,12 @@
       var evmAddr = dl.publicProfile.eip155Address;
       var sns     = dl.publicProfile.snsName || dl.publicProfile.label || evmAddr;
       walletAddress = evmAddr;
+      // Extract native Synergy address from device-link if present
+      walletSyna = dl.publicProfile.synergyAddress || (dl.publicProfile.addresses && dl.publicProfile.addresses.synergy) || null;
+      // If no native address in JSON, derive syna... from EVM via Bech32
+      if (!walletSyna && evmAddr) {
+        walletSyna = evmToSyna(evmAddr);
+      }
       _walletMode   = 'ephemeral';
       walletUma     = callerIdentity(evmAddr);
       updateWalletUI();
@@ -1061,6 +1146,26 @@
         var accounts = await provider.request({ method: 'eth_requestAccounts' });
         if (accounts && accounts.length) {
           walletAddress = accounts[0]; _walletMode = 'synergy';
+          // Try to get native Synergy address from extension
+          walletSyna = null;
+          if (window.synergy) {
+            // Try multiple possible extension APIs
+            try {
+              if (typeof window.synergy.getAddress === 'function') {
+                walletSyna = await window.synergy.getAddress();
+              } else if (typeof window.synergy.request === 'function') {
+                walletSyna = await window.synergy.request({ method: 'synergy_getAddress' });
+              } else if (window.synergy.nativeAddress) {
+                walletSyna = window.synergy.nativeAddress;
+              }
+            } catch(synErr) {
+              console.warn('[SynQ] Could not get native Synergy address from extension:', synErr.message);
+            }
+          }
+          // Fall back to client-side Bech32 derivation from EVM address
+          if (!walletSyna && walletAddress) {
+            walletSyna = evmToSyna(walletAddress);
+          }
           updateWalletUI(); attachEthereumListeners(); return;
         }
       } catch(e) {
@@ -1092,13 +1197,13 @@
     if (!window.ethereum || !window.ethereum.on) return;
     window.ethereum.on('accountsChanged', function(accs) {
       if (!accs || accs.length === 0) {
-        walletAddress = null; _walletMode = 'none';
+        walletAddress = null; walletSyna = null; _walletMode = 'none';
         document.querySelectorAll('[data-uma-btn]').forEach(function(b){ b.style.display='none'; });
         updateWalletUI();
         document.getElementById('attestPanel').classList.remove('show');
         var out = document.getElementById('vmOutput');
         if (out) out.innerHTML = '<span class="err">Synergy Wallet disconnected — reconnect to authenticate calls.</span>';
-      } else { walletAddress = accs[0]; updateWalletUI(); }
+      } else { walletAddress = accs[0]; walletSyna = evmToSyna(accs[0]); updateWalletUI(); }
     });
   }
 
@@ -1108,7 +1213,7 @@
     if (window.ethereum && window.synergy && window.synergy.isSynergyWallet) {
       window.ethereum.request({ method: 'eth_accounts' }).then(function(accs) {
         if (accs && accs.length) {
-          walletAddress = accs[0]; _walletMode = 'synergy';
+          walletAddress = accs[0]; walletSyna = evmToSyna(accs[0]); _walletMode = 'synergy';
           updateWalletUI(); attachEthereumListeners(); return;
         }
         generateEphemeralKey().then(function(ok){ if (ok) updateWalletUI(); });
@@ -1121,7 +1226,7 @@
   })();
 
   function disconnectWallet() {
-    walletAddress = null; _walletMode = 'none'; updateWalletUI();
+    walletAddress = null; walletSyna = null; _walletMode = 'none'; updateWalletUI();
     document.getElementById('attestPanel').classList.remove('show');
   }
   window.disconnectWallet = disconnectWallet;
@@ -1143,13 +1248,17 @@
     if (walletAddress) {
       dot.classList.add('connected');
       label.textContent = 'Connected:';
-      addr.textContent  = walletAddress.slice(0,6) + '...' + walletAddress.slice(-4);
+      // Display syna... Bech32 address (derived from EVM or from extension)
+      var _syna = walletSyna || evmToSyna(walletAddress) || '';
+      addr.textContent  = _syna ? _syna.slice(0,12) + '...' + _syna.slice(-6) : (walletAddress.slice(0,6) + '...' + walletAddress.slice(-4));
+      addr.title        = _syna ? (_syna + ' (from ' + walletAddress + ')') : walletAddress;
+      addr.style.fontFamily = 'ui-monospace, monospace';
       var _isSyn = (_walletMode === 'synergy');
-      mode.textContent  = _walletMode === 'synergy' ? 'Synergy Wallet' : 'Ephemeral Devnet Key';
+      mode.textContent  = _isSyn ? 'Synergy Wallet' : 'Ephemeral Devnet Key';
       mode.className    = 'wallet-mode hybrid';
       note.textContent  = _isSyn
-        ? 'Signing: Synergy Wallet · EIP-712 · ' + walletAddress.slice(0,8) + '…'
-        : 'Signing: EIP-712';
+        ? 'Signing: Synergy Wallet · EIP-712 · ' + (_syna ? _syna.slice(0,10) + '…' : walletAddress.slice(0,8) + '…')
+        : 'Signing: EIP-712 · ' + (_syna ? _syna.slice(0,10) + '…' : '');
       btn.textContent   = 'Disconnect Synergy';
       btn.onclick       = disconnectWallet;
       // UMA display
