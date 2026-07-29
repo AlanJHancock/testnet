@@ -1164,9 +1164,26 @@
 
   /* ── Master signing dispatcher ────────────────────────────────────────────── */
   async function getSignature(typedData) {
-    if (_walletMode === 'synergy' && window.ethereum) {
+    if (_walletMode === 'synergy') {
+      var provider = _walletProvider();
+      if (!provider) {
+        console.warn('[SynQ Wallet] No provider for synergy signing — falling back to ephemeral');
+        return await signEIP712Ephemeral(typedData);
+      }
       var json = typeof typedData === 'string' ? typedData : JSON.stringify(typedData);
-      return await window.ethereum.request({ method: 'eth_signTypedData_v4', params: [walletAddress, json] });
+      console.log('[SynQ Wallet] Requesting signature from extension...', 'method: eth_signTypedData_v4');
+      try {
+        return await _walletRequest('eth_signTypedData_v4', [walletAddress, json]);
+      } catch(e) {
+        console.warn('[SynQ Wallet] eth_signTypedData_v4 failed:', e.code, e.message);
+        // Try raw synergy signing method
+        try {
+          return await _walletRequest('synergy_signTypedData_v4', [walletAddress, json]);
+        } catch(e2) {
+          console.error('[SynQ Wallet] All signing methods failed:', e2.message);
+          throw e; // throw original error
+        }
+      }
     }
     return await signEIP712Ephemeral(typedData);
   }
@@ -1217,17 +1234,16 @@
 
   async function connectWallet() {
     // Try Synergy extension first; fall back to ephemeral if not available/approved
-    // Use the shared helper for consistent extension detection
     if (_checkSynergyExtension()) {
-      var provider = window.ethereum;
+      console.log('[SynQ Wallet] connectWallet: extension detected, requesting accounts...');
       try {
-        var accounts = await provider.request({ method: 'eth_requestAccounts' });
+        var accounts = await _walletRequest('eth_requestAccounts');
         if (accounts && accounts.length) {
           walletAddress = accounts[0]; _walletMode = 'synergy';
+          console.log('[SynQ Wallet] connectWallet: got account', accounts[0]);
           // Try to get native Synergy address from extension
           walletSyna = null;
           if (window.synergy) {
-            // Try multiple possible extension APIs
             try {
               if (typeof window.synergy.getAddress === 'function') {
                 walletSyna = await window.synergy.getAddress();
@@ -1237,25 +1253,27 @@
                 walletSyna = window.synergy.nativeAddress;
               }
             } catch(synErr) {
-              console.warn('[SynQ] Could not get native Synergy address from extension:', synErr.message);
+              console.warn('[SynQ Wallet] Could not get native Synergy address:', synErr.message);
             }
           }
           // Fall back to client-side Bech32 derivation from EVM address
           if (!walletSyna && walletAddress) {
             walletSyna = evmToSyna(walletAddress);
           }
-          updateWalletUI(); attachEthereumListeners(); return;
+          updateWalletUI(); attachWalletListeners(); return;
         }
+        console.warn('[SynQ Wallet] connectWallet: eth_requestAccounts returned no accounts');
       } catch(e) {
         if (e.code === 4001) {
           showWalletError('Connection rejected — approve in Synergy Wallet popup.');
           return;
         }
-        // Extension exists but rejected — could be origin not approved, or other error
-        console.warn('[SynQ] Synergy Wallet connection failed:', e.code, e.message);
+        console.warn('[SynQ Wallet] connectWallet failed:', e.code, e.message || e);
         showWalletError('Synergy Wallet detected but connection failed: ' + (e.message || e.code || 'unknown error') + '. Check the extension and try again.');
         return;
       }
+    } else {
+      console.warn('[SynQ Wallet] connectWallet: extension not detected');
     }
     // Ephemeral fallback — generate a fresh in-browser devnet identity
     var ok = await generateEphemeralKey();
@@ -1271,11 +1289,15 @@
     setStatus(msg, 'error');
   }
 
-  function attachEthereumListeners() {
-    if (attachEthereumListeners._done) return;
-    attachEthereumListeners._done = true;
-    if (!window.ethereum || !window.ethereum.on) return;
-    window.ethereum.on('accountsChanged', function(accs) {
+  function attachWalletListeners() {
+    if (attachWalletListeners._done) return;
+    attachWalletListeners._done = true;
+    var provider = _walletProvider();
+    if (!provider || typeof provider.on !== 'function') {
+      console.log('[SynQ Wallet] Provider does not support event listeners');
+      return;
+    }
+    provider.on('accountsChanged', function(accs) {
       if (!accs || accs.length === 0) {
         walletAddress = null; walletSyna = null; _walletMode = 'none';
         document.querySelectorAll('[data-uma-btn]').forEach(function(b){ b.style.display='none'; });
@@ -1292,29 +1314,98 @@
   }
 
   /* ── Auto-init: ephemeral key on load; restore Synergy if available ────── */
+  // Detect Synergy extension — it may inject window.ethereum (EIP-1193),
+  // OR only window.synergy with its own request API. Don't require both.
   function _checkSynergyExtension() {
-    return typeof window.ethereum !== 'undefined' &&
-           typeof window.synergy !== 'undefined' &&
-           window.synergy.isSynergyWallet === true;
+    if (typeof window.synergy === 'undefined') return false;
+    // Accept both true and truthy isSynergyWallet
+    if (window.synergy.isSynergyWallet === true || window.synergy.isSynergyWallet === 1) return true;
+    // Also accept if window.synergy has a request method (newer extension versions)
+    if (typeof window.synergy.request === 'function' && !window.synergy.isSynergyWallet === false) return true;
+    // Fallback: if window.synergy exists with any truthy marker
+    if (window.synergy.isSynergyWallet) return true;
+    return false;
+  }
+
+  // Unified wallet provider — returns the best available EIP-1193-compatible interface.
+  // Prefers window.ethereum (standard EIP-1193), falls back to window.synergy.
+  function _walletProvider() {
+    if (typeof window.ethereum !== 'undefined' && window.ethereum && typeof window.ethereum.request === 'function') {
+      return window.ethereum;
+    }
+    if (typeof window.synergy !== 'undefined' && window.synergy && typeof window.synergy.request === 'function') {
+      return window.synergy;
+    }
+    return null;
+  }
+
+  // Unified RPC request — tries standard eth_* methods first, then synergy_* fallback.
+  async function _walletRequest(method, params) {
+    var provider = _walletProvider();
+    if (!provider) throw new Error('No wallet provider available');
+    // Try standard EIP-1193 method first
+    try {
+      return await provider.request({ method: method, params: params || [] });
+    } catch(e) {
+      // If it's a method-not-found, try synergy_* variant
+      if (e.code === -32601 || (e.message && e.message.toLowerCase().includes('method'))) {
+        var synMethod = method.replace(/^eth_/, 'synergy_');
+        console.log('[SynQ Wallet] ' + method + ' failed, trying ' + synMethod + '...');
+        return await provider.request({ method: synMethod, params: params || [] });
+      }
+      throw e;
+    }
+  }
+
+  // EIP-6963: listen for multi-provider announcements (modern wallet injection)
+  var _eip6963Providers = [];
+  if (typeof window !== 'undefined') {
+    window.addEventListener('eip6963:announceProvider', function(ev) {
+      var detail = ev.detail || {};
+      console.log('[SynQ Wallet] EIP-6963 provider announced:', detail.info && detail.info.name, detail.info && detail.info.rdns);
+      if (detail.provider) _eip6963Providers.push(detail);
+      // If this is a Synergy provider, make sure window.synergy is set
+      if (detail.info && (detail.info.rdns === 'synergy' || (detail.info.name && detail.info.name.toLowerCase().includes('synergy')))) {
+        if (typeof window.synergy === 'undefined') {
+          window.synergy = detail.provider;
+          window.synergy.isSynergyWallet = true;
+          console.log('[SynQ Wallet] EIP-6963: registered as window.synergy');
+        }
+      }
+    });
+    // Request provider announcements
+    window.dispatchEvent(new CustomEvent('eip6963:requestProvider'));
   }
 
   function _logWalletState(label) {
     var _hasEth = typeof window.ethereum !== 'undefined';
     var _hasSyn = typeof window.synergy !== 'undefined';
     var _isSynWallet = _hasSyn && window.synergy.isSynergyWallet;
-    console.log('[SynQ Wallet ' + label + '] ethereum:' + _hasEth, 'synergy:' + _hasSyn, 'isSynergyWallet:' + _isSynWallet,
-                '| mode:' + _walletMode);
+    var _provider = _walletProvider();
+    console.log('[SynQ Wallet ' + label + ']',
+                'ethereum:' + _hasEth,
+                'synergy:' + _hasSyn,
+                'isSynergyWallet:' + _isSynWallet,
+                '| mode:' + _walletMode,
+                '| provider:' + (_provider ? 'available' : 'null'));
     if (_hasEth && window.ethereum.isMetaMask) console.log('[SynQ Wallet ' + label + '] isMetaMask: true');
-    if (_hasSyn) console.log('[SynQ Wallet ' + label + '] synergy keys:', Object.keys(window.synergy));
+    if (_hasSyn) {
+      console.log('[SynQ Wallet ' + label + '] synergy keys:', Object.keys(window.synergy));
+      console.log('[SynQ Wallet ' + label + '] synergy.request:', typeof window.synergy.request,
+                  '| synergy.on:', typeof window.synergy.on,
+                  '| synergy.getAddress:', typeof window.synergy.getAddress,
+                  '| synergy.nativeAddress:', window.synergy.nativeAddress || 'none');
+    }
+    if (_eip6963Providers.length) console.log('[SynQ Wallet ' + label + '] EIP-6963 providers:', _eip6963Providers.length);
   }
 
   async function _trySynergyRestore() {
     try {
-      var accs = await window.ethereum.request({ method: 'eth_accounts' });
+      var accs = await _walletRequest('eth_accounts');
       if (accs && accs.length) {
         console.log('[SynQ Wallet] Silent restore succeeded:', accs[0]);
         walletAddress = accs[0]; walletSyna = evmToSyna(accs[0]); _walletMode = 'synergy';
-        updateWalletUI(); attachEthereumListeners();
+        updateWalletUI(); attachWalletListeners();
         return true;
       }
       console.log('[SynQ Wallet] Extension detected but no pre-approved accounts. Button shows "Connect Synergy Wallet".');
@@ -2506,8 +2597,8 @@
 
       if (walletAddress) {
         // Liveness check: only needed for extension wallet; ephemeral key is always valid
-        if (_walletMode === 'synergy' && window.ethereum) {
-          var liveAccounts = await window.ethereum.request({ method: 'eth_accounts' });
+        if (_walletMode === 'synergy') {
+          var liveAccounts = await _walletRequest('eth_accounts');
           if (!liveAccounts || liveAccounts.length === 0) {
             walletAddress = null; updateWalletUI();
             setVMOutput('<span class="err">Wallet disconnected — reconnect to call authenticated functions.</span>');
