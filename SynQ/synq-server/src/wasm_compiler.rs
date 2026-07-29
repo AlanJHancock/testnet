@@ -42,13 +42,24 @@ impl WasmRuntime {
         store.out_of_fuel_trap();
 
         // wbindgen imports (no-ops needed for instantiation)
+        // Support both old module names (__wbindgen_placeholder__, __wbindgen_externref_xform__)
+        // and new wasm-bindgen module name (./synq_compiler_wasm_bg.js)
         let mut linker = Linker::new(&self.engine);
+
+        // ── Old-style module names (backward compat) ──────────────────────
         linker.func_wrap("__wbindgen_placeholder__", "__wbindgen_describe", |_: i32| {})
             .map_err(|e| format!("linker: {}", e))?;
         linker.func_wrap("__wbindgen_externref_xform__", "__wbindgen_externref_table_set_null", |_: i32| {})
             .map_err(|e| format!("linker: {}", e))?;
         linker.func_wrap("__wbindgen_externref_xform__", "__wbindgen_externref_table_grow", |d: i32| -> i32 { d })
             .map_err(|e| format!("linker: {}", e))?;
+
+        // ── New-style module name from wasm-pack/wasm-bindgen 0.2.100+ ─────
+        // Only import: __wbindgen_init_externref_table — signature () -> ()
+        // All other wbindgen functions are exported by the WASM binary itself.
+        let wbmod = "./synq_compiler_wasm_bg.js";
+        linker.func_wrap(wbmod, "__wbindgen_init_externref_table", || {})
+            .map_err(|e| format!("linker init_externref: {}", e))?;
 
         let instance = linker.instantiate(&mut store, &self.module)
             .map_err(|e| format!("Instantiate: {}", e))?;

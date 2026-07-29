@@ -39,6 +39,7 @@ contract_section = { state_section
                    | metadata_section
                    | impl_section
                    | tests_section
+                   | enum_definition
                    // Flat (legacy) items inside contract body for backwards compat
                    | state_variable_declaration
                    | function_definition }

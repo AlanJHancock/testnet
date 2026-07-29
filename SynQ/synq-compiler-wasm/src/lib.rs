@@ -200,6 +200,12 @@ const PQC_BUILTINS: &[&str] = &[
     "falcon_sign", "mceliece_encapsulate", "mceliece_decapsulate",
     "hqc_encapsulate", "hqc_decapsulate",
     "str_len", "str_concat", "str_eq",
+    // Authority builtins (v7.0 authority model)
+    "authority_envelope", "authority_require", "authority_identity",
+    // Address builtins (V3 Bech32)
+    "to_syna", "from_syna", "contract_address",
+    // AEG1 builtins
+    "aegis_call", "aegis_verify", "aegis_decaps",
 ];
 
 fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String>) -> Result<(), String> {
