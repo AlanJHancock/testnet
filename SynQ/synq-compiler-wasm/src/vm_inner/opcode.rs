@@ -106,11 +106,22 @@ pub enum OpCode {
     IsOk         = 0xA9,
     IsSome       = 0xAA,
 
+    // Authority model (0x51-0x53)
+    LoadAuthority = 0x51,   // push 104-byte AuthorityEnvelope from call context
+    AuthRequire   = 0x52,   // pop scope_hash(U256) → verify envelope covers scope → push Bool
+    AuthIdentity  = 0x53,   // pop → push identity bytes from AuthorityEnvelope[0..32]
+
+    // Bech32 address operations (0x54-0x56)
+    AddrEncode   = 0x54,   // pop 20-byte U256 → push syna Bech32 string
+    AddrDecode   = 0x55,   // pop syna/sync Bech32 string → push 20-byte U256
+    ContractAddr = 0x56,   // pop deployer+nonce+artifact_hash → push sync Bech32 string
+
     // PQC operations
     DilithiumVerify  = 0x80,
     KyberKeyExchange = 0x81,
     FalconVerify     = 0x82,
     SphincsVerify    = 0x83,
+    AegisCall        = 0x8F,   // unified AEG1 PQC dispatch
 
     // Utility
     Print = 0xF0,
@@ -177,10 +188,17 @@ impl TryFrom<u8> for OpCode {
             0xA8 => Ok(OpCode::ResultUnwrap),
             0xA9 => Ok(OpCode::IsOk),
             0xAA => Ok(OpCode::IsSome),
+            0x51 => Ok(OpCode::LoadAuthority),
+            0x52 => Ok(OpCode::AuthRequire),
+            0x53 => Ok(OpCode::AuthIdentity),
+            0x54 => Ok(OpCode::AddrEncode),
+            0x55 => Ok(OpCode::AddrDecode),
+            0x56 => Ok(OpCode::ContractAddr),
             0x80 => Ok(OpCode::DilithiumVerify),
             0x81 => Ok(OpCode::KyberKeyExchange),
             0x82 => Ok(OpCode::FalconVerify),
             0x83 => Ok(OpCode::SphincsVerify),
+            0x8F => Ok(OpCode::AegisCall),
             0xF0 => Ok(OpCode::Print),
             0xFF => Ok(OpCode::Halt),
             _    => Err(VMError::InvalidInstruction(value)),

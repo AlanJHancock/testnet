@@ -1138,6 +1138,43 @@ impl QuantumVM {
                 let some = matches!(v, Value::SynqOption(Some(_)));
                 self.stack.push(Value::I32(if some { 1 } else { 0 }));
             }
+            // ── V3 Authority opcodes (stubs for WASM — real execution on server) ──
+            OpCode::LoadAuthority => {
+                // Push a devnet wildcard envelope (104 zero bytes)
+                self.push(Value::Bytes(vec![0u8; 104]))?;
+            }
+            OpCode::AuthRequire => {
+                // Pop scope hash, push true (devnet wildcard accepts all scopes)
+                let _scope_hash = self.pop()?;
+                self.push(Value::Bool(true))?;
+            }
+            OpCode::AuthIdentity => {
+                // Pop envelope, push identity (first 32 bytes)
+                let env = self.pop()?.as_bytes()?.to_vec();
+                let id = if env.len() >= 32 { env[..32].to_vec() } else { vec![0u8; 32] };
+                self.push(Value::Bytes(id))?;
+            }
+            // ── Bech32 address opcodes (stubs) ──
+            OpCode::AddrEncode => {
+                let _addr = self.pop()?;
+                self.push(Value::Bytes(b"syna1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqx4mgu0".to_vec()))?;
+            }
+            OpCode::AddrDecode => {
+                let _s = self.pop()?;
+                self.push(Value::U256(ruint::aliases::U256::ZERO))?;
+            }
+            OpCode::ContractAddr => {
+                let _hash = self.pop()?;
+                let _nonce = self.pop()?;
+                let _deployer = self.pop()?;
+                self.push(Value::Bytes(b"sync1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqx4mgu0".to_vec()))?;
+            }
+            // ── AegisCall (unified PQC — stub like other PQC in non-native) ──
+            OpCode::AegisCall => {
+                return Err(VMError::RuntimeError(
+                    "AegisCall requires native build — use synq-server for PQC".into()
+                ));
+            }
             OpCode::Print => {
                 let value = self.pop()?;
                 self.print_log.push(vm_value_display(&value));

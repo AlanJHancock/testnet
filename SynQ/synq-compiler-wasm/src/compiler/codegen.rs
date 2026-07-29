@@ -1,5 +1,5 @@
-use crate::ast::*;
-use quantumvm::{Assembler, OpCode};
+use crate::compiler::ast::*;
+use crate::vm_inner::{Assembler, OpCode};
 use ruint::aliases::U256;
 use std::collections::HashMap;
 
@@ -305,7 +305,7 @@ impl CodeGenerator {
         });
         // Pre-populate local_types with function parameter types so
         // type-aware codegen (e.g. str + str → StrConcat) can inspect them.
-        let mut param_types: HashMap<String, crate::ast::Type> = HashMap::new();
+        let mut param_types: HashMap<String, crate::compiler::ast::Type> = HashMap::new();
         for param in &f.params {
             param_types.insert(param.name.clone(), param.ty.clone());
         }
@@ -325,8 +325,8 @@ impl CodeGenerator {
         // The pre-pass checks the raw statement list before gen runs.
         // Allow @public or @authority as alternative to 'as caller' for authority
         let has_attr_authority = f.attributes.iter().any(|a| {
-            matches!(a, crate::ast::Attribute::Public)
-            || matches!(a, crate::ast::Attribute::Authority(_))
+            matches!(a, crate::compiler::ast::Attribute::Public)
+            || matches!(a, crate::compiler::ast::Attribute::Authority(_))
         });
         if !f.requires_caller && !has_attr_authority {
             fn writes_state(stmt: &Statement, state_vars: &HashMap<String, u32>) -> bool {
@@ -393,7 +393,7 @@ impl CodeGenerator {
         // On devnet, the server constructs the envelope with scope_hash = all-zeros
         // (accept any scope), so this check always passes.
         for attr in &f.attributes {
-            if let crate::ast::Attribute::Authority(scope_name) = attr {
+            if let crate::compiler::ast::Attribute::Authority(scope_name) = attr {
                 // LoadAuthority pushes the current call's envelope as Bytes
                 self.assembler.emit_op(OpCode::LoadAuthority);
                 // SHA3-256 scope hash for V3 compatibility.
@@ -431,7 +431,7 @@ impl CodeGenerator {
             // @governance(ScopeName) — strict governance authorization.
             // Uses SHA3-256 scope hash and SYNQ-GOVERNANCE-v3 domain tag.
             // Server must embed matching scope hash + GOVERNANCE domain tag in envelope.
-            if let crate::ast::Attribute::Governance(scope_name) = attr {
+            if let crate::compiler::ast::Attribute::Governance(scope_name) = attr {
                 self.assembler.emit_op(OpCode::LoadAuthority);
                 let scope_bytes = if scope_name.is_empty() {
                     vec![0u8; 32]
@@ -1063,7 +1063,7 @@ impl CodeGenerator {
             Expression::Literal(Literal::String(_)) => true,
             Expression::Identifier(name) => {
                 // Check function parameter types
-                scope.local_types.get(name).map_or(false, |t| matches!(t, crate::ast::Type::Str))
+                scope.local_types.get(name).map_or(false, |t| matches!(t, crate::compiler::ast::Type::Str))
             }
             _ => false,
         }
