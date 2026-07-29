@@ -127,6 +127,7 @@ block = { "{" ~ statement* ~ "}" }
 
 statement = { return_statement
             | require_statement
+            | revert_enum_statement
             | revert_statement
             | emit_statement
             | extern_call_statement
@@ -144,6 +145,7 @@ statement = { return_statement
 return_statement      = { "return" ~ expression? ~ ";" }
 require_statement     = { "require" ~ "(" ~ expression ~ "," ~ string_literal ~ ")" ~ ";" }
 revert_statement      = { "revert" ~ IDENT ~ ("(" ~ arg_list? ~ ")")? ~ ";" }
+revert_enum_statement = { "revert" ~ IDENT ~ "::" ~ IDENT ~ ("(" ~ arg_list? ~ ")")? ~ ";" }
 emit_statement        = { "emit" ~ IDENT ~ "(" ~ arg_list? ~ ")" ~ ";" }
 extern_call_statement = { "extern_call" ~ "(" ~ string_literal ~ "," ~ string_literal
                           ~ ("," ~ expression)* ~ ")" ~ ";" }

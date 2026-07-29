@@ -691,7 +691,36 @@ impl CodeGenerator {
             // The server collects Print output and surfaces it as "events" in the
             // run response. A dedicated Emit opcode (0x70) will replace this
             // once the VM log/receipt subsystem is implemented.
-            Statement::Emit { event, args } => {
+                        Statement::RevertEnum { enum_name, error, args } => {
+                // Qualified named error: revert EnumName::VariantName(args)
+                // Look up the specific enum, then find the variant tag.
+                let code = if let Some(enum_info) = self.enum_defs.get(enum_name.as_str()) {
+                    enum_info.variants.iter().position(|v| v.name == *error)
+                        .map(|p| p as u32)
+                        .ok_or_else(|| format!("enum '{}' has no variant '{}'", enum_name, error))?
+                } else {
+                    return Err(format!("unknown enum '{}' in revert statement", enum_name));
+                };
+                
+                let msg = if args.is_empty() {
+                    format!("{}::{}", enum_name, error)
+                } else {
+                    format!("{}::{}({} arg(s))", enum_name, error, args.len())
+                };
+                
+                // Evaluate args for side effects.
+                for arg in args.iter() {
+                    self.gen_expression(arg, scope)?;
+                    self.assembler.emit_op(OpCode::Pop);
+                }
+                
+                let msg_bytes = msg.as_bytes();
+                self.assembler.emit_op(OpCode::RevertCode);
+                self.assembler.emit_u32(code);
+                self.assembler.emit_bytes(msg_bytes);
+                Ok(())
+            }
+Statement::Emit { event, args } => {
                 // Push each arg then use Print to surface it.
                 // For now: emit `Print("event:<EventName>")` as a marker,
                 // then Print each arg. The server aggregates these.

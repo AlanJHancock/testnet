@@ -195,6 +195,8 @@ pub enum Statement {
     Require(Expression, String),
     /// `revert ErrorName(args...)` — named error revert
     RevertNamed { error: String, args: Vec<Expression> },
+    /// `revert EnumName::VariantName(args);` — qualified named error revert
+    RevertEnum { enum_name: String, error: String, args: Vec<Expression> },
     Assignment(String, Expression),
     /// `obj.field = value` — struct field assignment
     FieldAssignment { object: String, field: String, value: Expression },

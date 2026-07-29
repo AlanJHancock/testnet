@@ -437,6 +437,13 @@ fn parse_statement(pair: Pair<Rule>) -> Statement {
             let args: Vec<Expression> = inner.map(parse_expression).collect();
             Statement::RevertNamed { error, args }
         }
+        Rule::revert_enum_statement => {
+            let mut inner = pair.into_inner();
+            let enum_name = inner.next().unwrap().as_str().to_string();
+            let error = inner.next().unwrap().as_str().to_string();
+            let args: Vec<Expression> = inner.map(parse_expression).collect();
+            Statement::RevertEnum { enum_name, error, args }
+        }
         Rule::emit_statement => {
             let mut inner = pair.into_inner();
             let event = inner.next().unwrap().as_str().to_string();
