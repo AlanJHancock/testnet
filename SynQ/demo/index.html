@@ -218,7 +218,7 @@
   <div class="wallet-right">
     <span class="wallet-mode persistent" id="sigMode">Compiler-Attested PQC</span>
     <span class="sig-note" id="sigNote">Signing: ML-DSA-65 · key_id —</span>
-    <button class="btn-wallet" id="walletBtn" onclick="connectWallet()">Connect Synergy Wallet</button>
+    <button class="btn-wallet" id="walletBtn" onclick="connectWallet()">Connect Wallet</button>
         <label class="btn-wallet" style="cursor:pointer;font-size:0.78rem;padding:4px 10px;opacity:0.75;" title="Import Synergy device-link JSON">Import device link<input type="file" accept=".json" style="display:none" onchange="(function(e){var f=e.target.files[0];if(!f)return;var r=new FileReader();r.onload=function(ev){importDeviceLink(ev.target.result);};r.readAsText(f);})(event)"></label>
   </div>
 </div>
@@ -1092,17 +1092,17 @@
         walletSyna = evmToSyna(evmAddr);
       }
       // Set mode based on whether extension is available for signing
-      var _extAvail = _checkSynergyExtension();
-      _walletMode   = _extAvail ? 'synergy' : 'ephemeral';
+      var _wt = _detectWalletType();
+      _walletMode   = _wt || 'ephemeral';
       walletUma     = callerIdentity(evmAddr);
       updateWalletUI();
       var out = document.getElementById('vmOutput');
       if (out) out.innerHTML =
         '<span class="ok">Identity imported: ' + sns + ' (' + evmAddr.slice(0,8) + '…)<br>' +
-        (_extAvail
-          ? '<span style="color:rgba(110,231,183,0.9)">✓ Extension detected — contract calls will be signed by Synergy Wallet.</span>'
+        (_wt
+          ? '<span style="color:rgba(110,231,183,0.9)">✓ ' + _wt + ' wallet detected — contract calls will be signed by ' + (_wt === 'synergy' ? 'Synergy Wallet' : 'EVM Wallet') + '.</span>'
           : '<span style="color:rgba(255,200,80,0.9)">⚠ Display identity set. ' +
-            'Contract <code>caller</code> will be the ephemeral signing key until the Synergy extension is approved for this origin.</span>') +
+            'Contract <code>caller</code> will be the ephemeral signing key until a wallet is connected.</span>') +
         '</span>';
       setStatus('Device link imported — ' + sns, 'ok');
     } catch(e) { showWalletError('Device link parse error: ' + e.message); }
@@ -1164,10 +1164,10 @@
 
   /* ── Master signing dispatcher ────────────────────────────────────────────── */
   async function getSignature(typedData) {
-    if (_walletMode === 'synergy') {
+    if (_walletMode === 'synergy' || _walletMode === 'ethereum') {
       var provider = _walletProvider();
       if (!provider) {
-        console.warn('[SynQ Wallet] No provider for synergy signing — falling back to ephemeral');
+        console.warn('[SynQ Wallet] No provider for ' + _walletMode + ' signing — falling back to ephemeral');
         return await signEIP712Ephemeral(typedData);
       }
       var json = typeof typedData === 'string' ? typedData : JSON.stringify(typedData);
@@ -1233,13 +1233,14 @@
   window.copyAddr = copyAddr;
 
   async function connectWallet() {
-    // Try Synergy extension first; fall back to ephemeral if not available/approved
-    if (_checkSynergyExtension()) {
-      console.log('[SynQ Wallet] connectWallet: extension detected, requesting accounts...');
+    // Try any detected wallet (Synergy extension OR MetaMask)
+    var walletType = _detectWalletType();
+    if (walletType) {
+      console.log('[SynQ Wallet] connectWallet: ' + walletType + ' detected, requesting accounts...');
       try {
         var accounts = await _walletRequest('eth_requestAccounts');
         if (accounts && accounts.length) {
-          walletAddress = accounts[0]; _walletMode = 'synergy';
+          walletAddress = accounts[0]; _walletMode = walletType;
           console.log('[SynQ Wallet] connectWallet: got account', accounts[0]);
           // Try to get native Synergy address from extension
           walletSyna = null;
@@ -1306,7 +1307,7 @@
         var out = document.getElementById('vmOutput');
         if (out) out.innerHTML = '<span class="err">Synergy Wallet disconnected — reconnect to authenticate calls.</span>';
       } else {
-        walletAddress = accs[0]; walletSyna = evmToSyna(accs[0]); _walletMode = 'synergy';
+        walletAddress = accs[0]; walletSyna = evmToSyna(accs[0]); _walletMode = walletType;
         console.log('[SynQ Wallet] accountsChanged:', accs[0]);
         updateWalletUI();
       }
@@ -1344,6 +1345,8 @@
     console.log('_walletMode:', _walletMode);
     console.log('_walletProvider():', _walletProvider());
     console.log('_checkSynergyExtension():', _checkSynergyExtension());
+    console.log('_detectWalletType():', _detectWalletType());
+    console.log('_checkAnyWallet():', _checkAnyWallet());
     console.log('EIP-6963 providers:', _eip6963Providers.length);
     _eip6963Providers.forEach(function(p, i) {
       console.log('  [%d] name=%s rdns=%s', i, p.info && p.info.name, p.info && p.info.rdns);
@@ -1355,17 +1358,30 @@
   window.synqWallet = synqWallet;
 
   /* ── Auto-init: ephemeral key on load; restore Synergy if available ────── */
-  // Detect Synergy extension — it may inject window.ethereum (EIP-1193),
-  // OR only window.synergy with its own request API. Don't require both.
+  // Detect Synergy extension specifically (window.synergy with isSynergyWallet)
   function _checkSynergyExtension() {
     if (typeof window.synergy === 'undefined') return false;
-    // Accept both true and truthy isSynergyWallet
     if (window.synergy.isSynergyWallet === true || window.synergy.isSynergyWallet === 1) return true;
-    // Also accept if window.synergy has a request method (newer extension versions)
     if (typeof window.synergy.request === 'function' && !window.synergy.isSynergyWallet === false) return true;
-    // Fallback: if window.synergy exists with any truthy marker
     if (window.synergy.isSynergyWallet) return true;
     return false;
+  }
+
+  // Detect ANY usable wallet — Synergy extension OR standard EIP-1193 (MetaMask, etc.)
+  // Returns 'synergy', 'ethereum', or null.
+  function _detectWalletType() {
+    if (_checkSynergyExtension()) return 'synergy';
+    if (typeof window.ethereum !== 'undefined' && window.ethereum && typeof window.ethereum.request === 'function') {
+      // Standard EIP-1193 provider (MetaMask, Rabby, etc.)
+      // Don't auto-connect to MetaMask unless user explicitly clicks Connect
+      return 'ethereum';
+    }
+    return null;
+  }
+
+  // Check if any wallet is available (for button display logic)
+  function _checkAnyWallet() {
+    return _detectWalletType() !== null;
   }
 
   // Unified wallet provider — returns the best available EIP-1193-compatible interface.
@@ -1444,16 +1460,17 @@
     if (_eip6963Providers.length) console.log('[SynQ Wallet ' + label + '] EIP-6963 providers:', _eip6963Providers.length);
   }
 
-  async function _trySynergyRestore() {
+  // Silent restore — works for Synergy extension OR MetaMask (if pre-approved)
+  async function _tryWalletRestore(walletType) {
     try {
       var accs = await _walletRequest('eth_accounts');
       if (accs && accs.length) {
-        console.log('[SynQ Wallet] Silent restore succeeded:', accs[0]);
-        walletAddress = accs[0]; walletSyna = evmToSyna(accs[0]); _walletMode = 'synergy';
+        console.log('[SynQ Wallet] Silent restore succeeded (' + walletType + '):', accs[0]);
+        walletAddress = accs[0]; walletSyna = evmToSyna(accs[0]); _walletMode = walletType;
         updateWalletUI(); attachWalletListeners();
         return true;
       }
-      console.log('[SynQ Wallet] Extension detected but no pre-approved accounts. Button shows "Connect Synergy Wallet".');
+      console.log('[SynQ Wallet] ' + walletType + ' detected but no pre-approved accounts. Click Connect to trigger popup.');
       return false;
     } catch(err) {
       console.warn('[SynQ Wallet] Silent restore failed:', err.message || err);
@@ -1467,29 +1484,34 @@
     if (_extRecheckTimers.length === 0) return;
     var delay = _extRecheckTimers.shift();
     setTimeout(function() {
-      // Only re-check if we're still in ephemeral/none mode (not already connected)
-      if (_walletMode !== 'synergy' && _checkSynergyExtension()) {
-        console.log('[SynQ Wallet] Extension detected on re-check (' + delay + 'ms) — upgrading...');
-        _trySynergyRestore().then(function(restored) {
-          if (!restored) updateWalletUI(); // Refresh button to show "Connect Synergy Wallet"
-        });
-      } else if (_walletMode !== 'synergy' && !_checkSynergyExtension()) {
-        _scheduleRecheck(); // Try next delay
+      if (_walletMode === 'none' || _walletMode === 'ephemeral') {
+        var walletType = _detectWalletType();
+        if (walletType) {
+          console.log('[SynQ Wallet] Wallet detected on re-check (' + delay + 'ms): ' + walletType);
+          _tryWalletRestore(walletType).then(function(restored) {
+            if (!restored) updateWalletUI();
+          });
+        } else {
+          _scheduleRecheck();
+        }
       }
     }, delay);
   }
 
   (function autoInitKey() {
     _logWalletState('init');
-    if (_checkSynergyExtension()) {
-      console.log('[SynQ Wallet] Synergy extension detected — attempting silent restore...');
-      _trySynergyRestore().then(function(restored) {
+    var walletType = _detectWalletType();
+    if (walletType) {
+      console.log('[SynQ Wallet] ' + walletType + ' detected — attempting silent restore...');
+      _tryWalletRestore(walletType).then(function(restored) {
         if (!restored) {
+          // Wallet detected but not pre-approved — generate ephemeral for now,
+          // but show "Connect Wallet" button so user can trigger the popup
           generateEphemeralKey().then(function(ok){ if (ok) updateWalletUI(); });
         }
       });
     } else {
-      console.log('[SynQ Wallet] Extension not detected at init — scheduling re-checks');
+      console.log('[SynQ Wallet] No wallet detected at init — scheduling re-checks');
       generateEphemeralKey().then(function(ok){ if (ok) updateWalletUI(); });
       _scheduleRecheck();
     }
@@ -1539,20 +1561,21 @@
         mode: _walletMode
       };
       var _isSyn = (_walletMode === 'synergy');
-      mode.textContent  = _isSyn ? 'Synergy Wallet' : 'Ephemeral Devnet Key';
+      var _isEth = (_walletMode === 'ethereum');
+      mode.textContent  = _isSyn ? 'Synergy Wallet' : _isEth ? 'EVM Wallet' : 'Ephemeral Devnet Key';
       mode.className    = 'wallet-mode hybrid';
-      note.textContent  = _isSyn
-        ? 'Signing: Synergy Wallet · EIP-712 · ' + (_syna ? _syna.slice(0,10) + '…' : walletAddress.slice(0,8) + '…')
+      note.textContent  = (_isSyn || _isEth)
+        ? 'Signing: ' + (_isSyn ? 'Synergy Wallet' : 'EVM Wallet') + ' · EIP-712 · ' + (_syna ? _syna.slice(0,10) + '…' : walletAddress.slice(0,8) + '…')
         : 'Signing: EIP-712 · ' + (_syna ? _syna.slice(0,10) + '…' : '');
       // Show appropriate button based on wallet mode
-      var _extAvailable = _checkSynergyExtension();
+      var _extAvailable = _checkAnyWallet();
       if (_isSyn) {
         // Actually connected to Synergy extension
         btn.textContent   = 'Disconnect';
         btn.onclick       = disconnectWallet;
       } else {
         // Ephemeral mode — show "Connect Synergy" if extension is available, else "Regen Key"
-        btn.textContent   = _extAvailable ? 'Connect Synergy Wallet' : 'Regen Devnet Key';
+        btn.textContent   = _extAvailable ? 'Connect Wallet' : 'Regen Devnet Key';
         btn.onclick       = _extAvailable ? connectWallet : regenerateEphemeralKey;
       }
       // UMA display
@@ -1592,8 +1615,8 @@
         mode.className   = 'wallet-mode ephemeral';
         note.textContent = 'Signing: ML-DSA-65 (compiler-attested)';
       }
-      var _extAvailable2 = _checkSynergyExtension();
-      btn.textContent   = _extAvailable2 ? 'Connect Synergy Wallet' : 'Regen Devnet Key';
+      var _extAvailable2 = _checkAnyWallet();
+      btn.textContent   = _extAvailable2 ? 'Connect Wallet' : 'Regen Devnet Key';
       btn.onclick       = _extAvailable2 ? connectWallet : regenerateEphemeralKey;
     }
   }
@@ -1982,7 +2005,7 @@
           // 4. Sign — ephemeral key or Synergy Wallet via getSignature dispatcher
           setStatus('Signing source commit...', 'info');
           var evmSig;
-          setStatus('Signing with ' + (_walletMode === 'synergy' ? 'Synergy Wallet' : 'ephemeral devnet key') + '...', 'info');
+          setStatus('Signing with ' + (_walletMode === 'synergy' ? 'Synergy Wallet' : _walletMode === 'ethereum' ? 'EVM Wallet' : 'ephemeral devnet key') + '...', 'info');
           evmSig = await getSignature(typedData);
 
           // 5. POST /compile/sign-source — server re-compiles + binds author → source → bytecode
@@ -2642,7 +2665,7 @@
 
       if (walletAddress) {
         // Liveness check: only needed for extension wallet; ephemeral key is always valid
-        if (_walletMode === 'synergy') {
+        if (_walletMode === 'synergy' || _walletMode === 'ethereum') {
           var liveAccounts = await _walletRequest('eth_accounts');
           if (!liveAccounts || liveAccounts.length === 0) {
             walletAddress = null; updateWalletUI();
