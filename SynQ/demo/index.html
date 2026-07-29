@@ -1514,7 +1514,7 @@
 
       // ── Rev-2 Source Signing (if wallet connected) ───────────────────────
       // SourceCommit EIP-712:
-      //   domain  : { name:'SynQ', version:'1', chainId:1337,
+      //   domain  : { name:'SynQ · <ContractName> · synergy-testnet-v3', version:'1', chainId:1266,
       //               verifyingContract: keccak256(contractName)[0..20] }
       //   struct  : SourceCommit { string sourceHash, string contractName, string nonce }
       //   The server verifies the KMAC128 nonce, ecrecovers the author, compiles,
@@ -1562,9 +1562,9 @@
             },
             primaryType: 'SourceCommit',
             domain: {
-              name:              'SynQ · ' + (currentContractName || 'unknown'),
+              name:              'SynQ · ' + (currentContractName || 'unknown') + ' · synergy-testnet-v3',
               version:           '1',
-              chainId:           1337,
+              chainId:           1266,
               verifyingContract: vcHex
             },
             message: {
@@ -1620,7 +1620,7 @@
             setStatus('Compiled ▶ ' + (currentContractName || 'contract') + ' (wallet signature declined)', 'success');
           } else if (we.code === 4902 || we.code === -32603 ||
                      (we.message && we.message.toLowerCase().includes('chain'))) {
-            setStatus('Wallet error: domain chain mismatch — SynQ uses chainId 1337. Try again.', 'error');
+            setStatus('Wallet error: domain chain mismatch — SynQ uses chainId 1266 (synergy-testnet-v3). Try again.', 'error');
           } else {
             setStatus('Source signing error: ' + (we.message || we.toString()), 'error');
           }
@@ -2265,6 +2265,10 @@
           return;
         }
         var callNonce   = nonceData.nonce;
+        // V3 metadata from server — used for EIP-712 domain and domainTag
+        var v3ChainId   = nonceData.chainId   || 1266;
+        var v3NetworkId = nonceData.networkId || 'synergy-testnet-v3';
+        var v3DomainTag = nonceData.domainTag || 'SYNQ-CALL-v3';
         // EIP-712: build typed data for ContractCall
         // verifyingContract = contract-name-derived address (deterministic, not on-chain).
         //   Derived as: keccak256("SynQ:" + contractName), last 20 bytes.
@@ -2283,14 +2287,15 @@
             ContractCall: [
               { name: 'callSignature', type: 'string' },
               { name: 'sessionId',     type: 'string' },
-              { name: 'nonce',         type: 'string' }
+              { name: 'nonce',         type: 'string' },
+              { name: 'domainTag',     type: 'string' }
             ]
           },
           primaryType: 'ContractCall',
           domain: {
-            name:              currentContractName ? ('SynQ · ' + currentContractName) : 'SynQ',
+            name:              currentContractName ? ('SynQ · ' + currentContractName + ' · ' + v3NetworkId) : ('SynQ · ' + v3NetworkId),
             version:           '1',
-            chainId:           1337,
+            chainId:           v3ChainId,
             verifyingContract: (function() {
               // Always derive from contract name — matches server's eip712_domain_separator_for_contract()
               // keccak256("SynQ:" + name), last 20 bytes (hash[12..31])
@@ -2303,7 +2308,8 @@
           message: {
             callSignature: callSignature,
             sessionId:     sessionId,
-            nonce:         callNonce
+            nonce:         callNonce,
+            domainTag:     v3DomainTag
           }
         });
         console.log('[SynQ auth] EIP-712 typed data:', callTypedData);
@@ -2321,7 +2327,7 @@
           if (sigErr.code === 4001 || sigErr.code === 'ACTION_REJECTED') {
             sigErrMsg = 'Signature declined — call not sent.';
           } else if (sigErr.code === 4902 || sigErr.code === -32603 || (sigErr.message && sigErr.message.toLowerCase().includes('chain'))) {
-            sigErrMsg = 'Wallet error: domain chain mismatch — SynQ uses chainId 1337 (devnet) for signing only, no network switch needed. Try again.';
+            sigErrMsg = 'Wallet error: domain chain mismatch — SynQ uses chainId 1266 (synergy-testnet-v3) for signing only, no network switch needed. Try again.';
           } else {
             sigErrMsg = 'Signing error: ' + (sigErr.message || sigErr.toString());
           }
@@ -2345,6 +2351,13 @@
 
       if (data.success) {
         var rv = data.result;
+        // V3: display caller's syna... Bech32 address if present
+        var callerSynaDisplay = '';
+        if (data.caller_syna) {
+          console.log('[SynQ V3] caller_syna:', data.caller_syna);
+          callerSynaDisplay = '<div style="margin-top:6px;font-size:0.78rem;color:#a78bfa;">'
+            + '🔑 caller: <span style="font-family:ui-monospace,monospace;">' + data.caller_syna + '</span></div>';
+        }
         var display = '';
         // ── Line 1: function name (dim) ──────────────────────────────────
         var fnLabel = (selectedFunc && selectedFunc.name) ? selectedFunc.name : (req.function || '');
@@ -2477,6 +2490,8 @@
         if (selectedFunc && selectedFunc.capabilities && selectedFunc.capabilities.length > 0) {
           display += '<div style="font-size:0.68rem;color:rgba(255,255,255,0.22);margin-top:4px;">requires cap::' + selectedFunc.capabilities.join(', cap::') + '</div>';
         }
+        // V3: append caller_syna display
+        display += callerSynaDisplay;
         // data.output intentionally omitted — server echoes 'Return value: X'
         // which duplicates the rv line already rendered above.
         out.innerHTML = display;
@@ -2503,7 +2518,8 @@
         } else if (errMsg.includes('StackUnderflow')) {
           errMsg = 'Stack underflow: a cross-contract call failed internally — ensure all required contracts are deployed in the same workspace before calling this function.';
         }
-        out.innerHTML = '<span class="err">' + errMsg + '</span>';
+        var errCallerSyna = data.caller_syna ? '<div style="margin-top:4px;font-size:0.72rem;color:rgba(167,139,250,0.7);">🔑 ' + data.caller_syna + '</div>' : '';
+        out.innerHTML = '<span class="err">' + errMsg + '</span>' + errCallerSyna;
         probeStateVars();
       }
     } catch (err) {
