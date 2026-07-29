@@ -643,21 +643,47 @@ impl CodeGenerator {
             }
             // ── Named error revert: `revert ErrorName(args...)` ────────────
             Statement::RevertNamed { error, args } => {
-                // For now: pack args count + error name into the Revert message.
-                // Future: ABI-encode args properly when full ABI is implemented.
+                // Named error: try to resolve the error name to an enum variant tag.
+                // If found, emit RevertCode (0x35) with the structured error code.
+                // If not found, fall back to string-based Revert (0x34).
+                
+                // Search all enum definitions for a matching variant.
+                let mut found_code: Option<(u32, String)> = None;
+                for (enum_name, enum_info) in &self.enum_defs {
+                    if let Some(idx) = enum_info.variants.iter().position(|v| v.name == *error) {
+                        found_code = Some((idx as u32, enum_name.clone()));
+                        break;
+                    }
+                }
+                
+                // Build the display message (error name + arg count).
                 let msg = if args.is_empty() {
-                    error.clone()
+                    if let Some((_, ref en)) = found_code { format!("{}::{}", en, error) }
+                    else { error.clone() }
                 } else {
-                    format!("{}({} arg(s))", error, args.len())
+                    let prefix = if let Some((_, ref en)) = found_code { format!("{}::{}", en, error) }
+                    else { error.clone() };
+                    format!("{}({} arg(s))", prefix, args.len())
                 };
+                
                 // Still push args so they are evaluated (side-effect safe).
                 for arg in args.iter() {
                     self.gen_expression(arg, scope)?;
                     self.assembler.emit_op(OpCode::Pop);
                 }
+                
                 let msg_bytes = msg.as_bytes();
-                self.assembler.emit_op(OpCode::Revert);
-                self.assembler.emit_bytes(msg_bytes);
+                
+                if let Some((code, _)) = found_code {
+                    // Emit RevertCode: opcode + error_code (4B LE) + msg_len (4B LE) + msg
+                    self.assembler.emit_op(OpCode::RevertCode);
+                    self.assembler.emit_u32(code);
+                    self.assembler.emit_bytes(msg_bytes);
+                } else {
+                    // Fall back to string-based Revert for unknown error names.
+                    self.assembler.emit_op(OpCode::Revert);
+                    self.assembler.emit_bytes(msg_bytes);
+                }
                 Ok(())
             }
             // ── Event emission: `emit EventName(args...)` ───────────────────

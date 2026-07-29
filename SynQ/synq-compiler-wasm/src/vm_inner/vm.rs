@@ -1203,6 +1203,15 @@ impl QuantumVM {
             .unwrap_or_else(|e| format!("revert(0x{})", hex::encode(&msg_bytes[..e.utf8_error().valid_up_to()])));
                 return Err(VMError::Reverted(msg));
             }
+            OpCode::RevertCode => {
+                // Named error revert: error_code (4B LE) + msg_len (4B LE) + msg_bytes
+                let code = self.read_u32()?;
+                let msg_len = self.read_u32()? as usize;
+                let msg_bytes = self.read_bytes(msg_len)?;
+                let msg = String::from_utf8(msg_bytes.to_vec())
+                    .unwrap_or_else(|e| format!("revert(0x{})", hex::encode(&msg_bytes[..e.utf8_error().valid_up_to()])));
+                return Err(VMError::RevertedNamed { code, message: msg });
+            }
         }
 
         Ok(())

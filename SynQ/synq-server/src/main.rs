@@ -2062,6 +2062,12 @@ struct RunResponse {
     error:   Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     caller_syna: Option<String>,
+    /// Structured error code from named revert (RevertCode opcode).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<u32>,
+    /// Error name extracted from the revert message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_name: Option<String>,
 }
 
 
@@ -2098,7 +2104,7 @@ async fn session_run_handler(
     Json(req): Json<SessionRunRequest>,
 ) -> (StatusCode, RespJson<RunResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), events: Vec::new(), error: Some("rate limit exceeded — retry later".into()), caller_syna: None }));
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), events: Vec::new(), error: Some("rate limit exceeded — retry later".into()), caller_syna: None, error_code: None, error_name: None }));
     }
     let mut vm_args: Vec<Value> = Vec::new();
     // Build call_sig before args are moved — used in EIP-712 digest if wallet auth is present.
@@ -2127,6 +2133,8 @@ async fn session_run_handler(
                 events: Vec::new(),
                 error: Some(format!("arg[{}]: {}", i, e)),
             caller_syna: None,
+            error_code: None,
+            error_name: None,
             })),
         }
     }
@@ -2140,6 +2148,8 @@ async fn session_run_handler(
                 events: Vec::new(),
                 error: Some(format!("Session '{}' not found or expired", req.session_id)),
             caller_syna: None,
+            error_code: None,
+            error_name: None,
             })),
         }
     };
@@ -2157,6 +2167,8 @@ async fn session_run_handler(
                     events: Vec::new(),
                     error: Some("caller auth: no pending nonce — call GET /session/:id/nonce first".into()),
                 caller_syna: None,
+                error_code: None,
+                error_name: None,
                 }));
             }
             Some(pn) if pn != nonce => {
@@ -2166,6 +2178,8 @@ async fn session_run_handler(
                     events: Vec::new(),
                     error: Some("caller auth: nonce mismatch — nonces are single-use, request a new one".into()),
                 caller_syna: None,
+                error_code: None,
+                error_name: None,
                 }));
             }
             _ => {}
@@ -2178,6 +2192,8 @@ async fn session_run_handler(
                 events: Vec::new(),
                 error: Some("caller auth: nonce already used — replay attack rejected".into()),
             caller_syna: None,
+            error_code: None,
+            error_name: None,
             }));
         }
         // 3. Build EIP-712 ContractCall digest
@@ -2206,6 +2222,8 @@ async fn session_run_handler(
                 return (StatusCode::BAD_REQUEST, RespJson(RunResponse {
                     success: false, result: None, output: String::new(), events: Vec::new(), error: Some(e),
                 caller_syna: None,
+                error_code: None,
+                error_name: None,
                 }));
             }
         };
@@ -2221,6 +2239,8 @@ async fn session_run_handler(
                     events: Vec::new(),
                     error: Some(format!("caller auth: ecrecover failed: {}", e)),
                 caller_syna: None,
+                error_code: None,
+                error_name: None,
                 }));
             }
         };
@@ -2234,6 +2254,8 @@ async fn session_run_handler(
                 events: Vec::new(),
                 error: Some("caller auth: signature does not match claimed evm_address".into()),
             caller_syna: None,
+            error_code: None,
+            error_name: None,
             }));
         }
         // 6. Consume the nonce
@@ -2248,6 +2270,8 @@ async fn session_run_handler(
             events: Vec::new(),
             error: Some("caller auth: evm_address, evm_signature, and call_nonce must all be provided together".into()),
         caller_syna: None,
+        error_code: None,
+        error_name: None,
         }));
     } else {
         // Unauthenticated call — caller == zero address
@@ -2393,20 +2417,32 @@ async fn session_run_handler(
             };
             {
         let caller_syna = if let Some(ref synw) = req.display_synw { Some(synw.clone()) } else { synq_vm::bech32::evm_to_syna(&caller_addr).ok() };
-        (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None, caller_syna }))
+        (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None, error_code: None, error_name: None, caller_syna }))
     }
         }
+        Err(synq_vm::VMError::RevertedNamed { code, message }) => (StatusCode::OK, RespJson(RunResponse {
+            success: false, result: None, output: String::new(),
+            events: Vec::new(),
+            error: Some(format!("revert: {}", message)),
+            caller_syna: req.display_synw.clone().or_else(|| synq_vm::bech32::evm_to_syna(&caller_addr).ok()),
+            error_code: Some(code),
+            error_name: Some(message.split('(').next().unwrap_or(&message).split("::").last().unwrap_or(&message).to_string()),
+        })),
         Err(synq_vm::VMError::Reverted(msg)) => (StatusCode::OK, RespJson(RunResponse {
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("require failed: {}", msg)),
         caller_syna: req.display_synw.clone().or_else(|| synq_vm::bech32::evm_to_syna(&caller_addr).ok()),
+        error_code: None,
+        error_name: None,
         })),
         Err(e) => (StatusCode::OK, RespJson(RunResponse {
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("{}", e)),
         caller_syna: req.display_synw.clone().or_else(|| synq_vm::bech32::evm_to_syna(&caller_addr).ok()),
+        error_code: None,
+        error_name: None,
         })),
     }
 }

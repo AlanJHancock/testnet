@@ -11,6 +11,7 @@ pub enum VMError {
     CryptoError(String),
     RuntimeError(String),
     Reverted(String),          // require() failure — carries the require message
+    RevertedNamed { code: u32, message: String }, // named error revert — carries enum variant tag + display message
     StepLimitExceeded(usize),  // PR-B: infinite-loop / gas guard
 }
 
@@ -25,6 +26,7 @@ impl fmt::Display for VMError {
             VMError::CryptoError(msg)        => write!(f, "Crypto error: {}", msg),
             VMError::RuntimeError(msg)       => write!(f, "Runtime error: {}", msg),
             VMError::Reverted(msg)           => write!(f, "require failed: {}", msg),
+            VMError::RevertedNamed { code, message } => write!(f, "revert: {} (code {})", message, code),
             VMError::StepLimitExceeded(n)    => write!(f, "step limit exceeded ({} steps): possible infinite loop", n),
         }
     }
@@ -63,6 +65,7 @@ pub enum OpCode {
     Call   = 0x32,
     Return = 0x33,
     Revert = 0x34,  // require() failure — followed by 4-byte LE len + message bytes
+    RevertCode = 0x35, // named error revert — followed by error_code(4B LE) + msg_len(4B LE) + msg
 
     // Memory operations
     Load       = 0x40,
@@ -154,6 +157,7 @@ impl TryFrom<u8> for OpCode {
             0x32 => Ok(OpCode::Call),
             0x33 => Ok(OpCode::Return),
             0x34 => Ok(OpCode::Revert),
+            0x35 => Ok(OpCode::RevertCode),
             0x40 => Ok(OpCode::Load),
             0x41 => Ok(OpCode::Store),
             0x42 => Ok(OpCode::LoadImm),
