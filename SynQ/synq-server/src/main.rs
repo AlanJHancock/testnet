@@ -305,7 +305,8 @@ fn eip712_domain_separator(domain_name: &str, verifying_contract: &[u8; 20]) -> 
     );
     let name_hash    = keccak256_str(domain_name);
     let version_hash = keccak256_str("1");
-    let chain_id     = pad32(&1337u64.to_be_bytes());
+    // V3: chain ID 1266 (synergy-testnet-v3). Was 1337 (legacy devnet).
+    let chain_id     = pad32(&V3_CHAIN_ID.to_be_bytes());
     let mut contract_slot = [0u8; 32];
     contract_slot[12..].copy_from_slice(verifying_contract);
     let mut enc = [0u8; 160];
@@ -326,7 +327,8 @@ fn eip712_domain_separator_zero() -> [u8; 32] {
 /// domain name = "SynQ · <ContractName>" -- shown verbatim in wallet signing card.
 /// verifyingContract = keccak256("SynQ:" + name)[12..] -- stable, unique per contract.
 fn eip712_domain_separator_for_contract(contract_name: &str) -> [u8; 32] {
-    let domain_name = format!("SynQ · {}", contract_name);
+    // V3: domain name includes network ID for cross-domain replay resistance.
+    let domain_name = format!("SynQ · {} · {}", contract_name, V3_NETWORK_ID);
     let hash = keccak256(format!("SynQ:{}", contract_name).as_bytes());
     let mut addr = [0u8; 20];
     addr.copy_from_slice(&hash[12..]);
@@ -360,6 +362,22 @@ fn eip712_hash_contract_call(call_sig: &str, session_id: &str, nonce: &str) -> [
     enc[32..64].copy_from_slice(&keccak256_str(call_sig));
     enc[64..96].copy_from_slice(&keccak256_str(session_id));
     enc[96..128].copy_from_slice(&keccak256_str(nonce));
+    keccak256(&enc)
+}
+
+/// V3 ContractCall struct hash with domain tag for cross-domain replay resistance.
+/// struct ContractCall(string callSignature, string sessionId, string nonce, string domainTag)
+/// domainTag = "SYNQ-CALL-v3" — binds the signature to the V3 call domain.
+fn eip712_hash_contract_call_v3(call_sig: &str, session_id: &str, nonce: &str, domain_tag: &str) -> [u8; 32] {
+    let type_hash = keccak256_str(
+        "ContractCall(string callSignature,string sessionId,string nonce,string domainTag)"
+    );
+    let mut enc = [0u8; 160];
+    enc[..32].copy_from_slice(&type_hash);
+    enc[32..64].copy_from_slice(&keccak256_str(call_sig));
+    enc[64..96].copy_from_slice(&keccak256_str(session_id));
+    enc[96..128].copy_from_slice(&keccak256_str(nonce));
+    enc[128..160].copy_from_slice(&keccak256_str(domain_tag));
     keccak256(&enc)
 }
 
@@ -1851,6 +1869,8 @@ struct RunResponse {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     events:  Vec<EventLog>,
     error:   Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caller_syna: Option<String>,
 }
 
 
@@ -1887,7 +1907,7 @@ async fn session_run_handler(
     Json(req): Json<SessionRunRequest>,
 ) -> (StatusCode, RespJson<RunResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), events: Vec::new(), error: Some("rate limit exceeded — retry later".into()) }));
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), events: Vec::new(), error: Some("rate limit exceeded — retry later".into()), caller_syna: None }));
     }
     let mut vm_args: Vec<Value> = Vec::new();
     // Build call_sig before args are moved — used in EIP-712 digest if wallet auth is present.
@@ -1915,6 +1935,7 @@ async fn session_run_handler(
                 success: false, result: None, output: String::new(),
                 events: Vec::new(),
                 error: Some(format!("arg[{}]: {}", i, e)),
+            caller_syna: None,
             })),
         }
     }
@@ -1927,6 +1948,7 @@ async fn session_run_handler(
                 success: false, result: None, output: String::new(),
                 events: Vec::new(),
                 error: Some(format!("Session '{}' not found or expired", req.session_id)),
+            caller_syna: None,
             })),
         }
     };
@@ -1943,6 +1965,7 @@ async fn session_run_handler(
                     success: false, result: None, output: String::new(),
                     events: Vec::new(),
                     error: Some("caller auth: no pending nonce — call GET /session/:id/nonce first".into()),
+                caller_syna: None,
                 }));
             }
             Some(pn) if pn != nonce => {
@@ -1951,6 +1974,7 @@ async fn session_run_handler(
                     success: false, result: None, output: String::new(),
                     events: Vec::new(),
                     error: Some("caller auth: nonce mismatch — nonces are single-use, request a new one".into()),
+                caller_syna: None,
                 }));
             }
             _ => {}
@@ -1962,6 +1986,7 @@ async fn session_run_handler(
                 success: false, result: None, output: String::new(),
                 events: Vec::new(),
                 error: Some("caller auth: nonce already used — replay attack rejected".into()),
+            caller_syna: None,
             }));
         }
         // 3. Build EIP-712 ContractCall digest
@@ -1974,7 +1999,7 @@ async fn session_run_handler(
         let run_domain = session.contract_name.as_deref()
             .map(eip712_domain_separator_for_contract)
             .unwrap_or_else(eip712_domain_separator_zero);
-        let struct_hash = eip712_hash_contract_call(&call_sig_early, &req.session_id, nonce);
+        let struct_hash = eip712_hash_contract_call_v3(&call_sig_early, &req.session_id, nonce, V3_DOMAIN_CALL);
         let digest      = eip712_digest_with_domain(run_domain, &struct_hash);
         eprintln!("[AUTH] contract_name={:?} call_sig={:?}",
             session.contract_name.as_deref().unwrap_or("(none)"), call_sig_early);
@@ -1989,6 +2014,7 @@ async fn session_run_handler(
                 { state.sessions.lock().unwrap().insert(req.session_id.clone(), session); }
                 return (StatusCode::BAD_REQUEST, RespJson(RunResponse {
                     success: false, result: None, output: String::new(), events: Vec::new(), error: Some(e),
+                caller_syna: None,
                 }));
             }
         };
@@ -2003,6 +2029,7 @@ async fn session_run_handler(
                     success: false, result: None, output: String::new(),
                     events: Vec::new(),
                     error: Some(format!("caller auth: ecrecover failed: {}", e)),
+                caller_syna: None,
                 }));
             }
         };
@@ -2015,6 +2042,7 @@ async fn session_run_handler(
                 success: false, result: None, output: String::new(),
                 events: Vec::new(),
                 error: Some("caller auth: signature does not match claimed evm_address".into()),
+            caller_syna: None,
             }));
         }
         // 6. Consume the nonce
@@ -2028,6 +2056,7 @@ async fn session_run_handler(
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some("caller auth: evm_address, evm_signature, and call_nonce must all be provided together".into()),
+        caller_syna: None,
         }));
     } else {
         // Unauthenticated call — caller == zero address
@@ -2065,6 +2094,11 @@ async fn session_run_handler(
     // auth_envelope[72..80] already zero
     // Capabilities: 0xFF = all enabled (devnet)
     auth_envelope[80] = 0xFF;
+    // Reserved (16 bytes): V3 domain tag for cross-domain replay resistance.
+    // First 8 bytes of the domain tag string, right-padded with zeros.
+    let domain_bytes = V3_DOMAIN_CALL.as_bytes();
+    let copy_len = domain_bytes.len().min(16);
+    auth_envelope[88..88 + copy_len].copy_from_slice(&domain_bytes[..copy_len]);
 
     session.vm.call_context = synq_vm::CallContext::with_authority(
         caller_addr,
@@ -2129,17 +2163,22 @@ async fn session_run_handler(
                 Some(v) => (Some(value_to_json_typed(v, declared_ret)), format!("Return value: {}", value_display(v))),
                 None    => (None, "Function completed (no return value)".to_string()),
             };
-            (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None }))
+            {
+        let caller_syna = synq_vm::bech32::evm_to_syna(&caller_addr).ok();
+        (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None, caller_syna }))
+    }
         }
         Err(synq_vm::VMError::Reverted(msg)) => (StatusCode::OK, RespJson(RunResponse {
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("require failed: {}", msg)),
+        caller_syna: synq_vm::bech32::evm_to_syna(&caller_addr).ok(),
         })),
         Err(e) => (StatusCode::OK, RespJson(RunResponse {
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("{}", e)),
+        caller_syna: synq_vm::bech32::evm_to_syna(&caller_addr).ok(),
         })),
     }
 }
@@ -2160,7 +2199,24 @@ async fn session_nonce_handler(
     let nonce_hex = hex_encode(&buf);
     session.pending_nonce = Some(nonce_hex.clone());
     session.last_used = Instant::now();
-    (StatusCode::OK, RespJson(json!({ "nonce": nonce_hex })))
+    let contract_name = session.contract_name.clone();
+    let network_id = V3_NETWORK_ID;
+    let chain_id = V3_CHAIN_ID;
+    let domain_tag = V3_DOMAIN_CALL;
+    (StatusCode::OK, RespJson(json!({
+        "nonce": nonce_hex,
+        "chainId": chain_id,
+        "networkId": network_id,
+        "domainTag": domain_tag,
+        "contractName": contract_name,
+        "eip712Type": "ContractCall(string callSignature,string sessionId,string nonce,string domainTag)",
+        "eip712Domain": {
+            "name": "SynQ",
+            "version": "1",
+            "chainId": chain_id,
+            "verifyingContract": null
+        }
+    })))
 }
 
 async fn session_delete_handler(
