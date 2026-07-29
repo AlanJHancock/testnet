@@ -105,6 +105,7 @@ pub enum OpCode {
     ResultUnwrap = 0xA8,
     IsOk         = 0xA9,
     IsSome       = 0xAA,
+    TupleSet     = 0xAB,   // pops index, value, tuple → pushes new tuple with element replaced
 
     // Authority model (0x51-0x53)
     LoadAuthority = 0x51,   // push 104-byte AuthorityEnvelope from call context
@@ -188,6 +189,7 @@ impl TryFrom<u8> for OpCode {
             0xA8 => Ok(OpCode::ResultUnwrap),
             0xA9 => Ok(OpCode::IsOk),
             0xAA => Ok(OpCode::IsSome),
+            0xAB => Ok(OpCode::TupleSet),
             0x51 => Ok(OpCode::LoadAuthority),
             0x52 => Ok(OpCode::AuthRequire),
             0x53 => Ok(OpCode::AuthIdentity),

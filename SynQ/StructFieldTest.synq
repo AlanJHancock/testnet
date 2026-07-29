@@ -1,0 +1,51 @@
+pragma synq ^0.9;
+
+struct Point {
+    x: u256;
+    y: u256;
+}
+
+contract StructFieldTest {
+    state {
+        origin: Point;
+        initialised: bool;
+    }
+
+    @public
+    function init() as caller -> bool {
+        origin = Point { x: 0, y: 0 };
+        initialised = true;
+        return true;
+    }
+
+    @public
+    function setOrigin(x: u256, y: u256) as caller -> bool {
+        origin.x = x;
+        origin.y = y;
+        return true;
+    }
+
+    @public
+    function getOriginX() as caller -> u256 {
+        return origin.x;
+    }
+
+    @public
+    function getOriginY() as caller -> u256 {
+        return origin.y;
+    }
+
+    @public
+    function moveX(dx: u256) as caller -> bool {
+        origin.x = origin.x + dx;
+        return true;
+    }
+
+    @public
+    function swapCoordinates() as caller -> bool {
+        let temp: u256 = origin.x;
+        origin.x = origin.y;
+        origin.y = temp;
+        return true;
+    }
+}

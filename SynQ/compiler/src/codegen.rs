@@ -332,6 +332,7 @@ impl CodeGenerator {
             fn writes_state(stmt: &Statement, state_vars: &HashMap<String, u32>) -> bool {
                 match stmt {
                     Statement::Assignment(name, _) => state_vars.contains_key(name.as_str()),
+                    Statement::FieldAssignment { object, .. } => state_vars.contains_key(object.as_str()),
                     Statement::If { then_block, else_block, .. } => {
                         then_block.statements.iter().any(|s| writes_state(s, state_vars))
                         || else_block.as_ref().map_or(false, |eb|
@@ -572,6 +573,36 @@ impl CodeGenerator {
             Statement::Assignment(name, expr) => {
                 let addr = self.resolve_address(scope, name)?;
                 self.gen_expression(expr, scope)?;
+                self.assembler.emit_op(OpCode::Push);
+                self.assembler.emit_i32(addr as i32);
+                self.assembler.emit_op(OpCode::Store);
+                Ok(())
+            }
+            Statement::FieldAssignment { object, field, value } => {
+                let addr = self.resolve_address(scope, object.as_str())?;
+                // Load the struct (Tuple) from memory
+                self.assembler.emit_op(OpCode::Push);
+                self.assembler.emit_i32(addr as i32);
+                self.assembler.emit_op(OpCode::Load);
+                // Push the new field value
+                self.gen_expression(value, scope)?;
+                // Look up field index from struct definitions
+                let ty = scope.local_types.get(object.as_str())
+                    .cloned()
+                    .or_else(|| self.state_var_types.get(object.as_str()).cloned());
+                let field_idx = if let Some(Type::Named(struct_name)) = ty {
+                    if let Some(sd) = self.struct_defs.get(&struct_name) {
+                        sd.fields.iter().position(|f| f.name == *field)
+                            .map(|p| p as i32)
+                    } else { None }
+                } else { None }
+                    .ok_or_else(|| format!("FieldAssignment: unknown field '{}' on '{}'", field, object))?;
+                // Push field index
+                self.assembler.emit_op(OpCode::Push);
+                self.assembler.emit_i32(field_idx);
+                // TupleSet: pops index, value, tuple → pushes new tuple
+                self.assembler.emit_op(OpCode::TupleSet);
+                // Store the modified tuple back to memory
                 self.assembler.emit_op(OpCode::Push);
                 self.assembler.emit_i32(addr as i32);
                 self.assembler.emit_op(OpCode::Store);

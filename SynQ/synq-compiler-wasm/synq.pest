@@ -137,6 +137,7 @@ statement = { return_statement
             | let_statement
             | map_assign_statement
             | set_op_statement
+            | field_assign_statement
             | assignment_statement
             | expr_statement }
 
@@ -153,6 +154,7 @@ break_statement       = { "break" ~ ";" }
 continue_statement    = { "continue" ~ ";" }
 let_statement         = { "let" ~ IDENT ~ (":" ~ type_decl)? ~ "=" ~ expression ~ ";" }
 assignment_statement  = { IDENT ~ "=" ~ expression ~ ";" }
+field_assign_statement = { IDENT ~ "." ~ IDENT ~ "=" ~ expression ~ ";" }
 map_assign_statement  = { IDENT ~ "[" ~ expression ~ "]" ~ "=" ~ expression ~ ";" }
 set_op_statement      = { IDENT ~ "." ~ ("add" | "remove") ~ "(" ~ expression ~ ")" ~ ";" }
 expr_statement        = { expression ~ ";" }

@@ -196,6 +196,8 @@ pub enum Statement {
     /// `revert ErrorName(args...)` — named error revert
     RevertNamed { error: String, args: Vec<Expression> },
     Assignment(String, Expression),
+    /// `obj.field = value` — struct field assignment
+    FieldAssignment { object: String, field: String, value: Expression },
     /// `map[key] = value`
     MapAssignment { map: String, key: Expression, value: Expression },
     /// `set.add(value)` / `set.remove(value)` as statements

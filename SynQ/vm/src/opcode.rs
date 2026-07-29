@@ -112,6 +112,7 @@ pub enum OpCode {
     ResultUnwrap = 0xA8,
     IsOk         = 0xA9,
     IsSome       = 0xAA,
+    TupleSet     = 0xAB,   // pops index, value, tuple → pushes new tuple with element replaced
 
     // PQC operations — legacy algorithm-specific opcodes (backward compat)
     DilithiumVerify  = 0x80,
@@ -192,6 +193,7 @@ impl TryFrom<u8> for OpCode {
             0xA8 => Ok(OpCode::ResultUnwrap),
             0xA9 => Ok(OpCode::IsOk),
             0xAA => Ok(OpCode::IsSome),
+            0xAB => Ok(OpCode::TupleSet),
             0x80 => Ok(OpCode::DilithiumVerify),
             0x81 => Ok(OpCode::KyberKeyExchange),
             0x82 => Ok(OpCode::FalconVerify),

@@ -1103,6 +1103,18 @@ impl QuantumVM {
                     self.stack.push(v);
                 } else { return Err(VMError::RuntimeError("TupleGet: not a Tuple".into())); }
             }
+            OpCode::TupleSet => {
+                let idx = self.stack.pop().ok_or(VMError::StackUnderflow)?.as_i32().map_err(|_| VMError::RuntimeError("TupleSet: expected index".into()))? as usize;
+                let val = self.stack.pop().ok_or(VMError::StackUnderflow)?;
+                let t   = self.stack.pop().ok_or(VMError::StackUnderflow)?;
+                if let Value::Tuple(mut elems) = t {
+                    if idx >= elems.len() {
+                        return Err(VMError::RuntimeError(format!("TupleSet: index {} out of range", idx)));
+                    }
+                    elems[idx] = val;
+                    self.stack.push(Value::Tuple(elems));
+                } else { return Err(VMError::RuntimeError("TupleSet: not a Tuple".into())); }
+            }
             OpCode::OptionSome => {
                 let v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
                 self.stack.push(Value::SynqOption(Some(Box::new(v))));
