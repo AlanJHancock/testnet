@@ -936,7 +936,13 @@ impl QuantumVM {
                         a[16] = ((i >> 24) & 0xFF) as u8;
                         a
                     }
-                    _ => return Err(VMError::RuntimeError("AddrEncode: expected address value (Bytes/U256/I32)".into())),
+                    Value::U128(v) => {
+                        let bytes = v.to_be_bytes();
+                        let mut a = [0u8; 20];
+                        a[20 - bytes.len()..].copy_from_slice(&bytes);
+                        a
+                    }
+                    _ => return Err(VMError::RuntimeError("AddrEncode: expected address value (Bytes/U256/U128/I32)".into())),
                 };
                 match crate::bech32::evm_to_syna(&addr20) {
                     Ok(encoded) => self.stack.push(Value::Bytes(encoded.into_bytes())),
@@ -988,11 +994,23 @@ impl QuantumVM {
                         a[16..20].copy_from_slice(&(i as u32).to_be_bytes());
                         a
                     }
+                    Value::U128(v) => {
+                        let bytes = v.to_be_bytes();
+                        let mut a = [0u8; 20];
+                        a[20 - bytes.len()..].copy_from_slice(&bytes);
+                        a
+                    }
+                    Value::Bool(b) => {
+                        let mut a = [0u8; 20];
+                        a[19] = if b { 1 } else { 0 };
+                        a
+                    }
                     _ => return Err(VMError::RuntimeError("ContractAddr: expected address value for deployer".into())),
                 };
 
                 let nonce: u64 = match nonce_v {
                     Value::I32(i) => i as u64,
+                    Value::U128(v) => v as u64,
                     Value::U256(ref u) => u.try_into().map_err(|_| VMError::RuntimeError("ContractAddr: nonce overflow".into()))?,
                     _ => return Err(VMError::RuntimeError("ContractAddr: expected integer nonce".into())),
                 };
@@ -1017,6 +1035,11 @@ impl QuantumVM {
                     Value::I32(i) => {
                         let mut h = [0u8; 32];
                         h[28..32].copy_from_slice(&(i as u32).to_be_bytes());
+                        h
+                    }
+                    Value::U128(v) => {
+                        let mut h = [0u8; 32];
+                        h[16..32].copy_from_slice(&v.to_be_bytes());
                         h
                     }
                     _ => return Err(VMError::RuntimeError("ContractAddr: expected hash value for artifact".into())),
