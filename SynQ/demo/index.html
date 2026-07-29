@@ -1313,6 +1313,47 @@
     });
   }
 
+  /* ── Console-callable extension diagnostics ──────────────────────────── */
+  // Type `synqWallet()` in DevTools console to see everything the extension injects.
+  function synqWallet() {
+    console.log('=== SynQ Wallet Diagnostics ===');
+    console.log('window.ethereum:', typeof window.ethereum !== 'undefined' ? window.ethereum : 'NOT INJECTED');
+    console.log('window.synergy:', typeof window.synergy !== 'undefined' ? window.synergy : 'NOT INJECTED');
+    if (typeof window.synergy !== 'undefined') {
+      console.log('  isSynergyWallet:', window.synergy.isSynergyWallet);
+      console.log('  keys:', Object.keys(window.synergy));
+      console.log('  request:', typeof window.synergy.request);
+      console.log('  on:', typeof window.synergy.on);
+      console.log('  getAddress:', typeof window.synergy.getAddress);
+      console.log('  nativeAddress:', window.synergy.nativeAddress || 'none');
+      // Dump all own properties
+      for (var k in window.synergy) {
+        var v = window.synergy[k];
+        var t = typeof v;
+        if (t === 'function') console.log('  .%s() → function', k);
+        else if (t === 'object' && v !== null) console.log('  .%s → object', k, JSON.stringify(v).slice(0,200));
+        else console.log('  .%s → %s: %s', k, t, String(v).slice(0,200));
+      }
+    }
+    if (typeof window.ethereum !== 'undefined' && window.ethereum) {
+      console.log('  ethereum.isMetaMask:', window.ethereum.isMetaMask);
+      console.log('  ethereum.request:', typeof window.ethereum.request);
+      console.log('  ethereum.on:', typeof window.ethereum.on);
+      console.log('  ethereum keys:', Object.keys(window.ethereum));
+    }
+    console.log('_walletMode:', _walletMode);
+    console.log('_walletProvider():', _walletProvider());
+    console.log('_checkSynergyExtension():', _checkSynergyExtension());
+    console.log('EIP-6963 providers:', _eip6963Providers.length);
+    _eip6963Providers.forEach(function(p, i) {
+      console.log('  [%d] name=%s rdns=%s', i, p.info && p.info.name, p.info && p.info.rdns);
+    });
+    console.log('walletAddress:', walletAddress);
+    console.log('walletSyna:', walletSyna);
+    console.log('=== End Diagnostics ===');
+  }
+  window.synqWallet = synqWallet;
+
   /* ── Auto-init: ephemeral key on load; restore Synergy if available ────── */
   // Detect Synergy extension — it may inject window.ethereum (EIP-1193),
   // OR only window.synergy with its own request API. Don't require both.
@@ -1395,6 +1436,10 @@
                   '| synergy.on:', typeof window.synergy.on,
                   '| synergy.getAddress:', typeof window.synergy.getAddress,
                   '| synergy.nativeAddress:', window.synergy.nativeAddress || 'none');
+      // Deep dump — show all properties and their types
+      try {
+        console.log('[SynQ Wallet ' + label + '] synergy object:', window.synergy);
+      } catch(e) {}
     }
     if (_eip6963Providers.length) console.log('[SynQ Wallet ' + label + '] EIP-6963 providers:', _eip6963Providers.length);
   }
