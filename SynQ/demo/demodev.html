@@ -1217,9 +1217,9 @@
 
   async function connectWallet() {
     // Try Synergy extension first; fall back to ephemeral if not available/approved
-    var provider = window.ethereum;
-    var hasSynergy = provider && window.synergy && window.synergy.isSynergyWallet;
-    if (hasSynergy) {
+    // Use the shared helper for consistent extension detection
+    if (_checkSynergyExtension()) {
+      var provider = window.ethereum;
       try {
         var accounts = await provider.request({ method: 'eth_requestAccounts' });
         if (accounts && accounts.length) {
@@ -1283,7 +1283,11 @@
         document.getElementById('attestPanel').classList.remove('show');
         var out = document.getElementById('vmOutput');
         if (out) out.innerHTML = '<span class="err">Synergy Wallet disconnected — reconnect to authenticate calls.</span>';
-      } else { walletAddress = accs[0]; walletSyna = evmToSyna(accs[0]); updateWalletUI(); }
+      } else {
+        walletAddress = accs[0]; walletSyna = evmToSyna(accs[0]); _walletMode = 'synergy';
+        console.log('[SynQ Wallet] accountsChanged:', accs[0]);
+        updateWalletUI();
+      }
     });
   }
 
