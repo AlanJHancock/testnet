@@ -1251,11 +1251,13 @@
         }
       } catch(e) {
         if (e.code === 4001) {
-          showWalletError('Connection rejected — approve in Synergy Wallet.');
+          showWalletError('Connection rejected — approve in Synergy Wallet popup.');
           return;
         }
-        // Extension not approved for this origin — fall through to ephemeral
-        console.warn('[SynQ] Synergy Wallet not available, using ephemeral key:', e.message);
+        // Extension exists but rejected — could be origin not approved, or other error
+        console.warn('[SynQ] Synergy Wallet connection failed:', e.code, e.message);
+        showWalletError('Synergy Wallet detected but connection failed: ' + (e.message || e.code || 'unknown error') + '. Check the extension and try again.');
+        return;
       }
     }
     // Ephemeral fallback — generate a fresh in-browser devnet identity
@@ -1290,18 +1292,31 @@
 
   /* ── Auto-init: ephemeral key on load; restore Synergy if available ────── */
   (function autoInitKey() {
+    // Diagnostics: log what wallet providers are detected
+    var _hasEth = typeof window.ethereum !== 'undefined';
+    var _hasSyn = typeof window.synergy !== 'undefined';
+    var _isSynWallet = _hasSyn && window.synergy.isSynergyWallet;
+    console.log('[SynQ Wallet] window.ethereum:', _hasEth, '| window.synergy:', _hasSyn, '| isSynergyWallet:', _isSynWallet);
+    if (_hasEth && window.ethereum.isMetaMask) console.log('[SynQ Wallet] window.ethereum.isMetaMask: true');
+    if (_hasSyn) console.log('[SynQ Wallet] window.synergy keys:', Object.keys(window.synergy));
+
     // Try silent Synergy restore (no popup — only returns if already approved)
-    if (window.ethereum && window.synergy && window.synergy.isSynergyWallet) {
+    if (_hasEth && _isSynWallet) {
+      console.log('[SynQ Wallet] Synergy extension detected — attempting silent restore...');
       window.ethereum.request({ method: 'eth_accounts' }).then(function(accs) {
         if (accs && accs.length) {
+          console.log('[SynQ Wallet] Silent restore succeeded:', accs[0]);
           walletAddress = accs[0]; walletSyna = evmToSyna(accs[0]); _walletMode = 'synergy';
           updateWalletUI(); attachEthereumListeners(); return;
         }
+        console.log('[SynQ Wallet] No pre-approved accounts — generating ephemeral key. Click "Connect Synergy Wallet" to trigger extension approval.');
         generateEphemeralKey().then(function(ok){ if (ok) updateWalletUI(); });
-      }).catch(function() {
+      }).catch(function(err) {
+        console.warn('[SynQ Wallet] Silent restore failed:', err.message || err);
         generateEphemeralKey().then(function(ok){ if (ok) updateWalletUI(); });
       });
     } else {
+      console.log('[SynQ Wallet] Synergy extension NOT detected on this origin. Using ephemeral key.', 'window.ethereum:', _hasEth);
       generateEphemeralKey().then(function(ok){ if (ok) updateWalletUI(); });
     }
   })();
@@ -1311,6 +1326,13 @@
     document.getElementById('attestPanel').classList.remove('show');
   }
   window.disconnectWallet = disconnectWallet;
+
+  function regenerateEphemeralKey() {
+    // Disconnect current ephemeral key, then generate a new one
+    walletAddress = null; walletSyna = null; _walletMode = 'none';
+    generateEphemeralKey().then(function(ok){ if (ok) updateWalletUI(); });
+  }
+  window.regenerateEphemeralKey = regenerateEphemeralKey;
 
   function regenerateKey() { /* no-op */ }
 
@@ -1348,8 +1370,17 @@
       note.textContent  = _isSyn
         ? 'Signing: Synergy Wallet · EIP-712 · ' + (_syna ? _syna.slice(0,10) + '…' : walletAddress.slice(0,8) + '…')
         : 'Signing: EIP-712 · ' + (_syna ? _syna.slice(0,10) + '…' : '');
-      btn.textContent   = 'Disconnect Synergy';
-      btn.onclick       = disconnectWallet;
+      // Show appropriate button based on wallet mode
+      var _extAvailable = window.ethereum && window.synergy && window.synergy.isSynergyWallet;
+      if (_isSyn) {
+        // Actually connected to Synergy extension
+        btn.textContent   = 'Disconnect';
+        btn.onclick       = disconnectWallet;
+      } else {
+        // Ephemeral mode — show "Connect Synergy" if extension is available, else "Regen Key"
+        btn.textContent   = _extAvailable ? 'Connect Synergy Wallet' : 'Regen Devnet Key';
+        btn.onclick       = _extAvailable ? connectWallet : regenerateEphemeralKey;
+      }
       // UMA display
       try {
         walletUma = callerIdentity(walletAddress);
@@ -1387,8 +1418,9 @@
         mode.className   = 'wallet-mode ephemeral';
         note.textContent = 'Signing: ML-DSA-65 (compiler-attested)';
       }
-      btn.textContent   = (window.synergy && window.synergy.isSynergyWallet) ? 'Connect Synergy Wallet' : 'Regen Devnet Key';
-      btn.onclick       = connectWallet;
+      var _extAvailable2 = window.ethereum && window.synergy && window.synergy.isSynergyWallet;
+      btn.textContent   = _extAvailable2 ? 'Connect Synergy Wallet' : 'Regen Devnet Key';
+      btn.onclick       = _extAvailable2 ? connectWallet : regenerateEphemeralKey;
     }
   }
 
