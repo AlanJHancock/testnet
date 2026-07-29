@@ -86,6 +86,26 @@ const V3_DOMAIN_CALL:       &str = "SYNQ-CALL-v3";
 const V3_DOMAIN_GOVERNANCE: &str = "SYNQ-GOVERNANCE-v3";
 const V3_DOMAIN_ATTEST:     &str = "SYNQ-ATTEST-v3";
 
+/// Derive a V3 governance scope hash (SHA3-256) from a scope name.
+/// This must match the compiler's codegen for @governance(ScopeName).
+fn governance_scope_hash(scope_name: &str) -> [u8; 32] {
+    use sha3::Digest;
+    let mut hasher = sha3::Sha3_256::new();
+    hasher.update(b"SYNQ-GOVERNANCE-SCOPE-v1:");
+    hasher.update(scope_name.as_bytes());
+    hasher.finalize().into()
+}
+
+/// Derive a V3 authority scope hash (SHA3-256) from a scope name.
+/// This must match the compiler's codegen for @authority(ScopeName).
+fn authority_scope_hash(scope_name: &str) -> [u8; 32] {
+    use sha3::Digest;
+    let mut hasher = sha3::Sha3_256::new();
+    hasher.update(b"SYNQ-AUTHORITY-SCOPE-v1:");
+    hasher.update(scope_name.as_bytes());
+    hasher.finalize().into()
+}
+
 // V3 chain parameters
 const V3_CHAIN_ID: u64 = 1266;
 const V3_NETWORK_ID: &str = "synergy-testnet-v3";
@@ -126,6 +146,10 @@ struct Session {
     /// Declared return type per function ("bool", "str", "u256" etc.) — used
     /// to coerce I32(0) from uninitialised slots into the correct JSON form.
     fn_return_types: std::collections::HashMap<String, String>,
+    /// Governance scope per function name (from @governance attribute).
+    /// When present, the server embeds the governance scope hash in the
+    /// AuthorityEnvelope and uses the GOVERNANCE domain tag.
+    governance_scopes: std::collections::HashMap<String, String>,
 }
 
 // ─── PR-G: Persistent compiler-attestation key ───────────────────────────────
@@ -640,6 +664,8 @@ struct FunctionMeta {
     requires_state: Vec<String>,
     /// State variables this function modifies (from `modifies` clause)
     modifies:       Vec<String>,
+    /// Governance scope name if @governance(ScopeName) is present
+    governance_scope: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -681,6 +707,44 @@ struct ManifestInfo {
     key_id: String,
     /// Signature domain tags
     signature_domains: SignatureDomains,
+    /// ML-DSA-87 signature over the manifest hash (hex)
+    manifest_signature: Option<String>,
+    /// Compiler public key used to sign (hex)
+    compiler_public_key: Option<String>,
+    /// Function ABI entries
+    functions: Vec<ManifestFunction>,
+    /// State variable layout
+    state_vars: Vec<ManifestStateVar>,
+    /// Governance scopes declared in the contract
+    governance_scopes: Vec<String>,
+    /// Authority scopes declared in the contract
+    authority_scopes: Vec<String>,
+}
+
+/// Function ABI entry in the V3 manifest
+#[derive(Debug, Clone, serde::Serialize)]
+struct ManifestFunction {
+    name: String,
+    params: Vec<ManifestParam>,
+    return_type: Option<String>,
+    is_public: bool,
+    governance_scope: Option<String>,
+    authority_scope: Option<String>,
+    effects: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct ManifestParam {
+    name: String,
+    ty: String,
+}
+
+/// State variable layout entry
+#[derive(Debug, Clone, serde::Serialize)]
+struct ManifestStateVar {
+    name: String,
+    ty: String,
+    slot: u32,
 }
 
 /// Domain-separated signature tags — V3 requires distinct domains for deploy, call, and governance.
@@ -876,6 +940,11 @@ async fn compile_handler(
                         has_return:     f.returns.is_some(),
                         return_type:    f.returns.as_ref().map(type_name),
                         requires_state: f.requires_state.clone(),
+                    governance_scope: f.attributes.iter().find_map(|a|
+                        if let synq_compiler::ast::Attribute::Governance(scope) = a {
+                            Some(scope.clone())
+                        } else { None }
+                    ),
                         modifies:       f.modifies.clone(),
                     }),
                     _ => None,
@@ -884,6 +953,9 @@ async fn compile_handler(
             _ => None,
         })
         .unwrap_or_default();
+
+    // Clone state_vars for manifest use (it gets moved into CompileResponse)
+    let manifest_state_vars = state_vars.clone();
 
     (StatusCode::OK, RespJson(CompileResponse {
         success: true,
@@ -958,6 +1030,115 @@ async fn compile_handler(
                 CompilerKey::Persistent { key_id, .. } => key_id.clone(),
                 CompilerKey::Ephemeral                   => "ephemeral".to_string(),
             };
+            // Build function ABI entries for manifest
+            let manifest_fns: Vec<ManifestFunction> = {
+                let mut fns = Vec::new();
+                for unit in &ast {
+                    if let synq_compiler::ast::SourceUnit::Contract(c) = unit {
+                        for part in &c.parts {
+                            if let synq_compiler::ast::ContractPart::Function(f) = part {
+                                let is_public = f.attributes.iter().any(|a| matches!(a, synq_compiler::ast::Attribute::Public));
+                                let gov_scope = f.attributes.iter().find_map(|a|
+                                    if let synq_compiler::ast::Attribute::Governance(s) = a { Some(s.clone()) } else { None });
+                                let auth_scope = f.attributes.iter().find_map(|a|
+                                    if let synq_compiler::ast::Attribute::Authority(s) = a { Some(s.clone()) } else { None });
+                                let effects = f.attributes.iter().find_map(|a|
+                                    if let synq_compiler::ast::Attribute::Effects(v) = a { Some(v.clone()) } else { None })
+                                    .unwrap_or_default();
+                                fns.push(ManifestFunction {
+                                    name: f.name.clone(),
+                                    params: f.params.iter().map(|p| ManifestParam {
+                                        name: p.name.clone(), ty: type_name(&p.ty)
+                                    }).collect(),
+                                    return_type: f.returns.as_ref().map(type_name),
+                                    is_public,
+                                    governance_scope: gov_scope,
+                                    authority_scope: auth_scope,
+                                    effects,
+                                });
+                            }
+                        }
+                    }
+                }
+                fns
+            };
+
+            // Collect governance + authority scopes
+            let mut gov_scopes: Vec<String> = Vec::new();
+            let mut auth_scopes: Vec<String> = Vec::new();
+            for unit in &ast {
+                if let synq_compiler::ast::SourceUnit::Contract(c) = unit {
+                    for part in &c.parts {
+                        if let synq_compiler::ast::ContractPart::Function(f) = part {
+                            for attr in &f.attributes {
+                                if let synq_compiler::ast::Attribute::Governance(s) = attr {
+                                    if !gov_scopes.contains(s) { gov_scopes.push(s.clone()); }
+                                }
+                                if let synq_compiler::ast::Attribute::Authority(s) = attr {
+                                    if !auth_scopes.contains(s) { auth_scopes.push(s.clone()); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Build state variable layout for manifest
+            let manifest_state: Vec<ManifestStateVar> = manifest_state_vars.iter().map(|(name, slot)| {
+                let ty = {
+                    let mut t = "u256".to_string();
+                    for unit in &ast {
+                        if let synq_compiler::ast::SourceUnit::Contract(c) = unit {
+                            for part in &c.parts {
+                                if let synq_compiler::ast::ContractPart::StateVariable(sv) = part {
+                                    if sv.name == *name { t = type_name(&sv.ty); }
+                                }
+                            }
+                        }
+                    }
+                    t
+                };
+                ManifestStateVar { name: name.clone(), ty, slot: *slot }
+            }).collect();
+
+            // Sign the manifest hash with ML-DSA-87
+            let manifest_json = serde_json::json!({
+                "artifact_hash": artifact_hash,
+                "source_hash": source_hash,
+                "chain_id": V3_CHAIN_ID,
+                "network_id": V3_NETWORK_ID,
+                "functions": manifest_fns,
+                "state_vars": manifest_state,
+                "governance_scopes": gov_scopes,
+                "authority_scopes": auth_scopes,
+            });
+            let manifest_bytes = serde_json::to_vec(&manifest_json).unwrap_or_default();
+            let manifest_hash = {
+                use sha3::Digest;
+                sha3::Sha3_256::digest(&manifest_bytes)
+            };
+
+            let (manifest_sig, manifest_pubkey) = match state.compiler_key.as_ref() {
+                CompilerKey::Persistent { private_key, public_key, .. } => {
+                    let pqc = synq_compiler::PQCCompiler::new(PQCSecurityLevel::Enhanced);
+                    match pqc.sign_message(private_key, &manifest_hash, SIGNING_ALGORITHM) {
+                        Ok(sig) => (Some(hex_encode(&sig.signature)), Some(hex_encode(public_key))),
+                        Err(_) => (None, None),
+                    }
+                }
+                CompilerKey::Ephemeral => {
+                    let pqc = synq_compiler::PQCCompiler::new(PQCSecurityLevel::Enhanced);
+                    let keypair = match pqc.generate_keypair(SIGNING_ALGORITHM) {
+                        Ok(k) => (k.private_key, k.public_key),
+                        Err(_) => (vec![], vec![]),
+                    };
+                    match pqc.sign_message(&keypair.0, &manifest_hash, SIGNING_ALGORITHM) {
+                        Ok(sig) => (Some(hex_encode(&sig.signature)), Some(hex_encode(&keypair.1))),
+                        Err(_) => (None, None),
+                    }
+                }
+            };
+
             Some(ManifestInfo {
                 required_signature_algorithm: SIGNING_ALGORITHM.to_string(),
                 consensus_signature_algorithm: "ML-DSA-65".to_string(),
@@ -973,6 +1154,12 @@ async fn compile_handler(
                     governance: V3_DOMAIN_GOVERNANCE.to_string(),
                     attest:     V3_DOMAIN_ATTEST.to_string(),
                 },
+                manifest_signature: manifest_sig,
+                compiler_public_key: manifest_pubkey,
+                functions: manifest_fns,
+                state_vars: manifest_state,
+                governance_scopes: gov_scopes,
+                authority_scopes: auth_scopes,
             })
         },
     }))
@@ -1618,6 +1805,8 @@ struct NewSessionRequest {
     contract_name:   Option<String>,
     workspace_id:    Option<String>,
     fn_return_types: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    governance_scopes: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(serde::Serialize)]
@@ -1823,6 +2012,7 @@ async fn session_new_handler(
             pending_nonce: None,
             used_nonces: std::collections::HashSet::new(),
             fn_return_types: req.fn_return_types.unwrap_or_default(),
+            governance_scopes: req.governance_scopes.unwrap_or_default(),
         });
         // Register contract in workspace if workspace_id provided
         if let (Some(wid), Some(cname)) = (wid, cname) {
@@ -1849,6 +2039,7 @@ struct SessionRunRequest {
     call_nonce:     Option<String>,
     call_signature: Option<String>,  // "functionName(arg0, arg1, ...)" — must match frontend
     param_types:    Option<Vec<String>>,  // declared types per arg ("str","u256","bool")
+    display_synw:   Option<String>,  // Manual synw address override (devnet only)
     // ── Runtime fault injection (cosmic ray simulation) ──
     fault_step:       Option<usize>,
     fault_byte_offset: Option<usize>,
@@ -2077,8 +2268,27 @@ async fn session_run_handler(
     let mut auth_envelope = vec![0u8; 104];
     // Identity: EVM address right-aligned in 32 bytes
     auth_envelope[12..32].copy_from_slice(&caller_addr);
-    // Scope hash: all-zeros = accept any scope (devnet convenience)
-    // auth_envelope[32..64] already zero
+
+    // Scope hash: all-zeros = accept any scope (devnet convenience).
+    // For @governance functions, embed the actual SHA3-256 scope hash so
+    // the VM's AuthRequire matches the compiler-emitted hash.
+    let mut domain_tag_bytes: &[u8] = V3_DOMAIN_CALL.as_bytes();
+
+    if let Some(ref gov_scope) = session.governance_scopes.get(&req.function) {
+        let scope_hash = governance_scope_hash(gov_scope);
+        auth_envelope[32..64].copy_from_slice(&scope_hash);
+        domain_tag_bytes = V3_DOMAIN_GOVERNANCE.as_bytes();
+        // Devnet: if no authenticated caller, use a non-zero governance identity
+        // so the AuthRequire identity check passes. Mainnet would use real UMA.
+        if auth_envelope[0..32].iter().all(|&b| b == 0) {
+            // Use a devnet governance identity: SHA3-256("SYNQ-DEVNET-GOVERNANCE")
+            use sha3::Digest;
+            let gov_id = sha3::Sha3_256::digest(b"SYNQ-DEVNET-GOVERNANCE");
+            auth_envelope[0..32].copy_from_slice(&gov_id);
+        }
+        eprintln!("[RUN] governance scope '{}' for function '{}'", gov_scope, req.function);
+    }
+
     // Nonce: current session nonce if available
     if let Some(ref pn) = session.pending_nonce {
         if let Ok(nonce_bytes) = hex::decode(pn) {
@@ -2096,12 +2306,25 @@ async fn session_run_handler(
     auth_envelope[80] = 0xFF;
     // Reserved (16 bytes): V3 domain tag for cross-domain replay resistance.
     // First 8 bytes of the domain tag string, right-padded with zeros.
-    let domain_bytes = V3_DOMAIN_CALL.as_bytes();
-    let copy_len = domain_bytes.len().min(16);
-    auth_envelope[88..88 + copy_len].copy_from_slice(&domain_bytes[..copy_len]);
+    // Uses GOVERNANCE tag for @governance functions, CALL tag otherwise.
+    let copy_len = domain_tag_bytes.len().min(16);
+    auth_envelope[88..88 + copy_len].copy_from_slice(&domain_tag_bytes[..copy_len]);
+
+    // Devnet: if display_synw is provided, override caller_addr with the synw address.
+    // The EVM signature still authenticates the request (nonce + ephemeral key),
+    // but the contract sees the user's synw identity as the caller.
+    let mut effective_caller = caller_addr;
+    if let Some(ref synw) = req.display_synw {
+        if let Ok(decoded) = synq_vm::bech32::from_any_syn(synw) {
+            eprintln!("[RUN] display_synw override: {} -> {}", synw, hex_encode(&decoded));
+            effective_caller = decoded;
+        } else {
+            eprintln!("[RUN] display_synw decode failed for: {}", synw);
+        }
+    }
 
     session.vm.call_context = synq_vm::CallContext::with_authority(
-        caller_addr,
+        effective_caller,
         None, // uma_ref: None on devnet (NullUmaRegistry)
         auth_envelope,
     );
@@ -2111,7 +2334,7 @@ async fn session_run_handler(
         let sessions_arc = state.sessions.clone();
         let workspaces_arc = state.workspaces.clone();
         let wid_clone = wid.clone();
-        let caller_clone = caller_addr;
+        let caller_clone = effective_caller;
         session.vm.extern_call_handler = Some(std::sync::Arc::new(move |contract: &str, func: &str, args: &[synq_vm::Value]| {
             let wmap = workspaces_arc.lock().unwrap();
             let ws = wmap.get(&wid_clone)
@@ -2137,7 +2360,12 @@ async fn session_run_handler(
         }));
     }
 
-    let caller_syna = synq_vm::bech32::evm_to_syna(&caller_addr).unwrap_or_else(|_| hex_encode(&caller_addr));
+    // If display_synw was provided, show it as the caller; otherwise encode the EVM address
+    let caller_syna = if let Some(ref synw) = req.display_synw {
+        synw.clone()
+    } else {
+        synq_vm::bech32::evm_to_syna(&caller_addr).unwrap_or_else(|_| hex_encode(&caller_addr))
+    };
     eprintln!("[RUN] sid={} caller={} fn={} args_len={}", &req.session_id, caller_syna, req.function, vm_args.len());
 
     // ── Runtime fault injection (cosmic ray / Rowhammer simulation) ────────
@@ -2164,7 +2392,7 @@ async fn session_run_handler(
                 None    => (None, "Function completed (no return value)".to_string()),
             };
             {
-        let caller_syna = synq_vm::bech32::evm_to_syna(&caller_addr).ok();
+        let caller_syna = if let Some(ref synw) = req.display_synw { Some(synw.clone()) } else { synq_vm::bech32::evm_to_syna(&caller_addr).ok() };
         (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None, caller_syna }))
     }
         }
@@ -2172,13 +2400,13 @@ async fn session_run_handler(
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("require failed: {}", msg)),
-        caller_syna: synq_vm::bech32::evm_to_syna(&caller_addr).ok(),
+        caller_syna: req.display_synw.clone().or_else(|| synq_vm::bech32::evm_to_syna(&caller_addr).ok()),
         })),
         Err(e) => (StatusCode::OK, RespJson(RunResponse {
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("{}", e)),
-        caller_syna: synq_vm::bech32::evm_to_syna(&caller_addr).ok(),
+        caller_syna: req.display_synw.clone().or_else(|| synq_vm::bech32::evm_to_syna(&caller_addr).ok()),
         })),
     }
 }

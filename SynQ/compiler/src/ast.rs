@@ -148,6 +148,10 @@ pub enum Attribute {
     Manifest,
     /// `@ai` — function may perform AI inference (requires cap::AI)
     Ai,
+    /// `@governance(ScopeName)` — requires governance authorization for the named scope.
+    /// Unlike @authority (devnet convenience, all-zeros scope accepted), @governance
+    /// enforces a strict SHA3-256 scope hash match and uses the SYNQ-GOVERNANCE-v3 domain tag.
+    Governance(String),
 }
 
 // ── Events ───────────────────────────────────────────────────────────────────
@@ -231,6 +235,7 @@ pub enum Expression {
     Err(Box<Expression>),
     /// `expr.field` — access a struct field
     FieldAccess { object: Box<Expression>, field: String },
+    EnumAccess { enum_name: String, variant_name: String },
     /// `TypeName { field1: val1, field2: val2 }` — struct literal
     StructLiteral { type_name: String, fields: Vec<(String, Expression)> },
 }

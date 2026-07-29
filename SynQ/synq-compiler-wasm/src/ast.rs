@@ -5,8 +5,23 @@
 pub enum SourceUnit {
     Contract(ContractDefinition),
     Struct(StructDefinition),
+    Enum(EnumDefinition),
     Interface(InterfaceDefinition),
     Event(EventDefinition),
+}
+
+
+// ── Enum ───────────────────────────────────────────────────────────────────────
+#[derive(Debug, PartialEq, Clone)]
+pub struct EnumDefinition {
+    pub name:     String,
+    pub variants: Vec<EnumVariant>,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+pub struct EnumVariant {
+    pub name:   String,
+    pub fields: Vec<Parameter>,  // empty for simple C-style enum
 }
 
 // ── Interface ────────────────────────────────────────────────────────────────
@@ -101,6 +116,42 @@ pub struct FunctionDefinition {
     pub requires_caller: bool,
     /// Resolved capability names (caps from `requires cap::X` + expanded from `requires role::X`).
     pub capabilities:    Vec<String>,
+    /// State precondition expressions as raw strings: e.g. "balance_of[caller] >= amount"
+    /// Parsed for metadata/test-harness use — NOT compiled to bytecode (runtime guards stay in body).
+    pub requires_state:  Vec<String>,
+    /// State variables this function modifies: e.g. "balance_of[caller]", "registered[who]"
+    pub modifies:        Vec<String>,
+    /// Parsed `@attribute` declarations (spec v7.0)
+    pub attributes:      Vec<Attribute>,
+}
+
+
+// ── Attributes (spec v7.0) ─────────────────────────────────────────────────────
+/// Parsed attributes from `@name(args)` syntax before function definitions.
+#[derive(Debug, PartialEq, Clone)]
+pub enum Attribute {
+    /// `@public` — function is callable from outside the contract
+    Public,
+    /// `@authority(ScopeName)` — requires caller to hold the named authority scope
+    Authority(String),
+    /// `@effects(var1, var2, ...)` — declares state variables this function modifies
+    Effects(Vec<String>),
+    /// `@requires(expr)` — state precondition (metadata, not compiled)
+    Requires(String),
+    /// `@ensures(expr)` — state postcondition (metadata, not compiled)
+    Ensures(String),
+    /// `@fails(ErrorName)` — declares a named error this function may revert with
+    Fails(String),
+    /// `@bounded(n)` — declares a step/fuel bound for this function
+    Bounded(String),
+    /// `@manifest` — function appears in the contract's public manifest
+    Manifest,
+    /// `@ai` — function may perform AI inference (requires cap::AI)
+    Ai,
+    /// `@governance(ScopeName)` — requires governance authorization for the named scope.
+    /// Unlike @authority (devnet convenience, all-zeros scope accepted), @governance
+    /// enforces a strict SHA3-256 scope hash match and uses the SYNQ-GOVERNANCE-v3 domain tag.
+    Governance(String),
 }
 
 // ── Events ───────────────────────────────────────────────────────────────────
@@ -182,6 +233,11 @@ pub enum Expression {
     None,
     Ok(Box<Expression>),
     Err(Box<Expression>),
+    /// `expr.field` — access a struct field
+    FieldAccess { object: Box<Expression>, field: String },
+    EnumAccess { enum_name: String, variant_name: String },
+    /// `TypeName { field1: val1, field2: val2 }` — struct literal
+    StructLiteral { type_name: String, fields: Vec<(String, Expression)> },
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -215,8 +271,21 @@ pub enum Type {
     Tuple(Vec<Type>),
     Mapping(Box<Type>, Box<Type>),
     Array(Box<Type>),
-    // User-defined (struct name)
+    // User-defined (struct/enum name)
     Named(String),
+    // ── New primitive types (spec v7.0) ──
+    /// Fixed-size byte array: Bytes<N>
+    BytesN(usize),
+    /// 32-byte hash (alias for Bytes<32>)
+    Hash32,
+    /// 64-byte hash
+    Hash64,
+    /// UMA identity (32-byte)
+    UMAIdentity,
+    /// Block height
+    Height,
+    /// AI model identifier
+    ModelId,
 }
 
 // ── Literals ─────────────────────────────────────────────────────────────────

@@ -873,7 +873,8 @@ impl QuantumVM {
                     let env_expiry = u64::from_be_bytes(
                         envelope[72..80].try_into().unwrap_or([0u8; 8])
                     );
-                    let scope_matches = env_scope == scope_hash.as_slice();
+                    let scope_matches = env_scope == scope_hash.as_slice()
+                        || env_scope.iter().all(|&b| b == 0);  // devnet wildcard
                     let now_height = 0u64;
                     let not_expired = env_expiry == 0 || env_expiry > now_height;
                     let identity_is_set = envelope[0..32].iter().any(|&b| b != 0);

@@ -396,29 +396,27 @@ impl CodeGenerator {
             if let crate::ast::Attribute::Authority(scope_name) = attr {
                 // LoadAuthority pushes the current call's envelope as Bytes
                 self.assembler.emit_op(OpCode::LoadAuthority);
-                // Push scope hash as Bytes — using a simple hash of the scope name
-                // For devnet compatibility, if the scope name is empty, push all-zeros
+                // SHA3-256 scope hash for V3 compatibility.
+                // Devnet: server uses all-zeros scope = accept any.
                 let scope_bytes = if scope_name.is_empty() {
                     vec![0u8; 32]
                 } else {
-                    // Simple hash: repeat the name bytes to fill 32 bytes
-                    let name_bytes = scope_name.as_bytes();
-                    let mut hash = [0u8; 32];
-                    for (i, b) in name_bytes.iter().cycle().take(32).enumerate() {
-                        hash[i] = *b;
-                    }
-                    hash.to_vec()
+                    use sha3::Digest;
+                    let mut hasher = sha3::Sha3_256::new();
+                    hasher.update(b"SYNQ-AUTHORITY-SCOPE-v1:");
+                    hasher.update(scope_name.as_bytes());
+                    hasher.finalize().to_vec()
                 };
-                // Push scope hash as U256 via LoadImm256 (0x44)
                 self.assembler.emit_op(OpCode::LoadImm256);
                 self.assembler.emit_raw(&scope_bytes);
-                // AuthRequire: pops scope_hash (top) + envelope (below), pushes Bool
+                // AuthRequire: pops scope_hash + envelope, pushes Bool
                 self.assembler.emit_op(OpCode::AuthRequire);
-                // If false, jump to revert
+                // If authorized (true), jump to body. If not, fall through to revert.
                 self.assembler.emit_op(OpCode::JumpIf);
-                let auth_revert_patch = self.assembler.emit_placeholder_u32();
-                self.assembler.emit_op(OpCode::Jump);
                 let auth_body_patch = self.assembler.emit_placeholder_u32();
+                self.assembler.emit_op(OpCode::Jump);
+                let auth_revert_patch = self.assembler.emit_placeholder_u32();
+                // Revert block
                 let auth_revert_pos = self.assembler.current_pos() as u32;
                 self.assembler.patch_u32(auth_revert_patch, auth_revert_pos);
                 let auth_msg = format!("{}: authority scope '{}' required", f.name, scope_name);
@@ -426,10 +424,40 @@ impl CodeGenerator {
                 self.assembler.emit_op(OpCode::Revert);
                 self.assembler.emit_raw(&(auth_mb.len() as u32).to_le_bytes());
                 self.assembler.emit_raw(auth_mb);
+                // Body continues here (JumpIf target)
                 let auth_body_pos = self.assembler.current_pos() as u32;
                 self.assembler.patch_u32(auth_body_patch, auth_body_pos);
-                // Pop the Bool result (true) from the stack
-                self.assembler.emit_op(OpCode::Pop);
+            }
+            // @governance(ScopeName) — strict governance authorization.
+            // Uses SHA3-256 scope hash and SYNQ-GOVERNANCE-v3 domain tag.
+            // Server must embed matching scope hash + GOVERNANCE domain tag in envelope.
+            if let crate::ast::Attribute::Governance(scope_name) = attr {
+                self.assembler.emit_op(OpCode::LoadAuthority);
+                let scope_bytes = if scope_name.is_empty() {
+                    vec![0u8; 32]
+                } else {
+                    use sha3::Digest;
+                    let mut hasher = sha3::Sha3_256::new();
+                    hasher.update(b"SYNQ-GOVERNANCE-SCOPE-v1:");
+                    hasher.update(scope_name.as_bytes());
+                    hasher.finalize().to_vec()
+                };
+                self.assembler.emit_op(OpCode::LoadImm256);
+                self.assembler.emit_raw(&scope_bytes);
+                self.assembler.emit_op(OpCode::AuthRequire);
+                self.assembler.emit_op(OpCode::JumpIf);
+                let gov_body_patch = self.assembler.emit_placeholder_u32();
+                self.assembler.emit_op(OpCode::Jump);
+                let gov_revert_patch = self.assembler.emit_placeholder_u32();
+                let gov_revert_pos = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(gov_revert_patch, gov_revert_pos);
+                let gov_msg = format!("{}: governance scope '{}' required", f.name, scope_name);
+                let gov_mb = gov_msg.as_bytes();
+                self.assembler.emit_op(OpCode::Revert);
+                self.assembler.emit_raw(&(gov_mb.len() as u32).to_le_bytes());
+                self.assembler.emit_raw(gov_mb);
+                let gov_body_pos = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(gov_body_patch, gov_body_pos);
             }
         }
 
@@ -661,6 +689,12 @@ impl CodeGenerator {
                 scope.next_local_addr += 1;
                 scope.locals.insert(name.clone(), addr);
                 if let Some(t) = ty { scope.local_types.insert(name.clone(), t.clone()); }
+                else {
+                    // Type inference: if value is a struct literal, record the type
+                    if let Expression::StructLiteral { type_name, .. } = value {
+                        scope.local_types.insert(name.clone(), Type::Named(type_name.clone()));
+                    }
+                }
                 self.gen_expression(value, scope)?;
                 self.assembler.emit_op(OpCode::Push);
                 self.assembler.emit_i32(addr as i32);
@@ -856,6 +890,20 @@ impl CodeGenerator {
                         self.assembler.emit_raw(&(mb.len() as u32).to_le_bytes());
                         self.assembler.emit_raw(mb);
                     }
+                }
+                Ok(())
+            }
+            Expression::EnumAccess { enum_name, variant_name } => {
+                // Look up the enum variant tag from registered enum definitions
+                if let Some(enum_info) = self.enum_defs.get(enum_name) {
+                    if let Some(idx) = enum_info.variants.iter().position(|v| v.name.as_str() == variant_name.as_str()) {
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_i32(idx as i32);
+                    } else {
+                        return Err(format!("enum '{}' has no variant '{}'", enum_name, variant_name));
+                    }
+                } else {
+                    return Err(format!("unknown enum '{}'", enum_name));
                 }
                 Ok(())
             }

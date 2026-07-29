@@ -234,6 +234,7 @@ fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
                     "bounded" => Attribute::Bounded(attr_args.to_string()),
                     "manifest" => Attribute::Manifest,
                     "ai" => Attribute::Ai,
+                    "governance" => Attribute::Governance(attr_args.trim_matches('"').to_string()),
                     other => {
                         return Err(format!("unknown attribute: @{}", other));
                     }
@@ -613,6 +614,12 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
                 object: Box::new(Expression::Identifier(obj_name)),
                 field,
             }
+        }
+        Rule::enum_access_expr => {
+            let mut inner = pair.into_inner();
+            let enum_name = inner.next().unwrap().as_str().to_string();
+            let variant   = inner.next().unwrap().as_str().to_string();
+            Expression::EnumAccess { enum_name, variant_name: variant }
         }
         _ => Expression::Literal(Literal::Number(0)),
     }

@@ -37,6 +37,8 @@ use std::collections::HashMap;
 // Each function gets its own disjoint address block so that parameters
 // with the same name across different functions never alias the same
 // memory slot.
+// Param slots start at 1024 (above realistic state-var range 0..1023).
+// STRIDE=16 → supports ≤16 params per function; functions 0..63 fit in 0..2047.
 const FUNCTION_LOCAL_BASE: u32 = 1024;
 const FUNCTION_LOCAL_STRIDE: u32 = 16;
 
@@ -44,6 +46,9 @@ const FUNCTION_LOCAL_STRIDE: u32 = 16;
 /// The tuple is (arg count, opcode, pushes a Bool/Bytes result).
 fn pqc_builtin_opcode(name: &str) -> Option<OpCode> {
     match name {
+        // AEG1 unified dispatch (spec v7.0 aligned)
+        "aegis_call" | "aegis_verify" | "aegis_decaps" => Some(OpCode::AegisCall),
+        // Legacy algorithm-specific builtins (backward compat)
         "dilithium_verify"                        => Some(OpCode::DilithiumVerify),
         "falcon_verify" | "falcon_sign"           => Some(OpCode::FalconVerify),
         "sphincs_verify"                          => Some(OpCode::SphincsVerify),
@@ -74,10 +79,21 @@ struct FunctionScope {
     continue_targets: Vec<u32>,
 }
 
+/// Enum info for codegen — variant name → tag mapping
+struct EnumInfo {
+    variants: Vec<EnumVariant>,
+    tags: HashMap<String, i32>,
+}
+
 pub struct CodeGenerator {
     assembler: Assembler,
+    /// Struct definitions — field layout for struct literal/field access codegen
+    struct_defs: HashMap<String, StructDefinition>,
+    /// Enum definitions — variant tag mappings
+    enum_defs: HashMap<String, EnumInfo>,
     /// Contract-wide state variable addresses, shared across all functions.
     state_vars: HashMap<String, u32>,
+    state_var_types: HashMap<String, Type>,
     map_vars:   HashMap<String, u32>,
     set_vars:   HashMap<String, u32>,
     next_state_addr: u32,
@@ -86,6 +102,7 @@ pub struct CodeGenerator {
     /// marshal args into a callee defined later in the source.
     function_addresses: HashMap<String, u32>,
     function_param_addrs: HashMap<String, Vec<u32>>,
+    function_param_signs: HashMap<String, Vec<bool>>,
     function_has_return: HashMap<String, bool>,
     /// Whether each function declares `as caller` (requires authenticated identity).
     function_requires_caller: HashMap<String, bool>,
@@ -109,8 +126,12 @@ impl CodeGenerator {
             next_state_addr: 0,
             function_addresses: HashMap::new(),
             function_param_addrs: HashMap::new(),
+            function_param_signs: HashMap::new(),
             function_has_return: HashMap::new(),
             function_requires_caller: HashMap::new(),
+            struct_defs: HashMap::new(),
+            enum_defs: HashMap::new(),
+            state_var_types: HashMap::new(),
             function_capabilities: HashMap::new(),
             pending_call_patches: Vec::new(),
             current_function: None,
@@ -176,6 +197,7 @@ impl CodeGenerator {
                 let addr = self.next_state_addr;
                 self.next_state_addr += 1;
                 self.state_vars.insert(sv.name.clone(), addr);
+                self.state_var_types.insert(sv.name.clone(), sv.ty.clone());
                 match &sv.ty {
                     Type::Mapping(_, _) => { self.map_vars.insert(sv.name.clone(), addr); }
                     Type::Array(_)      => { self.set_vars.insert(sv.name.clone(), addr); }
@@ -193,8 +215,14 @@ impl CodeGenerator {
                     param_addrs.push(addr);
                     addr += 1;
                 }
+                let param_signs: Vec<bool> = f.params.iter()
+                    .map(|p| matches!(p.ty, Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
+                                         | Type::Int128 | Type::Int256))
+                    .collect();
                 self.function_param_addrs.insert(f.name.clone(), param_addrs);
-                let has_return = f.body.statements.iter().any(|s| matches!(s, Statement::Return(Some(_))));
+                self.function_param_signs.insert(f.name.clone(), param_signs);
+                let has_return = f.body.statements.iter().any(|s| matches!(s, Statement::Return(Some(_))))
+                    || f.returns.is_some();
                 self.function_has_return.insert(f.name.clone(), has_return);
                 self.function_requires_caller.insert(f.name.clone(), f.requires_caller);
 
@@ -222,14 +250,29 @@ impl CodeGenerator {
     fn gen_source_unit(&mut self, unit: &SourceUnit) -> Result<(), String> {
         match unit {
             SourceUnit::Struct(s)    => self.gen_struct(s),
+            SourceUnit::Enum(e)     => self.gen_enum(e),
             SourceUnit::Contract(c)  => self.gen_contract(c),
             SourceUnit::Interface(_) => Ok(()), // interfaces are compile-time only
             SourceUnit::Event(_)     => Ok(()), // top-level events: metadata only
         }
     }
 
-    fn gen_struct(&mut self, _s: &StructDefinition) -> Result<(), String> {
-        // Structs don't generate executable code (metadata only, for now).
+    fn gen_struct(&mut self, s: &StructDefinition) -> Result<(), String> {
+        // Register struct field layout for codegen (field index mapping)
+        self.struct_defs.insert(s.name.clone(), s.clone());
+        Ok(())
+    }
+
+    fn gen_enum(&mut self, e: &EnumDefinition) -> Result<(), String> {
+        // Register enum variants — each variant gets a sequential tag (I32)
+        let mut tags = std::collections::HashMap::new();
+        for (i, v) in e.variants.iter().enumerate() {
+            tags.insert(v.name.clone(), i as i32);
+        }
+        self.enum_defs.insert(e.name.clone(), EnumInfo {
+            variants: e.variants.clone(),
+            tags,
+        });
         Ok(())
     }
 
@@ -280,7 +323,12 @@ impl CodeGenerator {
         // scope.locals (function parameters only at this point, since
         // Let bindings are added to scope during gen_statement).
         // The pre-pass checks the raw statement list before gen runs.
-        if !f.requires_caller {
+        // Allow @public or @authority as alternative to 'as caller' for authority
+        let has_attr_authority = f.attributes.iter().any(|a| {
+            matches!(a, crate::ast::Attribute::Public)
+            || matches!(a, crate::ast::Attribute::Authority(_))
+        });
+        if !f.requires_caller && !has_attr_authority {
             fn writes_state(stmt: &Statement, state_vars: &HashMap<String, u32>) -> bool {
                 match stmt {
                     Statement::Assignment(name, _) => state_vars.contains_key(name.as_str()),
@@ -339,6 +387,80 @@ impl CodeGenerator {
             self.assembler.patch_u32(patch_to_body, body_pos);
         }
 
+        // ── @authority(Scope) check ──────────────────────────────────────────
+        // Emits: LoadAuthority → Push(scope_hash) → AuthRequire → JumpIf revert → Jump body
+        // The scope hash is derived from the scope name via a simple hash.
+        // On devnet, the server constructs the envelope with scope_hash = all-zeros
+        // (accept any scope), so this check always passes.
+        for attr in &f.attributes {
+            if let crate::ast::Attribute::Authority(scope_name) = attr {
+                // LoadAuthority pushes the current call's envelope as Bytes
+                self.assembler.emit_op(OpCode::LoadAuthority);
+                // SHA3-256 scope hash for V3 compatibility.
+                // Devnet: server uses all-zeros scope = accept any.
+                let scope_bytes = if scope_name.is_empty() {
+                    vec![0u8; 32]
+                } else {
+                    use sha3::Digest;
+                    let mut hasher = sha3::Sha3_256::new();
+                    hasher.update(b"SYNQ-AUTHORITY-SCOPE-v1:");
+                    hasher.update(scope_name.as_bytes());
+                    hasher.finalize().to_vec()
+                };
+                self.assembler.emit_op(OpCode::LoadImm256);
+                self.assembler.emit_raw(&scope_bytes);
+                // AuthRequire: pops scope_hash + envelope, pushes Bool
+                self.assembler.emit_op(OpCode::AuthRequire);
+                // If authorized (true), jump to body. If not, fall through to revert.
+                self.assembler.emit_op(OpCode::JumpIf);
+                let auth_body_patch = self.assembler.emit_placeholder_u32();
+                self.assembler.emit_op(OpCode::Jump);
+                let auth_revert_patch = self.assembler.emit_placeholder_u32();
+                // Revert block
+                let auth_revert_pos = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(auth_revert_patch, auth_revert_pos);
+                let auth_msg = format!("{}: authority scope '{}' required", f.name, scope_name);
+                let auth_mb = auth_msg.as_bytes();
+                self.assembler.emit_op(OpCode::Revert);
+                self.assembler.emit_raw(&(auth_mb.len() as u32).to_le_bytes());
+                self.assembler.emit_raw(auth_mb);
+                // Body continues here (JumpIf target)
+                let auth_body_pos = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(auth_body_patch, auth_body_pos);
+            }
+            // @governance(ScopeName) — strict governance authorization.
+            // Uses SHA3-256 scope hash and SYNQ-GOVERNANCE-v3 domain tag.
+            // Server must embed matching scope hash + GOVERNANCE domain tag in envelope.
+            if let crate::ast::Attribute::Governance(scope_name) = attr {
+                self.assembler.emit_op(OpCode::LoadAuthority);
+                let scope_bytes = if scope_name.is_empty() {
+                    vec![0u8; 32]
+                } else {
+                    use sha3::Digest;
+                    let mut hasher = sha3::Sha3_256::new();
+                    hasher.update(b"SYNQ-GOVERNANCE-SCOPE-v1:");
+                    hasher.update(scope_name.as_bytes());
+                    hasher.finalize().to_vec()
+                };
+                self.assembler.emit_op(OpCode::LoadImm256);
+                self.assembler.emit_raw(&scope_bytes);
+                self.assembler.emit_op(OpCode::AuthRequire);
+                self.assembler.emit_op(OpCode::JumpIf);
+                let gov_body_patch = self.assembler.emit_placeholder_u32();
+                self.assembler.emit_op(OpCode::Jump);
+                let gov_revert_patch = self.assembler.emit_placeholder_u32();
+                let gov_revert_pos = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(gov_revert_patch, gov_revert_pos);
+                let gov_msg = format!("{}: governance scope '{}' required", f.name, scope_name);
+                let gov_mb = gov_msg.as_bytes();
+                self.assembler.emit_op(OpCode::Revert);
+                self.assembler.emit_raw(&(gov_mb.len() as u32).to_le_bytes());
+                self.assembler.emit_raw(gov_mb);
+                let gov_body_pos = self.assembler.current_pos() as u32;
+                self.assembler.patch_u32(gov_body_patch, gov_body_pos);
+            }
+        }
+
         // ── Capability stubs ─────────────────────────────────────────────────
         // Capabilities are declared, parsed, stored in the dispatch table, and
         // included in the EIP-712 signed payload — so they are expressed and
@@ -348,7 +470,35 @@ impl CodeGenerator {
         //   LoadCaller, LoadImm256(keccak256(cap_name)), ExternCall(__CapRegistry, hasCapability, 2)
         //   JumpIf past revert, Revert "missing capability: <cap>"
 
-        for stmt in &f.body.statements {
+        // ── Implicit return from extern_call ─────────────────────
+        // If the last statement is an extern_call, the function declares a
+        // return type (has_return), and there is no explicit `return` in the
+        // body, skip the Pop so the extern_call's return value stays on the
+        // stack and becomes the function's return value.
+        let fn_has_return = *self.function_has_return.get(&f.name).unwrap_or(&false);
+        let has_explicit_return = f.body.statements.iter().any(|s| matches!(s, Statement::Return(_)));
+        let stmt_count = f.body.statements.len();
+        for (i, stmt) in f.body.statements.iter().enumerate() {
+            let is_last = i + 1 == stmt_count;
+            if is_last && fn_has_return && !has_explicit_return {
+                if let Statement::ExternCall { contract, function, args } = stmt {
+                    // Push args onto stack left-to-right
+                    for arg in args.iter() {
+                        self.gen_expression(arg, &mut scope)?;
+                    }
+                    let contract_bytes = contract.as_bytes();
+                    let fn_bytes       = function.as_bytes();
+                    let arg_count      = args.len() as u8;
+                    self.assembler.emit_op(OpCode::ExternCall);
+                    self.assembler.emit_u32(contract_bytes.len() as u32);
+                    self.assembler.emit_raw(contract_bytes);
+                    self.assembler.emit_u32(fn_bytes.len() as u32);
+                    self.assembler.emit_raw(fn_bytes);
+                    self.assembler.emit_raw(&[arg_count]);
+                    // Skip Pop — return value stays on stack for the trailing Return
+                    continue;
+                }
+            }
             self.gen_statement(stmt, &mut scope)?;
         }
 
@@ -539,6 +689,12 @@ impl CodeGenerator {
                 scope.next_local_addr += 1;
                 scope.locals.insert(name.clone(), addr);
                 if let Some(t) = ty { scope.local_types.insert(name.clone(), t.clone()); }
+                else {
+                    // Type inference: if value is a struct literal, record the type
+                    if let Expression::StructLiteral { type_name, .. } = value {
+                        scope.local_types.insert(name.clone(), Type::Named(type_name.clone()));
+                    }
+                }
                 self.gen_expression(value, scope)?;
                 self.assembler.emit_op(OpCode::Push);
                 self.assembler.emit_i32(addr as i32);
@@ -694,6 +850,73 @@ impl CodeGenerator {
             Expression::Err(inner) => {
                 self.gen_expression(inner, scope)?;
                 self.assembler.emit_op(OpCode::ResultErr);
+                Ok(())
+            }
+            Expression::FieldAccess { object, field } => {
+                // Generate the object expression (pushes the struct value as Tuple onto stack)
+                self.gen_expression(object, scope)?;
+                
+                // Look up field index from struct definitions.
+                // For Identifier objects, check local_types and state_var_types.
+                // For nested field access or function call results, check expression types.
+                let field_idx = if let Expression::Identifier(name) = object.as_ref() {
+                    let ty = scope.local_types.get(name.as_str())
+                        .cloned()
+                        .or_else(|| self.state_var_types.get(name.as_str()).cloned());
+                    if let Some(Type::Named(struct_name)) = ty {
+                        if let Some(sd) = self.struct_defs.get(&struct_name) {
+                            sd.fields.iter().position(|f| f.name == *field)
+                                .map(|p| p as i32)
+                        } else { None }
+                    } else { None }
+                } else { None };
+
+                match field_idx {
+                    Some(idx) => {
+                        // Stack: [tuple_value, index]
+                        // TupleGet pops index (top), then tuple (below), pushes element
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_i32(idx);
+                        self.assembler.emit_op(OpCode::TupleGet);
+                    }
+                    None => {
+                        // Unknown struct or field — emit runtime error via Revert
+                        self.assembler.emit_op(OpCode::Pop);
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_op(OpCode::Revert);
+                        // Revert takes a 4-byte-LE length + message
+                        let msg = format!("field access: unknown field '{}'", field);
+                        let mb = msg.as_bytes();
+                        self.assembler.emit_raw(&(mb.len() as u32).to_le_bytes());
+                        self.assembler.emit_raw(mb);
+                    }
+                }
+                Ok(())
+            }
+            Expression::EnumAccess { enum_name, variant_name } => {
+                // Look up the enum variant tag from registered enum definitions
+                if let Some(enum_info) = self.enum_defs.get(enum_name) {
+                    if let Some(idx) = enum_info.variants.iter().position(|v| v.name.as_str() == variant_name.as_str()) {
+                        self.assembler.emit_op(OpCode::Push);
+                        self.assembler.emit_i32(idx as i32);
+                    } else {
+                        return Err(format!("enum '{}' has no variant '{}'", enum_name, variant_name));
+                    }
+                } else {
+                    return Err(format!("unknown enum '{}'", enum_name));
+                }
+                Ok(())
+            }
+            Expression::StructLiteral { type_name, fields } => {
+                // Push field values in declaration order (matching struct field layout)
+                for (_, expr) in fields {
+                    self.gen_expression(expr, scope)?;
+                }
+                // TuplePack: pops count (top), then pops count values, pushes Tuple
+                // Stack: [val0, val1, ..., valN, count] → pushes Tuple([val0, val1, ..., valN])
+                self.assembler.emit_op(OpCode::Push);
+                self.assembler.emit_i32(fields.len() as i32);
+                self.assembler.emit_op(OpCode::TuplePack);
                 Ok(())
             }
             Expression::MapIndex(map, key) => {
@@ -866,12 +1089,81 @@ impl CodeGenerator {
             return Ok(());
         }
         // ── End string builtins ───────────────────────────────────────────────
+        // ── Authority builtins (spec v7.0 authority model) ───────────────
+        match name {
+            "authority_envelope" => {
+                // No args — pushes the current call's authority envelope as Bytes
+                self.assembler.emit_op(OpCode::LoadAuthority);
+                return Ok(());
+            }
+            "authority_require" => {
+                // (envelope: Bytes, scope_hash: Bytes) → Bool
+                if args.len() != 2 {
+                    return Err("authority_require expects 2 arguments (envelope, scope_hash)".into());
+                }
+                // Push order reversed: scope_hash pushed last (popped first)
+                self.gen_expression(&args[0], scope)?;  // envelope
+                self.gen_expression(&args[1], scope)?;  // scope_hash
+                self.assembler.emit_op(OpCode::AuthRequire);
+                return Ok(());
+            }
+            "authority_identity" => {
+                // (envelope: Bytes) → U256 (UMA identity)
+                if args.len() != 1 {
+                    return Err("authority_identity expects 1 argument (envelope)".into());
+                }
+                self.gen_expression(&args[0], scope)?;
+                self.assembler.emit_op(OpCode::AuthIdentity);
+                return Ok(());
+            }
+            // ── Address builtins (V3 Bech32 address model) ──────────────────
+            "to_syna" => {
+                // to_syna(address) → syna... Bech32 string as Bytes
+                if args.len() != 1 {
+                    return Err("to_syna expects 1 argument (20-byte address)".into());
+                }
+                self.gen_expression(&args[0], scope)?;
+                self.assembler.emit_op(OpCode::AddrEncode);
+                return Ok(());
+            }
+            "from_syna" => {
+                // from_syna(s) → 20-byte value as U256
+                if args.len() != 1 {
+                    return Err("from_syna expects 1 argument (Bech32 string)".into());
+                }
+                self.gen_expression(&args[0], scope)?;
+                self.assembler.emit_op(OpCode::AddrDecode);
+                return Ok(());
+            }
+            "contract_address" => {
+                // contract_address(deployer, nonce, artifact_hash) → sync... Bech32 string
+                if args.len() != 3 {
+                    return Err("contract_address expects 3 arguments (deployer, nonce, artifact_hash)".into());
+                }
+                // Stack order: artifact_hash (bottom), nonce, deployer (top)
+                self.gen_expression(&args[2], scope)?;  // artifact_hash
+                self.gen_expression(&args[1], scope)?;  // nonce
+                self.gen_expression(&args[0], scope)?;  // deployer (top of stack)
+                self.assembler.emit_op(OpCode::ContractAddr);
+                return Ok(());
+            }
+            _ => {}
+        }
+
         if let Some(opcode) = pqc_builtin_opcode(name) {
             // PQC/KEM builtins: argument push order matches the VM
             // opcode handler's pop order exactly (see vm.rs), which is
             // the reverse of natural source-code argument order for
             // these specific ops.
             match name {
+                "aegis_call" | "aegis_verify" | "aegis_decaps" => {
+                    // AEG1: single Bytes argument (the pre-encoded AEG1 frame).
+                    // The VM pops the frame and dispatches it via aeg1::process_frame.
+                    if args.len() != 1 {
+                        return Err(format!("{} expects 1 argument (AEG1 frame)", name));
+                    }
+                    self.gen_expression(&args[0], scope)?;
+                }
                 "dilithium_verify" | "falcon_verify" | "sphincs_verify" => {
                     // Source order: (message, signature, public_key).
                     // VM pops: public_key, then message, then signature.

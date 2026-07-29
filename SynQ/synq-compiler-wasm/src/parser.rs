@@ -20,6 +20,7 @@ pub fn parse(source: &str) -> Result<Vec<SourceUnit>, String> {
                     Rule::pragma_directive => {} // standard pragma -- consumed silently
                     Rule::synq_pragma      => {} // `pragma synq ^x.y;` -- consumed silently
                     Rule::struct_definition   => ast.push(SourceUnit::Struct(parse_struct(inner))),
+                    Rule::enum_definition    => ast.push(SourceUnit::Enum(parse_enum(inner))),
                     Rule::contract_definition => {
                         let c = parse_contract(inner)?;
                         if !contract_names.insert(c.name.clone()) {
@@ -39,7 +40,21 @@ pub fn parse(source: &str) -> Result<Vec<SourceUnit>, String> {
 
 fn parse_struct(pair: Pair<Rule>) -> StructDefinition {
     let mut inner = pair.into_inner();
-    let name = inner.next().unwrap().as_str().to_string();
+    // The first inner pair may be attribute_list (if present) or IDENT (if not).
+    // We need to save attribute_list for processing in the loop below.
+    let mut saved_attr_list: Option<Pair<Rule>> = None;
+    let name = {
+        let first = inner.next().unwrap();
+        match first.as_rule() {
+            Rule::attribute_list => {
+                // Save it for later processing, get the next pair (IDENT)
+                let name = inner.next().unwrap().as_str().to_string();
+                saved_attr_list = Some(first);
+                name
+            }
+            _ => first.as_str().to_string()
+        }
+    };
     let fields = inner.map(|p| {
         let mut fi = p.into_inner();
         let n = fi.next().unwrap().as_str().to_string();
@@ -49,10 +64,53 @@ fn parse_struct(pair: Pair<Rule>) -> StructDefinition {
     StructDefinition { name, fields }
 }
 
+
+fn parse_enum(pair: Pair<Rule>) -> EnumDefinition {
+    let mut inner = pair.into_inner();
+    let name = inner.next().unwrap().as_str().to_string();
+    let mut variants = vec![];
+    for p in inner {
+        if p.as_rule() == Rule::enum_variant {
+            let mut vi = p.into_inner();
+            let vname = vi.next().unwrap().as_str().to_string();
+            let mut fields = vec![];
+            // Check if there's a param_list (algebraic variant)
+            for sub in vi {
+                if sub.as_rule() == Rule::param_list {
+                    for param in sub.into_inner() {
+                        if param.as_rule() == Rule::param {
+                            let mut pi = param.into_inner();
+                            let pn = pi.next().unwrap().as_str().to_string();
+                            let pt = parse_type(pi.next().unwrap());
+                            fields.push(Parameter { name: pn, ty: pt, is_indexed: false });
+                        }
+                    }
+                }
+            }
+            variants.push(EnumVariant { name: vname, fields });
+        }
+    }
+    EnumDefinition { name, variants }
+}
+
 fn parse_contract(pair: Pair<Rule>) -> Result<ContractDefinition, String> {
     use std::collections::HashSet;
     let mut inner = pair.into_inner();
-    let name = inner.next().unwrap().as_str().to_string();
+    // The first inner pair may be attribute_list (if present) or IDENT (if not).
+    // We need to save attribute_list for processing in the loop below.
+    let mut saved_attr_list: Option<Pair<Rule>> = None;
+    let name = {
+        let first = inner.next().unwrap();
+        match first.as_rule() {
+            Rule::attribute_list => {
+                // Save it for later processing, get the next pair (IDENT)
+                let name = inner.next().unwrap().as_str().to_string();
+                saved_attr_list = Some(first);
+                name
+            }
+            _ => first.as_str().to_string()
+        }
+    };
     let mut parts = vec![];
     let mut fn_names: HashSet<String> = HashSet::new();
     let mut sv_names: HashSet<String> = HashSet::new();
@@ -129,7 +187,21 @@ fn parse_contract(pair: Pair<Rule>) -> Result<ContractDefinition, String> {
 fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
     use std::collections::HashSet;
     let mut inner = pair.into_inner();
-    let name = inner.next().unwrap().as_str().to_string();
+    // The first inner pair may be attribute_list (if present) or IDENT (if not).
+    // We need to save attribute_list for processing in the loop below.
+    let mut saved_attr_list: Option<Pair<Rule>> = None;
+    let name = {
+        let first = inner.next().unwrap();
+        match first.as_rule() {
+            Rule::attribute_list => {
+                // Save it for later processing, get the next pair (IDENT)
+                let name = inner.next().unwrap().as_str().to_string();
+                saved_attr_list = Some(first);
+                name
+            }
+            _ => first.as_str().to_string()
+        }
+    };
     let mut params = vec![];
     let mut returns: Option<Type> = None;
     let mut body_stmts = vec![];
@@ -137,6 +209,40 @@ fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
 
     let mut requires_caller = false;
     let mut capabilities: Vec<String> = vec![];
+    let mut requires_state: Vec<String> = vec![];
+    let mut modifies: Vec<String> = vec![];
+    let mut attributes: Vec<Attribute> = vec![];
+
+    // Process saved attribute_list first
+    if let Some(attr_pair) = saved_attr_list {
+        for attr_item in attr_pair.into_inner() {
+            if attr_item.as_rule() == Rule::attribute {
+                let mut ai = attr_item.into_inner();
+                let attr_name = ai.next().map(|p| p.as_str().to_string()).unwrap_or_default();
+                let attr_args = ai.next()
+                    .map(|p| p.as_str().trim().to_string())
+                    .unwrap_or_default();
+                let attr = match attr_name.as_str() {
+                    "public" => Attribute::Public,
+                    "authority" => Attribute::Authority(attr_args.trim_matches('"').to_string()),
+                    "effects" => Attribute::Effects(
+                        attr_args.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                    ),
+                    "requires" => Attribute::Requires(attr_args.to_string()),
+                    "ensures" => Attribute::Ensures(attr_args.to_string()),
+                    "fails" => Attribute::Fails(attr_args.trim_matches('"').to_string()),
+                    "bounded" => Attribute::Bounded(attr_args.to_string()),
+                    "manifest" => Attribute::Manifest,
+                    "ai" => Attribute::Ai,
+                    "governance" => Attribute::Governance(attr_args.trim_matches('"').to_string()),
+                    other => {
+                        return Err(format!("unknown attribute: @{}", other));
+                    }
+                };
+                attributes.push(attr);
+            }
+        }
+    }
 
     for p in inner {
         match p.as_rule() {
@@ -160,21 +266,70 @@ fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
                 // "as caller" — mark function as requiring authenticated caller
                 requires_caller = true;
             }
-            Rule::capability_clause => {
-                // "requires cap::X, role::Y"
-                for item in p.into_inner() {
-                    match item.as_rule() {
-                        Rule::cap_item  => {
-                            if let Some(name_pair) = item.into_inner().next() {
-                                capabilities.push(format!("cap::{}", name_pair.as_str()));
-                            }
-                        }
-                        Rule::role_item => {
-                            if let Some(name_pair) = item.into_inner().next() {
-                                capabilities.push(format!("role::{}", name_pair.as_str()));
+            Rule::requires_clauses => {
+                // One or more "requires" lines — each is either cap/role or state condition
+                for req_line in p.into_inner() {
+                    match req_line.as_rule() {
+                        Rule::req_body => {
+                            let inner = req_line.into_inner().next();
+                            if let Some(body) = inner {
+                                match body.as_rule() {
+                                    Rule::access_req_list => {
+                                        for item in body.into_inner() {
+                                            match item.as_rule() {
+                                                Rule::cap_item => {
+                                                    if let Some(np) = item.into_inner().next() {
+                                                        capabilities.push(format!("cap::{}", np.as_str()));
+                                                    }
+                                                }
+                                                Rule::role_item => {
+                                                    if let Some(np) = item.into_inner().next() {
+                                                        capabilities.push(format!("role::{}", np.as_str()));
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                    Rule::state_condition_list => {
+                                        for cond in body.into_inner() {
+                                            if cond.as_rule() == Rule::state_condition {
+                                                let raw = cond.as_str().trim().to_string();
+                                                if !raw.is_empty() {
+                                                    requires_state.push(raw);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                         _ => {}
+                    }
+                }
+            }
+            Rule::modifies_clauses => {
+                // One or more "modifies" lines
+                for mod_line in p.into_inner() {
+                    if mod_line.as_rule() == Rule::modifies_list {
+                        for item in mod_line.into_inner() {
+                            if item.as_rule() == Rule::modifies_item {
+                                let mut mi = item.into_inner();
+                                let var_name = mi.next().map(|p| p.as_str().to_string()).unwrap_or_default();
+                                let mut full = var_name;
+                                for sub in mi {
+                                    if sub.as_rule() == Rule::expression {
+                                        full.push('[');
+                                        full.push_str(sub.as_str());
+                                        full.push(']');
+                                    }
+                                }
+                                if !full.is_empty() {
+                                    modifies.push(full);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -189,14 +344,35 @@ fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
         }
     }
 
+    // Process attributes: derive is_public, merge with legacy clauses
+    let is_public = attributes.iter().any(|a| matches!(a, Attribute::Public));
+    // @effects merges with modifies
+    for attr in &attributes {
+        if let Attribute::Effects(vars) = attr {
+            for v in vars {
+                if !modifies.contains(v) {
+                    modifies.push(v.clone());
+                }
+            }
+        }
+        if let Attribute::Requires(expr) = attr {
+            if !requires_state.contains(expr) {
+                requires_state.push(expr.clone());
+            }
+        }
+    }
+
     Ok(FunctionDefinition {
         name,
         params,
         returns,
         body: Block { statements: body_stmts },
-        is_public: false,
+        is_public,
         requires_caller,
         capabilities,
+        requires_state,
+        modifies,
+        attributes,
     })
 }
 
@@ -417,6 +593,34 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
             let inner = pair.into_inner().next().unwrap();
             Expression::Err(Box::new(parse_expression(inner)))
         }
+        Rule::struct_literal => {
+            let mut inner = pair.into_inner();
+            let type_name = inner.next().unwrap().as_str().to_string();
+            let mut fields: Vec<(String, Expression)> = Vec::new();
+            for field_pair in inner {
+                // Each field_pair is a struct_field_init: IDENT ~ ":" ~ expression
+                let mut fi = field_pair.into_inner();
+                let fname = fi.next().unwrap().as_str().to_string();
+                let fval  = parse_expression(fi.next().unwrap());
+                fields.push((fname, fval));
+            }
+            Expression::StructLiteral { type_name, fields }
+        }
+        Rule::field_access_expr => {
+            let mut inner = pair.into_inner();
+            let obj_name = inner.next().unwrap().as_str().to_string();
+            let field    = inner.next().unwrap().as_str().to_string();
+            Expression::FieldAccess {
+                object: Box::new(Expression::Identifier(obj_name)),
+                field,
+            }
+        }
+        Rule::enum_access_expr => {
+            let mut inner = pair.into_inner();
+            let enum_name = inner.next().unwrap().as_str().to_string();
+            let variant   = inner.next().unwrap().as_str().to_string();
+            Expression::EnumAccess { enum_name, variant_name: variant }
+        }
         _ => Expression::Literal(Literal::Number(0)),
     }
 }
@@ -476,5 +680,31 @@ fn parse_type(pair: Pair<Rule>) -> Type {
             other                                         => Type::Named(other.to_string()),
         },
         _ => Type::UInt256,
+    }
+}
+
+
+#[cfg(test)]
+mod attribute_parse_tests {
+    use crate::parser::parse;
+
+    #[test]
+    fn test_minimal_attribute() {
+        let src = "pragma synq ^0.9;\ncontract T {\n  state { x: u256; }\n  impl {\n    @public\n    function get_x() -> u256 { return x; }\n  }\n}\n";
+        let result = parse(src);
+        if let Err(ref e) = result {
+            eprintln!("PARSE ERROR: {}", e);
+        }
+        assert!(result.is_ok(), "parse failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_attribute_with_args() {
+        let src = "pragma synq ^0.9;\ncontract T {\n  state { x: u256; }\n  impl {\n    @public\n    @authority(Admin)\n    function set_x(v: u256) -> bool { x = v; return true; }\n  }\n}\n";
+        let result = parse(src);
+        if let Err(ref e) = result {
+            eprintln!("PARSE ERROR: {}", e);
+        }
+        assert!(result.is_ok(), "parse failed: {:?}", result.err());
     }
 }

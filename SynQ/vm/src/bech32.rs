@@ -168,6 +168,21 @@ pub fn syna_to_evm(s: &str) -> Result<[u8; 20], String> {
     Ok(addr)
 }
 
+/// Decode any SynQ Bech32 address (syna, synw, or sync) to 20 bytes.
+/// Used for display_synw override where the wallet address may use a different HRP.
+pub fn from_any_syn(s: &str) -> Result<[u8; 20], String> {
+    let (hrp, data) = bech32_decode(s)?;
+    if hrp != HRP_SYNA && hrp != "synw" && hrp != HRP_SYNC {
+        return Err(format!("expected HRP 'syna', 'synw', or 'sync', got '{}'", hrp));
+    }
+    if data.len() != 20 {
+        return Err(format!("expected 20 bytes, got {}", data.len()));
+    }
+    let mut addr = [0u8; 20];
+    addr.copy_from_slice(&data);
+    Ok(addr)
+}
+
 /// Encode a 20-byte value as a `sync...` contract address.
 pub fn to_sync(addr: &[u8; 20]) -> Result<String, String> {
     bech32_encode(HRP_SYNC, addr)
