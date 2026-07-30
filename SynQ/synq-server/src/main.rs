@@ -871,6 +871,36 @@ async fn compile_handler(
         })),
     };
 
+    // ── SSA IR analysis (parallel to codegen) ──────────────────────────────
+    {
+        let mut ir_builder = synq_compiler::ir::IrBuilder::new();
+        eprintln!("[IR] building...");
+        match ir_builder.build(&ast) {
+            Ok(mut ir_module) => {
+                eprintln!("[IR] built: {} functions", ir_module.functions.len());
+                let ir_report = synq_compiler::ir::analyze(&mut ir_module);
+                eprintln!("[IR] analyzed: {} stats, {} errors", ir_report.function_stats.len(), ir_report.errors.len());
+                for err in &ir_report.errors {
+                    compile_warnings.push(format!("[IR] {}", err));
+                }
+                for stat in &ir_report.function_stats {
+                    compile_warnings.push(format!(
+                        "[IR] fn {}: {} blocks, {} insts, {} reachable, {} effects, {} host, {} auth, {} lin_create, {} lin_consume",
+                        stat.name, stat.block_count, stat.instruction_count,
+                        stat.reachable_blocks, stat.effects.len(),
+                        stat.host_profiles, stat.authority_checks,
+                        stat.linear_creates, stat.linear_consumes
+                    ));
+                }
+            }
+            Err(e) => {
+                eprintln!("[IR] build error: {}", e);
+                compile_warnings.push(format!("[IR] build error: {}", e));
+            }
+        }
+    }
+
+
     // PR-G: use persistent compiler key when available, ephemeral otherwise
     let pqc = PQCCompiler::new(PQCSecurityLevel::Enhanced);
     let sidecar = match state.compiler_key.as_ref() {

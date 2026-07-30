@@ -3,6 +3,7 @@ extern crate pest_derive;
 
 pub mod ast;
 pub mod codegen;
+pub mod ir;
 pub mod parser;
 pub mod pqc_integration;
 
@@ -90,6 +91,33 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
                         collect_extern_contracts_stmt(stmt, &mut extern_contracts);
                     }
                 }
+            }
+        }
+    }
+
+    // 4. Build SSA IR (parallel to codegen — for analysis and future backend)
+    {
+        let mut ir_builder = ir::IrBuilder::new();
+        match ir_builder.build(&ast) {
+            Ok(mut ir_module) => {
+                let ir_report = ir::analyze(&mut ir_module);
+                if !ir_report.is_ok() {
+                    for err in &ir_report.errors {
+                        warnings.push(format!("[IR] {}", err));
+                    }
+                }
+                for stat in &ir_report.function_stats {
+                    warnings.push(format!(
+                        "[IR] fn {}: {} blocks, {} insts, {} reachable, {} effects, {} host_profiles, {} auth_checks, {} linear_creates, {} linear_consumes",
+                        stat.name, stat.block_count, stat.instruction_count,
+                        stat.reachable_blocks, stat.effects.len(),
+                        stat.host_profiles, stat.authority_checks,
+                        stat.linear_creates, stat.linear_consumes
+                    ));
+                }
+            }
+            Err(e) => {
+                warnings.push(format!("[IR] build error: {}", e));
             }
         }
     }
