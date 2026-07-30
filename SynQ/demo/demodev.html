@@ -281,6 +281,10 @@
     <button class="btn btn-secondary" onclick="loadTypeTest()" title="Type &amp; operator test contract — all primitives, map, set, require">TypeTestContract</button>
     <button class="btn btn-secondary" onclick="loadLoopDemo()" title="Loop constructs — while, break, continue, let locals, state accumulation">LoopDemo</button>
     <button class="btn btn-secondary" onclick="loadV3Demo()" title="V3 types — Bytes, Hash32, Height, UMAIdentity, @authority, syna/sync Bech32 builtins" style="border-color:rgba(16,185,129,0.4);color:rgba(110,231,183,0.9);">V3Types</button>
+    <button class="btn btn-secondary" onclick="loadStructValueDemo()" title="Struct value semantics — pass/return structs, field access on call results, nested struct access" style="border-color:rgba(168,85,247,0.4);color:rgba(192,132,252,0.9);">StructValue</button>
+    <button class="btn btn-secondary" onclick="loadNamedErrorDemo()" title="Named error revert — enum-based RevertCode (0x35) with structured error codes" style="border-color:rgba(239,68,68,0.4);color:rgba(248,113,113,0.9);">NamedError</button>
+    <button class="btn btn-secondary" onclick="loadAssetDemo()" title="Linear asset tracking — AssetCreate/Transfer/Burn/Balance/Owner (0x57-0x5B)" style="border-color:rgba(245,158,11,0.4);color:rgba(251,191,36,0.9);">AssetDemo</button>
+    <button class="btn btn-secondary" onclick="loadStructFieldTest()" title="TupleSet (0xAB) — struct field assignment via in-place tuple replacement" style="border-color:rgba(14,165,233,0.4);color:rgba(56,189,248,0.9);">StructField</button>
         
   </div>
 
@@ -2932,7 +2936,28 @@
         }
         // ── Line 3: return value (prominent) ─────────────────────────────
         if (rv !== null && rv !== undefined) {
-          var val  = (typeof rv === 'object' && rv.value !== undefined) ? rv.value : JSON.stringify(rv);
+          // Tuple / struct return value — render fields individually
+          if (typeof rv === 'object' && rv.type === 'Tuple' && Array.isArray(rv.value)) {
+            var _tFields = rv.value.map(function(el) {
+              if (typeof el === 'object' && el !== null) {
+                var ev = el.value !== undefined ? String(el.value) : '?';
+                var et = el.type || '';
+                if ((et === 'UInt256' || et === 'u256') && /^\d+$/.test(ev) && BigInt(ev) > 0n) {
+                  try { var h = BigInt(ev).toString(16); if (h.length >= 20) ev = '0x' + h.padStart(40,'0'); } catch(e) {}
+                }
+                return '<span style="color:rgba(180,230,180,1);">' + ev.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>';
+              }
+              return '<span>' + String(el).replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>';
+            });
+            var _declRetT = (currentFnReturnTypes && selectedFunc)
+                         ? (currentFnReturnTypes[selectedFunc.name] || '') : '';
+            var _tupleLabel = _declRetT || 'struct';
+            display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;">{ '
+              + _tFields.join('<span style="color:rgba(255,255,255,0.3);">, </span>')
+              + ' }</span>';
+            display += '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;">' + _tupleLabel + '</span>\n';
+          } else
+          { var val  = (typeof rv === 'object' && rv.value !== undefined) ? rv.value : JSON.stringify(rv);
           var _rvType = (typeof rv === 'object' && rv.type) ? rv.type : '';
           // Compiler-declared return type overrides VM runtime type
           // (VM emits 'UInt256' for Bytes/str slots; compiler knows the declared type)
@@ -2987,6 +3012,7 @@
             display += '<span class="ok" style="font-size:1.05rem;font-weight:600;letter-spacing:0.01em;">' + dispVal + '</span>';
             if (type) display += '<span style="font-size:0.72rem;color:rgba(255,255,255,0.28);margin-left:6px;">' + type + '</span>';
             display += boolBadge + '\n';
+          }
           }
         } else {
           // void return — probe state using the session this run was sent to,
@@ -4604,6 +4630,266 @@ var LOOP_LINES = [
     setStatus('V3TypesDemo loaded — Compile, Deploy, then call init() (sign with wallet). Try deriveContractAddr(42, 0, 4660) and getOwnerSyna() after init.', 'info');
   }
   window.loadV3Demo = loadV3Demo;
+
+  // ── StructValueDemo ──────────────────────────────────────────────────────────
+  function loadStructValueDemo() {
+    evictWorkspaceContractByName('StructValueDemo');
+    const src = [
+      'pragma synq ^0.9;',
+      '',
+      'struct Point {',
+      '    x: u256;',
+      '    y: u256;',
+      '}',
+      '',
+      'struct Rect {',
+      '    origin: Point;',
+      '    size: Point;',
+      '}',
+      '',
+      'contract StructValueDemo {',
+      '    state {',
+      '        corner: Point;',
+      '        box_val: Rect;',
+      '        initialised: bool;',
+      '    }',
+      '',
+      '    @public',
+      '    function init() -> bool {',
+      '        corner = Point { x: 0, y: 0 };',
+      '        box_val = Rect { origin: Point { x: 1, y: 2 }, size: Point { x: 100, y: 200 } };',
+      '        initialised = true;',
+      '        return true;',
+      '    }',
+      '',
+      '    @public',
+      '    function translate(p: Point, dx: u256, dy: u256) -> Point {',
+      '        let result = Point { x: p.x + dx, y: p.y + dy };',
+      '        return result;',
+      '    }',
+      '',
+      '    @public',
+      '    function getCorner() -> Point {',
+      '        return corner;',
+      '    }',
+      '',
+      '    @public',
+      '    function makePoint(x: u256, y: u256) -> Point {',
+      '        return Point { x: x, y: y };',
+      '    }',
+      '',
+      '    @public',
+      '    function getCornerX() -> u256 {',
+      '        return getCorner().x;',
+      '    }',
+      '',
+      '    @public',
+      '    function getCornerY() -> u256 {',
+      '        return getCorner().y;',
+      '    }',
+      '',
+      '    @public',
+      '    function getBoxOriginX() -> u256 {',
+      '        return box_val.origin.x;',
+      '    }',
+      '',
+      '    @public',
+      '    function getBoxSizeY() -> u256 {',
+      '        return box_val.size.y;',
+      '    }',
+      '',
+      '    @public',
+      '    function setCorner(p: Point) -> bool {',
+      '        corner = p;',
+      '        return true;',
+      '    }',
+      '',
+      '    @public',
+      '    function setCornerFromMake(x: u256, y: u256) -> bool {',
+      '        corner = makePoint(x, y);',
+      '        return true;',
+      '    }',
+      '',
+      '    @public',
+      '    function moveCorner(dx: u256, dy: u256) -> bool {',
+      '        corner = translate(corner, dx, dy);',
+      '        return true;',
+      '    }',
+      '}',
+    ].join('\n');
+    document.getElementById('editor').value = src;
+    updateLineNums();
+    clearResults();
+    syncCompileBtn();
+    setStatus('StructValueDemo loaded — Compile, Deploy, then call init(). Try getCornerX(), getBoxOriginX(), setCornerFromMake(10,20), moveCorner(100,200).', 'info');
+  }
+  window.loadStructValueDemo = loadStructValueDemo;
+
+  // ── NamedErrorDemo (RevertCode 0x35) ─────────────────────────────────────────
+  function loadNamedErrorDemo() {
+    evictWorkspaceContractByName('NamedErrorDemo');
+    const src = [
+      'pragma synq ^0.9;',
+      '',
+      'contract NamedErrorDemo {',
+      '  state {',
+      '    initialised: bool;',
+      '  }',
+      '',
+      '  enum VaultError { InsufficientBalance, Unauthorized, InvalidAmount, Overflow }',
+      '',
+      '  @public',
+      '  function init() as caller -> bool {',
+      '    initialised = true;',
+      '    return true;',
+      '  }',
+      '',
+      '  @public',
+      '  function failInsufficient() as caller -> bool {',
+      '    revert VaultError::InsufficientBalance;',
+      '  }',
+      '',
+      '  @public',
+      '  function failUnauthorized() as caller -> bool {',
+      '    revert VaultError::Unauthorized;',
+      '  }',
+      '',
+      '  @public',
+      '  function failInvalid() as caller -> bool {',
+      '    revert VaultError::InvalidAmount;',
+      '  }',
+      '',
+      '  @public',
+      '  function failOverflow() as caller -> bool {',
+      '    revert VaultError::Overflow;',
+      '  }',
+      '}',
+    ].join('\n');
+    document.getElementById('editor').value = src;
+    updateLineNums();
+    clearResults();
+    syncCompileBtn();
+    setStatus('NamedErrorDemo loaded — Compile, Deploy, then call init(). Try failInsufficient(), failInvalid(), failOverflow() to see structured error codes.', 'info');
+  }
+  window.loadNamedErrorDemo = loadNamedErrorDemo;
+
+  // ── AssetDemo (opcodes 0x57-0x5B) ─────────────────────────────────────────────
+  function loadAssetDemo() {
+    evictWorkspaceContractByName('AssetDemo');
+    const src = [
+      'pragma synq ^0.9;',
+      '',
+      'contract AssetDemo {',
+      '  state {',
+      '    initialised: bool;',
+      '  }',
+      '',
+      '  @public',
+      '  function init() as caller -> bool {',
+      '    initialised = true;',
+      '    return true;',
+      '  }',
+      '',
+      '  @public',
+      '  function createAsset(value: u256) as caller -> u256 {',
+      '    let id = asset_create("SNRG", value);',
+      '    return id;',
+      '  }',
+      '',
+      '  @public',
+      '  function transferAsset(asset_id: u256, to: u256) as caller -> u256 {',
+      '    let new_id = asset_transfer(asset_id, to);',
+      '    return new_id;',
+      '  }',
+      '',
+      '  @public',
+      '  function burnAsset(asset_id: u256) as caller -> u256 {',
+      '    let value = asset_burn(asset_id);',
+      '    return value;',
+      '  }',
+      '',
+      '  @public',
+      '  function checkBalance(asset_id: u256) as caller -> u256 {',
+      '    return asset_balance(asset_id);',
+      '  }',
+      '',
+      '  @public',
+      '  function checkOwner(asset_id: u256) as caller -> u256 {',
+      '    return asset_owner(asset_id);',
+      '  }',
+      '}',
+    ].join('\n');
+    document.getElementById('editor').value = src;
+    updateLineNums();
+    clearResults();
+    syncCompileBtn();
+    setStatus('AssetDemo loaded — Compile, Deploy, then call init(). Try createAsset(1000), checkOwner(1), transferAsset(1, 42), burnAsset(2).', 'info');
+  }
+  window.loadAssetDemo = loadAssetDemo;
+
+  // ── StructFieldTest (TupleSet 0xAB) ──────────────────────────────────────────
+  function loadStructFieldTest() {
+    evictWorkspaceContractByName('StructFieldTest');
+    const src = [
+      'pragma synq ^0.9;',
+      '',
+      'struct Point {',
+      '  x: u256;',
+      '  y: u256;',
+      '}',
+      '',
+      'contract StructFieldTest {',
+      '  state {',
+      '    origin: Point;',
+      '    initialised: bool;',
+      '  }',
+      '',
+      '  @public',
+      '  function init() as caller -> bool {',
+      '    origin = Point { x: 0, y: 0 };',
+      '    initialised = true;',
+      '    return true;',
+      '  }',
+      '',
+      '  @public',
+      '  function setOrigin(x: u256, y: u256) as caller -> bool {',
+      '    origin.x = x;',
+      '    origin.y = y;',
+      '    return true;',
+      '  }',
+      '',
+      '  @public',
+      '  function getOriginX() as caller -> u256 {',
+      '    return origin.x;',
+      '  }',
+      '',
+      '  @public',
+      '  function getOriginY() as caller -> u256 {',
+      '    return origin.y;',
+      '  }',
+      '',
+      '  @public',
+      '  function moveX(dx: u256) as caller -> bool {',
+      '    origin.x = origin.x + dx;',
+      '    return true;',
+      '  }',
+      '',
+      '  @public',
+      '  function swapCoordinates() as caller -> bool {',
+      '    let temp: u256 = origin.x;',
+      '    origin.x = origin.y;',
+      '    origin.y = temp;',
+      '    return true;',
+      '  }',
+      '}',
+    ].join('\n');
+    document.getElementById('editor').value = src;
+    updateLineNums();
+    clearResults();
+    syncCompileBtn();
+    setStatus('StructFieldTest loaded — Compile, Deploy, then call init(). Try setOrigin(42, 99), getOriginX(), moveX(10), swapCoordinates().', 'info');
+  }
+  window.loadStructFieldTest = loadStructFieldTest;
 
 })();
 </script>
