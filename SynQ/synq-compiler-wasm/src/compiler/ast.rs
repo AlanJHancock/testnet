@@ -47,6 +47,7 @@ pub struct ContractDefinition {
     pub metadata:   Vec<MetadataEntry>,
     pub roles:      Vec<RoleDefinition>,
     pub error_defs: Vec<ErrorDefinition>,
+    pub enums: Vec<EnumDefinition>,
     pub event_defs: Vec<EventDefinition>,
     /// Functions in the `tests { }` section — compiled but not deployed.
     pub test_fns:   Vec<FunctionDefinition>,

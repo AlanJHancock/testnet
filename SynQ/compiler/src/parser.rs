@@ -112,6 +112,7 @@ fn parse_contract(pair: Pair<Rule>) -> Result<ContractDefinition, String> {
         }
     };
     let mut parts = vec![];
+    let mut contract_enums = vec![];
     let mut fn_names: HashSet<String> = HashSet::new();
     let mut sv_names: HashSet<String> = HashSet::new();
     for section in inner {
@@ -169,6 +170,9 @@ fn parse_contract(pair: Pair<Rule>) -> Result<ContractDefinition, String> {
                     }
                 }
             }
+            Rule::enum_definition => {
+                contract_enums.push(parse_enum(p));
+            }
             _ => {}
         }
     }
@@ -179,6 +183,7 @@ fn parse_contract(pair: Pair<Rule>) -> Result<ContractDefinition, String> {
         metadata:   vec![],
         roles:      vec![],
         error_defs: vec![],
+        enums: contract_enums,
         event_defs: vec![],
         test_fns:   vec![],
     })

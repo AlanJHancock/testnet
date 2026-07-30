@@ -283,6 +283,10 @@ impl CodeGenerator {
     }
 
     fn gen_contract(&mut self, c: &ContractDefinition) -> Result<(), String> {
+        // Register enums declared inside the contract body
+        for e in &c.enums {
+            self.gen_enum(e)?;
+        }
         for part in &c.parts {
             match part {
                 ContractPart::Function(f) => self.gen_function(f)?,
