@@ -883,7 +883,7 @@ async fn compile_handler(
         match builder.build(&ast) {
             Ok(mut module) => {
                 let _report = synq_compiler::ir::analyze(&mut module);
-                module.functions.iter().map(|f| f.dump()).collect()
+                vec![module.dump()]
             }
             Err(_) => vec![],
         }

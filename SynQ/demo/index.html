@@ -569,7 +569,7 @@
     return (bytes[off] | (bytes[off+1]<<8) | (bytes[off+2]<<16) | (bytes[off+3]<<24)) >>> 0;
   }
 
-  function formatBytecode(hex) {
+  function formatBytecode(hex, contractName) {
     var bytes = hexToBytes(hex);
     var lines = [];
     if (bytes.length < 15) { lines.push(hex); return lines.join('\n'); }
@@ -581,7 +581,7 @@
     var codeLen = readU32LE(bytes, 7);
     var dataLen = readU32LE(bytes, 11);
 
-    lines.push('; QVM Bytecode -- ' + bytes.length + ' bytes');
+    lines.push('; QVM Bytecode -- ' + bytes.length + ' bytes' + (contractName ? '  [contract: ' + contractName + ']' : ''));
     lines.push('; Magic: 0x' + magic.toUpperCase() + '  Version: ' + ver);
     lines.push('; Header: ' + hdrLen + 'B  Code: ' + codeLen + 'B  Data: ' + dataLen + 'B');
     lines.push('');
@@ -2000,7 +2000,7 @@
       })();
 
       // ── Render bytecode display ────────────────────────────────────────────
-      document.getElementById('bytecodeDisplay').textContent = formatBytecode(data.bytecode);
+      document.getElementById('bytecodeDisplay').textContent = formatBytecode(data.bytecode, data.contract_name);
       var hexRaw = data.bytecode.startsWith('0x') ? data.bytecode.slice(2) : data.bytecode;
       document.getElementById('hashBadge').textContent = (hexRaw.length/2) + ' bytes  0x' + hexRaw.slice(0,8) + '...';
       document.getElementById('resultsSection').classList.add('show');

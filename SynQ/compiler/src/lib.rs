@@ -118,10 +118,8 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
                         stat.linear_creates, stat.linear_consumes
                     ));
                 }
-                // Dump full IR for each function
-                for func in &ir_module.functions {
-                    ir_dump.push(func.dump());
-                }
+                // Dump full IR (includes contract name header)
+                ir_dump.push(ir_module.dump());
             }
             Err(e) => {
                 warnings.push(format!("[IR] build error: {}", e));
