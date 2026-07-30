@@ -142,6 +142,32 @@ fn collect_identifiers(expr: &Expression, out: &mut Vec<String>) {
         Expression::Call(_, args) => {
             for a in args { collect_identifiers(a, out); }
         }
+        Expression::FieldAccess { object, .. } => {
+            // Only collect the root identifier, not field names
+            collect_identifiers(object, out);
+        }
+        Expression::StructLiteral { fields, .. } => {
+            for (_, v) in fields { collect_identifiers(v, out); }
+        }
+        Expression::MapIndex(map, key) => {
+            out.push(map.clone());
+            collect_identifiers(key, out);
+        }
+        Expression::MapMethod { map, args, .. } => {
+            out.push(map.clone());
+            for a in args { collect_identifiers(a, out); }
+        }
+        Expression::SetMethod { set, args, .. } => {
+            out.push(set.clone());
+            for a in args { collect_identifiers(a, out); }
+        }
+        Expression::UnaryOp(_, inner) => collect_identifiers(inner, out),
+        Expression::Tuple(exprs) => {
+            for e in exprs { collect_identifiers(e, out); }
+        }
+        Expression::Some(inner) => collect_identifiers(inner, out),
+        Expression::Ok(inner) => collect_identifiers(inner, out),
+        Expression::Err(inner) => collect_identifiers(inner, out),
         _ => {}
     }
 }
@@ -188,6 +214,11 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
         if let ContractPart::Function(f) = part {
             let param_names: HashSet<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
 
+            // Collect let-bound variable names (function-scoped)
+            let let_names: HashSet<String> = f.body.statements.iter().filter_map(|s| {
+                if let Statement::Let { name, .. } = s { Some(name.clone()) } else { None }
+            }).collect();
+
             let all_stmts: Vec<&Statement> = f.body.statements.iter().collect();
             for stmt in all_stmts {
                 let exprs: Vec<&Expression> = match stmt {
@@ -215,7 +246,9 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                     for id in &idents {
                         if !state_names.contains(id.as_str())
                             && !param_names.contains(id.as_str())
+                            && !let_names.contains(id)
                             && !PQC_BUILTINS.contains(&id.as_str())
+                            && id != "caller"
                         {
                             return Err(format!(
                                 "undefined variable '{}' in function '{}' of contract '{}'",

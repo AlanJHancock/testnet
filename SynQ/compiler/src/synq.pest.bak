@@ -176,14 +176,13 @@ add_op   = { "+" | "-" }
 multiplicative = { unary ~ (mul_op ~ unary)* }
 mul_op         = { "*" | "/" | "%" }
 
-unary   = { ("-" ~ unary) | ("!" ~ unary) | postfix }
-postfix = { primary ~ postfix_suffix* }
-postfix_suffix = { "." ~ IDENT ~ ("(" ~ arg_list? ~ ")")? }
-primary = { map_index_expr | enum_access_expr | struct_literal
+unary   = { ("-" ~ unary) | ("!" ~ unary) | primary }
+primary = { map_index_expr | method_call_expr | field_access_expr | enum_access_expr
+             | struct_literal
              | some_expr | none_expr | ok_expr | err_expr | call_expr
              | tuple_literal | literal | "(" ~ expression ~ ")" | IDENT }
 map_index_expr  = { IDENT ~ "[" ~ expression ~ "]" }
-
+method_call_expr = { IDENT ~ "." ~ IDENT ~ "(" ~ arg_list? ~ ")" }
 
 call_expr = { IDENT ~ "(" ~ arg_list? ~ ")" }
 arg_list  = { expression ~ ("," ~ expression)* }
@@ -196,7 +195,8 @@ string_literal = @{ "\"" ~ (!("\"") ~ ANY)* ~ "\"" }
 bool_literal   = { "true" | "false" }
 
 // ── Field access & struct literal ──────────────────────────────────────────────
-// field_access_expr and method_call_expr are now handled by the postfix rule
+// `expr.field` — access a field on a struct value (no parens → not a method call)
+field_access_expr = { IDENT ~ "." ~ IDENT ~ !"(" }
 
 // `EnumName::VariantName` — access an enum variant (resolves to sequential tag I32)
 enum_access_expr = { IDENT ~ "::" ~ IDENT }

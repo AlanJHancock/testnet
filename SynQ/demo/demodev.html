@@ -302,7 +302,7 @@
     <div class="results-title">Compilation Results</div>
     <div class="compile-split">
       <div class="compile-col">
-        <div class="col-header ir">SSA IR Builder &amp; Analysis</div>
+        <div class="col-header ir">SSA IR — Static Single Assignment · Intermediate Representation</div>
         <div class="ir-display" id="irDisplay"><span class="ir-empty">Compile to see IR output...</span></div>
       </div>
       <div class="compile-col">
@@ -2014,7 +2014,8 @@
         // If we have full IR dump from server, show that
         if (irDump && irDump.length > 0) {
           var lines = [];
-          lines.push('SSA IR — Full Instruction Dump');
+          lines.push('SSA IR (Static Single Assignment) — Intermediate Representation');
+          lines.push('Full Instruction Dump');
           lines.push('============================================');
           lines.push('');
           irDump.forEach(function(fnIR) {
@@ -2035,7 +2036,8 @@
         } else if (irWarnings.length > 0) {
           // Fallback: stats only (WASM path without server IR dump)
           var lines = [];
-          lines.push('SSA IR Analysis (summary only)');
+          lines.push('SSA IR (Static Single Assignment) — Intermediate Representation');
+          lines.push('Analysis (summary only)');
           lines.push('============================================');
           lines.push('');
           irWarnings.forEach(function(w) {

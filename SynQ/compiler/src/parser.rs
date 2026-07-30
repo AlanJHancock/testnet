@@ -526,6 +526,44 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
                 parse_expression(operand_pair)
             }
         }
+        Rule::postfix => {
+            let mut inner = pair.into_inner();
+            // First child is the primary expression
+            let base = parse_expression(inner.next().unwrap());
+            // Remaining children are postfix suffixes (IDENT, optionally with arg_list)
+            let mut expr = base;
+            for suffix in inner {
+                let mut suffix_inner = suffix.into_inner();
+                let field_or_method = suffix_inner.next().unwrap().as_str().to_string();
+                // Check if there's an arg_list (method call) or not (field access)
+                if let Some(arg_list) = suffix_inner.next() {
+                    let args: Vec<Expression> = arg_list.into_inner().map(parse_expression).collect();
+                    // Method call on a map/set — build from the expression
+                    // For now, only support method calls on identifiers (map/set state vars)
+                    if let Expression::Identifier(ref map_name) = expr {
+                        match field_or_method.as_str() {
+                            "add" | "remove" => expr = Expression::SetMethod {
+                                set: map_name.clone(), method: field_or_method, args
+                            },
+                            _ => expr = Expression::MapMethod {
+                                map: map_name.clone(), method: field_or_method, args
+                            },
+                        }
+                    } else {
+                        // Method call on non-identifier expression — not supported yet
+                        // This would need a general method call AST variant
+                        return Expression::Literal(Literal::Number(0));
+                    }
+                } else {
+                    // Field access (no parens)
+                    expr = Expression::FieldAccess {
+                        object: Box::new(expr),
+                        field: field_or_method,
+                    };
+                }
+            }
+            expr
+        }
         Rule::primary  => parse_expression(pair.into_inner().next().unwrap()),
         Rule::call_expr => {
             let mut inner = pair.into_inner();
@@ -563,28 +601,6 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
             let key_expr = parse_expression(inner.next().unwrap());
             Expression::MapIndex(map_name, Box::new(key_expr))
         }
-        Rule::method_call_expr => {
-            let mut inner = pair.into_inner();
-            let obj_name = inner.next().unwrap().as_str().to_string();
-            let method   = inner.next().unwrap().as_str().to_string();
-            // The remaining child is an optional arg_list node — unwrap it to get
-            // the individual expression children (same pattern as call_expr).
-            let args: Vec<Expression> = if let Some(arg_list) = inner.next() {
-                arg_list.into_inner().map(parse_expression).collect()
-            } else {
-                vec![]
-            };
-            match method.as_str() {
-                "get" => Expression::MapMethod { map: obj_name, method, args },
-                "contains" | "len" => {
-                    // Route to SetMethod if the object is a Set state var;
-                    // otherwise treat as MapMethod (maps also support contains/len).
-                    Expression::MapMethod { map: obj_name, method, args }
-                },
-                "add" | "remove"           => Expression::SetMethod { set: obj_name, method, args },
-                _                          => Expression::MapMethod { map: obj_name, method, args },
-            }
-        }
         Rule::IDENT => match pair.as_str() {
             "caller" => Expression::Caller,
             "None"   => Expression::None,
@@ -619,15 +635,6 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
                 fields.push((fname, fval));
             }
             Expression::StructLiteral { type_name, fields }
-        }
-        Rule::field_access_expr => {
-            let mut inner = pair.into_inner();
-            let obj_name = inner.next().unwrap().as_str().to_string();
-            let field    = inner.next().unwrap().as_str().to_string();
-            Expression::FieldAccess {
-                object: Box::new(Expression::Identifier(obj_name)),
-                field,
-            }
         }
         Rule::enum_access_expr => {
             let mut inner = pair.into_inner();
