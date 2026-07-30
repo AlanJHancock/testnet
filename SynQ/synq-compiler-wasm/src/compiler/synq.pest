@@ -127,6 +127,7 @@ block = { "{" ~ statement* ~ "}" }
 
 statement = { return_statement
             | require_statement
+            | revert_enum_statement
             | revert_statement
             | emit_statement
             | extern_call_statement
@@ -137,12 +138,14 @@ statement = { return_statement
             | let_statement
             | map_assign_statement
             | set_op_statement
+            | field_assign_statement
             | assignment_statement
             | expr_statement }
 
 return_statement      = { "return" ~ expression? ~ ";" }
 require_statement     = { "require" ~ "(" ~ expression ~ "," ~ string_literal ~ ")" ~ ";" }
 revert_statement      = { "revert" ~ IDENT ~ ("(" ~ arg_list? ~ ")")? ~ ";" }
+revert_enum_statement = { "revert" ~ IDENT ~ "::" ~ IDENT ~ ("(" ~ arg_list? ~ ")")? ~ ";" }
 emit_statement        = { "emit" ~ IDENT ~ "(" ~ arg_list? ~ ")" ~ ";" }
 extern_call_statement = { "extern_call" ~ "(" ~ string_literal ~ "," ~ string_literal
                           ~ ("," ~ expression)* ~ ")" ~ ";" }
@@ -153,6 +156,7 @@ break_statement       = { "break" ~ ";" }
 continue_statement    = { "continue" ~ ";" }
 let_statement         = { "let" ~ IDENT ~ (":" ~ type_decl)? ~ "=" ~ expression ~ ";" }
 assignment_statement  = { IDENT ~ "=" ~ expression ~ ";" }
+field_assign_statement = { IDENT ~ "." ~ IDENT ~ "=" ~ expression ~ ";" }
 map_assign_statement  = { IDENT ~ "[" ~ expression ~ "]" ~ "=" ~ expression ~ ";" }
 set_op_statement      = { IDENT ~ "." ~ ("add" | "remove") ~ "(" ~ expression ~ ")" ~ ";" }
 expr_statement        = { expression ~ ";" }
@@ -172,13 +176,14 @@ add_op   = { "+" | "-" }
 multiplicative = { unary ~ (mul_op ~ unary)* }
 mul_op         = { "*" | "/" | "%" }
 
-unary   = { ("-" ~ unary) | ("!" ~ unary) | primary }
-primary = { map_index_expr | method_call_expr | field_access_expr | enum_access_expr
-             | struct_literal
+unary   = { ("-" ~ unary) | ("!" ~ unary) | postfix }
+postfix = { primary ~ postfix_suffix* }
+postfix_suffix = { "." ~ IDENT ~ ("(" ~ arg_list? ~ ")")? }
+primary = { map_index_expr | enum_access_expr | struct_literal
              | some_expr | none_expr | ok_expr | err_expr | call_expr
              | tuple_literal | literal | "(" ~ expression ~ ")" | IDENT }
 map_index_expr  = { IDENT ~ "[" ~ expression ~ "]" }
-method_call_expr = { IDENT ~ "." ~ IDENT ~ "(" ~ arg_list? ~ ")" }
+
 
 call_expr = { IDENT ~ "(" ~ arg_list? ~ ")" }
 arg_list  = { expression ~ ("," ~ expression)* }
@@ -191,8 +196,7 @@ string_literal = @{ "\"" ~ (!("\"") ~ ANY)* ~ "\"" }
 bool_literal   = { "true" | "false" }
 
 // ── Field access & struct literal ──────────────────────────────────────────────
-// `expr.field` — access a field on a struct value (no parens → not a method call)
-field_access_expr = { IDENT ~ "." ~ IDENT ~ !"(" }
+// field_access_expr and method_call_expr are now handled by the postfix rule
 
 // `EnumName::VariantName` — access an enum variant (resolves to sequential tag I32)
 enum_access_expr = { IDENT ~ "::" ~ IDENT }
@@ -210,7 +214,7 @@ err_expr      = { "Err"  ~ "(" ~ expression ~ ")" }
 
 // ── Types ────────────────────────────────────────────────────────────────────
 // Full numeric tower: u8..u256, i8..i256 + aliases + option/result/tuple
-type_decl = { option_type | result_type | tuple_type | mapping_type | set_type | array_type
+type_decl = { option_type | result_type | tuple_type | mapping_type | set_type | array_type | asset_type
                  | bytes_type | hash_type | uma_type | IDENT }
 
 bytes_type = { "Bytes" ~ "<" ~ number_literal ~ ">" }
@@ -223,5 +227,6 @@ tuple_type   = { "(" ~ type_decl ~ ("," ~ type_decl)+ ~ ")" }
 mapping_type = { ("mapping" | "map") ~ "<" ~ type_decl ~ "," ~ type_decl ~ ">" }
 set_type     = { "set" ~ "<" ~ type_decl ~ ">" }
 array_type   = { "[" ~ type_decl ~ "]" }
+asset_type   = { "Asset" ~ "<" ~ type_decl ~ ">" }
 
 IDENT = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }

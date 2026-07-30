@@ -104,6 +104,8 @@ pub struct CodeGenerator {
     function_param_addrs: HashMap<String, Vec<u32>>,
     function_param_signs: HashMap<String, Vec<bool>>,
     function_has_return: HashMap<String, bool>,
+    /// Return type of each function (for struct field access on call results).
+    function_return_types: HashMap<String, Type>,
     /// Whether each function declares `as caller` (requires authenticated identity).
     function_requires_caller: HashMap<String, bool>,
     /// Capability names declared via `requires cap::X` per function.
@@ -128,6 +130,7 @@ impl CodeGenerator {
             function_param_addrs: HashMap::new(),
             function_param_signs: HashMap::new(),
             function_has_return: HashMap::new(),
+            function_return_types: HashMap::new(),
             function_requires_caller: HashMap::new(),
             struct_defs: HashMap::new(),
             enum_defs: HashMap::new(),
@@ -224,6 +227,9 @@ impl CodeGenerator {
                 let has_return = f.body.statements.iter().any(|s| matches!(s, Statement::Return(Some(_))))
                     || f.returns.is_some();
                 self.function_has_return.insert(f.name.clone(), has_return);
+                if let Some(ref ret_ty) = f.returns {
+                    self.function_return_types.insert(f.name.clone(), ret_ty.clone());
+                }
                 self.function_requires_caller.insert(f.name.clone(), f.requires_caller);
 
                 // Expand role::X references into their constituent caps
@@ -776,9 +782,18 @@ Statement::Emit { event, args } => {
                 scope.locals.insert(name.clone(), addr);
                 if let Some(t) = ty { scope.local_types.insert(name.clone(), t.clone()); }
                 else {
-                    // Type inference: if value is a struct literal, record the type
-                    if let Expression::StructLiteral { type_name, .. } = value {
-                        scope.local_types.insert(name.clone(), Type::Named(type_name.clone()));
+                    // Type inference: infer struct type from value expression
+                    let inferred = match value {
+                        Expression::StructLiteral { type_name, .. } => {
+                            Some(Type::Named(type_name.clone()))
+                        }
+                        Expression::Call(fn_name, _) => {
+                            self.function_return_types.get(fn_name).cloned()
+                        }
+                        _ => None,
+                    };
+                    if let Some(t) = inferred {
+                        scope.local_types.insert(name.clone(), t);
                     }
                 }
                 self.gen_expression(value, scope)?;
@@ -942,20 +957,10 @@ Statement::Emit { event, args } => {
                 // Generate the object expression (pushes the struct value as Tuple onto stack)
                 self.gen_expression(object, scope)?;
                 
-                // Look up field index from struct definitions.
-                // For Identifier objects, check local_types and state_var_types.
-                // For nested field access or function call results, check expression types.
-                let field_idx = if let Expression::Identifier(name) = object.as_ref() {
-                    let ty = scope.local_types.get(name.as_str())
-                        .cloned()
-                        .or_else(|| self.state_var_types.get(name.as_str()).cloned());
-                    if let Some(Type::Named(struct_name)) = ty {
-                        if let Some(sd) = self.struct_defs.get(&struct_name) {
-                            sd.fields.iter().position(|f| f.name == *field)
-                                .map(|p| p as i32)
-                        } else { None }
-                    } else { None }
-                } else { None };
+                // Resolve field index from the object's type.
+                // Handles: Identifier (local/state var), Call (function return), 
+                // nested FieldAccess (struct of structs).
+                let field_idx = self.resolve_field_index(object, field, scope);
 
                 match field_idx {
                     Some(idx) => {
@@ -1155,6 +1160,50 @@ Statement::Emit { event, args } => {
         }
     }
 
+    /// Resolve the struct type of an expression for field access.
+    /// Returns the Type::Named(struct_name) if known, or None.
+    fn resolve_expression_type(&self, expr: &Expression, scope: &FunctionScope) -> Option<Type> {
+        match expr {
+            Expression::Identifier(name) => {
+                scope.local_types.get(name.as_str())
+                    .cloned()
+                    .or_else(|| self.state_var_types.get(name.as_str()).cloned())
+            }
+            Expression::Call(name, _) => {
+                self.function_return_types.get(name).cloned()
+            }
+            Expression::FieldAccess { object, field } => {
+                // Nested field access: resolve the inner struct type, find the field,
+                // then check if that field's type is itself a struct.
+                let outer_ty = self.resolve_expression_type(object, scope)?;
+                if let Type::Named(struct_name) = outer_ty {
+                    if let Some(sd) = self.struct_defs.get(&struct_name) {
+                        let field_def = sd.fields.iter().find(|f| f.name == *field)?;
+                        return Some(field_def.ty.clone());
+                    }
+                }
+                None
+            }
+            Expression::StructLiteral { type_name, .. } => {
+                Some(Type::Named(type_name.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve a field index for field access codegen.
+    /// Works with identifiers, function call results, and nested field access.
+    fn resolve_field_index(&self, object: &Expression, field: &str, scope: &FunctionScope) -> Option<i32> {
+        let ty = self.resolve_expression_type(object, scope)?;
+        if let Type::Named(struct_name) = ty {
+            if let Some(sd) = self.struct_defs.get(&struct_name) {
+                return sd.fields.iter().position(|f| f.name == field)
+                    .map(|p| p as i32);
+            }
+        }
+        None
+    }
+
     fn gen_call(&mut self, name: &str, args: &[Expression], scope: &mut FunctionScope) -> Result<(), String> {
         // ── String builtins ───────────────────────────────────────────────────
         if name == "str_concat" && args.len() == 2 {
@@ -1179,7 +1228,7 @@ Statement::Emit { event, args } => {
             // asset_create(type_name: str, value: u256) -> u256 (asset_id)
             // Hash the type_name to a u32 type_tag using FNV-1a.
             self.gen_expression(&args[1], scope)?;  // push value
-            if let crate::compiler::ast::Expression::Literal(crate::compiler::ast::Literal::String(ref tn)) = args[0] {
+            if let Expression::Literal(Literal::String(ref tn)) = args[0] {
                 let mut hash: u32 = 2166136261;
                 for byte in tn.bytes() {
                     hash ^= byte as u32;

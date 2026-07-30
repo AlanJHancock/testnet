@@ -1,73 +1,27 @@
-
-// ── Vendored SynQ compiler + VM source ────────────────────────────────────────
 #[macro_use]
 extern crate pest_derive;
 
-mod compiler {
-    pub mod ast;
-    pub mod parser;
-    pub mod codegen;
-}
+pub mod ast;
+pub mod codegen;
+pub mod ir;
+pub mod parser;
+pub mod pqc_integration;
 
-mod vm_inner {
-    pub mod pqc_shims {
-        pub mod dilithium {
-            pub fn verify(_msg: &[u8], _sig: &[u8], _pk: &[u8]) -> bool { false }
-        }
-        pub mod kyber {
-            pub fn keygen() -> Result<(Vec<u8>, Vec<u8>), String> { Ok((vec![0;32], vec![0;32])) }
-            pub fn encaps(_pk: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> { Ok((vec![0;32], vec![0;32])) }
-            pub fn decaps(_ct: &[u8], _sk: &[u8]) -> Result<Vec<u8>, String> { Ok(vec![0;32]) }
-        }
-        pub mod falcon {
-            pub fn verify(_msg: &[u8], _sig: &[u8], _pk: &[u8]) -> bool { false }
-        }
-        pub mod sphincs {
-            pub fn verify(_msg: &[u8], _sig: &[u8], _pk: &[u8]) -> bool { false }
-        }
-    }
-    pub mod opcode;
-    pub mod assembler;
-    pub mod vm;
-    pub use vm::QuantumVM;
-    pub use opcode::{OpCode, VMError};
-    pub use assembler::Assembler;
-}
+pub use pqc_integration::{PQCCompiler, PQCSecurityLevel};
 
-// ── Types we re-export for external use ───────────────────────────────────────
-pub use vm_inner::QuantumVM;
-
-// ── compile() — exact copy from synq-compiler/src/lib.rs ─────────────────────
-use compiler::ast::*;
-use compiler::{parser, codegen};
+use ast::*;
 use std::collections::{HashMap, HashSet};
 
 /// Result of compiling a SynQ source file.
 #[derive(Debug)]
 pub struct CompileResult {
-    pub bytecode:          Vec<u8>,
-    pub state_vars:        Vec<(String, u32)>,
-    pub warnings:          Vec<String>,
+    pub bytecode:         Vec<u8>,
+    pub state_vars:       Vec<(String, u32)>,
+    pub warnings:         Vec<String>,
     /// Contract names called via extern_call, in first-appearance order, deduplicated.
-    pub extern_contracts:  Vec<String>,
-}
-
-
-/// Helper: convert AST Type to the string the IDE expects.
-fn type_name(ty: &Type) -> String {
-    match ty {
-        Type::Bool    => "bool".to_string(),
-        Type::Str     => "str".to_string(),
-        Type::Address => "address".to_string(),
-        Type::UInt8   => "u8".to_string(),
-        Type::UInt16  => "u16".to_string(),
-        Type::UInt32  => "u32".to_string(),
-        Type::UInt64  => "u64".to_string(),
-        Type::UInt128 => "u128".to_string(),
-        Type::UInt256 => "u256".to_string(),
-        Type::Bytes   => "bytes".to_string(),
-        _             => "u256".to_string(),
-    }
+    pub extern_contracts: Vec<String>,
+    /// Full SSA IR dump for each function (block-by-block instruction listing).
+    pub ir_dump:          Vec<String>,
 }
 
 /// Top-level compile entry point.
@@ -80,28 +34,22 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
 
     // 2. Semantic checks per contract
     for unit in &ast {
-        if let SourceUnit::Contract(c) = unit {
-            check_undefined_refs(&c, &mut warnings)?;
-            check_call_graph(&c)?;
+        if let SourceUnit::Contract(ref c) = unit {
+            check_undefined_refs(c, &mut warnings)?;
+            check_call_graph(c)?;
         }
     }
 
-    // 3. Codegen
-    let gen = codegen::CodeGenerator::new();
-    let (bytecode, state_vars) = gen.generate(&ast)?;
-
-    // ── G3: PQC simulation warning ──────────────────────────────────────
-    // PQC builtins compile fine but the WASM VM cannot execute them —
-    // they throw RuntimeError at runtime. Warn the developer explicitly
-    // so they are not surprised when running in the browser IDE.
-    const PQC_BUILTINS_WARN: &[&str] = &[
+    // 3a. PQC simulation warning — emitted on both server and WASM paths so
+    //     the developer sees it regardless of which compile route was used.
+    const PQC_BUILTINS: &[&str] = &[
         "dilithium_verify", "falcon_verify", "sphincs_verify",
         "kyber_encapsulate", "kyber_decapsulate", "kyber_decaps",
         "falcon_sign", "mceliece_encapsulate", "mceliece_decapsulate",
         "hqc_encapsulate", "hqc_decapsulate",
     ];
-    'pqc_check: for unit in &ast {
-        if let SourceUnit::Contract(c) = unit {
+    'pqc_scan: for unit in &ast {
+        if let SourceUnit::Contract(ref c) = unit {
             for part in &c.parts {
                 if let ContractPart::Function(f) = part {
                     for stmt in &f.body.statements {
@@ -115,13 +63,13 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
                         };
                         for expr in exprs {
                             if let Expression::Call(name, _) = expr {
-                                if PQC_BUILTINS_WARN.contains(&name.as_str()) {
+                                if PQC_BUILTINS.contains(&name.as_str()) {
                                     warnings.push(format!(
-                                        "PQC builtin '{}' will throw a RuntimeError in browser (WASM) mode. \
-                                         Deploy to synq-server for real PQC verification.",
+                                        "PQC builtin '{}' executes via synq-server native VM only. \
+                                         In browser (WASM) mode it will throw a RuntimeError.",
                                         name
                                     ));
-                                    break 'pqc_check;
+                                    break 'pqc_scan;
                                 }
                             }
                         }
@@ -131,40 +79,58 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
         }
     }
 
-    // Collect extern_call targets for tamper-detection cross-check with server.
+    // 3. Codegen
+    let gen = codegen::CodeGenerator::new();
+    let (bytecode, state_vars) = gen.generate(&ast)?;
+
+    // Collect extern_call targets from AST — these are contracts this one depends on.
     let mut extern_contracts: Vec<String> = Vec::new();
     for unit in &ast {
-        if let SourceUnit::Contract(c) = unit {
+        if let SourceUnit::Contract(ref c) = unit {
             for part in &c.parts {
-                if let ContractPart::Function(f) = part {
+                if let crate::ast::ContractPart::Function(f) = part {
                     for stmt in &f.body.statements {
-                        wasm_collect_extern_contracts(stmt, &mut extern_contracts);
+                        collect_extern_contracts_stmt(stmt, &mut extern_contracts);
                     }
                 }
             }
         }
     }
 
-    Ok(CompileResult { bytecode, state_vars, warnings, extern_contracts })
-}
-
-
-
-/// Walk a statement and collect unique extern_call target contract names.
-fn wasm_collect_extern_contracts(stmt: &Statement, out: &mut Vec<String>) {
-    match stmt {
-        Statement::ExternCall { contract, .. } => {
-            if !out.contains(contract) { out.push(contract.clone()); }
-        }
-        Statement::If { then_block, else_block, .. } => {
-            for s in &then_block.statements { wasm_collect_extern_contracts(s, out); }
-            if let Some(eb) = else_block {
-                for s in &eb.statements { wasm_collect_extern_contracts(s, out); }
+    // 4. Build SSA IR (parallel to codegen — for analysis and future backend)
+    let mut ir_dump: Vec<String> = Vec::new();
+    {
+        let mut ir_builder = ir::IrBuilder::new();
+        match ir_builder.build(&ast) {
+            Ok(mut ir_module) => {
+                let ir_report = ir::analyze(&mut ir_module);
+                if !ir_report.is_ok() {
+                    for err in &ir_report.errors {
+                        warnings.push(format!("[IR] {}", err));
+                    }
+                }
+                for stat in &ir_report.function_stats {
+                    warnings.push(format!(
+                        "[IR] fn {}: {} blocks, {} insts, {} reachable, {} effects, {} host_profiles, {} auth_checks, {} linear_creates, {} linear_consumes",
+                        stat.name, stat.block_count, stat.instruction_count,
+                        stat.reachable_blocks, stat.effects.len(),
+                        stat.host_profiles, stat.authority_checks,
+                        stat.linear_creates, stat.linear_consumes
+                    ));
+                }
+                // Dump full IR (includes contract name header)
+                ir_dump.push(ir_module.dump());
+            }
+            Err(e) => {
+                warnings.push(format!("[IR] build error: {}", e));
             }
         }
-        _ => {}
     }
+
+    Ok(CompileResult { bytecode, state_vars, warnings, extern_contracts, ir_dump })
 }
+
+// ─── Semantic check: undefined variables and calls ───────────────────────────
 
 fn collect_identifiers(expr: &Expression, out: &mut Vec<String>) {
     match expr {
@@ -177,6 +143,7 @@ fn collect_identifiers(expr: &Expression, out: &mut Vec<String>) {
             for a in args { collect_identifiers(a, out); }
         }
         Expression::FieldAccess { object, .. } => {
+            // Only collect the root identifier, not field names
             collect_identifiers(object, out);
         }
         Expression::StructLiteral { fields, .. } => {
@@ -224,13 +191,14 @@ const PQC_BUILTINS: &[&str] = &[
     "kyber_encapsulate", "kyber_decapsulate", "kyber_decaps",
     "falcon_sign", "mceliece_encapsulate", "mceliece_decapsulate",
     "hqc_encapsulate", "hqc_decapsulate",
-    "str_len", "str_concat", "str_eq",
     // Authority builtins (v7.0 authority model)
     "authority_envelope", "authority_require", "authority_identity",
     // Address builtins (V3 Bech32)
     "to_syna", "from_syna", "contract_address",
     // AEG1 builtins
     "aegis_call", "aegis_verify", "aegis_decaps",
+    // String builtins
+    "str_len", "str_concat", "str_eq",
 ];
 
 fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String>) -> Result<(), String> {
@@ -245,14 +213,14 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
     for part in &contract.parts {
         if let ContractPart::Function(f) = part {
             let param_names: HashSet<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
-            let mut let_names: HashSet<String> = HashSet::new();
+
+            // Collect let-bound variable names (function-scoped)
+            let let_names: HashSet<String> = f.body.statements.iter().filter_map(|s| {
+                if let Statement::Let { name, .. } = s { Some(name.clone()) } else { None }
+            }).collect();
 
             let all_stmts: Vec<&Statement> = f.body.statements.iter().collect();
             for stmt in all_stmts {
-                // Track let-bound variables for subsequent statement checks
-                if let Statement::Let { name, .. } = stmt {
-                    let_names.insert(name.clone());
-                }
                 let exprs: Vec<&Expression> = match stmt {
                     Statement::Expression(e) => vec![e],
                     Statement::Require(e, _) => vec![e],
@@ -263,7 +231,7 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                     Statement::Emit { args, .. } => args.iter().collect(),
                     Statement::RevertNamed { args, .. } => args.iter().collect(),
                     Statement::RevertEnum { args, .. } => args.iter().collect(),
-                    Statement::If { condition, then_block: _, else_block: _ } => vec![condition],
+                    Statement::If { condition, then_block, else_block: _ } => vec![condition],
                     Statement::Let { value, .. } => vec![value],
                     Statement::MapAssignment { key, value, .. } => vec![key, value],
                     Statement::FieldAssignment { value, .. } => vec![value],
@@ -278,8 +246,9 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                     for id in &idents {
                         if !state_names.contains(id.as_str())
                             && !param_names.contains(id.as_str())
-                            && !let_names.contains(id.as_str())
+                            && !let_names.contains(id)
                             && !PQC_BUILTINS.contains(&id.as_str())
+                            && id != "caller"
                         {
                             return Err(format!(
                                 "undefined variable '{}' in function '{}' of contract '{}'",
@@ -427,194 +396,109 @@ fn dfs_check<'a>(
     Ok(())
 }
 
-// ── wasm-bindgen surface ──────────────────────────────────────────────────────
-use wasm_bindgen::prelude::*;
-use serde::Serialize;
-
-#[derive(Serialize)]
-struct WasmParamInfo {
-    name: String,
-    ty:   String,
-}
-
-#[derive(Serialize)]
-struct WasmFunctionInfo {
-    name:        String,
-    params:      Vec<WasmParamInfo>,
-    return_type: Option<String>,
-    argc:        usize,
-}
-
-#[derive(Serialize)]
-struct WasmCompileResult {
-    success:           bool,
-    bytecode:          Option<String>,
-    state_vars:        Vec<(String, u32)>,
-    warnings:          Vec<String>,
-    errors:            Vec<String>,
-    /// Contract names this contract calls via extern_call.
-    extern_contracts:  Vec<String>,
-    /// Function metadata — param names, types, return types.
-    functions:         Vec<WasmFunctionInfo>,
-    /// Per-state-variable type names for IDE rendering.
-    state_var_types:   std::collections::HashMap<String, String>,
-}
-
-/// Compile a SynQ source string in-browser. Returns JSON.
-/// Bytecode is lowercase hex. Call POST /synq/sign to attach ML-DSA-65 sidecar.
-#[wasm_bindgen]
-pub fn compile_synq(source: &str) -> String {
-    // Parse AST separately so we can extract metadata even when compile() succeeds
-    let ast = parser::parse(source).unwrap_or_default();
-    let result = match compile(source) {
-        Ok(cr) => {
-            // Extract function metadata from the AST for the IDE
-            let mut functions: Vec<WasmFunctionInfo> = Vec::new();
-            let mut state_var_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-            for unit in &ast {
-                if let SourceUnit::Contract(c) = unit {
-                    for part in &c.parts {
-                        if let ContractPart::Function(f) = part {
-                            let params: Vec<WasmParamInfo> = f.params.iter().map(|p| WasmParamInfo {
-                                name: p.name.clone(),
-                                ty:   type_name(&p.ty),
-                            }).collect();
-                            let argc = params.len();
-                            functions.push(WasmFunctionInfo {
-                                name:        f.name.clone(),
-                                params,
-                                return_type: f.returns.as_ref().map(|t| type_name(t)),
-                                argc,
-                            });
-                        }
-                        if let ContractPart::StateVariable(sv) = part {
-                            state_var_types.insert(sv.name.clone(), type_name(&sv.ty));
-                        }
-                    }
-                }
-            }
-            WasmCompileResult {
-                success:          true,
-                bytecode:         Some(hex::encode(&cr.bytecode)),
-                state_vars:       cr.state_vars,
-                warnings:         cr.warnings,
-                errors:           vec![],
-                extern_contracts: cr.extern_contracts,
-                functions,
-                state_var_types,
-            }
-        },
-        Err(e) => WasmCompileResult {
-            success:          false,
-            bytecode:         None,
-            state_vars:       vec![],
-            warnings:         vec![],
-            errors:           vec![e],
-            extern_contracts: vec![],
-            functions:        vec![],
-            state_var_types:  std::collections::HashMap::new(),
-        },
-    };
-    serde_json::to_string(&result)
-        .unwrap_or_else(|e| format!("{{\"success\":false,\"errors\":[\"serialisation error: {}\"]}}", e))
-}
-
-/// Compiler version string.
-#[wasm_bindgen]
-pub fn synq_version() -> String { "0.1.0-wasm".to_string() }
-
-
-// ── C-ABI export for server-side wasmtime execution ──────────────────────────
-// Bypasses wasm-bindgen entirely. Called via wasmtime on the server.
-// Convention: compile_synq_c(src_ptr, src_len, out_ptr, out_len) -> i32
-//   - Reads source string from (src_ptr, src_len) in WASM memory
-//   - Writes JSON result to (out_ptr, out_len) in WASM memory
-//   - Returns actual bytes written, or -1 on error
-#[no_mangle]
-pub unsafe extern "C" fn compile_synq_c(src_ptr: *const u8, src_len: usize, out_ptr: *mut u8, out_len: usize) -> i32 {
-    let source = match std::slice::from_raw_parts(src_ptr, src_len) {
-        s => match std::str::from_utf8(s) {
-            Ok(st) => st,
-            Err(_) => return -1,
+/// Recursively walk a statement collecting unique extern_call contract targets.
+fn collect_extern_contracts_stmt(stmt: &crate::ast::Statement, out: &mut Vec<String>) {
+    use crate::ast::Statement;
+    match stmt {
+        Statement::ExternCall { contract, .. } => {
+            if !out.contains(contract) { out.push(contract.clone()); }
         }
-    };
-
-    // Call the same compile() function that wasm-bindgen uses
-    let result = match compile(source) {
-        Ok(cr) => {
-            // Extract function metadata (same as compile_synq)
-            let ast = parser::parse(source).unwrap_or_default();
-            let mut functions: Vec<WasmFunctionInfo> = Vec::new();
-            let mut state_var_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-            for unit in &ast {
-                if let SourceUnit::Contract(c) = unit {
-                    for part in &c.parts {
-                        if let ContractPart::Function(f) = part {
-                            let params: Vec<WasmParamInfo> = f.params.iter().map(|p| WasmParamInfo {
-                                name: p.name.clone(),
-                                ty: type_name(&p.ty),
-                            }).collect();
-                            functions.push(WasmFunctionInfo {
-                                name: f.name.clone(),
-                                params,
-                                return_type: f.returns.as_ref().map(type_name),
-                                argc: f.params.len(),
-                            });
-                        }
-                        if let ContractPart::StateVariable(sv) = part {
-                            state_var_types.insert(sv.name.clone(), type_name(&sv.ty));
-                        }
-                    }
-                }
-            }
-
-            WasmCompileResult {
-                success: true,
-                bytecode: Some(hex::encode(&cr.bytecode)),
-                state_vars: cr.state_vars,
-                warnings: cr.warnings,
-                errors: vec![],
-                extern_contracts: cr.extern_contracts,
-                functions,
-                state_var_types,
+        Statement::If { then_block, else_block, .. } => {
+            for s in &then_block.statements { collect_extern_contracts_stmt(s, out); }
+            if let Some(eb) = else_block {
+                for s in &eb.statements { collect_extern_contracts_stmt(s, out); }
             }
         }
-        Err(e) => WasmCompileResult {
-            success: false,
-            bytecode: None,
-            state_vars: vec![],
-            warnings: vec![],
-            errors: vec![e],
-            extern_contracts: vec![],
-            functions: vec![],
-            state_var_types: std::collections::HashMap::new(),
-        },
-    };
-
-    let json = serde_json::to_string(&result).unwrap_or_else(|e| {
-        format!("{{{{\"success\":false,\"errors\":[\"serialise: {}\"]}}}}", e)
-    });
-
-    let json_bytes = json.as_bytes();
-    let written = json_bytes.len().min(out_len);
-    if written > 0 {
-        std::ptr::copy_nonoverlapping(json_bytes.as_ptr(), out_ptr, written);
+        _ => {}
     }
-    written as i32
 }
 
-/// Simple malloc for wasmtime callers — allocates `size` bytes, returns pointer.
-/// Uses a bump allocator from a static buffer.
-#[no_mangle]
-pub unsafe extern "C" fn synq_wasm_alloc(size: usize) -> *mut u8 {
-    // Simple static bump allocator
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static HEAP: AtomicUsize = AtomicUsize::new(0);
-    static mut HEAP_BASE: [u8; 4 * 1024 * 1024] = [0u8; 4 * 1024 * 1024]; // 4MB
+#[cfg(test)]
+mod struct_tests {
+    use super::*;
+// Test: Struct creation + field access via TuplePack/TupleGet
+// Verifies that struct literals create Tuple values and field access extracts fields.
 
-    let offset = HEAP.fetch_add(size, Ordering::SeqCst);
-    if offset + size > 4 * 1024 * 1024 {
-        return std::ptr::null_mut();
+use crate::parser::parse;
+use crate::codegen::CodeGenerator;
+
+#[test]
+fn test_struct_literal_and_field_access() {
+    let source = r#"pragma synq ^0.9;
+struct Point {
+    x: u256;
+    y: u256;
+}
+contract StructTest {
+    state {
+        p: Point;
+        initialised: bool;
     }
-    unsafe { HEAP_BASE.as_mut_ptr().add(offset) }
+    impl {
+        @public
+        @effects(initialised, p)
+        function init() -> bool {
+            if (initialised) { return false; }
+            p = Point { x: 10, y: 20 };
+            initialised = true;
+            return true;
+        }
+        @public
+        function get_x() -> u256 {
+            return p.x;
+        }
+        @public
+        function get_y() -> u256 {
+            return p.y;
+        }
+    }
+}
+"#;
+    let ast = parse(source).expect("parse failed");
+    let (bytecode, _state_vars) = CodeGenerator::new().generate(&ast).expect("codegen failed");
+    
+    // Bytecode should contain TuplePack (0xA0) and TupleGet (0xA2) opcodes
+    let has_pack = bytecode.windows(1).any(|w| w[0] == 0xA0);
+    let has_get  = bytecode.windows(1).any(|w| w[0] == 0xA2);
+    assert!(has_pack, "bytecode should contain TuplePack (0xA0) for struct literal");
+    assert!(has_get,  "bytecode should contain TupleGet (0xA2) for field access");
+}
+
+#[test]
+fn test_struct_literal_bytecode_count() {
+    // Verify that a struct with 2 fields emits exactly one TuplePack with count=2
+    let source = r#"pragma synq ^0.9;
+struct Pair {
+    a: u256;
+    b: u256;
+}
+contract PairTest {
+    state {
+        pair: Pair;
+    }
+    impl {
+        @public
+        function set_pair(av: u256, bv: u256) -> bool {
+            pair = Pair { a: av, b: bv };
+            return true;
+        }
+        @public
+        function get_a() -> u256 {
+            return pair.a;
+        }
+    }
+}
+"#;
+    let ast = parse(source).expect("parse failed");
+    let (bytecode, _state_vars) = CodeGenerator::new().generate(&ast).expect("codegen failed");
+    
+    // Count TuplePack opcodes — should be 1 (in set_pair)
+    let pack_count = bytecode.windows(1).filter(|w| w[0] == 0xA0).count();
+    assert_eq!(pack_count, 1, "should have exactly 1 TuplePack for struct literal");
+    
+    // Count TupleGet opcodes — should be 1 (in get_a)
+    let get_count = bytecode.windows(1).filter(|w| w[0] == 0xA2).count();
+    assert_eq!(get_count, 1, "should have exactly 1 TupleGet for field access");
+}
+
 }
