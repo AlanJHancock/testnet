@@ -111,6 +111,7 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
                             Statement::Assignment(_, e) => vec![e],
                             Statement::Require(e, _) => vec![e],
                             Statement::Let { value, .. } => vec![value],
+                    Statement::LetDestructure { value, .. } => vec![value.as_ref()],
                             _ => vec![],
                         };
                         for expr in exprs {
@@ -252,6 +253,10 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                 // Track let-bound variables for subsequent statement checks
                 if let Statement::Let { name, .. } = stmt {
                     let_names.insert(name.clone());
+                } else if let Statement::LetDestructure { names, .. } = stmt {
+                    for n in names {
+                        let_names.insert(n.clone());
+                    }
                 }
                 let exprs: Vec<&Expression> = match stmt {
                     Statement::Expression(e) => vec![e],
@@ -265,6 +270,7 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                     Statement::RevertEnum { args, .. } => args.iter().collect(),
                     Statement::If { condition, then_block: _, else_block: _ } => vec![condition],
                     Statement::Let { value, .. } => vec![value],
+                    Statement::LetDestructure { value, .. } => vec![value.as_ref()],
                     Statement::MapAssignment { key, value, .. } => vec![key, value],
                     Statement::FieldAssignment { value, .. } => vec![value],
                     Statement::SetOp { value, .. } => vec![value],
@@ -358,6 +364,7 @@ fn check_call_graph(contract: &ContractDefinition) -> Result<(), String> {
                     Statement::RevertEnum { args, .. } => args.iter().collect(),
                     Statement::If { condition, then_block: _, else_block: _ } => vec![condition],
                     Statement::Let { value, .. } => vec![value],
+                    Statement::LetDestructure { value, .. } => vec![value.as_ref()],
                     Statement::MapAssignment { key, value, .. } => vec![key, value],
                     Statement::FieldAssignment { value, .. } => vec![value],
                     Statement::SetOp { value, .. } => vec![value],

@@ -135,6 +135,7 @@ statement = { return_statement
             | break_statement
             | continue_statement
             | if_statement
+            | let_destructure
             | let_statement
             | map_assign_statement
             | set_op_statement
@@ -155,6 +156,7 @@ while_statement       = { "while" ~ "(" ~ expression ~ ")" ~ block }
 break_statement       = { "break" ~ ";" }
 continue_statement    = { "continue" ~ ";" }
 let_statement         = { "let" ~ IDENT ~ (":" ~ type_decl)? ~ "=" ~ expression ~ ";" }
+let_destructure       = { "let" ~ "(" ~ IDENT ~ ("," ~ IDENT)+ ~ ")" ~ "=" ~ expression ~ ";" }
 assignment_statement  = { IDENT ~ "=" ~ expression ~ ";" }
 field_assign_statement = { IDENT ~ "." ~ IDENT ~ "=" ~ expression ~ ";" }
 map_assign_statement  = { IDENT ~ "[" ~ expression ~ "]" ~ "=" ~ expression ~ ";" }
@@ -178,7 +180,7 @@ mul_op         = { "*" | "/" | "%" }
 
 unary   = { ("-" ~ unary) | ("!" ~ unary) | postfix }
 postfix = { primary ~ postfix_suffix* }
-postfix_suffix = { "." ~ IDENT ~ ("(" ~ arg_list? ~ ")")? }
+postfix_suffix = { "." ~ (IDENT ~ ("(" ~ arg_list? ~ ")")? | number_literal) }
 primary = { map_index_expr | enum_access_expr | struct_literal
              | some_expr | none_expr | ok_expr | err_expr | call_expr
              | tuple_literal | literal | "(" ~ expression ~ ")" | IDENT }

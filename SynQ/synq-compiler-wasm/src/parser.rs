@@ -425,6 +425,22 @@ fn parse_statement(pair: Pair<Rule>) -> Statement {
             let value = parse_expression(inner.next().unwrap());
             Statement::FieldAssignment { object, field, value }
         }
+        Rule::let_destructure => {
+            let inner: Vec<_> = pair.into_inner().collect();
+            let mut names = Vec::new();
+            let mut value_idx = None;
+            for (i, p) in inner.iter().enumerate() {
+                match p.as_rule() {
+                    Rule::IDENT => names.push(p.as_str().to_string()),
+                    _ => { value_idx = Some(i); }
+                }
+            }
+            let value_pair = inner.into_iter().nth(value_idx.unwrap()).unwrap();
+            Statement::LetDestructure {
+                names,
+                value: Box::new(parse_expression(value_pair)),
+            }
+        }
         Rule::let_statement => {
             let mut inner = pair.into_inner();
             let name = inner.next().unwrap().as_str().to_string();
@@ -540,13 +556,23 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
             for suffix in inner {
                 let mut suffix_inner = suffix.into_inner();
                 let field_or_method = suffix_inner.next().unwrap().as_str().to_string();
-                // Check if there's an arg_list (method call) or not (field access)
-                if let Some(arg_list) = suffix_inner.next() {
+                // Check if this is a numeric tuple index (e.g., t.0, t.1)
+                if let Ok(index) = field_or_method.parse::<usize>() {
+                    expr = Expression::TupleIndex {
+                        object: Box::new(expr),
+                        index,
+                    };
+                } else if let Some(arg_list) = suffix_inner.next() {
                     let args: Vec<Expression> = arg_list.into_inner().map(parse_expression).collect();
                     // Method call on a map/set — build from the expression
                     // For now, only support method calls on identifiers (map/set state vars)
                     if let Expression::Identifier(ref map_name) = expr {
                         match field_or_method.as_str() {
+                            "unwrap" | "is_some" | "is_none" | "is_ok" | "is_err" => {
+                                expr = Expression::MapMethod {
+                                    map: map_name.clone(), method: field_or_method, args
+                                };
+                            }
                             "add" | "remove" => expr = Expression::SetMethod {
                                 set: map_name.clone(), method: field_or_method, args
                             },

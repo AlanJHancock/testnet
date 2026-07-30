@@ -59,6 +59,7 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
                             Statement::Assignment(_, e) => vec![e],
                             Statement::Require(e, _) => vec![e],
                             Statement::Let { value, .. } => vec![value],
+                    Statement::LetDestructure { value, .. } => vec![value.as_ref()],
                             _ => vec![],
                         };
                         for expr in exprs {
@@ -215,8 +216,12 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
             let param_names: HashSet<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
 
             // Collect let-bound variable names (function-scoped)
-            let let_names: HashSet<String> = f.body.statements.iter().filter_map(|s| {
-                if let Statement::Let { name, .. } = s { Some(name.clone()) } else { None }
+            let let_names: HashSet<String> = f.body.statements.iter().flat_map(|s| {
+                match s {
+                    Statement::Let { name, .. } => vec![name.clone()],
+                    Statement::LetDestructure { names, .. } => names.clone(),
+                    _ => vec![],
+                }
             }).collect();
 
             let all_stmts: Vec<&Statement> = f.body.statements.iter().collect();
@@ -233,6 +238,7 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                     Statement::RevertEnum { args, .. } => args.iter().collect(),
                     Statement::If { condition, then_block, else_block: _ } => vec![condition],
                     Statement::Let { value, .. } => vec![value],
+                    Statement::LetDestructure { value, .. } => vec![value.as_ref()],
                     Statement::MapAssignment { key, value, .. } => vec![key, value],
                     Statement::FieldAssignment { value, .. } => vec![value],
                     Statement::SetOp { value, .. } => vec![value],
@@ -327,6 +333,7 @@ fn check_call_graph(contract: &ContractDefinition) -> Result<(), String> {
                     Statement::RevertEnum { args, .. } => args.iter().collect(),
                     Statement::If { condition, then_block: _, else_block: _ } => vec![condition],
                     Statement::Let { value, .. } => vec![value],
+                    Statement::LetDestructure { value, .. } => vec![value.as_ref()],
                     Statement::MapAssignment { key, value, .. } => vec![key, value],
                     Statement::FieldAssignment { value, .. } => vec![value],
                     Statement::SetOp { value, .. } => vec![value],

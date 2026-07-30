@@ -202,6 +202,7 @@ pub enum Statement {
     SetOp { set: String, op: SetOpKind, value: Expression },
     /// `let x = expr` or `let x: T = expr` — local variable binding
     Let { name: String, ty: Option<Type>, value: Expression },
+    LetDestructure { names: Vec<String>, value: Box<Expression> },
     Return(Option<Expression>),
     ExternCall { contract: String, function: String, args: Vec<Expression> },
     /// `emit EventName(args...)` — event emission
@@ -235,6 +236,7 @@ pub enum Expression {
     Err(Box<Expression>),
     /// `expr.field` — access a struct field
     FieldAccess { object: Box<Expression>, field: String },
+    TupleIndex { object: Box<Expression>, index: usize },
     EnumAccess { enum_name: String, variant_name: String },
     /// `TypeName { field1: val1, field2: val2 }` — struct literal
     StructLiteral { type_name: String, fields: Vec<(String, Expression)> },

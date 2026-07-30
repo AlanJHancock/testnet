@@ -399,6 +399,19 @@ impl<'a> BuildContext<'a> {
                 Ok(())
             }
 
+            Statement::LetDestructure { names, value } => {
+                let val = self.build_expression(value)?;
+                // Build IR for destructuring — each name gets a tuple element
+                for (i, name) in names.iter().enumerate() {
+                    let elem = self.push_value(
+                        IrOp::FieldAccess(val, format!(".{}", i)),
+                        IrType::U256,
+                    );
+                    self.local_values.insert(name.clone(), elem);
+                }
+                Ok(())
+            }
+
             Statement::Return(expr) => {
                 let val = match expr {
                     Some(e) => Some(self.build_expression(e)?),
@@ -763,6 +776,11 @@ impl<'a> BuildContext<'a> {
                 let obj_val = self.build_expression(object)?;
                 let field_idx = self.get_field_index(object, field);
                 Ok(self.push_value(IrOp::FieldAccess(obj_val, field.clone()), IrType::U256))
+            }
+
+            Expression::TupleIndex { object, index } => {
+                let obj_val = self.build_expression(object)?;
+                Ok(self.push_value(IrOp::FieldAccess(obj_val, format!(".{}", index)), IrType::U256))
             }
 
             Expression::EnumAccess { enum_name, variant_name } => {
