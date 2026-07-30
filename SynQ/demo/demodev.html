@@ -2007,27 +2007,41 @@
 
       // Populate SSA IR display from compile warnings
       var irEl = document.getElementById('irDisplay');
-      function renderIR(warningsList) {
+      function renderIR(warningsList, irDump) {
         if (!irEl) return;
         var irWarnings = (warningsList || []).filter(function(w) { return w.indexOf('[IR]') === 0; });
-        if (irWarnings.length > 0) {
+        
+        // If we have full IR dump from server, show that
+        if (irDump && irDump.length > 0) {
           var lines = [];
-          lines.push('SSA IR Analysis');
+          lines.push('SSA IR — Full Instruction Dump');
+          lines.push('============================================');
+          lines.push('');
+          irDump.forEach(function(fnIR) {
+            lines.push(fnIR.trim());
+            lines.push('');
+          });
+          // Append summary stats below the full dump
+          if (irWarnings.length > 0) {
+            lines.push('--------------------------------------------');
+            lines.push('Summary');
+            lines.push('--------------------------------------------');
+            irWarnings.forEach(function(w) {
+              lines.push('  ' + w.replace(/^\[IR\]\s*/, ''));
+            });
+          }
+          irEl.textContent = lines.join('\n');
+          irEl.style.color = '#c4b5fd';
+        } else if (irWarnings.length > 0) {
+          // Fallback: stats only (WASM path without server IR dump)
+          var lines = [];
+          lines.push('SSA IR Analysis (summary only)');
           lines.push('============================================');
           lines.push('');
           irWarnings.forEach(function(w) {
             var text = w.replace(/^\[IR\]\s*/, '');
-            if (text.indexOf('fn ') === 0) {
-              lines.push(text);
-            } else if (text.indexOf('build error') !== -1) {
-              lines.push('WARNING: ' + text);
-            } else {
-              lines.push('  ' + text);
-            }
+            lines.push('  ' + text);
           });
-          lines.push('');
-          lines.push('--------------------------------------------');
-          lines.push('R=read  W=write  H=host  A=auth  L=linear');
           irEl.textContent = lines.join('\n');
           irEl.style.color = '#c4b5fd';
         } else {
@@ -2036,18 +2050,19 @@
       }
       if (irEl) {
         var irWarnings = (data.warnings || []).filter(function(w) { return w.indexOf('[IR]') === 0; });
-        if (irWarnings.length > 0) {
-          renderIR(data.warnings);
+        var irDump = data.ir_dump || null;
+        if (irWarnings.length > 0 || irDump) {
+          renderIR(data.warnings, irDump);
         } else {
-          // WASM compile succeeded but no IR warnings — fetch from server
+          // WASM compile succeeded but no IR — fetch from server
           irEl.innerHTML = '<span class="ir-empty">Fetching IR analysis from server...</span>';
           fetch(COMPILE_URL, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ source: source })
           }).then(function(r) { return r.json(); }).then(function(srvData) {
-            if (srvData.success && srvData.warnings) {
-              renderIR(srvData.warnings);
+            if (srvData.success && (srvData.warnings || srvData.ir_dump)) {
+              renderIR(srvData.warnings, srvData.ir_dump);
             } else {
               irEl.innerHTML = '<span class="ir-empty">No IR analysis available</span>';
             }

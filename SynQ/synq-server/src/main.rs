@@ -684,6 +684,8 @@ struct CompileResponse {
     state_var_types:    std::collections::HashMap<String, String>,
     /// V3 manifest metadata
     manifest:           Option<ManifestInfo>,
+    /// Full SSA IR dump (one string per function, block-by-block)
+    ir_dump:            Vec<String>,
 }
 
 /// V3 artifact manifest — matches the Testnet-v3 schema-v2 manifest structure.
@@ -782,6 +784,7 @@ async fn compile_handler(
             functions:        Vec::new(),
             state_var_types:  std::collections::HashMap::new(),
             manifest:           None,
+            ir_dump:            vec![],
         }));
     }
     if req.source.len() > MAX_SOURCE_BYTES {
@@ -792,6 +795,7 @@ async fn compile_handler(
             functions:        Vec::new(),
             state_var_types:  std::collections::HashMap::new(),
             manifest:           None,
+            ir_dump:            vec![],
         }));
     }
 
@@ -803,6 +807,7 @@ async fn compile_handler(
             functions:        Vec::new(),
             state_var_types:  std::collections::HashMap::new(),
             manifest:           None,
+            ir_dump:            vec![],
         })),
     };
 
@@ -868,7 +873,20 @@ async fn compile_handler(
             functions:        Vec::new(),
             state_var_types:  std::collections::HashMap::new(),
             manifest:           None,
+            ir_dump:            vec![],
         })),
+    };
+
+    // Build SSA IR dump for display
+    let ir_dump: Vec<String> = {
+        let mut builder = synq_compiler::ir::IrBuilder::new();
+        match builder.build(&ast) {
+            Ok(mut module) => {
+                let _report = synq_compiler::ir::analyze(&mut module);
+                module.functions.iter().map(|f| f.dump()).collect()
+            }
+            Err(_) => vec![],
+        }
     };
 
     // ── SSA IR analysis (parallel to codegen) ──────────────────────────────
@@ -912,6 +930,7 @@ async fn compile_handler(
                     errors: vec![format!("PQC signing failed: {}", e)], warnings: vec![],
                     functions:        Vec::new(), state_var_types: std::collections::HashMap::new(),
             manifest:           None,
+            ir_dump:            vec![],
                 })),
             };
             json!({
@@ -933,6 +952,7 @@ async fn compile_handler(
                     errors: vec![format!("PQC keygen failed: {}", e)], warnings: vec![],
                     functions:        Vec::new(), state_var_types: std::collections::HashMap::new(),
                     manifest:           None,
+                    ir_dump:            vec![],
                 })),
             };
             let sig = match pqc.sign_message(&keypair.private_key, &bytecode, SIGNING_ALGORITHM) {
@@ -942,6 +962,7 @@ async fn compile_handler(
                     errors: vec![format!("PQC signing failed: {}", e)], warnings: vec![],
                     functions:        Vec::new(), state_var_types: std::collections::HashMap::new(),
             manifest:           None,
+            ir_dump:            vec![],
                 })),
             };
             json!({
@@ -1045,6 +1066,7 @@ async fn compile_handler(
                         warnings: vec![],
                         functions:        Vec::new(), state_var_types: std::collections::HashMap::new(),
             manifest:           None,
+            ir_dump:            vec![],
                         }));
                 }
             }
@@ -1192,6 +1214,7 @@ async fn compile_handler(
                 authority_scopes: auth_scopes,
             })
         },
+        ir_dump,
     }))
 }
 
@@ -1400,6 +1423,7 @@ async fn sign_source_handler(
                 functions:        Vec::new(),
             state_var_types:  std::collections::HashMap::new(),
             manifest:           None,
+            ir_dump:            vec![],
             }))
         };
     }
@@ -1441,6 +1465,7 @@ async fn sign_source_handler(
             functions:        Vec::new(),
             state_var_types:  std::collections::HashMap::new(),
             manifest:           None,
+            ir_dump:            vec![],
         })),
     };
     let contract_name: Option<String> = ast.iter().find_map(|unit| match unit {
@@ -1518,6 +1543,7 @@ async fn sign_source_handler(
             functions:        Vec::new(),
             state_var_types:  std::collections::HashMap::new(),
             manifest:           None,
+            ir_dump:            vec![],
         })),
     };
     let bytecode_hash_bytes: [u8; 32] = Keccak256::digest(&bytecode).into();
@@ -1632,6 +1658,7 @@ async fn sign_source_handler(
         warnings:          compile_warnings,
         functions:        Vec::new(),
             manifest:           None,
+            ir_dump:            vec![],
     }))
 }
 

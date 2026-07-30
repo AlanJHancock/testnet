@@ -20,6 +20,8 @@ pub struct CompileResult {
     pub warnings:         Vec<String>,
     /// Contract names called via extern_call, in first-appearance order, deduplicated.
     pub extern_contracts: Vec<String>,
+    /// Full SSA IR dump for each function (block-by-block instruction listing).
+    pub ir_dump:          Vec<String>,
 }
 
 /// Top-level compile entry point.
@@ -96,6 +98,7 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
     }
 
     // 4. Build SSA IR (parallel to codegen — for analysis and future backend)
+    let mut ir_dump: Vec<String> = Vec::new();
     {
         let mut ir_builder = ir::IrBuilder::new();
         match ir_builder.build(&ast) {
@@ -115,6 +118,10 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
                         stat.linear_creates, stat.linear_consumes
                     ));
                 }
+                // Dump full IR for each function
+                for func in &ir_module.functions {
+                    ir_dump.push(func.dump());
+                }
             }
             Err(e) => {
                 warnings.push(format!("[IR] build error: {}", e));
@@ -122,7 +129,7 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
         }
     }
 
-    Ok(CompileResult { bytecode, state_vars, warnings, extern_contracts })
+    Ok(CompileResult { bytecode, state_vars, warnings, extern_contracts, ir_dump })
 }
 
 // ─── Semantic check: undefined variables and calls ───────────────────────────
