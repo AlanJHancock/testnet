@@ -74,6 +74,7 @@ use synq_vm::{QuantumVM, Value};
 use synq_vm::verify;
 
 mod wasm_compiler;
+mod sqb;
 
 // ─── Security constants ───────────────────────────────────────────────────────
 
@@ -703,6 +704,8 @@ struct CompileResponse {
     manifest:           Option<ManifestInfo>,
     /// Full SSA IR dump (one string per function, block-by-block)
     ir_dump:            Vec<String>,
+    /// SQB binary artifact (base64-encoded) — canonical hash-bound format
+    sqb:               Option<String>,
 }
 
 /// V3 artifact manifest — matches the Testnet-v3 schema-v2 manifest structure.
@@ -822,6 +825,7 @@ async fn compile_handler(
             state_var_types:  std::collections::HashMap::new(),
             manifest:           None,
             ir_dump:            vec![],
+            sqb:               None,
         }));
     }
     if req.source.len() > MAX_SOURCE_BYTES {
@@ -833,6 +837,7 @@ async fn compile_handler(
             state_var_types:  std::collections::HashMap::new(),
             manifest:           None,
             ir_dump:            vec![],
+            sqb:               None,
         }));
     }
 
@@ -845,6 +850,7 @@ async fn compile_handler(
             state_var_types:  std::collections::HashMap::new(),
             manifest:           None,
             ir_dump:            vec![],
+            sqb:               None,
         })),
     };
 
@@ -911,6 +917,7 @@ async fn compile_handler(
             state_var_types:  std::collections::HashMap::new(),
             manifest:           None,
             ir_dump:            vec![],
+            sqb:               None,
         })),
     };
 
@@ -995,6 +1002,7 @@ async fn compile_handler(
                     functions:        Vec::new(), state_var_types: std::collections::HashMap::new(),
             manifest:           None,
             ir_dump:            vec![],
+            sqb:               None,
                 })),
             };
             json!({
@@ -1017,6 +1025,7 @@ async fn compile_handler(
                     functions:        Vec::new(), state_var_types: std::collections::HashMap::new(),
                     manifest:           None,
                     ir_dump:            vec![],
+            sqb:               None,
                 })),
             };
             let sig = match pqc.sign_message(&keypair.private_key, &bytecode, SIGNING_ALGORITHM) {
@@ -1027,6 +1036,7 @@ async fn compile_handler(
                     functions:        Vec::new(), state_var_types: std::collections::HashMap::new(),
             manifest:           None,
             ir_dump:            vec![],
+            sqb:               None,
                 })),
             };
             json!({
@@ -1071,6 +1081,13 @@ async fn compile_handler(
 
     // Clone state_vars for manifest use (it gets moved into CompileResponse)
     let manifest_state_vars = state_vars.clone();
+
+    // Clone values needed by the SQB encoder (they get moved into CompileResponse fields)
+    let sqb_functions = functions.clone();
+    let sqb_state_vars = state_vars.clone();
+    let sqb_ir_dump = ir_dump.clone();
+    let sqb_bytecode = bytecode.clone();
+    let sqb_source = req.source.clone();
 
     (StatusCode::OK, RespJson(CompileResponse {
         success: true,
@@ -1131,6 +1148,7 @@ async fn compile_handler(
                         functions:        Vec::new(), state_var_types: std::collections::HashMap::new(),
             manifest:           None,
             ir_dump:            vec![],
+            sqb:               None,
                         }));
                 }
             }
@@ -1279,11 +1297,124 @@ async fn compile_handler(
             })
         },
         ir_dump,
+        sqb: {
+            // ── SQB Binary Artifact Generation (ACTS-VM-001..011) ─────────
+            // Build a canonical, hash-bound .sqb artifact from the compiled
+            // bytecode, ABI, manifest, and IR dump. All section hashes are
+            // bound into the artifact root (SHA3-256).
+            use base64::{Engine, prelude::BASE64_STANDARD};
+            use sha3::{Digest, Sha3_256};
+
+            // CODE section: raw QVM bytecode
+            let sqb_code = sqb_bytecode.clone();
+
+            // ABI section: function metadata as JSON (self-contained)
+            let mut ec: Vec<String> = Vec::new();
+            for unit in &ast {
+                if let synq_compiler::ast::SourceUnit::Contract(c) = unit {
+                    for part in &c.parts {
+                        if let synq_compiler::ast::ContractPart::Function(fn_) = part {
+                            for stmt in &fn_.body.statements {
+                                if let synq_compiler::ast::Statement::ExternCall { contract, .. } = stmt {
+                                    if !ec.contains(contract) { ec.push(contract.clone()); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let abi_json = serde_json::json!({
+                "contract_name": &contract_name,
+                "functions": sqb_functions.iter().map(|f| serde_json::json!({
+                    "name": f.name,
+                    "params": f.params,
+                    "return_type": f.return_type,
+                    "has_return": f.has_return,
+                    "governance_scope": f.governance_scope,
+                    "requires_state": f.requires_state,
+                    "modifies": f.modifies,
+                })).collect::<Vec<_>>(),
+                "extern_contracts": &ec,
+            });
+            let abi_bytes = serde_json::to_vec(&abi_json).unwrap_or_default();
+
+            // MANIFEST section: V3 manifest JSON (self-contained)
+            let artifact_hash = hex::encode(Sha3_256::digest(&bytecode));
+            let source_hash = hex::encode(Sha3_256::digest(sqb_source.as_bytes()));
+            let manifest_json = serde_json::json!({
+                "artifact_hash": artifact_hash,
+                "source_hash": source_hash,
+                "chain_id": V3_CHAIN_ID,
+                "network_id": V3_NETWORK_ID,
+                "signature_domains": {
+                    "deploy": V3_DOMAIN_DEPLOY,
+                    "call": V3_DOMAIN_CALL,
+                    "governance": V3_DOMAIN_GOVERNANCE,
+                    "attest": V3_DOMAIN_ATTEST,
+                },
+                "functions": sqb_functions.iter().map(|f| serde_json::json!({
+                    "name": f.name,
+                    "params": f.params,
+                    "return_type": f.return_type,
+                })).collect::<Vec<_>>(),
+                "state_vars": sqb_state_vars.iter().map(|(name, slot)| {
+                    let ty = {
+                        let mut t = "u256".to_string();
+                        for unit in &ast {
+                            if let synq_compiler::ast::SourceUnit::Contract(c) = unit {
+                                for part in &c.parts {
+                                    if let synq_compiler::ast::ContractPart::StateVariable(sv) = part {
+                                        if sv.name == *name { t = type_name(&sv.ty); }
+                                    }
+                                }
+                            }
+                        }
+                        serde_json::json!({"name": name, "ty": t, "slot": slot})
+                    };
+                    ty
+                }).collect::<Vec<_>>(),
+            });
+            let manifest_bytes = serde_json::to_vec(&manifest_json).unwrap_or_default();
+
+            // IR section: join all IR dump strings
+            let ir_bytes = sqb_ir_dump.join("\n").into_bytes();
+
+            // META section: compiler metadata
+            let meta_json = serde_json::json!({
+                "compiler_version": "0.9",
+                "chain_id": V3_CHAIN_ID,
+                "network_id": V3_NETWORK_ID,
+                "contract_name": &contract_name,
+                "timestamp": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs()).unwrap_or(0),
+                "acts_vm_conformance": "ACTS-VM-001..011",
+            });
+            let meta_bytes = serde_json::to_vec(&meta_json).unwrap_or_default();
+
+            let encoder = sqb::SqbEncoder::new(V3_CHAIN_ID as u32)
+                .code(sqb_code)
+                .abi(abi_bytes)
+                .manifest(manifest_bytes)
+                .ir_dump(ir_bytes)
+                .meta(meta_bytes);
+
+            match encoder.build() {
+                Ok(sqb_binary) => {
+                    eprintln!("[SQB] Artifact encoded: {} bytes, {} sections",
+                               sqb_binary.len(), 5);
+                    Some(BASE64_STANDARD.encode(&sqb_binary))
+                }
+                Err(e) => {
+                    eprintln!("[SQB] Failed to encode artifact: {}", e);
+                    None
+                }
+            }
+        },
     }))
 }
 
-
-// ─── POST /source-nonce ───────────────────────────────────────────────────────
+// ─── POST /source-nonce ───────────────────────────────────────────────────────────────────────────
 //
 // Rev-2 source signing: return a fresh single-use nonce bound to a source hash.
 // Stateless — nonce = SHA3_HMAC(source_nonce_secret || source_hash || 10s-bucket).
@@ -1488,6 +1619,7 @@ async fn sign_source_handler(
             state_var_types:  std::collections::HashMap::new(),
             manifest:           None,
             ir_dump:            vec![],
+            sqb:               None,
             }))
         };
     }
@@ -1530,6 +1662,7 @@ async fn sign_source_handler(
             state_var_types:  std::collections::HashMap::new(),
             manifest:           None,
             ir_dump:            vec![],
+            sqb:               None,
         })),
     };
     let contract_name: Option<String> = ast.iter().find_map(|unit| match unit {
@@ -1608,6 +1741,7 @@ async fn sign_source_handler(
             state_var_types:  std::collections::HashMap::new(),
             manifest:           None,
             ir_dump:            vec![],
+            sqb:               None,
         })),
     };
     let bytecode_hash_bytes: [u8; 32] = Keccak256::digest(&bytecode).into();
@@ -1723,6 +1857,7 @@ async fn sign_source_handler(
         functions:        Vec::new(),
             manifest:           None,
             ir_dump:            vec![],
+            sqb:               None,
     }))
 }
 

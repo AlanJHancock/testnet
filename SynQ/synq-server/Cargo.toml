@@ -22,4 +22,5 @@ getrandom     = "0.2"
 governor      = { workspace = true }
 dashmap       = { workspace = true }
 wasmtime = { version = "14", default-features = false, features = ["cranelift"] }
+base64        = "0.22"
 

@@ -306,6 +306,7 @@
   <div class="actions" style="flex-wrap:nowrap;align-items:center;gap:8px;">
     <button class="btn btn-primary" id="compileBtn" onclick="doCompile()">Compile</button>
     <button class="btn btn-primary" id="deployBtn" onclick="initVMPanel()" style="visibility:hidden;pointer-events:none;" title="Deploy compiled bytecode to the QVM session">Deploy</button>
+    <button class="btn btn-primary" id="sqbDownloadBtn" onclick="downloadSqb()" style="visibility:hidden;pointer-events:none;background:#1a6b3c;color:#fff;" title="Download SQB binary artifact (.sqb)">&#x2B07; .sqb</button>
   </div>
   <!-- Row 2: status badges + deps hint — always in DOM, never causes row-1 reflow -->
   <div style="display:flex;align-items:center;gap:8px;min-height:1.4rem;margin-top:4px;padding-left:2px;">
@@ -460,6 +461,7 @@
 
   var currentBytecode         = null;
   var currentManifest          = null;  // V3 manifest from compile (for Layer 3 verification)
+  var currentSqb               = null;  // SQB binary artifact (base64) from compile
   var currentSidecar          = null;
   var currentStateVars        = [];
   var currentStateVarTypes    = {};
@@ -1753,6 +1755,7 @@
   function clearResults() {
     var wb = document.getElementById('wasmBadge'); if (wb) wb.style.display = 'none';
     var _db = document.getElementById('deployBtn'); if (_db) { _db.style.visibility = 'hidden'; _db.style.pointerEvents = 'none'; }
+  var _sb = document.getElementById('sqbDownloadBtn'); if (_sb) { _sb.style.visibility = 'hidden'; _sb.style.pointerEvents = 'none'; }
     if (sessionId) {
       // Only delete server session if it is NOT registered in the workspace.
       // Workspace contracts must survive template switches — they are only
@@ -1761,7 +1764,7 @@
       if (!_inWs) fetch(SESSION_DEL_URL + sessionId, { method: 'DELETE' }).catch(function(){});
       sessionId = null;
     }
-    currentBytecode = null; currentSidecar = null; currentContractName = null; currentContractAddress = null; currentManifest = null;
+    currentBytecode = null; currentSidecar = null; currentContractName = null; currentContractAddress = null; currentManifest = null; currentSqb = null;
     (function() {
       var mode = document.getElementById('sigMode');
       var note = document.getElementById('sigNote');
@@ -2064,6 +2067,7 @@
       // ── Compile success — store state ──────────────────────────────────────
       currentBytecode        = data.bytecode;
       currentManifest         = data.manifest || null;
+      currentSqb              = data.sqb || null;
       currentSidecar         = data.signature_sidecar || null;
       currentStateVars       = data.state_vars        || [];
       currentStateVarTypes    = data.state_var_types   || {};
@@ -2314,6 +2318,16 @@
         db.style.pointerEvents = 'auto';
         db.removeAttribute('disabled');
         db.style.opacity = '1';
+      }
+      var sb = document.getElementById('sqbDownloadBtn');
+      if (sb && currentSqb) {
+        sb.style.visibility = 'visible';
+        sb.style.pointerEvents = 'auto';
+        var sizeKb = Math.round(currentSqb.length * 0.75 / 1024);
+        sb.textContent = '\u2B07 .sqb (' + sizeKb + ' KB)';
+      } else if (sb) {
+        sb.style.visibility = 'hidden';
+        sb.style.pointerEvents = 'none';
       }
       // Dependency hint — contextual message based on what still needs deploying.
       // Uses visibility (not display) so the badge row height stays constant.
@@ -5416,6 +5430,29 @@ var LOOP_LINES = [
     setStatus('StackFailDemo loaded — Compile to see the ✅ VERIFY badge. Each function uses balanced stack operations that Layer 2 verifies.', 'info');
   }
   window.loadStackFailDemo = loadStackFailDemo;
+
+
+    // ── SQB Binary Artifact Download ───────────────────────────────────────
+    function downloadSqb() {
+      if (!currentSqb) { console.warn('[SQB] No artifact available'); return; }
+      try {
+        var binary = atob(currentSqb);
+        var bytes = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) { bytes[i] = binary.charCodeAt(i); }
+        var blob = new Blob([bytes], { type: 'application/octet-stream' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = (currentContractName || 'contract') + '.sqb';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        console.log('[SQB] Downloaded: ' + a.download + ' (' + bytes.length + ' bytes)');
+      } catch(e) {
+        console.error('[SQB] Download failed:', e);
+      }
+    }
 
 })();
 </script>

@@ -111,3 +111,4 @@ pub fn sign(_msg: &[u8], _sk: &[u8]) -> Vec<u8> {{
 pub fn verify(_msg: &[u8], _sig: &[u8], _pk: &[u8]) -> bool {{
     false
 }}
+
