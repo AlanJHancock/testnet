@@ -42,6 +42,71 @@ use std::collections::HashMap;
 const FUNCTION_LOCAL_BASE: u32 = 1024;
 const FUNCTION_LOCAL_STRIDE: u32 = 16;
 
+/// Format an Expression back to a source-like string for error messages.
+fn expr_to_string(expr: &Expression) -> String {
+    match expr {
+        Expression::Literal(lit) => match lit {
+            Literal::String(s) => format!("\"{}\"", s),
+            Literal::Number(n) => n.to_string(),
+            Literal::BigNumber(s) => s.clone(),
+            Literal::Hex(bytes) => format!("0x{}", bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()),
+            Literal::Bool(b) => b.to_string(),
+        },
+        Expression::Identifier(name) => name.clone(),
+        Expression::Caller => "caller".to_string(),
+        Expression::Call(name, args) => {
+            let args_str = args.iter().map(expr_to_string).collect::<Vec<_>>().join(", ");
+            format!("{}({})", name, args_str)
+        }
+        Expression::BinaryOp(lhs, op, rhs) => {
+            let op_str = match op {
+                BinaryOperator::Add => "+", BinaryOperator::Sub => "-",
+                BinaryOperator::Mul => "*", BinaryOperator::Div => "/",
+                BinaryOperator::Mod => "%", BinaryOperator::Eq => "==",
+                BinaryOperator::Ne => "!=", BinaryOperator::Lt => "<",
+                BinaryOperator::Le => "<=", BinaryOperator::Gt => ">",
+                BinaryOperator::Ge => ">=", BinaryOperator::And => "&&",
+                BinaryOperator::Or => "||",
+            };
+            format!("{} {} {}", expr_to_string(lhs), op_str, expr_to_string(rhs))
+        }
+        Expression::UnaryOp(op, operand) => {
+            let op_str = match op { UnaryOperator::Neg => "-", UnaryOperator::Not => "!" };
+            format!("{}{}", op_str, expr_to_string(operand))
+        }
+        Expression::MapIndex(map, key) => format!("{}[{}]", map, expr_to_string(key)),
+        Expression::MapMethod { map, method, args } => {
+            let args_str = args.iter().map(expr_to_string).collect::<Vec<_>>().join(", ");
+            format!("{}.{}({})", map, method, args_str)
+        }
+        Expression::SetMethod { set, method, args } => {
+            let args_str = args.iter().map(expr_to_string).collect::<Vec<_>>().join(", ");
+            format!("{}.{}({})", set, method, args_str)
+        }
+        Expression::Tuple(exprs) => {
+            format!("({})", exprs.iter().map(expr_to_string).collect::<Vec<_>>().join(", "))
+        }
+        Expression::Some(e) => format!("Some({})", expr_to_string(e)),
+        Expression::None => "None".to_string(),
+        Expression::Ok(e) => format!("Ok({})", expr_to_string(e)),
+        Expression::Err(e) => format!("Err({})", expr_to_string(e)),
+        Expression::FieldAccess { object, field } => format!("{}.{}", expr_to_string(object), field),
+        Expression::TupleIndex { object, index } => format!("{}.{}", expr_to_string(object), index),
+        Expression::EnumAccess { enum_name, variant_name } => format!("{}::{}", enum_name, variant_name),
+        Expression::StructLiteral { type_name, fields } => {
+            let fields_str = fields.iter()
+                .map(|(f, v)| format!("{}: {}", f, expr_to_string(v)))
+                .collect::<Vec<_>>().join(", ");
+            format!("{} {{ {} }}", type_name, fields_str)
+        }
+    }
+}
+
+/// Format a list of arg expressions for a revert error message.
+fn format_revert_args(args: &[Expression]) -> String {
+    args.iter().map(expr_to_string).collect::<Vec<_>>().join(", ")
+}
+
 /// One PQC/KEM builtin call compiles directly to its matching VM opcode.
 /// The tuple is (arg count, opcode, pushes a Bool/Bytes result).
 fn pqc_builtin_opcode(name: &str) -> Option<OpCode> {
@@ -667,20 +732,20 @@ impl CodeGenerator {
                     }
                 }
                 
-                // Build the display message (error name + arg count).
+                // Build the display message with arg expressions formatted.
                 let msg = if args.is_empty() {
                     if let Some((_, ref en)) = found_code { format!("{}::{}", en, error) }
                     else { error.clone() }
                 } else {
                     let prefix = if let Some((_, ref en)) = found_code { format!("{}::{}", en, error) }
                     else { error.clone() };
-                    format!("{}({} arg(s))", prefix, args.len())
+                    format!("{}({})", prefix, format_revert_args(&args))
                 };
                 
-                // Still push args so they are evaluated (side-effect safe).
+                // Evaluate args and Print their runtime values before reverting.
                 for arg in args.iter() {
                     self.gen_expression(arg, scope)?;
-                    self.assembler.emit_op(OpCode::Pop);
+                    self.assembler.emit_op(OpCode::Print);
                 }
                 
                 let msg_bytes = msg.as_bytes();
@@ -716,13 +781,13 @@ impl CodeGenerator {
                 let msg = if args.is_empty() {
                     format!("{}::{}", enum_name, error)
                 } else {
-                    format!("{}::{}({} arg(s))", enum_name, error, args.len())
+                    format!("{}::{}({})", enum_name, error, format_revert_args(&args))
                 };
                 
-                // Evaluate args for side effects.
+                // Evaluate args and Print their runtime values before reverting.
                 for arg in args.iter() {
                     self.gen_expression(arg, scope)?;
-                    self.assembler.emit_op(OpCode::Pop);
+                    self.assembler.emit_op(OpCode::Print);
                 }
                 
                 let msg_bytes = msg.as_bytes();

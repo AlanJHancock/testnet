@@ -4838,6 +4838,7 @@ var LOOP_LINES = [
       'contract NamedError {',
       '  state {',
       '    initialised: bool;',
+      '    balance: u256;',
       '  }',
       '',
       '  enum VaultError { InsufficientBalance, Unauthorized, InvalidAmount, Overflow }',
@@ -4845,12 +4846,13 @@ var LOOP_LINES = [
       '  @public',
       '  function init() as caller -> bool {',
       '    initialised = true;',
+      '    balance = 100;',
       '    return true;',
       '  }',
       '',
       '  @public',
       '  function failInsufficient() as caller -> bool {',
-      '    revert VaultError::InsufficientBalance;',
+      '    revert VaultError::InsufficientBalance(balance);',
       '  }',
       '',
       '  @public',
@@ -4860,12 +4862,12 @@ var LOOP_LINES = [
       '',
       '  @public',
       '  function failInvalid() as caller -> bool {',
-      '    revert VaultError::InvalidAmount;',
+      '    revert VaultError::InvalidAmount(0);',
       '  }',
       '',
       '  @public',
       '  function failOverflow() as caller -> bool {',
-      '    revert VaultError::Overflow;',
+      '    revert VaultError::Overflow(balance, 100);',
       '  }',
       '}',
     ].join('\n');
@@ -4873,7 +4875,7 @@ var LOOP_LINES = [
     updateLineNums();
     clearResults();
     syncCompileBtn();
-    setStatus('NamedError loaded — Compile, Deploy, then call init(). Try failInsufficient(), failInvalid(), failOverflow() to see structured error codes.', 'info');
+    setStatus('NamedError loaded — Compile, Deploy, then call init(). Try failInsufficient(), failInvalid(), failOverflow() to see structured error codes with arg formatting.', 'info');
   }
   window.loadNamedError = loadNamedError;
 

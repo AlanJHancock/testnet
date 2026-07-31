@@ -1320,8 +1320,9 @@ OpCode::MapNew => {
             // This is the spec v7.0 aligned interface — replaces algorithm-
             // specific opcodes 0x80-0x83 for new contracts.
             OpCode::AegisCall => {
+                // ACTS-15 §3: deterministic VM dispatcher — only verification ops
                 let frame = self.pop()?.as_bytes()?.to_vec();
-                match aeg1::process_frame(&frame) {
+                match aeg1::process_frame_deterministic(&frame) {
                     Ok(response_frame) => {
                         // Decode the response to determine VM-level result
                         match aeg1::Aeg1Response::decode(&response_frame) {

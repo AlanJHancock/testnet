@@ -126,6 +126,13 @@ pub enum ErrorCode {
     InvalidKey           = 0x0B,
     InvalidSignature     = 0x0C,
     InvalidCiphertext     = 0x0D,
+    OperationNotSupported = 0x0E,
+}
+
+impl std::fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AEG1 error: {:?}", self)
+    }
 }
 
 /// AEG1 protocol errors
@@ -335,6 +342,7 @@ impl Aeg1Response {
                     0x0B => ErrorCode::InvalidKey,
                     0x0C => ErrorCode::InvalidSignature,
                     0x0D => ErrorCode::InvalidCiphertext,
+                    0x0E => ErrorCode::OperationNotSupported,
                     _    => ErrorCode::CryptoFailed,
                 };
                 Ok(Self::Error(ec, msg))
@@ -367,6 +375,29 @@ pub fn dispatch(req: &Aeg1Request) -> Aeg1Response {
 
 #[cfg(not(feature = "native"))]
 pub fn dispatch(_req: &Aeg1Request) -> Aeg1Response {
+    Aeg1Response::Error(ErrorCode::CryptoFailed, "PQC requires native build".into())
+}
+
+/// Deterministic dispatch — for on-chain / VM-context use.
+///
+/// Per ACTS-15 §3: only detached verification operations (ML-DSA, FN-DSA)
+/// are supported in the deterministic public dispatcher. ML-KEM decapsulate
+/// requires a decapsulation (secret) key and is rejected here. Key generation,
+/// encapsulation, and signing are not exposed at all.
+#[cfg(feature = "native")]
+pub fn dispatch_deterministic(req: &Aeg1Request) -> Aeg1Response {
+    match req.operation {
+        Operation::MlDsaVerify => dispatch_ml_dsa(req),
+        Operation::FnDsaVerify  => dispatch_fn_dsa(req),
+        Operation::MlKemDecaps  => Aeg1Response::Error(
+            ErrorCode::OperationNotSupported,
+            "ML-KEM decapsulate rejected in deterministic dispatcher (requires secret key) — ACTS-15 §3".into(),
+        ),
+    }
+}
+
+#[cfg(not(feature = "native"))]
+pub fn dispatch_deterministic(_req: &Aeg1Request) -> Aeg1Response {
     Aeg1Response::Error(ErrorCode::CryptoFailed, "PQC requires native build".into())
 }
 
@@ -465,6 +496,16 @@ fn dispatch_fn_dsa(req: &Aeg1Request) -> Aeg1Response {
 pub fn process_frame(frame: &[u8]) -> Result<Vec<u8>, Aeg1Error> {
     let req = Aeg1Request::decode(frame)?;
     let resp = dispatch(&req);
+    resp.encode()
+}
+
+/// Process a raw AEG1 frame using the deterministic dispatcher (on-chain/VM path).
+///
+/// Only verification operations are permitted; ML-KEM decapsulate is rejected.
+/// This is the entry point the QVM AegisCall (0x8F) opcode MUST use.
+pub fn process_frame_deterministic(frame: &[u8]) -> Result<Vec<u8>, Aeg1Error> {
+    let req = Aeg1Request::decode(frame)?;
+    let resp = dispatch_deterministic(&req);
     resp.encode()
 }
 
@@ -596,5 +637,67 @@ mod tests {
     fn test_process_frame_invalid() {
         let bad = b"NOT_AEG1";
         assert!(process_frame(bad).is_err());
+    }
+
+    /// ACTS-15 §3: deterministic dispatcher MUST reject ML-KEM decapsulate.
+    #[cfg(feature = "native")]
+    #[test]
+    fn test_deterministic_rejects_decapsulate() {
+        let req = Aeg1Request {
+            operation: Operation::MlKemDecaps,
+            algorithm: Algorithm::MlKem768,
+            args: vec![vec![0xAB; 32], vec![0xCD; 32]],
+        };
+        let encoded = req.encode();
+        let result = process_frame_deterministic(&encoded).unwrap();
+        let resp = Aeg1Response::decode(&result).unwrap();
+        match resp {
+            Aeg1Response::Error(code, msg) => {
+                assert_eq!(code, ErrorCode::OperationNotSupported);
+                assert!(msg.contains("ACTS-15"));
+                assert!(msg.contains("secret key"));
+            }
+            Aeg1Response::Ok(_) => panic!("ML-KEM decapsulate should be rejected in deterministic dispatcher"),
+        }
+    }
+
+    /// ACTS-15 §3: deterministic dispatcher SHOULD accept ML-DSA verify.
+    #[cfg(feature = "native")]
+    #[test]
+    fn test_deterministic_accepts_ml_dsa_verify() {
+        let req = Aeg1Request {
+            operation: Operation::MlDsaVerify,
+            algorithm: Algorithm::MlDsa65,
+            args: vec![b"msg".to_vec(), vec![0xFF; 64], vec![0xEE; 32]],
+        };
+        let encoded = req.encode();
+        let result = process_frame_deterministic(&encoded).unwrap();
+        let resp = Aeg1Response::decode(&result).unwrap();
+        match resp {
+            Aeg1Response::Error(code, _) => {
+                assert_ne!(code, ErrorCode::OperationNotSupported, "ML-DSA verify should not be rejected");
+            }
+            Aeg1Response::Ok(_) => {}
+        }
+    }
+
+    /// Without native feature, deterministic dispatcher returns CryptoFailed for all ops.
+    #[cfg(not(feature = "native"))]
+    #[test]
+    fn test_deterministic_no_native() {
+        let req = Aeg1Request {
+            operation: Operation::MlDsaVerify,
+            algorithm: Algorithm::MlDsa65,
+            args: vec![b"msg".to_vec(), vec![0xFF; 64], vec![0xEE; 32]],
+        };
+        let encoded = req.encode();
+        let result = process_frame_deterministic(&encoded).unwrap();
+        let resp = Aeg1Response::decode(&result).unwrap();
+        match resp {
+            Aeg1Response::Error(code, _) => {
+                assert_eq!(code, ErrorCode::CryptoFailed);
+            }
+            Aeg1Response::Ok(_) => panic!("Should fail without native build"),
+        }
     }
 }
