@@ -357,6 +357,8 @@
       color:#6ee7b7; border-radius:10px; padding:2px 10px; letter-spacing:0.04em;">
       ● QVM — SynQ Virtual Machine active
     </span>
+    <span id="fuelBadge2" style="display:none;" class="fuel-badge active" title="PQC Fuel Budget (ACTS-VM-005) — cost charged per AegisCall"></span>
+    <span id="stepBadge2" style="display:none;" class="step-badge active" title="VM Step Budget (ACTS-VM-003) — compute steps per call"></span>
   </div>
 
   <!-- Function pills -->
@@ -842,13 +844,17 @@
 
   function hideFuelBadge() {
     var fb = document.getElementById('fuelBadge');
+    var fb2 = document.getElementById('fuelBadge2');
     if (fb) fb.style.display = 'none';
+    if (fb2) fb2.style.display = 'none';
     window._fuelBudget = undefined;
     window._fuelUsed = 0;
   }
   function hideStepBadge() {
     var sb = document.getElementById('stepBadge');
+    var sb2 = document.getElementById('stepBadge2');
     if (sb) sb.style.display = 'none';
+    if (sb2) sb2.style.display = 'none';
     window._stepBudget = undefined;
     window._stepUsed = 0;
   }
@@ -942,7 +948,7 @@
       if (el) {
         // Reset str params to blank, numeric params to 0
         var _isStr = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'str';
-        el.value = _isStr ? '' : '0';
+        el.value = (_isStr || (selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'bytes')) ? '' : '0';
       }
     }
 
@@ -2637,6 +2643,7 @@
       // ── Fuel badge: PQC budget from /session/new ──────────────────────
       (function() {
         var fb = document.getElementById('fuelBadge');
+        var fb2 = document.getElementById('fuelBadge2');
         if (!fb) return;
         var budget = data.fuel_budget;
         if (budget === undefined || budget === null) {
@@ -2660,11 +2667,13 @@
           + 'each charge fuel based on algorithm parameters.\n'
           + 'Reset on every function call (per-invocation budget).';
         fb.style.display = 'inline-flex';
+        if (fb2) { fb2.innerHTML = fb.innerHTML; fb2.className = fb.className; fb2.title = fb.title; fb2.style.display = fb.style.display; }
       })();
 
       // ── Step badge: VM compute budget from /session/new ────────────────
       (function() {
         var sb = document.getElementById('stepBadge');
+        var sb2 = document.getElementById('stepBadge2');
         if (!sb) return;
         var budget = data.max_steps;
         if (budget === undefined || budget === null) {
@@ -2688,6 +2697,7 @@
           + 'computation. Reset on every function call.\n'
           + 'Configurable via max_steps in session/new.';
         sb.style.display = 'inline-flex';
+        if (sb2) { sb2.innerHTML = sb.innerHTML; sb2.className = sb.className; sb2.title = sb.title; sb2.style.display = sb.style.display; }
       })();
 
       // Always update sessionId to the freshly deployed session.
@@ -2780,23 +2790,49 @@
           inp.style.width = '100%';
           inp.style.cursor = 'pointer';
         } else {
-          inp = document.createElement('input');
-          inp.type = 'text';
+          var isBytesParam = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'bytes';
           var isStrParam = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'str';
-          if (!isStrParam) inp.inputMode = 'numeric';
-          inp.id = 'param_' + p;
-          inp.value = isStrParam ? '' : '0';
-          inp.placeholder = isStrParam ? 'text…' : '0';
-          inp.autocomplete = 'off';
-          inp.spellcheck = false;
-          inp.dataset.paramType = isStrParam ? 'str' : 'num';
-          inp.style.fontFamily = 'ui-monospace,monospace';
-          inp.style.letterSpacing = '0.02em';
-          inp.addEventListener('input', function() {
-            var v = this.value;
-            if (this.dataset.paramType === 'str') { this.style.borderColor = ''; return; }
-            this.style.borderColor = (v.trim() === '' || /^\d+$/.test(v.trim())) ? '' : '#f87171';
-          });
+          if (isBytesParam) {
+            inp = document.createElement('textarea');
+            inp.id = 'param_' + p;
+            inp.value = '';
+            inp.placeholder = 'hex bytes… e.g. 48656c6c6f';
+            inp.autocomplete = 'off';
+            inp.spellcheck = false;
+            inp.dataset.paramType = 'bytes';
+            inp.style.fontFamily = 'ui-monospace,monospace';
+            inp.style.letterSpacing = '0.02em';
+            inp.style.minHeight = '60px';
+            inp.style.resize = 'vertical';
+            inp.style.background = '#1a1a2e';
+            inp.style.color = 'rgba(255,255,255,0.82)';
+            inp.style.border = '1px solid rgba(255,255,255,0.12)';
+            inp.style.borderRadius = '5px';
+            inp.style.padding = '6px 10px';
+            inp.style.width = '100%';
+            inp.style.boxSizing = 'border-box';
+            inp.addEventListener('input', function() {
+              var v = this.value.trim();
+              this.style.borderColor = (v === '' || /^[0-9a-fA-F]+$/.test(v.replace(/^0x/, ''))) ? '' : '#f87171';
+            });
+          } else {
+            inp = document.createElement('input');
+            inp.type = 'text';
+            if (!isStrParam) inp.inputMode = 'numeric';
+            inp.id = 'param_' + p;
+            inp.value = isStrParam ? '' : '0';
+            inp.placeholder = isStrParam ? 'text…' : '0';
+            inp.autocomplete = 'off';
+            inp.spellcheck = false;
+            inp.dataset.paramType = isStrParam ? 'str' : 'num';
+            inp.style.fontFamily = 'ui-monospace,monospace';
+            inp.style.letterSpacing = '0.02em';
+            inp.addEventListener('input', function() {
+              var v = this.value;
+              if (this.dataset.paramType === 'str') { this.style.borderColor = ''; return; }
+              this.style.borderColor = (v.trim() === '' || /^\d+$/.test(v.trim())) ? '' : '#f87171';
+            });
+          }
         }
         // UMA address hint + "My UMA" button for identity params
         // Any param name that plausibly represents an identity/address gets 'My UMA' button
@@ -2918,14 +2954,23 @@
     for (var p = 0; p < selectedFunc.paramCount; p++) {
       var el = document.getElementById('param_' + p);
       var paramIsStr = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'str';
-      var raw = el ? (paramIsStr ? el.value : el.value.trim()) : '';
-      if (!paramIsStr && raw === '') {
+      var paramIsBytes = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'bytes';
+      var raw = el ? (paramIsStr || paramIsBytes ? el.value : el.value.trim()) : '';
+      if (!paramIsStr && !paramIsBytes && raw === '') {
         argError = selectedFunc.paramNames && selectedFunc.paramNames[p]
           ? 'Enter a value for "' + selectedFunc.paramNames[p] + '"'
           : 'Enter a value for parameter ' + p;
         break;
       }
-      if (paramIsStr) {
+      if (paramIsBytes) {
+        // Bytes params: send hex string as-is, server parse_arg_typed decodes
+        var hexVal = raw.trim().replace(/^0x/, '');
+        if (hexVal === '' || !/^[0-9a-fA-F]*$/.test(hexVal)) {
+          argError = 'param_' + p + ': "' + raw + '" must be valid hex (0-9, a-f).';
+          break;
+        }
+        args.push(hexVal);
+      } else if (paramIsStr) {
         // String params sent as-is; server parse_arg handles utf-8 bytes
         args.push(raw);
       } else {
@@ -3102,6 +3147,7 @@
         // ── Update fuel badge ───────────────────────────────────────────
         (function() {
           var fb = document.getElementById('fuelBadge');
+          var fb2 = document.getElementById('fuelBadge2');
           if (!fb || !window._fuelBudget) return;
           var used = data.fuel_used !== undefined ? data.fuel_used : 0;
           var remaining = data.fuel_remaining !== undefined ? data.fuel_remaining : (window._fuelBudget - used);
@@ -3128,11 +3174,13 @@
             + 'Used: ' + used.toLocaleString() + '\n'
             + 'Remaining: ' + remaining.toLocaleString() + '\n'
             + 'Utilization: ' + pct.toFixed(2) + '%';
+          if (fb2) { fb2.innerHTML = fb.innerHTML; fb2.className = fb.className; fb2.title = fb.title; fb2.style.display = fb.style.display; }
         })();
 
         // ── Update step badge ───────────────────────────────────────────
         (function() {
           var sb = document.getElementById('stepBadge');
+          var sb2 = document.getElementById('stepBadge2');
           if (!sb || !window._stepBudget) return;
           var used = data.steps_used !== undefined ? data.steps_used : 0;
           var remaining = data.steps_remaining !== undefined ? data.steps_remaining : (window._stepBudget - used);
@@ -3164,6 +3212,7 @@
             + 'The step limit prevents infinite loops and runaway\n'
             + 'computation. Reset on every function call.';
           sb.style.display = 'inline-flex';
+          if (sb2) { sb2.innerHTML = sb.innerHTML; sb2.className = sb.className; sb2.title = sb.title; sb2.style.display = sb.style.display; }
         })();
         var rv = data.result;
         // V3: display caller's syna... Bech32 address if present
@@ -3650,7 +3699,7 @@
       if (el) {
         // Reset str params to blank, numeric params to 0
         var _isStr = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'str';
-        el.value = _isStr ? '' : '0';
+        el.value = (_isStr || (selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'bytes')) ? '' : '0';
       }
     }
 
