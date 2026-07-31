@@ -767,8 +767,28 @@ fn type_name(ty: &synq_compiler::ast::Type) -> String {
         Address              => "address".to_string(),
         Bytes                => "bytes".to_string(),
         UInt8  | UInt16 | UInt32 | UInt64 | UInt128 | UInt256 => "u256".to_string(),
-        Int8   | Int16  | Int32 | Int64 | Int128 | Int256      => "i256".to_string(),
-        _                    => "u256".to_string(),
+        Int8   | Int16 | Int32 | Int64 | Int128 | Int256      => "i256".to_string(),
+        DilithiumPublicKey   => "dilithium_pubkey".to_string(),
+        FalconPublicKey       => "falcon_pubkey".to_string(),
+        KyberPublicKey        => "kyber_pubkey".to_string(),
+        DilithiumSignature    => "dilithium_sig".to_string(),
+        FalconSignature       => "falcon_sig".to_string(),
+        Hash32                => "hash32".to_string(),
+        Hash64                => "hash64".to_string(),
+        UMAIdentity           => "uma_identity".to_string(),
+        Height                => "height".to_string(),
+        BytesN(n)             => format!("bytes{}", n),
+        Asset(inner)          => format!("Asset<{}>", type_name(inner)),
+        Option(inner)         => format!("option<{}>", type_name(inner)),
+        Result(ok, err)       => format!("result<{}, {}>", type_name(ok), type_name(err)),
+        Tuple(types)          => {
+            let parts: Vec<String> = types.iter().map(type_name).collect();
+            format!("({})", parts.join(", "))
+        }
+        Mapping(k, v)         => format!("mapping<{}, {}>", type_name(k), type_name(v)),
+        Array(inner)          => format!("[{}]", type_name(inner)),
+        Named(name)           => name.clone(),
+        ModelId               => "model_id".to_string(),
     }
 }
 

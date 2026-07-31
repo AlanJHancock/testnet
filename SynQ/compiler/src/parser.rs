@@ -711,6 +711,48 @@ fn parse_type(pair: Pair<Rule>) -> Type {
             let inner = pair.into_inner().next().unwrap();
             Type::Asset(Box::new(parse_type(inner)))
         }
+        Rule::tuple_type => {
+            let types: Vec<Type> = pair.into_inner().map(parse_type).collect();
+            Type::Tuple(types)
+        }
+        Rule::option_type => {
+            let inner = pair.into_inner().next().unwrap();
+            Type::Option(Box::new(parse_type(inner)))
+        }
+        Rule::result_type => {
+            let mut inner = pair.into_inner();
+            let ok = parse_type(inner.next().unwrap());
+            let err = parse_type(inner.next().unwrap());
+            Type::Result(Box::new(ok), Box::new(err))
+        }
+        Rule::bytes_type => {
+            let n_str = pair.into_inner().next().unwrap().as_str();
+            let n: usize = n_str.parse().unwrap_or(0);
+            Type::BytesN(n)
+        }
+        Rule::hash_type => {
+            match pair.as_str() {
+                "Hash32" => Type::Hash32,
+                "Hash64" => Type::Hash64,
+                _ => Type::Bytes,
+            }
+        }
+        Rule::uma_type => {
+            match pair.as_str() {
+                "UMAIdentity" => Type::UMAIdentity,
+                "ModelId" => Type::Named("ModelId".to_string()),
+                "Height" => Type::Height,
+                _ => Type::Named(pair.as_str().to_string()),
+            }
+        }
+        Rule::set_type => {
+            let inner = pair.into_inner().next().unwrap();
+            Type::Array(Box::new(parse_type(inner)))
+        }
+        Rule::array_type => {
+            let inner = pair.into_inner().next().unwrap();
+            Type::Array(Box::new(parse_type(inner)))
+        }
         Rule::IDENT => match pair.as_str() {
             "address" | "Address"                         => Type::Address,
             "u8"  | "UInt8"  | "uint8"                   => Type::UInt8,
