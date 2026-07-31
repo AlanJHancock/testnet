@@ -285,10 +285,10 @@
     <button class="btn btn-secondary" onclick="loadTypeTest()" title="Type &amp; operator test contract — all primitives, map, set, require">TypeTestContract</button>
     <button class="btn btn-secondary" onclick="loadLoopDemo()" title="Loop constructs — while, break, continue, let locals, state accumulation">LoopDemo</button>
     <button class="btn btn-secondary" onclick="loadV3Demo()" title="V3 types — Bytes, Hash32, Height, UMAIdentity, @authority, syna/sync Bech32 builtins" style="border-color:rgba(16,185,129,0.4);color:rgba(110,231,183,0.9);">V3Types</button>
-    <button class="btn btn-secondary" onclick="loadStructValueDemo()" title="Struct value semantics — pass/return structs, field access on call results, nested struct access" style="border-color:rgba(168,85,247,0.4);color:rgba(192,132,252,0.9);">StructValue</button>
-    <button class="btn btn-secondary" onclick="loadNamedErrorDemo()" title="Named error revert — enum-based RevertCode (0x35) with structured error codes" style="border-color:rgba(239,68,68,0.4);color:rgba(248,113,113,0.9);">NamedError</button>
+    <button class="btn btn-secondary" onclick="loadStructValue()" title="Struct value semantics — pass/return structs, field access on call results, nested struct access" style="border-color:rgba(168,85,247,0.4);color:rgba(192,132,252,0.9);">StructValue</button>
+    <button class="btn btn-secondary" onclick="loadNamedError()" title="Named error revert — enum-based RevertCode (0x35) with structured error codes" style="border-color:rgba(239,68,68,0.4);color:rgba(248,113,113,0.9);">NamedError</button>
     <button class="btn btn-secondary" onclick="loadAssetDemo()" title="Linear asset tracking — AssetCreate/Transfer/Burn/Balance/Owner (0x57-0x5B)" style="border-color:rgba(245,158,11,0.4);color:rgba(251,191,36,0.9);">AssetDemo</button>
-    <button class="btn btn-secondary" onclick="loadStructFieldTest()" title="TupleSet (0xAB) — struct field assignment via in-place tuple replacement" style="border-color:rgba(14,165,233,0.4);color:rgba(56,189,248,0.9);">StructField</button>
+    <button class="btn btn-secondary" onclick="loadStructField()" title="TupleSet (0xAB) — struct field assignment via in-place tuple replacement" style="border-color:rgba(14,165,233,0.4);color:rgba(56,189,248,0.9);">StructField</button>
     <button class="btn btn-secondary" onclick="loadStackFailDemo()" title="Stack safety verification demo — shows Layer 1+2 in action" style="border-color:rgba(239,68,68,0.4);color:rgba(252,165,165,0.9);">StackFailDemo</button>
         
   </div>
@@ -4569,7 +4569,7 @@ var LOOP_LINES = [
     '',
     'enum Role { Admin, Minter, User }',
     '',
-    'contract V3TypesDemo {',
+    'contract V3Types {',
     '  state {',
     '    initialised: bool;',
     '    owner: Bytes<20>;',
@@ -4663,18 +4663,18 @@ var LOOP_LINES = [
   ];
 
   function loadV3Demo() {
-    evictWorkspaceContractByName('V3TypesDemo');
+    evictWorkspaceContractByName('V3Types');
     document.getElementById('editor').value = V3_LINES.join('\n');
     updateLineNums();
     clearResults();
     syncCompileBtn();
-    setStatus('V3TypesDemo loaded — Compile, Deploy, then call init() (sign with wallet). Try deriveContractAddr(42, 0, 4660) and getOwnerSyna() after init.', 'info');
+    setStatus('V3Types loaded — Compile, Deploy, then call init() (sign with wallet). Try deriveContractAddr(42, 0, 4660) and getOwnerSyna() after init.', 'info');
   }
   window.loadV3Demo = loadV3Demo;
 
-  // ── StructValueDemo ──────────────────────────────────────────────────────────
-  function loadStructValueDemo() {
-    evictWorkspaceContractByName('StructValueDemo');
+  // ── StructValue ──────────────────────────────────────────────────────────
+  function loadStructValue() {
+    evictWorkspaceContractByName('StructValue');
     const src = [
       'pragma synq ^0.9;',
       '',
@@ -4688,7 +4688,7 @@ var LOOP_LINES = [
       '    size: Point;',
       '}',
       '',
-      'contract StructValueDemo {',
+      'contract StructValue {',
       '    state {',
       '        corner: Point;',
       '        box_val: Rect;',
@@ -4762,17 +4762,17 @@ var LOOP_LINES = [
     updateLineNums();
     clearResults();
     syncCompileBtn();
-    setStatus('StructValueDemo loaded — Compile, Deploy, then call init(). Try getCornerX(), getBoxOriginX(), setCornerFromMake(10,20), moveCorner(100,200).', 'info');
+    setStatus('StructValue loaded — Compile, Deploy, then call init(). Try getCornerX(), getBoxOriginX(), setCornerFromMake(10,20), moveCorner(100,200).', 'info');
   }
-  window.loadStructValueDemo = loadStructValueDemo;
+  window.loadStructValue = loadStructValue;
 
-  // ── NamedErrorDemo (RevertCode 0x35) ─────────────────────────────────────────
-  function loadNamedErrorDemo() {
-    evictWorkspaceContractByName('NamedErrorDemo');
+  // ── NamedError (RevertCode 0x35) ─────────────────────────────────────────
+  function loadNamedError() {
+    evictWorkspaceContractByName('NamedError');
     const src = [
       'pragma synq ^0.9;',
       '',
-      'contract NamedErrorDemo {',
+      'contract NamedError {',
       '  state {',
       '    initialised: bool;',
       '  }',
@@ -4810,9 +4810,9 @@ var LOOP_LINES = [
     updateLineNums();
     clearResults();
     syncCompileBtn();
-    setStatus('NamedErrorDemo loaded — Compile, Deploy, then call init(). Try failInsufficient(), failInvalid(), failOverflow() to see structured error codes.', 'info');
+    setStatus('NamedError loaded — Compile, Deploy, then call init(). Try failInsufficient(), failInvalid(), failOverflow() to see structured error codes.', 'info');
   }
-  window.loadNamedErrorDemo = loadNamedErrorDemo;
+  window.loadNamedError = loadNamedError;
 
   // ── AssetDemo (opcodes 0x57-0x5B) ─────────────────────────────────────────────
   function loadAssetDemo() {
@@ -4868,9 +4868,9 @@ var LOOP_LINES = [
   }
   window.loadAssetDemo = loadAssetDemo;
 
-  // ── StructFieldTest (TupleSet 0xAB) ──────────────────────────────────────────
-  function loadStructFieldTest() {
-    evictWorkspaceContractByName('StructFieldTest');
+  // ── StructField (TupleSet 0xAB) ──────────────────────────────────────────
+  function loadStructField() {
+    evictWorkspaceContractByName('StructField');
     const src = [
       'pragma synq ^0.9;',
       '',
@@ -4879,7 +4879,7 @@ var LOOP_LINES = [
       '  y: u256;',
       '}',
       '',
-      'contract StructFieldTest {',
+      'contract StructField {',
       '  state {',
       '    origin: Point;',
       '    initialised: bool;',
@@ -4939,9 +4939,9 @@ var LOOP_LINES = [
     updateLineNums();
     clearResults();
     syncCompileBtn();
-    setStatus('StructFieldTest loaded — Compile, Deploy, then call init(). Try setOrigin(42, 99), getOriginX(), getOrigin(), moveX(10), swapCoordinates().', 'info');
+    setStatus('StructField loaded — Compile, Deploy, then call init(). Try setOrigin(42, 99), getOriginX(), getOrigin(), moveX(10), swapCoordinates().', 'info');
   }
-  window.loadStructFieldTest = loadStructFieldTest;
+  window.loadStructField = loadStructField;
 
   // ── StackFailDemo (verification education) ───────────────────────────────
   function loadStackFailDemo() {
