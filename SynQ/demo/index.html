@@ -60,6 +60,10 @@
   .wallet-mode.hybrid { background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.4); color: #6ee7b7; }
   .wallet-mode.wasm     { background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.4); color: #93c5fd; }
   .wasm-toolbar-badge { display:inline-flex; align-items:center; gap:5px; font-size:0.7rem; font-weight:700; letter-spacing:0.04em; padding:3px 10px; border-radius:12px; background:rgba(59,130,246,0.15); border:1px solid rgba(59,130,246,0.4); color:#93c5fd; vertical-align:middle; }
+  .verify-badge { display:inline-flex; align-items:center; gap:5px; font-size:0.7rem; font-weight:700; letter-spacing:0.04em; padding:3px 10px; border-radius:12px; vertical-align:middle; }
+  .verify-badge.pass { background:rgba(16,185,129,0.12); border:1px solid rgba(16,185,129,0.35); color:#6ee7b7; }
+  .verify-badge.warn { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
+  .verify-badge.fail { background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); color:#fca5a5; }
   .wallet-mode.ephemeral   { background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.3); color: #fcd34d; }
     .wallet-mode.persistent  { background: rgba(52,211,153,0.1);  border: 1px solid rgba(52,211,153,0.4);  color: #34d399; }
   .btn-wallet { display: inline-flex; align-items: center; gap: 6px; padding: 7px 18px; border-radius: 8px; font-size: 0.82rem; font-weight: 600; cursor: pointer; border: 1px solid rgba(124,58,237,0.5); background: rgba(124,58,237,0.15); color: #a78bfa; }
@@ -297,6 +301,7 @@
   <div style="display:flex;align-items:center;gap:8px;min-height:1.4rem;margin-top:4px;padding-left:2px;">
     <span id="wasmBadge" style="display:none;" class="wasm-toolbar-badge">&#x26A1; In-Browser WASM</span>
     <span id="pqcSimBadge" style="display:none;" class="wasm-toolbar-badge" title="PQC builtins will throw RuntimeError in browser — deploy to synq-server for real verification">&#x26A0; PQC Simulation</span>
+    <span id="verifyBadge" style="display:none;" class="verify-badge pass" title="Bytecode verification status"></span>
     <span id="depsHint" style="font-size:0.75rem;visibility:hidden;">&nbsp;</span>
   </div>
   <div class="status-bar" id="statusBar"></div>
@@ -1952,12 +1957,47 @@
         if (pqcB2) pqcB2.style.display = 'none';
       }
 
+      // ── Update verification badge from compile response ────────────────────
+      (function() {
+        var vb = document.getElementById('verifyBadge');
+        if (!vb) return;
+        var vw = (data.warnings || []).filter(function(w) { return w.indexOf('[VERIFY]') === 0; });
+        var sw = (data.warnings || []).filter(function(w) { return w.indexOf('Stack safety:') === 0; });
+        if (vw.length === 0) { vb.style.display = 'none'; return; }
+        var line = vw[0];
+        if (line.indexOf('Layer 2 passed') !== -1 && sw.length === 0) {
+          // Full pass
+          var m = line.match(/(\d+) instructions, (\d+) jumps, (\d+) calls, (\d+) bytes/);
+          if (m) {
+            vb.innerHTML = '\u2705 VERIFY: ' + m[1] + ' insts \u00b7 ' + m[3] + ' calls \u00b7 ' + m[4] + 'B';
+          } else {
+            vb.innerHTML = '\u2705 VERIFY PASSED';
+          }
+          vb.className = 'verify-badge pass';
+          vb.title = 'Layer 1 (structural) + Layer 2 (stack safety) verified';
+        } else if (sw.length > 0) {
+          vb.innerHTML = '\u26a0 VERIFY: ' + sw.length + ' stack warning(s)';
+          vb.className = 'verify-badge warn';
+          vb.title = sw.join('\n');
+        } else if (line.indexOf('FAILED') !== -1) {
+          vb.innerHTML = '\u274c VERIFY FAILED';
+          vb.className = 'verify-badge fail';
+          vb.title = line;
+        } else {
+          vb.innerHTML = '\u2705 VERIFY PASSED';
+          vb.className = 'verify-badge pass';
+        }
+        vb.style.display = 'inline-flex';
+      })();
+
       // ── Handle compile failure ─────────────────────────────────────────────
       if (!data.success) {
         var errs = data.errors || ['Compilation failed'];
         setStatus('Error: ' + errs[0], 'error');
         var irEl0 = document.getElementById('irDisplay');
         if (irEl0) irEl0.innerHTML = '<span class="ir-empty">Compilation failed — no IR output</span>';
+        var vbFail = document.getElementById('verifyBadge');
+        if (vbFail) vbFail.style.display = 'none';
         return;
       }
 

@@ -903,13 +903,25 @@ async fn compile_handler(
         Ok(report) => {
             eprintln!("[VERIFY] {} instructions, {} jumps, {} calls in {} bytes",
                 report.instruction_count, report.jump_targets.len(), report.call_targets.len(), report.code_size);
-            for sw in &report.stack_warnings {
-                eprintln!("[VERIFY] stack warning: {}", sw);
-                compile_warnings.push(format!("Stack safety: {}", sw));
+            // Always surface a verification summary so the IDE shows verification ran
+            if report.stack_warnings.is_empty() {
+                compile_warnings.push(format!(
+                    "[VERIFY] Layer 1 passed (structural) + Layer 2 passed (stack safety) | {} instructions, {} jumps, {} calls, {} bytes code",
+                    report.instruction_count, report.jump_targets.len(), report.call_targets.len(), report.code_size,
+                ));
+            } else {
+                compile_warnings.push(format!(
+                    "[VERIFY] Layer 1 passed | Layer 2: {} stack warning(s) — see below",
+                    report.stack_warnings.len(),
+                ));
+                for sw in &report.stack_warnings {
+                    eprintln!("[VERIFY] stack warning: {}", sw);
+                    compile_warnings.push(format!("Stack safety: {}", sw));
+                }
             }
         }
         Err(e) => {
-            compile_warnings.push(format!("Bytecode verification warning: {}", e));
+            compile_warnings.push(format!("Bytecode verification FAILED: {}", e));
         }
     }
 
