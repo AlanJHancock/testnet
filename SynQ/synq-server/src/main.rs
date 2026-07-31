@@ -71,6 +71,7 @@ use tower_http::{
 use synq_compiler::{PQCCompiler, PQCSecurityLevel};
 use ruint::aliases::U256;
 use synq_vm::{QuantumVM, Value};
+use synq_vm::verify;
 
 mod wasm_compiler;
 
@@ -896,6 +897,17 @@ async fn compile_handler(
             ir_dump:            vec![],
         })),
     };
+
+    // Layer 1 structural verification — belt-and-suspenders check on our own codegen output
+    match synq_vm::verify::verify(&bytecode) {
+        Ok(report) => {
+            eprintln!("[VERIFY] {} instructions, {} jumps, {} calls in {} bytes",
+                report.instruction_count, report.jump_targets.len(), report.call_targets.len(), report.code_size);
+        }
+        Err(e) => {
+            compile_warnings.push(format!("Bytecode verification warning: {}", e));
+        }
+    }
 
     // Build SSA IR dump for display
     let ir_dump: Vec<String> = {
@@ -2066,6 +2078,14 @@ async fn session_new_handler(
             success: false, session_id: None, contract_name: None, error: Some(format!("bytecode hex invalid: {}", e)),
         })),
     };
+
+    // Layer 1 structural verification — reject malformed bytecode before loading
+    if let Err(e) = verify::verify(&raw) {
+        return (StatusCode::OK, RespJson(NewSessionResponse {
+            success: false, session_id: None, contract_name: None,
+            error: Some(format!("Bytecode verification failed: {}", e)),
+        }));
+    }
 
     let mut vm = QuantumVM::new();
     if let Err(e) = vm.load_bytecode(&raw) {
