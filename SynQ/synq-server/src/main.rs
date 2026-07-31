@@ -898,11 +898,15 @@ async fn compile_handler(
         })),
     };
 
-    // Layer 1 structural verification — belt-and-suspenders check on our own codegen output
+    // Layer 1 + Layer 2 verification — belt-and-suspenders check on our own codegen output
     match synq_vm::verify::verify(&bytecode) {
         Ok(report) => {
             eprintln!("[VERIFY] {} instructions, {} jumps, {} calls in {} bytes",
                 report.instruction_count, report.jump_targets.len(), report.call_targets.len(), report.code_size);
+            for sw in &report.stack_warnings {
+                eprintln!("[VERIFY] stack warning: {}", sw);
+                compile_warnings.push(format!("Stack safety: {}", sw));
+            }
         }
         Err(e) => {
             compile_warnings.push(format!("Bytecode verification warning: {}", e));
