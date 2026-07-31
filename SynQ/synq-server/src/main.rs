@@ -1958,6 +1958,30 @@ struct Layer3Result {
 }
 
 
+// ─── GET /pqc/test-vector ─────────────────────────────────────────────────────
+/// Generates a fresh ML-DSA-65 test vector (keypair + signed message).
+/// Used by the IDE PQC demo to auto-fill function arguments.
+async fn pqc_test_vector_handler(
+) -> impl axum::response::IntoResponse {
+    use synq_pqc_shims::dilithium;
+
+    let (pk, sk) = dilithium::keygen();
+    let msg = b"Hello SynQ PQC!";
+    let sig = dilithium::sign(msg, &sk);
+    let valid = dilithium::verify(msg, &sig, &pk);
+
+    serde_json::json!({
+        "algorithm": "ML-DSA-65",
+        "message": String::from_utf8_lossy(msg),
+        "message_hex": hex::encode(msg),
+        "public_key_hex": hex::encode(&pk),
+        "signature_hex": hex::encode(&sig),
+        "public_key_len": pk.len(),
+        "signature_len": sig.len(),
+        "verified": valid,
+    }).to_string()
+}
+
 // ─── POST /workspace/new ─────────────────────────────────────────────────────
 #[derive(serde::Serialize)]
 struct NewWorkspaceResponse { success: bool, workspace_id: Option<String>, error: Option<String> }
@@ -3044,7 +3068,9 @@ async fn main() {
         .route("/workspace/:id",     get(workspace_info_handler).delete(workspace_delete_handler))
         .route("/workspace/:id/join",   post(workspace_join_handler))
         .route("/workspace/:id/remove", post(workspace_remove_handler))
-        .route("/session/:id/state", get(session_state_handler))
+        .route("/pqc/test-vector",
+        axum::routing::get(pqc_test_vector_handler))
+    .route("/session/:id/state", get(session_state_handler))
         .route("/debug/ecrecover",   post(debug_ecrecover_handler))
         .route("/bench-compile",      post(bench_compile_handler))
         .route("/compile-wasm",     post(wasm_compiler::compile_wasm_handler))

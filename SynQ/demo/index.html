@@ -294,6 +294,7 @@
     <button class="btn btn-secondary" onclick="loadAssetDemo()" title="Linear asset tracking — AssetCreate/Transfer/Burn/Balance/Owner (0x57-0x5B)" style="border-color:rgba(245,158,11,0.4);color:rgba(251,191,36,0.9);">AssetDemo</button>
     <button class="btn btn-secondary" onclick="loadStructField()" title="TupleSet (0xAB) — struct field assignment via in-place tuple replacement" style="border-color:rgba(14,165,233,0.4);color:rgba(56,189,248,0.9);">StructField</button>
     <button class="btn btn-secondary" onclick="loadStackFailDemo()" title="Stack safety + manifest verification demo — Layer 1+2+3 in action" style="border-color:rgba(239,68,68,0.4);color:rgba(252,165,165,0.9);">StackFailDemo</button>
+        <button class="contract-btn" style="border-color: #a855f7; color: #c084fc;" onclick="loadPQCDemo()" title="PQC Demo — ML-DSA-65 verification, FN-DSA verify, ML-KEM decapsulation">PQC</button>
         
   </div>
 
@@ -2651,7 +2652,10 @@
           + '  cost = base_op,alg + cbyte * input_bytes + carg * argc\n'
           + '\n'
           + 'Only AegisCall (0x8F) consumes fuel.\n'
-          + 'Non-PQC contracts always show 0 used.';
+          + 'Non-PQC contracts always show 0 used.\n'
+          + '\n'
+          + 'Step limit: ' + (data.max_steps || 100000000).toLocaleString() + '\n'
+          + '(per call_function invocation, ACTS-VM-003)';
         fb.style.display = 'inline-flex';
       })();
 
@@ -4006,6 +4010,88 @@ var LOOP_LINES = [
   '    return total;',
   '  }',
   '}',
+  var PQC_DEMO_LINES = [
+'// ═══ PQC DEMO ═══════════════════════════════════════════════════════════════
+  '// PQCDemo — Post-Quantum Cryptography Verification Demo
+  '// Demonstrates ML-DSA-65 (Dilithium3) signature verification
+  '// using the legacy direct-call opcode (0x80).
+  '// Also demonstrates ML-KEM-768 decapsulation (opcode 0x81).
+  '//
+  '// ACTS-15 §3: ML-DSA verify is a deterministic public operation.
+  '//             ML-KEM decapsulate requires a secret key and is
+  '//             rejected by the AEG1 deterministic dispatcher (0x8F).
+  '//             The legacy opcodes (0x80-0x83) bypass AEG1 dispatch
+  '//             and call the PQC shim directly.
+  'contract PQCDemo {',
+  '  state {',
+  '    initialised: bool;',
+  '    pk: bytes;',
+  '    sig: bytes;',
+  '    msg: bytes;',
+  '  }',
+  '',
+  '  impl {',
+  '    @public',
+  '    function init() -> bool {',
+  '      if (initialised) { return false; }',
+  '      initialised = true;',
+  '      return true;',
+  '    }',
+  '',
+  '    // Store a public key for later verification',
+  '    @public',
+  '    function setPublicKey(key: bytes) -> bool {',
+  '      pk = key;',
+  '      return true;',
+  '    }',
+  '',
+  '    // Store a signature for later verification',
+  '    @public',
+  '    function setSignature(s: bytes) -> bool {',
+  '      sig = s;',
+  '      return true;',
+  '    }',
+  '',
+  '    // Store a message for later verification',
+  '    @public',
+  '    function setMessage(m: bytes) -> bool {',
+  '      msg = m;',
+  '      return true;',
+  '    }',
+  '',
+  '    // Verify stored signature using ML-DSA-65 (Dilithium3)',
+  '    // Returns true if signature is valid for stored message + stored key',
+  '    @public',
+  '    function verifyStored() -> bool {',
+  '      require(initialised, "not initialised");',
+  '      return dilithium_verify(msg, sig, pk);',
+  '    }',
+  '',
+  '    // Direct ML-DSA-65 verification — pass all three as arguments',
+  '    // Source order: (message, signature, public_key)',
+  '    @public',
+  '    function verifyMlDsa(message: bytes, signature: bytes, publicKey: bytes) -> bool {',
+  '      return dilithium_verify(message, signature, publicKey);',
+  '    }',
+  '',
+  '    // Direct FN-DSA-512 (Falcon) verification',
+  '    @public',
+  '    function verifyFnDsa(message: bytes, signature: bytes, publicKey: bytes) -> bool {',
+  '      return falcon_verify(message, signature, publicKey);',
+  '    }',
+  '',
+  '    // ML-KEM-768 decapsulation — requires ciphertext + secret key
+  '    // NOTE: This uses the legacy opcode 0x81 which bypasses AEG1 dispatch.',
+  '    // The AEG1 deterministic dispatcher (0x8F) would reject this operation',
+  '    // per ACTS-15 §3 (requires secret key material).',
+  '    // Returns the shared secret as bytes.',
+  '    @public',
+  '    function decapsMlKem(ciphertext: bytes, secretKey: bytes) -> bytes {',
+  '      return kyber_decaps(ciphertext, secretKey);',
+  '    }',
+  '  }',
+  '}',
+];
 ];  /* ── Init ────────────────────────────────────────────────────────────────── */
   (function init() {
     document.getElementById('editor').value = VAULT_LINES.join('\n');
@@ -5203,4 +5289,17 @@ var LOOP_LINES = [
 })();
 </script>
 </body>
-</html>
+</htmlfunction loadPQCDemo() {
+    document.getElementById('editor').value = PQC_DEMO_LINES.join('\n');
+    updateLineNums(); clearResults(); syncCompileBtn();
+    // Fetch a fresh ML-DSA-65 test vector from the server
+    fetch('/synq/pqc/test-vector')
+      .then(r => r.json())
+      .then(tv => {
+        window._pqcTestVector = tv;
+        console.log('[PQC] Test vector loaded:', tv.algorithm, 'pk=' + tv.public_key_len + 'B sig=' + tv.signature_len + 'B verified=' + tv.verified);
+      })
+      .catch(e => console.warn('[PQC] Could not fetch test vector:', e));
+  }
+
+>
