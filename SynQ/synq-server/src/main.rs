@@ -144,6 +144,7 @@ const FUEL_REPORTING: bool = true;
 
 struct Session {
     vm:              QuantumVM,
+    max_steps:       usize,
     last_used:       Instant,
     state_vars:      Vec<(String, u32)>,
     contract_name:   Option<String>,      // from compile — used to derive EIP-712 verifyingContract
@@ -1921,6 +1922,10 @@ struct NewSessionRequest {
     /// V3 manifest from compile — used for Layer 3 verification (artifact hash + ML-DSA-87 signature)
     #[serde(default)]
     manifest: Option<serde_json::Value>,
+    /// Optional step limit override (default: 100M). Allows the IDE to configure
+    /// a lower limit for testing or a higher limit for loop-heavy contracts.
+    #[serde(default)]
+    max_steps: Option<usize>,
 }
 
 #[derive(serde::Serialize)]
@@ -1935,6 +1940,9 @@ struct NewSessionResponse {
     /// PQC fuel budget for this session (ACTS-VM-005).
     #[serde(skip_serializing_if = "Option::is_none")]
     fuel_budget: Option<u64>,
+    /// Step limit for this session (ACTS-VM-003).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_steps: Option<usize>,
 }
 
 /// Layer 3: Manifest + ML-DSA-87 signature verification result
@@ -2202,17 +2210,17 @@ async fn session_new_handler(
     Json(req): Json<NewSessionRequest>,
 ) -> (StatusCode, RespJson<NewSessionResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, contract_name: None, error: Some("rate limit exceeded — retry later".into()), layer3: None, fuel_budget: None }));
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, contract_name: None, error: Some("rate limit exceeded — retry later".into()), layer3: None, fuel_budget: None, max_steps: None }));
     }
     let raw = match hex_decode_strict(&req.bytecode) {
         Ok(b) if !b.is_empty() => b,
         Ok(_) => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None, error: Some("bytecode is empty".into()),
-            layer3: None, fuel_budget: None,
+            layer3: None, fuel_budget: None, max_steps: None,
         })),
         Err(e) => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None, error: Some(format!("bytecode hex invalid: {}", e)),
-            layer3: None, fuel_budget: None,
+            layer3: None, fuel_budget: None, max_steps: None,
         })),
     };
 
@@ -2221,7 +2229,7 @@ async fn session_new_handler(
         return (StatusCode::OK, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None,
             error: Some(format!("Bytecode verification failed: {}", e)),
-            layer3: None, fuel_budget: None,
+            layer3: None, fuel_budget: None, max_steps: None,
         }));
     }
 
@@ -2232,9 +2240,12 @@ async fn session_new_handler(
     if let Err(e) = vm.load_bytecode(&raw) {
         return (StatusCode::OK, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None, error: Some(format!("Load error: {}", e)),
-            layer3: None, fuel_budget: None,
+            layer3: None, fuel_budget: None, max_steps: None,
         }));
     }
+    // Apply optional step limit override
+    let effective_max_steps = req.max_steps.unwrap_or(synq_vm::DEFAULT_MAX_STEPS);
+    vm.max_steps = effective_max_steps;
 
     // Log Layer 3 result
     if let Some(ref l3) = layer3_result {
@@ -2257,6 +2268,7 @@ async fn session_new_handler(
         let cname = req.contract_name.clone();
         map.insert(id.clone(), Session {
             vm, last_used: Instant::now(),
+            max_steps: effective_max_steps,
             state_vars: req.state_vars,
             contract_name: cname.clone(),
             workspace_id: wid.clone(),
@@ -2277,6 +2289,7 @@ async fn session_new_handler(
 
     (StatusCode::OK, RespJson(NewSessionResponse { success: true, session_id: Some(id), contract_name: req.contract_name.clone(), error: None, layer3: layer3_result,
         fuel_budget: if FUEL_REPORTING { Some(synq_vm::DEFAULT_MAX_FUEL) } else { None },
+        max_steps: Some(effective_max_steps),
     }))
 }
 
@@ -2666,6 +2679,8 @@ async fn session_run_handler(
         session.vm.fault_injection = Some((step, offset, mask));
     }
 
+    // Ensure per-session step limit is applied (in case VM was reset)
+    session.vm.max_steps = session.max_steps;
     let call_result = session.vm.call_function(&req.function, &vm_args);
     eprintln!("[RUN] result={:?}", call_result);
     // ACTS-VM-005: read fuel consumption after the call

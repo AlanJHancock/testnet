@@ -2651,7 +2651,10 @@
           + '  cost = base_op,alg + cbyte * input_bytes + carg * argc\n'
           + '\n'
           + 'Only AegisCall (0x8F) consumes fuel.\n'
-          + 'Non-PQC contracts always show 0 used.';
+          + 'Non-PQC contracts always show 0 used.\n'
+          + '\n'
+          + 'Step limit: ' + (data.max_steps || 100000000).toLocaleString() + '\n'
+          + '(per call_function invocation, ACTS-VM-003)';
         fb.style.display = 'inline-flex';
       })();
 

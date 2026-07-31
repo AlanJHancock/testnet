@@ -9,9 +9,9 @@ use pqc_shims::aeg1;
 // ── PR-B constants ──────────────────────────────────────────────────────────
 
 /// Default maximum execution steps per call_function() invocation.
-/// 1,000,000 steps is generous for any real contract but terminates
-/// infinite loops in bounded time (milliseconds at native speed).
-pub const DEFAULT_MAX_STEPS: usize = 1_000_000;
+/// 100,000,000 steps allows loop-heavy demo contracts (~10M iterations)
+/// while still terminating infinite loops in bounded time (~100ms at native speed).
+pub const DEFAULT_MAX_STEPS: usize = 100_000_000;
 
 /// Default maximum PQC fuel budget per call_function() invocation.
 /// Each AEG1 operation deducts from this budget per the ACTS-15 cost model:
