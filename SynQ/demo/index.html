@@ -289,7 +289,7 @@
     <button class="btn btn-secondary" onclick="loadNamedError()" title="Named error revert — enum-based RevertCode (0x35) with structured error codes" style="border-color:rgba(239,68,68,0.4);color:rgba(248,113,113,0.9);">NamedError</button>
     <button class="btn btn-secondary" onclick="loadAssetDemo()" title="Linear asset tracking — AssetCreate/Transfer/Burn/Balance/Owner (0x57-0x5B)" style="border-color:rgba(245,158,11,0.4);color:rgba(251,191,36,0.9);">AssetDemo</button>
     <button class="btn btn-secondary" onclick="loadStructField()" title="TupleSet (0xAB) — struct field assignment via in-place tuple replacement" style="border-color:rgba(14,165,233,0.4);color:rgba(56,189,248,0.9);">StructField</button>
-    <button class="btn btn-secondary" onclick="loadStackFailDemo()" title="Stack safety verification demo — shows Layer 1+2 in action" style="border-color:rgba(239,68,68,0.4);color:rgba(252,165,165,0.9);">StackFailDemo</button>
+    <button class="btn btn-secondary" onclick="loadStackFailDemo()" title="Stack safety + manifest verification demo — Layer 1+2+3 in action" style="border-color:rgba(239,68,68,0.4);color:rgba(252,165,165,0.9);">StackFailDemo</button>
         
   </div>
 
@@ -303,6 +303,7 @@
     <span id="wasmBadge" style="display:none;" class="wasm-toolbar-badge">&#x26A1; In-Browser WASM</span>
     <span id="pqcSimBadge" style="display:none;" class="wasm-toolbar-badge" title="PQC builtins will throw RuntimeError in browser — deploy to synq-server for real verification">&#x26A0; PQC Simulation</span>
     <span id="verifyBadge" style="display:none;" class="verify-badge pass" title="Bytecode verification status"></span>
+    <span id="layer3Badge" style="display:none;" class="verify-badge pass" title="Layer 3: Manifest + ML-DSA-87 signature verification"></span>
     <span id="depsHint" style="font-size:0.75rem;visibility:hidden;">&nbsp;</span>
   </div>
   <div class="status-bar" id="statusBar"></div>
@@ -445,6 +446,7 @@
   var SESSION_NONCE_URL = 'https://hanksweb.co.uk/synq/session/';
 
   var currentBytecode         = null;
+  var currentManifest          = null;  // V3 manifest from compile (for Layer 3 verification)
   var currentSidecar          = null;
   var currentStateVars        = [];
   var currentStateVarTypes    = {};
@@ -853,6 +855,7 @@
       }
       // 2. Create a fresh session
       var resetBody = { bytecode: c.bytecode, state_vars: c.stateVars || c.state_vars || [] };
+      if (c.manifest) resetBody.manifest = c.manifest;
       if (c.name)      resetBody.contract_name = c.name;
       if (workspaceId)        resetBody.workspace_id    = workspaceId;
       if (c.fnReturnTypes)   resetBody.fn_return_types = c.fnReturnTypes;
@@ -1728,7 +1731,7 @@
       if (!_inWs) fetch(SESSION_DEL_URL + sessionId, { method: 'DELETE' }).catch(function(){});
       sessionId = null;
     }
-    currentBytecode = null; currentSidecar = null; currentContractName = null; currentContractAddress = null;
+    currentBytecode = null; currentSidecar = null; currentContractName = null; currentContractAddress = null; currentManifest = null;
     (function() {
       var mode = document.getElementById('sigMode');
       var note = document.getElementById('sigNote');
@@ -2004,6 +2007,7 @@
 
       // ── Compile success — store state ──────────────────────────────────────
       currentBytecode        = data.bytecode;
+      currentManifest         = data.manifest || null;
       currentSidecar         = data.signature_sidecar || null;
       currentStateVars       = data.state_vars        || [];
       currentStateVarTypes    = data.state_var_types   || {};
@@ -2529,6 +2533,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(Object.assign(
           { bytecode: currentBytecode, state_vars: currentStateVars, contract_name: currentContractName },
+          currentManifest ? { manifest: currentManifest } : {},
           workspaceId ? { workspace_id: workspaceId } : {}
         ))
       });
@@ -2547,6 +2552,28 @@
       const deployedAddress    = currentContractAddress;
       const deployedBytecode   = currentBytecode;
       const deployedStateVars  = currentStateVars.slice();
+
+      // ── Layer 3 badge: Manifest + ML-DSA-87 signature verification ──────
+      (function() {
+        var l3el = document.getElementById('layer3Badge');
+        if (!l3el) return;
+        var l3 = data.layer3;
+        if (!l3) {
+          l3el.style.display = 'none';
+          return;
+        }
+        if (l3.verified) {
+          l3el.innerHTML = '\u2705 L3: MANIFEST SIGNED \u00b7 ' + l3.algorithm + ' \u00b7 ' + l3.key_id;
+          l3el.className = 'verify-badge pass';
+          l3el.title = 'Layer 3 verified: artifact hash matches, ML-DSA-87 signature valid\n' +
+                       'Artifact hash: ' + l3.artifact_hash.slice(0, 32) + '...';
+        } else {
+          l3el.innerHTML = '\u26a0 L3: ' + (l3.artifact_hash_match ? 'SIG INVALID' : 'HASH MISMATCH');
+          l3el.className = 'verify-badge warn';
+          l3el.title = l3.warning || 'Layer 3 verification failed';
+        }
+        l3el.style.display = 'inline-flex';
+      })();
 
       // Always update sessionId to the freshly deployed session.
       // The old guard prevented re-deploys from updating sessionId when a
@@ -3379,6 +3406,7 @@
       }
       // 2. Create a fresh session
       var resetBody = { bytecode: c.bytecode, state_vars: c.stateVars || c.state_vars || [] };
+      if (c.manifest) resetBody.manifest = c.manifest;
       if (c.name)      resetBody.contract_name = c.name;
       if (workspaceId)        resetBody.workspace_id    = workspaceId;
       if (c.fnReturnTypes)   resetBody.fn_return_types = c.fnReturnTypes;
@@ -4971,6 +4999,13 @@ var LOOP_LINES = [
       '//   • Jump/Call targets out of bounds',
       '//',
       '// Layer 2 (advisory warnings — logged but not blocking):',
+      '//',
+      '// Layer 3 (manifest + ML-DSA-87 signature verification):',
+      '//   • Artifact hash (SHA3-256 of bytecode) matches manifest',
+      '//   • Manifest signature verified against compiler public key',
+      '//   • Badge: \u2705 L3: MANIFEST SIGNED \u00b7 ML-DSA-87 \u00b7 <key_id>',
+      '//   • Only checked when manifest is passed to /session/new',
+      '//',
       '//   • Stack underflow: opcode pops more than available',
       '//     e.g. Add with only 1 item on stack (needs 2)',
       '//     e.g. Store with only 1 item (needs addr + value)',

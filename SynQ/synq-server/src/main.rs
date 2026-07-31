@@ -1912,6 +1912,9 @@ struct NewSessionRequest {
     fn_return_types: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
     governance_scopes: Option<std::collections::HashMap<String, String>>,
+    /// V3 manifest from compile — used for Layer 3 verification (artifact hash + ML-DSA-87 signature)
+    #[serde(default)]
+    manifest: Option<serde_json::Value>,
 }
 
 #[derive(serde::Serialize)]
@@ -1920,6 +1923,21 @@ struct NewSessionResponse {
     session_id:    Option<String>,
     contract_name: Option<String>,
     error:      Option<String>,
+    /// Layer 3 manifest verification result
+    #[serde(skip_serializing_if = "Option::is_none")]
+    layer3: Option<Layer3Result>,
+}
+
+/// Layer 3: Manifest + ML-DSA-87 signature verification result
+#[derive(Debug, Clone, serde::Serialize)]
+struct Layer3Result {
+    verified:           bool,
+    artifact_hash_match: bool,
+    signature_valid:    bool,
+    artifact_hash:       String,
+    algorithm:           String,
+    key_id:              String,
+    warning:             Option<String>,
 }
 
 
@@ -2077,21 +2095,115 @@ async fn workspace_remove_handler(
     }
 }
 
+
+// ─── Layer 3: Manifest + ML-DSA-87 signature verification ─────────────────────
+
+/// Verify a V3 manifest against bytecode:
+/// 1. Recompute artifact_hash = SHA3-256(bytecode) and compare with manifest
+/// 2. Reconstruct the canonical manifest JSON, hash it, verify ML-DSA-87 signature
+fn verify_manifest(bytecode: &[u8], manifest: &serde_json::Value) -> Layer3Result {
+    use sha3::{Digest, Sha3_256};
+
+    // Extract fields from the manifest JSON
+    let artifact_hash_stored = manifest.get("artifact_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let manifest_sig = manifest.get("manifest_signature")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let compiler_pubkey = manifest.get("compiler_public_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let algorithm = manifest.get("required_signature_algorithm")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ML-DSA-87");
+    let key_id = manifest.get("key_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    // Step 1: artifact hash check
+    let computed_hash = hex::encode(Sha3_256::digest(bytecode));
+    let hash_match = computed_hash == artifact_hash_stored;
+
+    // Step 2: signature verification
+    let mut sig_valid = false;
+    let mut warning = None;
+
+    if manifest_sig.is_empty() || compiler_pubkey.is_empty() {
+        warning = Some("Manifest has no signature or public key".into());
+    } else if !hash_match {
+        warning = Some(format!(
+            "Artifact hash mismatch: manifest={}, computed={}", 
+            &artifact_hash_stored[..16.min(artifact_hash_stored.len())],
+            &computed_hash[..16.min(computed_hash.len())]
+        ));
+    } else {
+        // Reconstruct the canonical manifest JSON (same fields used during compile-time signing)
+        let canonical_json = serde_json::json!({
+            "artifact_hash":   manifest.get("artifact_hash").cloned().unwrap_or_default(),
+            "source_hash":     manifest.get("source_hash").cloned().unwrap_or_default(),
+            "chain_id":        manifest.get("chain_id").cloned().unwrap_or_default(),
+            "network_id":      manifest.get("network_id").cloned().unwrap_or_default(),
+            "functions":       manifest.get("functions").cloned().unwrap_or_default(),
+            "state_vars":      manifest.get("state_vars").cloned().unwrap_or_default(),
+            "governance_scopes": manifest.get("governance_scopes").cloned().unwrap_or_default(),
+            "authority_scopes":  manifest.get("authority_scopes").cloned().unwrap_or_default(),
+        });
+        let manifest_bytes = serde_json::to_vec(&canonical_json).unwrap_or_default();
+        let manifest_hash = Sha3_256::digest(&manifest_bytes);
+
+        match (hex::decode(manifest_sig), hex::decode(compiler_pubkey)) {
+            (Ok(sig), Ok(pk)) => {
+                let pqc = synq_compiler::PQCCompiler::new(
+                    synq_compiler::PQCSecurityLevel::Enhanced
+                );
+                match pqc.verify_signature(&pk, &sig, &manifest_hash, algorithm) {
+                    Ok(valid) => sig_valid = valid,
+                    Err(e) => {
+                        warning = Some(format!("Signature verification error: {}", e));
+                    }
+                }
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                warning = Some(format!("Hex decode failed: {}", e));
+            }
+        }
+
+        if !sig_valid && warning.is_none() {
+            warning = Some("ML-DSA-87 signature invalid".into());
+        }
+    }
+
+    let verified = hash_match && sig_valid;
+
+    Layer3Result {
+        verified,
+        artifact_hash_match: hash_match,
+        signature_valid:     sig_valid,
+        artifact_hash:       computed_hash,
+        algorithm:           algorithm.to_string(),
+        key_id:              key_id.to_string(),
+        warning,
+    }
+}
+
 async fn session_new_handler(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<NewSessionRequest>,
 ) -> (StatusCode, RespJson<NewSessionResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, contract_name: None, error: Some("rate limit exceeded — retry later".into()) }));
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, contract_name: None, error: Some("rate limit exceeded — retry later".into()), layer3: None }));
     }
     let raw = match hex_decode_strict(&req.bytecode) {
         Ok(b) if !b.is_empty() => b,
         Ok(_) => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None, error: Some("bytecode is empty".into()),
+            layer3: None,
         })),
         Err(e) => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None, error: Some(format!("bytecode hex invalid: {}", e)),
+            layer3: None,
         })),
     };
 
@@ -2100,14 +2212,31 @@ async fn session_new_handler(
         return (StatusCode::OK, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None,
             error: Some(format!("Bytecode verification failed: {}", e)),
+            layer3: None,
         }));
     }
+
+    // Layer 3: Manifest + ML-DSA-87 signature verification (if manifest provided)
+    let layer3_result = req.manifest.as_ref().map(|m| verify_manifest(&raw, m));
 
     let mut vm = QuantumVM::new();
     if let Err(e) = vm.load_bytecode(&raw) {
         return (StatusCode::OK, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None, error: Some(format!("Load error: {}", e)),
+            layer3: None,
         }));
+    }
+
+    // Log Layer 3 result
+    if let Some(ref l3) = layer3_result {
+        if l3.verified {
+            eprintln!("[VERIFY] Layer 3 passed (manifest + ML-DSA-87 signature) | hash={}...", &l3.artifact_hash[..16]);
+        } else {
+            eprintln!("[VERIFY] Layer 3 FAILED: hash_match={}, sig_valid={}", l3.artifact_hash_match, l3.signature_valid);
+            if let Some(ref w) = l3.warning { eprintln!("[VERIFY] Layer 3 warning: {}", w); }
+        }
+    } else {
+        eprintln!("[VERIFY] Layer 3 skipped (no manifest provided)");
     }
 
     let id = new_session_id();
@@ -2137,7 +2266,7 @@ async fn session_new_handler(
         }
     }
 
-    (StatusCode::OK, RespJson(NewSessionResponse { success: true, session_id: Some(id), contract_name: req.contract_name.clone(), error: None }))
+    (StatusCode::OK, RespJson(NewSessionResponse { success: true, session_id: Some(id), contract_name: req.contract_name.clone(), error: None, layer3: layer3_result }))
 }
 
 // ─── POST /session/run ────────────────────────────────────────────────────────
