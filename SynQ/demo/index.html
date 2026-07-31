@@ -64,6 +64,10 @@
   .verify-badge.pass { background:rgba(16,185,129,0.12); border:1px solid rgba(16,185,129,0.35); color:#6ee7b7; }
   .verify-badge.warn { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
   .verify-badge.fail { background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); color:#fca5a5; }
+  .fuel-badge { display:inline-flex; align-items:center; gap:5px; font-size:0.7rem; font-weight:700; letter-spacing:0.04em; padding:3px 10px; border-radius:12px; vertical-align:middle; }
+  .fuel-badge.active { background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.35); color:#93c5fd; }
+  .fuel-badge.warn { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
+  .fuel-badge.depleted { background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); color:#fca5a5; }
   .wallet-mode.ephemeral   { background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.3); color: #fcd34d; }
     .wallet-mode.persistent  { background: rgba(52,211,153,0.1);  border: 1px solid rgba(52,211,153,0.4);  color: #34d399; }
   .btn-wallet { display: inline-flex; align-items: center; gap: 6px; padding: 7px 18px; border-radius: 8px; font-size: 0.82rem; font-weight: 600; cursor: pointer; border: 1px solid rgba(124,58,237,0.5); background: rgba(124,58,237,0.15); color: #a78bfa; }
@@ -304,6 +308,7 @@
     <span id="pqcSimBadge" style="display:none;" class="wasm-toolbar-badge" title="PQC builtins will throw RuntimeError in browser — deploy to synq-server for real verification">&#x26A0; PQC Simulation</span>
     <span id="verifyBadge" style="display:none;" class="verify-badge pass" title="L1 Structural (hard gate) + L2 Stack Safety (advisory) — checked at compile"></span>
     <span id="layer3Badge" style="display:none;" class="verify-badge pass" title="L3 Manifest + ML-DSA-87 signature — checked at deploy"></span>
+    <span id="fuelBadge" style="display:none;" class="fuel-badge active" title="PQC Fuel Budget (ACTS-VM-005) — cost charged per AegisCall"></span>
     <span id="depsHint" style="font-size:0.75rem;visibility:hidden;">&nbsp;</span>
   </div>
   <div class="status-bar" id="statusBar"></div>
@@ -827,6 +832,13 @@
     }
 
     renderWorkspacePanel();
+  }
+
+  function hideFuelBadge() {
+    var fb = document.getElementById('fuelBadge');
+    if (fb) fb.style.display = 'none';
+    window._fuelBudget = undefined;
+    window._fuelUsed = 0;
   }
 
   async function resetVM() {
@@ -2610,6 +2622,39 @@
         l3el.style.display = 'inline-flex';
       })();
 
+      // ── Fuel badge: PQC budget from /session/new ──────────────────────
+      (function() {
+        var fb = document.getElementById('fuelBadge');
+        if (!fb) return;
+        var budget = data.fuel_budget;
+        if (budget === undefined || budget === null) {
+          fb.style.display = 'none';
+          return;
+        }
+        window._fuelBudget = budget;
+        window._fuelUsed = 0;
+        var fmtN = function(n) {
+          if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
+          if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+          if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+          return String(n);
+        };
+        fb.innerHTML = '\u26a1 FUEL: 0 / ' + fmtN(budget);
+        fb.className = 'fuel-badge active';
+        fb.title = 'PQC FUEL BUDGET (ACTS-VM-005)\n'
+          + '===============================================\n'
+          + 'Budget: ' + budget.toLocaleString() + '\n'
+          + 'Used: 0\n'
+          + 'Remaining: ' + budget.toLocaleString() + '\n'
+          + '\n'
+          + 'Cost formula (per AegisCall):\n'
+          + '  cost = base_op,alg + cbyte * input_bytes + carg * argc\n'
+          + '\n'
+          + 'Only AegisCall (0x8F) consumes fuel.\n'
+          + 'Non-PQC contracts always show 0 used.';
+        fb.style.display = 'inline-flex';
+      })();
+
       // Always update sessionId to the freshly deployed session.
       // The old guard prevented re-deploys from updating sessionId when a
       // workspace was active, causing init() to fire against a stale session.
@@ -3019,6 +3064,36 @@
       var data = await res.json();
 
       if (data.success) {
+        // ── Update fuel badge ───────────────────────────────────────────
+        (function() {
+          var fb = document.getElementById('fuelBadge');
+          if (!fb || !window._fuelBudget) return;
+          var used = data.fuel_used !== undefined ? data.fuel_used : 0;
+          var remaining = data.fuel_remaining !== undefined ? data.fuel_remaining : (window._fuelBudget - used);
+          window._fuelUsed = used;
+          var budget = window._fuelBudget;
+          var pct = budget > 0 ? (used / budget) * 100 : 0;
+          var fmtN = function(n) {
+            if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
+            if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+            if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+            return String(n);
+          };
+          fb.innerHTML = '\u26a1 FUEL: ' + fmtN(used) + ' / ' + fmtN(budget);
+          if (pct >= 100) {
+            fb.className = 'fuel-badge depleted';
+          } else if (pct >= 75) {
+            fb.className = 'fuel-badge warn';
+          } else {
+            fb.className = 'fuel-badge active';
+          }
+          fb.title = 'PQC FUEL BUDGET (ACTS-VM-005)\n'
+            + '===============================================\n'
+            + 'Budget: ' + budget.toLocaleString() + '\n'
+            + 'Used: ' + used.toLocaleString() + '\n'
+            + 'Remaining: ' + remaining.toLocaleString() + '\n'
+            + 'Utilization: ' + pct.toFixed(2) + '%';
+        })();
         var rv = data.result;
         // V3: display caller's syna... Bech32 address if present
         var callerSynaDisplay = '';
