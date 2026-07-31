@@ -13,6 +13,7 @@ pub enum VMError {
     Reverted(String),          // require() failure — carries the require message
     RevertedNamed { code: u32, message: String }, // named error revert — carries enum variant tag + display message
     StepLimitExceeded(usize),  // PR-B: infinite-loop / gas guard
+    FuelExhausted { cost: u64, remaining: u64 },  // ACTS-VM-005: PQC cost budget
 }
 
 impl fmt::Display for VMError {
@@ -28,6 +29,7 @@ impl fmt::Display for VMError {
             VMError::Reverted(msg)           => write!(f, "require failed: {}", msg),
             VMError::RevertedNamed { code, message } => write!(f, "revert: {} (code {})", message, code),
             VMError::StepLimitExceeded(n)    => write!(f, "step limit exceeded ({} steps): possible infinite loop", n),
+            VMError::FuelExhausted { cost, remaining } => write!(f, "fuel exhausted: needed {} but only {} remaining", cost, remaining),
         }
     }
 }

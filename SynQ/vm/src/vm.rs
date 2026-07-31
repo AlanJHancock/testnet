@@ -13,6 +13,16 @@ use pqc_shims::aeg1;
 /// infinite loops in bounded time (milliseconds at native speed).
 pub const DEFAULT_MAX_STEPS: usize = 1_000_000;
 
+/// Default maximum PQC fuel budget per call_function() invocation.
+/// Each AEG1 operation deducts from this budget per the ACTS-15 cost model:
+///   cost = base_op,alg + cbyte * input_bytes + carg * argument_count
+/// 100,000,000 is sufficient for ~8,000 ML-DSA-87 verifications.
+pub const DEFAULT_MAX_FUEL: u64 = 100_000_000;
+
+/// Minimum bounded cost charged for any AegisCall attempt, even if the
+/// payload is malformed and cannot be parsed (ACTS-15 §4).
+pub const AEGIS_MIN_COST: u64 = 1_000;
+
 /// Default maximum call-stack depth enforced at runtime.
 /// Matches the compile-time MAX_CALL_DEPTH = 64 in compiler/src/lib.rs —
 /// belt-and-suspenders: the compiler rejects obvious infinite recursion
@@ -389,6 +399,13 @@ pub struct QuantumVM {
     /// Set this before calling call_function() to override.
     pub max_steps: usize,
 
+    // ── ACTS-VM-005: PQC fuel budget ──────────────────────────────────────
+    /// Fuel consumed so far in the current call_function() invocation.
+    /// Reset to 0 at the start of each call.
+    fuel_used: u64,
+    /// Hard limit on PQC fuel per invocation.  Default: DEFAULT_MAX_FUEL.
+    pub max_fuel: u64,
+
     // ── PR-B Item 4: runtime call depth guard ──────────────────────────────
     /// Hard limit on call_stack depth enforced at the Call opcode.
     /// Default: DEFAULT_MAX_CALL_DEPTH.
@@ -437,12 +454,19 @@ impl QuantumVM {
             print_log: Vec::new(),
             steps: 0,
             max_steps: DEFAULT_MAX_STEPS,
+            fuel_used: 0,
+            max_fuel: DEFAULT_MAX_FUEL,
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
             fault_injection: None,
             assets: HashMap::new(),
             next_asset_id: 1,
         }
     }
+
+    /// PQC fuel consumed so far in the current invocation (ACTS-VM-005).
+    pub fn fuel_used(&self) -> u64 { self.fuel_used }
+    /// Remaining PQC fuel budget.
+    pub fn fuel_remaining(&self) -> u64 { self.max_fuel.saturating_sub(self.fuel_used) }
 
     pub fn load_bytecode(&mut self, bytecode: &[u8]) -> Result<(), VMError> {
         let header = Header::parse(bytecode)?;
@@ -460,6 +484,7 @@ impl QuantumVM {
         self.pc    = 0;
         self.halted = false;
         self.steps  = 0;  // reset step counter on fresh load
+        self.fuel_used = 0;  // reset fuel budget
         self.functions = parse_function_table(&self.data)?;
 
         Ok(())
@@ -524,6 +549,7 @@ impl QuantumVM {
         self.halted = false;
         // ── PR-B Item 3: reset step counter for this invocation ─────────────
         self.steps = 0;
+        self.fuel_used = 0;
         eprintln!("[VM] call_function name={:?} pc={} code_len={} memory_slots={}",
             name, self.pc, self.code.len(), self.memory.len());
         // Dump 200 bytes starting at entry PC
@@ -566,6 +592,7 @@ impl QuantumVM {
 
     pub fn execute(&mut self) -> Result<(), VMError> {
         self.steps = 0;
+        self.fuel_used = 0;
         let snapshot = self.memory.clone();
         loop {
             if self.halted || self.pc >= self.code.len() {
@@ -1320,8 +1347,23 @@ OpCode::MapNew => {
             // This is the spec v7.0 aligned interface — replaces algorithm-
             // specific opcodes 0x80-0x83 for new contracts.
             OpCode::AegisCall => {
-                // ACTS-15 §3: deterministic VM dispatcher — only verification ops
+                // ACTS-15 §3+§4: deterministic VM dispatcher with cost model
                 let frame = self.pop()?.as_bytes()?.to_vec();
+
+                // ACTS-VM-005: compute and charge cost BEFORE dispatch.
+                // If the payload is malformed, charge the minimum bounded cost.
+                let cost = match aeg1::Aeg1Request::decode(&frame) {
+                    Ok(req) => aeg1::compute_cost(&req),
+                    Err(_)  => AEGIS_MIN_COST,  // malformed: bounded cost (ACTS-15 §4)
+                };
+
+                let remaining = self.max_fuel.saturating_sub(self.fuel_used);
+                if cost > remaining {
+                    eprintln!("[AEG1] fuel exhausted: needed {} but only {} remaining", cost, remaining);
+                    return Err(VMError::FuelExhausted { cost, remaining });
+                }
+                self.fuel_used += cost;
+
                 match aeg1::process_frame_deterministic(&frame) {
                     Ok(response_frame) => {
                         // Decode the response to determine VM-level result
@@ -1768,5 +1810,95 @@ mod authority_tests {
             }
             _ => panic!("expected U256"),
         }
+    }
+
+    /// ACTS-VM-005: AegisCall must charge fuel based on the cost model.
+    #[test]
+    fn test_aegis_call_charges_fuel() {
+        let req = aeg1::Aeg1Request {
+            operation: aeg1::Operation::MlDsaVerify,
+            algorithm: aeg1::Algorithm::MlDsa65,
+            args: vec![b"msg".to_vec(), vec![0xFF; 64], vec![0xEE; 32]],
+        };
+        let frame = req.encode();
+        let expected_cost = aeg1::compute_cost(&req);
+        // base(8000) + cbyte(1)*(3+64+32) + carg(100)*3 = 8000 + 99 + 300 = 8399
+        assert_eq!(expected_cost, 8000 + 99 + 300);
+
+        let mut vm = QuantumVM::new();
+        vm.push(Value::Bytes(frame.clone()));
+        vm.code = vec![OpCode::AegisCall as u8, OpCode::Halt as u8];
+        vm.pc = 0;
+        let _ = vm.execute();
+        assert_eq!(vm.fuel_used(), expected_cost);
+    }
+
+    /// ACTS-VM-005: Fuel exhaustion must halt with FuelExhausted error.
+    #[test]
+    fn test_fuel_exhaustion() {
+        let req = aeg1::Aeg1Request {
+            operation: aeg1::Operation::MlDsaVerify,
+            algorithm: aeg1::Algorithm::MlDsa87,
+            args: vec![vec![0xAB; 1000], vec![0xCD; 2000], vec![0xEF; 500]],
+        };
+        let frame = req.encode();
+        let expected_cost = aeg1::compute_cost(&req);
+
+        let mut vm = QuantumVM::new();
+        vm.max_fuel = expected_cost - 1;
+        vm.push(Value::Bytes(frame));
+        vm.code = vec![OpCode::AegisCall as u8, OpCode::Halt as u8];
+        vm.pc = 0;
+        let result = vm.execute();
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            VMError::FuelExhausted { cost, remaining } => {
+                assert_eq!(cost, expected_cost);
+                assert_eq!(remaining, expected_cost - 1);
+            }
+            e => panic!("expected FuelExhausted, got {:?}", e),
+        }
+    }
+
+    /// ACTS-VM-005: Malformed payloads must still charge the minimum bounded cost.
+    #[test]
+    fn test_malformed_aegis_call_charges_min_cost() {
+        let mut vm = QuantumVM::new();
+        vm.push(Value::Bytes(b"NOT_AEG1".to_vec()));
+        vm.code = vec![OpCode::AegisCall as u8, OpCode::Halt as u8];
+        vm.pc = 0;
+        let _ = vm.execute();
+        assert_eq!(vm.fuel_used(), AEGIS_MIN_COST);
+    }
+
+    /// ACTS-VM-005: Multiple AegisCalls accumulate fuel usage.
+    #[test]
+    fn test_fuel_accumulates() {
+        let req = aeg1::Aeg1Request {
+            operation: aeg1::Operation::MlDsaVerify,
+            algorithm: aeg1::Algorithm::MlDsa65,
+            args: vec![b"msg".to_vec(), vec![0xFF; 32], vec![0xEE; 16]],
+        };
+        let frame = req.encode();
+        let single_cost = aeg1::compute_cost(&req);
+
+        let mut vm = QuantumVM::new();
+        // Use execute_instruction directly — execute() resets fuel to 0
+        vm.code = vec![OpCode::AegisCall as u8, OpCode::Halt as u8];
+
+        // First call
+        vm.push(Value::Bytes(frame.clone()));
+        vm.pc = 0;
+        let _ = vm.execute_instruction();
+        assert_eq!(vm.fuel_used(), single_cost);
+
+        // Pop the Bool(false) pushed by the first AegisCall
+        let _ = vm.pop();
+
+        // Second call — fuel should accumulate
+        vm.push(Value::Bytes(frame.clone()));
+        vm.pc = 0;
+        let _ = vm.execute_instruction();
+        assert_eq!(vm.fuel_used(), single_cost * 2);
     }
 }
