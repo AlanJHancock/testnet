@@ -42,6 +42,10 @@ pub const MAX_ARGS: u8 = 8;
 pub const MAX_ARG_SIZE: usize = 131_072;
 pub const MAX_RESPONSE_SIZE: usize = 131_072;
 
+/// AEG1 ABI / profile version (ACTS-VM-011).
+/// Increment on any change to wire semantics or operation IDs.
+pub const ABI_VERSION: u8 = 1;
+
 /// AEG1 operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -100,6 +104,23 @@ impl TryFrom<u8> for Algorithm {
     }
 }
 
+impl Algorithm {
+    /// Canonical ACTS identifier (ACTS-VM-004).
+    /// Maps local algorithm IDs to canonical ACTS parameter-set identifiers.
+    pub fn canonical_id(&self) -> &'static str {
+        match self {
+            Self::MlKem512  => "ACTS-ML-KEM-512",
+            Self::MlKem768  => "ACTS-ML-KEM-768",
+            Self::MlKem1024 => "ACTS-ML-KEM-1024",
+            Self::MlDsa44   => "ACTS-ML-DSA-44",
+            Self::MlDsa65   => "ACTS-ML-DSA-65",
+            Self::MlDsa87   => "ACTS-ML-DSA-87",
+            Self::FnDsa512  => "ACTS-FN-DSA-512",
+            Self::FnDsa1024 => "ACTS-FN-DSA-1024",
+        }
+    }
+}
+
 /// AEG1 response status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -148,6 +169,7 @@ pub enum Aeg1Error {
     WrongArgCount { expected: u8, actual: u8 },
     CryptoFailed(String),
     ResponseTooLarge(usize),
+    TrailingBytes(usize),
     Io(io::Error),
 }
 
@@ -164,6 +186,7 @@ impl std::fmt::Display for Aeg1Error {
             Self::WrongArgCount{expected,actual} => write!(f, "AEG1: wrong arg count (expected {}, got {})", expected, actual),
             Self::CryptoFailed(s) => write!(f, "AEG1: crypto failed: {}", s),
             Self::ResponseTooLarge(n) => write!(f, "AEG1: response too large ({})", n),
+            Self::TrailingBytes(n) => write!(f, "AEG1: {} trailing byte(s) after final argument", n),
             Self::Io(e) => write!(f, "AEG1: IO error: {}", e),
         }
     }
@@ -244,6 +267,11 @@ impl Aeg1Request {
             }
             args.push(data[pos..pos+len].to_vec());
             pos += len;
+        }
+
+        // ACTS-VM-003: reject trailing bytes after the final argument
+        if pos != data.len() {
+            return Err(Aeg1Error::TrailingBytes(data.len() - pos));
         }
 
         let req = Self { operation, algorithm, args };
@@ -396,6 +424,65 @@ pub fn dispatch_deterministic(req: &Aeg1Request) -> Aeg1Response {
     }
 }
 
+// ── ACTS-VM-007: Capability Discovery ────────────────────────────────────────
+/// Describes whether a given operation+algorithm combination is supported,
+/// and in which dispatch context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capability {
+    pub operation: Operation,
+    pub algorithm: Algorithm,
+    pub deterministic: bool,  // available in deterministic (on-chain) dispatcher
+    pub off_chain: bool,      // available in trusted off-chain dispatcher
+    pub contextual: bool,     // contextual signing supported
+}
+
+/// Query capability support for a given operation+algorithm (ACTS-VM-007).
+/// Unsupported operations (e.g. FN-DSA contextual signing) return
+/// `contextual: false` so callers get an explicit not-implemented signal.
+pub fn capability(op: Operation, alg: Algorithm) -> Capability {
+    match (op, alg) {
+        // ML-DSA: deterministic verify + off-chain sign; contextual supported
+        (Operation::MlDsaVerify, _) => Capability {
+            operation: op, algorithm: alg,
+            deterministic: true, off_chain: true, contextual: true,
+        },
+        // FN-DSA: deterministic verify supported; contextual NOT implemented (ACTS-VM-007)
+        (Operation::FnDsaVerify, _) => Capability {
+            operation: op, algorithm: alg,
+            deterministic: true, off_chain: true, contextual: false,
+        },
+        // ML-KEM: off-chain only, not deterministic
+        (Operation::MlKemDecaps, _) => Capability {
+            operation: op, algorithm: alg,
+            deterministic: false, off_chain: true, contextual: false,
+        },
+    }
+}
+
+/// Returns a list of all supported capability combinations for build identification
+/// (ACTS-VM-008).
+pub fn supported_capabilities() -> Vec<Capability> {
+    let mut caps = Vec::new();
+    for &op in &[Operation::MlDsaVerify, Operation::FnDsaVerify, Operation::MlKemDecaps] {
+        for &alg in &[
+            Algorithm::MlKem512, Algorithm::MlKem768, Algorithm::MlKem1024,
+            Algorithm::MlDsa44, Algorithm::MlDsa65, Algorithm::MlDsa87,
+            Algorithm::FnDsa512, Algorithm::FnDsa1024,
+        ] {
+            // Only include valid combos
+            match (op, alg) {
+                (Operation::MlKemDecaps, Algorithm::MlKem512 | Algorithm::MlKem768 | Algorithm::MlKem1024) |
+                (Operation::MlDsaVerify, Algorithm::MlDsa44 | Algorithm::MlDsa65 | Algorithm::MlDsa87) |
+                (Operation::FnDsaVerify, Algorithm::FnDsa512 | Algorithm::FnDsa1024) => {
+                    caps.push(capability(op, alg));
+                }
+                _ => {}
+            }
+        }
+    }
+    caps
+}
+
 #[cfg(not(feature = "native"))]
 pub fn dispatch_deterministic(_req: &Aeg1Request) -> Aeg1Response {
     Aeg1Response::Error(ErrorCode::CryptoFailed, "PQC requires native build".into())
@@ -487,6 +574,51 @@ fn dispatch_fn_dsa(req: &Aeg1Request) -> Aeg1Response {
         }
         _ => Aeg1Response::Error(ErrorCode::UnknownAlgorithm, format!("FN-DSA got 0x{:02x}", req.algorithm as u8)),
     }
+}
+
+// ── ACTS-VM-005: Cost Model ──────────────────────────────────────────────────
+/// AEG1 operation cost model (ACTS-15 §4).
+///
+/// cost = baseop,alg + cbyte * input_bytes + carg * argument_count
+///
+/// Constants are versioned by ABI_VERSION and VM profile.
+
+/// Base cost per operation + algorithm combination.
+pub fn base_cost(op: Operation, alg: Algorithm) -> u64 {
+    match (op, alg) {
+        // ML-DSA verify: moderate base cost
+        (Operation::MlDsaVerify, Algorithm::MlDsa44) => 5_000,
+        (Operation::MlDsaVerify, Algorithm::MlDsa65) => 8_000,
+        (Operation::MlDsaVerify, Algorithm::MlDsa87) => 12_000,
+        // FN-DSA verify: lower base cost (compact signatures)
+        (Operation::FnDsaVerify, Algorithm::FnDsa512)  => 4_000,
+        (Operation::FnDsaVerify, Algorithm::FnDsa1024) => 7_000,
+        // ML-KEM decapsulate (off-chain only): high base cost
+        (Operation::MlKemDecaps, _) => 20_000,
+        _ => 15_000, // conservative default
+    }
+}
+
+/// Per-byte cost coefficient.
+pub const CBYTE: u64 = 1;
+/// Per-argument cost coefficient.
+pub const CARG: u64 = 100;
+
+/// Compute the bounded cost of an AEG1 request (ACTS-VM-005).
+/// Deterministic — same input always yields the same cost.
+pub fn compute_cost(req: &Aeg1Request) -> u64 {
+    let base = base_cost(req.operation, req.algorithm);
+    let input_bytes: usize = req.args.iter().map(|a| a.len()).sum();
+    let bounded_bytes = input_bytes.min(MAX_PAYLOAD) as u64;
+    base + CBYTE * bounded_bytes + CARG * (req.args.len() as u64)
+}
+
+/// Compute the worst-case cost for a given operation+algorithm before parsing
+/// the payload. Used for pre-execution bounding (ACTS-15 §4).
+pub fn worst_case_cost(op: Operation, alg: Algorithm) -> u64 {
+    base_cost(op, alg)
+        + CBYTE * MAX_PAYLOAD as u64
+        + CARG * MAX_ARGS as u64
 }
 
 // ── Convenience: encode + dispatch + decode in one call ──────────────────────
@@ -699,5 +831,103 @@ mod tests {
             }
             Aeg1Response::Ok(_) => panic!("Should fail without native build"),
         }
+    }
+
+    /// ACTS-VM-003: trailing bytes after final argument MUST be rejected.
+    #[test]
+    fn test_trailing_bytes_rejected() {
+        let req = Aeg1Request {
+            operation: Operation::MlDsaVerify,
+            algorithm: Algorithm::MlDsa65,
+            args: vec![b"msg".to_vec(), vec![0xFF; 32], vec![0xEE; 16]],
+        };
+        let mut encoded = req.encode();
+        encoded.extend_from_slice(b"TRAILING");
+        let result = Aeg1Request::decode(&encoded);
+        assert!(matches!(result, Err(Aeg1Error::TrailingBytes(8))));
+    }
+
+    /// ACTS-VM-004: canonical ACTS identifiers.
+    #[test]
+    fn test_canonical_ids() {
+        assert_eq!(Algorithm::MlKem768.canonical_id(),  "ACTS-ML-KEM-768");
+        assert_eq!(Algorithm::MlKem1024.canonical_id(), "ACTS-ML-KEM-1024");
+        assert_eq!(Algorithm::MlDsa44.canonical_id(),   "ACTS-ML-DSA-44");
+        assert_eq!(Algorithm::MlDsa87.canonical_id(),    "ACTS-ML-DSA-87");
+        assert_eq!(Algorithm::FnDsa512.canonical_id(),  "ACTS-FN-DSA-512");
+        assert_eq!(Algorithm::FnDsa1024.canonical_id(), "ACTS-FN-DSA-1024");
+    }
+
+    /// ACTS-VM-005: cost model must be deterministic and bounded.
+    #[test]
+    fn test_cost_model() {
+        let req = Aeg1Request {
+            operation: Operation::MlDsaVerify,
+            algorithm: Algorithm::MlDsa87,
+            args: vec![vec![0xAB; 100], vec![0xCD; 200], vec![0xEF; 50]],
+        };
+        let cost = compute_cost(&req);
+        // base(12000) + cbyte(1)*350 + carg(100)*3 = 12000 + 350 + 300 = 12650
+        assert_eq!(cost, 12000 + 350 + 300);
+
+        // Same input → same cost (deterministic)
+        let cost2 = compute_cost(&req);
+        assert_eq!(cost, cost2);
+
+        // Worst case must be >= any actual cost
+        let wc = worst_case_cost(Operation::MlDsaVerify, Algorithm::MlDsa87);
+        assert!(wc >= cost);
+    }
+
+    /// ACTS-VM-005: worst-case cost must bound malformed payloads too.
+    #[test]
+    fn test_worst_case_bounded() {
+        let wc = worst_case_cost(Operation::MlDsaVerify, Algorithm::MlDsa65);
+        let base = base_cost(Operation::MlDsaVerify, Algorithm::MlDsa65);
+        assert_eq!(wc, base + CBYTE * MAX_PAYLOAD as u64 + CARG * MAX_ARGS as u64);
+    }
+
+    /// ACTS-VM-007: FN-DSA contextual signing MUST be capability-discovered.
+    #[test]
+    fn test_fn_dsa_contextual_not_implemented() {
+        let cap = capability(Operation::FnDsaVerify, Algorithm::FnDsa512);
+        assert!(cap.deterministic);  // verify supported on-chain
+        assert!(cap.off_chain);      // verify supported off-chain
+        assert!(!cap.contextual);   // contextual NOT implemented (ACTS-VM-007)
+    }
+
+    /// ACTS-VM-007: ML-DSA contextual signing IS supported.
+    #[test]
+    fn test_ml_dsa_contextual_supported() {
+        let cap = capability(Operation::MlDsaVerify, Algorithm::MlDsa65);
+        assert!(cap.deterministic);
+        assert!(cap.off_chain);
+        assert!(cap.contextual);
+    }
+
+    /// ACTS-VM-008: supported_capabilities must list all valid combinations.
+    #[test]
+    fn test_supported_capabilities() {
+        let caps = supported_capabilities();
+        // 3 ML-KEM + 3 ML-DSA + 2 FN-DSA = 8
+        assert_eq!(caps.len(), 8);
+        // Verify all ML-DSA have contextual=true
+        for c in caps.iter().filter(|c| c.operation == Operation::MlDsaVerify) {
+            assert!(c.contextual);
+        }
+        // Verify all FN-DSA have contextual=false
+        for c in caps.iter().filter(|c| c.operation == Operation::FnDsaVerify) {
+            assert!(!c.contextual);
+        }
+        // Verify all ML-KEM have deterministic=false
+        for c in caps.iter().filter(|c| c.operation == Operation::MlKemDecaps) {
+            assert!(!c.deterministic);
+        }
+    }
+
+    /// ACTS-VM-011: ABI version must be defined.
+    #[test]
+    fn test_abi_version() {
+        assert_eq!(ABI_VERSION, 1);
     }
 }
