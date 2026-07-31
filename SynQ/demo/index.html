@@ -1973,9 +1973,9 @@
           // Full pass
           var m = line.match(/(\d+) instructions, (\d+) jumps, (\d+) calls, (\d+) bytes/);
           if (m) {
-            vb.innerHTML = '\u2705 VERIFY: ' + m[1] + ' insts \u00b7 ' + m[3] + ' calls \u00b7 ' + m[4] + 'B';
+            vb.innerHTML = '\u2705 L1 + L2 VERIFY: ' + m[1] + ' insts \u00b7 ' + m[3] + ' calls \u00b7 ' + m[4] + 'B';
           } else {
-            vb.innerHTML = '\u2705 VERIFY PASSED';
+            vb.innerHTML = '\u2705 L1 + L2 VERIFY PASSED';
           }
           vb.className = 'verify-badge pass';
           vb.title = 'VERIFICATION LAYERS\n'
@@ -1994,7 +1994,7 @@
             + '  Manifest signature verified against compiler public key.\n'
             + '  Badge appears after Deploy if manifest is present.';
         } else if (sw.length > 0) {
-          vb.innerHTML = '\u26a0 VERIFY: ' + sw.length + ' stack warning(s)';
+          vb.innerHTML = '\u26a0 L1 + L2 VERIFY: ' + sw.length + ' stack warning(s)';
           vb.className = 'verify-badge warn';
           vb.title = 'VERIFICATION LAYERS\n'
             + '═════════════════════════════════════════════\n'
@@ -2004,7 +2004,7 @@
             + sw.join('\n  ') + '\n'
             + 'L3 \u2014 MANIFEST + ML-DSA-87: (checked at deploy)';
         } else if (line.indexOf('FAILED') !== -1) {
-          vb.innerHTML = '\u274c VERIFY FAILED';
+          vb.innerHTML = '\u274c L1 VERIFY FAILED';
           vb.className = 'verify-badge fail';
           vb.title = 'VERIFICATION LAYERS\n'
             + '═════════════════════════════════════════════\n'
@@ -2013,7 +2013,7 @@
             + 'L2 \u2014 STACK SAFETY: skipped (L1 failed)\n'
             + 'L3 \u2014 MANIFEST + ML-DSA-87: skipped (L1 failed)';
         } else {
-          vb.innerHTML = '\u2705 VERIFY PASSED';
+          vb.innerHTML = '\u2705 L1 + L2 VERIFY PASSED';
           vb.className = 'verify-badge pass';
           vb.title = 'L1 (structural) + L2 (stack safety) passed\nL3 (manifest + ML-DSA-87) checked at deploy';
         }
