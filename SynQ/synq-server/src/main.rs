@@ -616,6 +616,15 @@ fn parse_arg_typed(v: &serde_json::Value, ty_hint: &str) -> Result<Value, String
             if ty_hint == "str" || ty_hint == "string" {
                 return Ok(Value::Bytes(s.as_bytes().to_vec()));
             }
+            // If the caller declared this param as bytes, decode hex string to binary.
+            // Accepts both "0x..." prefixed and bare hex strings.
+            if ty_hint == "bytes" {
+                let hex_str = if s.starts_with("0x") || s.starts_with("0X") { &s[2..] } else { s };
+                return match hex::decode(hex_str) {
+                    Ok(b)  => Ok(Value::Bytes(b)),
+                    Err(_) => Err(format!("Invalid hex bytes: {}", &hex_str[..hex_str.len().min(40)])),
+                };
+            }
             if s.starts_with('-') {
                 if let Ok(i) = s.parse::<i64>() {
                     return Ok(if i >= i32::MIN as i64 { Value::I32(i as i32) } else { Value::I64(i) });
