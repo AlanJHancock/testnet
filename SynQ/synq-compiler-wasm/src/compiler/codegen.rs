@@ -364,6 +364,7 @@ impl CodeGenerator {
             }
         }
 
+        let has_attr_public = f.attributes.iter().any(|a| matches!(a, crate::compiler::ast::Attribute::Public));
         // ── Identity prologue ────────────────────────────────────────────────
         // `as caller`: emit a runtime check that caller != zero address.
         // LoadCaller (0x50) returns the raw EVM signing address padded to 32
@@ -371,7 +372,7 @@ impl CodeGenerator {
         // For an anonymous (unauthenticated) call, LoadCaller pushes [0u8;32].
         // Sentinel = [0u8; 32] — the zero address.
         // Pattern: LoadCaller → LoadImm256(ANON_ZERO) → Eq → JumpIf revert → Jump body → Revert
-        if f.requires_caller {
+        if f.requires_caller && !has_attr_public {
             // Zero address — anonymous sentinel matching LoadCaller behaviour
             const UMA_ANON: [u8; 32] = [
                 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,

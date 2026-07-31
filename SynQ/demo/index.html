@@ -4881,13 +4881,24 @@ var LOOP_LINES = [
       '    origin.y = temp;',
       '    return true;',
       '  }',
+      '',
+      '  @public',
+      '  function getOrigin() as caller -> (u256, u256) {',
+      '    return (origin.x, origin.y);',
+      '  }',
+      '',
+      '  @public',
+      '  function getOriginSum() as caller -> u256 {',
+      '    let (x, y) = getOrigin();',
+      '    return x + y;',
+      '  }',
       '}',
     ].join('\n');
     document.getElementById('editor').value = src;
     updateLineNums();
     clearResults();
     syncCompileBtn();
-    setStatus('StructFieldTest loaded — Compile, Deploy, then call init(). Try setOrigin(42, 99), getOriginX(), moveX(10), swapCoordinates().', 'info');
+    setStatus('StructFieldTest loaded — Compile, Deploy, then call init(). Try setOrigin(42, 99), getOriginX(), getOrigin(), moveX(10), swapCoordinates().', 'info');
   }
   window.loadStructFieldTest = loadStructFieldTest;
 

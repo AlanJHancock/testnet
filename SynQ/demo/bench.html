@@ -484,9 +484,9 @@ contract FaultDemo {
 
 <script type="module">
 // ── WASM Loader ──────────────────────────────────────────────────
-import init, { compile_synq, synq_version } from '/demo/wasm/synq_compiler_wasm.7f2fe75c19396ee0.js';
+import init, { compile_synq, synq_version } from '/demo/wasm/synq_compiler_wasm.c0773b24f2fc6858.js';
 
-const _wasmReady = init({ module_or_path: '/demo/wasm/synq_compiler_wasm_bg.7f2fe75c19396ee0.wasm' });
+const _wasmReady = init({ module_or_path: '/demo/wasm/synq_compiler_wasm_bg.97673b7edc2e57ac.wasm' });
 
 window.SynQWasm = {
   ready: _wasmReady,
@@ -1036,6 +1036,9 @@ async function runExecPhaseFresh(source, name) {
   var sid = sessResp.session_id;
   elog('Session: ' + sid.slice(0, 16) + '...');
 
+  // V3: manual synw address override (optional, for native Synergy wallet)
+  var _manualSynw = null;
+
   // Create ephemeral keypairs for EIP-712 signing
   var wallet = ethers.Wallet.createRandom();
   var wallet2 = ethers.Wallet.createRandom();
@@ -1046,37 +1049,63 @@ async function runExecPhaseFresh(source, name) {
   elog('Signer 2 (secondary): ' + evmAddr2);
   elog('');
 
-  // Build EIP-712 domain (must match server: name="SynQ \u00b7 <ContractName>", chainId=1337)
+  // V3 EIP-712 domain (must match server: chainId=1266, domainTag=SYNQ-CALL-v3)
   var verifyingContract = '0x' + ethers.keccak256(ethers.toUtf8Bytes('SynQ:' + cname)).slice(26, 66);
+  var V3_NETWORK_ID = 'synergy-testnet-v3';
+  var V3_CHAIN_ID   = 1266;
+  var V3_DOMAIN_TAG = 'SYNQ-CALL-v3';
   var domain = {
-    name: 'SynQ \u00b7 ' + cname,
+    name: 'SynQ \u00b7 ' + cname + ' \u00b7 ' + V3_NETWORK_ID,
     version: '1',
-    chainId: 1337,
+    chainId: V3_CHAIN_ID,
     verifyingContract: verifyingContract
   };
+  // V3: log EIP-712 metadata (after vars are defined)
+  elog('V3 EIP-712: chainId=' + V3_CHAIN_ID + ' network=' + V3_NETWORK_ID + ' domainTag=' + V3_DOMAIN_TAG);
+  elog('V3 caller: ' + (_manualSynw ? _manualSynw + ' (manual synw)' : evmAddr + ' (ephemeral)'));
+  elog('');
   var types = {
     ContractCall: [
       { name: 'callSignature', type: 'string' },
-      { name: 'sessionId', type: 'string' },
-      { name: 'nonce', type: 'string' }
+      { name: 'sessionId',     type: 'string' },
+      { name: 'nonce',         type: 'string' },
+      { name: 'domainTag',     type: 'string' }
     ]
   };
 
-  // Helper: signed call to a function
+  // Helper: signed call to a function (V3 EIP-712 with domainTag)
   async function signedCall(fnName, fnArgs, fnTypes) {
     var cs = fnName + '(' + fnArgs.map(fmtArg).join(', ') + ')';
     var nonceResp = await fetchRetry('/synq/session/' + sid + '/nonce', { method: 'GET' }, 'nonce');
-    var msg = { callSignature: cs, sessionId: sid, nonce: nonceResp.nonce };
+    // V3 metadata from server nonce endpoint
+    var v3Chain   = nonceResp.chainId   || V3_CHAIN_ID;
+    var v3Net     = nonceResp.networkId || V3_NETWORK_ID;
+    var v3Tag     = nonceResp.domainTag || V3_DOMAIN_TAG;
+    // Update domain with V3 metadata from server (in case server overrides)
+    domain.chainId = v3Chain;
+    domain.name     = 'SynQ \u00b7 ' + cname + ' \u00b7 ' + v3Net;
+    var msg = { callSignature: cs, sessionId: sid, nonce: nonceResp.nonce, domainTag: v3Tag };
     var sig = await wallet.signTypedData(domain, types, msg);
+    var callBody = {
+      session_id: sid, function: fnName, args: fnArgs, param_types: fnTypes,
+      call_signature: cs, evm_address: evmAddr, evm_signature: sig, call_nonce: nonceResp.nonce
+    };
+    // V3: send display_synw if manually set
+    if (typeof _manualSynw !== 'undefined' && _manualSynw) {
+      callBody.display_synw = _manualSynw;
+    }
     var resp = await fetchRetry('/synq/session/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        session_id: sid, function: fnName, args: fnArgs, param_types: fnTypes,
-        call_signature: cs, evm_address: evmAddr, evm_signature: sig, call_nonce: nonceResp.nonce
-      })
+      body: JSON.stringify(callBody)
     }, fnName);
-    return { success: resp.success, result: resp.result, error: resp.error, callSig: cs };
+    // V3: capture caller_syna from server response
+    var callerSyna = resp.caller_syna || '';
+    if (_manualSynw && callerSyna) {
+      // Override with manual synw if set (matches demodev pattern)
+      callerSyna = _manualSynw;
+    }
+    return { success: resp.success, result: resp.result, error: resp.error, callSig: cs, callerSyna: callerSyna };
   }
 
   // ── Smart Setup: read requires_state/modifies metadata to build pre-pass ──
@@ -1431,14 +1460,15 @@ async function runExecPhaseFresh(source, name) {
     if (runResp.success) {
       var val = runResp.result;
       var valStr = val ? (val.value !== undefined ? val.value + ' (' + (val.type || '') + ')' : JSON.stringify(val)) : '(void)';
-      elog('    \u2713 ' + valStr + '  [' + dt.toFixed(2) + ' ms]');
+      var callerInfo = runResp.callerSyna ? ' [caller: ' + runResp.callerSyna.slice(0,12) + '...]' : '';
+      elog('    \u2713 ' + valStr + '  [' + dt.toFixed(2) + ' ms]' + callerInfo);
       execTimes.push(dt);
-      results.push({ name: fn.name, args: argStr, ok: true, result: valStr, time: dt });
+      results.push({ name: fn.name, args: argStr, ok: true, result: valStr, time: dt, callerSyna: runResp.callerSyna || '' });
       updateState(fn.name, fn, da.args);
     } else {
       var err = runResp.error || 'unknown error';
       elog('    \u2717 ' + err + '  [' + dt.toFixed(2) + ' ms]');
-      results.push({ name: fn.name, args: argStr, ok: false, result: err, time: dt });
+      results.push({ name: fn.name, args: argStr, ok: false, result: err, time: dt, callerSyna: runResp.callerSyna || '' });
     }
   }
 
@@ -1462,13 +1492,14 @@ async function runExecPhaseFresh(source, name) {
   }
 
   var html = '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-top:8px;">';
-  html += '<tr style="border-bottom:1px solid #30363d;color:#8b949e;"><th style="text-align:left;padding:6px;">Function</th><th style="text-align:left;padding:6px;">Args</th><th style="text-align:left;padding:6px;">Result</th><th style="text-align:right;padding:6px;">Time</th></tr>';
+  html += '<tr style="border-bottom:1px solid #30363d;color:#8b949e;"><th style="text-align:left;padding:6px;">Function</th><th style="text-align:left;padding:6px;">Args</th><th style="text-align:left;padding:6px;">Result</th><th style="text-align:left;padding:6px;">Caller</th><th style="text-align:right;padding:6px;">Time</th></tr>';
   for (var r = 0; r < results.length; r++) {
     var row = results[r];
     var color = row.ok ? '#7ee787' : '#ff7b72';
     html += '<tr style="border-bottom:1px solid #21262d;">';
     html += '<td style="padding:6px;color:#c9d1d9;font-weight:600;">' + row.name + '</td>';
     html += '<td style="padding:6px;color:#8b949e;font-family:monospace;">' + row.args + '</td>';
+    html += '<td style="padding:6px;color:#8b949e;font-family:monospace;font-size:11px;">' + (row.callerSyna ? row.callerSyna.slice(0,14) + '...' : '-') + '</td>';
     html += '<td style="padding:6px;color:' + color + ';font-family:monospace;">' + row.result + '</td>';
     html += '<td style="padding:6px;text-align:right;color:#8b949e;">' + row.time.toFixed(2) + ' ms</td>';
     html += '</tr>';

@@ -3,9 +3,9 @@
  */
 
 import init, { compile_synq, synq_version }
-    from '/demo/wasm/synq_compiler_wasm.e4ff66711fe1c77c.js';
+    from '/demo/wasm/synq_compiler_wasm.34625e58b527c84f.js';
 
-const _ready = init({ module_or_path: '/demo/wasm/synq_compiler_wasm_bg.e4ff66711fe1c77c.wasm' });
+const _ready = init({ module_or_path: '/demo/wasm/synq_compiler_wasm_bg.34625e58b527c84f.wasm' });
 
 window.SynQWasm = {
     ready: _ready,
