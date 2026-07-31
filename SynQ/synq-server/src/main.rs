@@ -136,6 +136,12 @@ const MAX_BODY_BYTES: usize    = 128 * 1024;
 
 // ─── Session store ────────────────────────────────────────────────────────────
 
+/// Master switch for PQC fuel reporting in API responses.
+/// Set to `false` to suppress all fuel fields from NewSessionResponse
+/// and RunResponse — the fields use `skip_serializing_if` so they
+/// vanish from the JSON entirely when this is disabled.
+const FUEL_REPORTING: bool = true;
+
 struct Session {
     vm:              QuantumVM,
     last_used:       Instant,
@@ -1926,6 +1932,9 @@ struct NewSessionResponse {
     /// Layer 3 manifest verification result
     #[serde(skip_serializing_if = "Option::is_none")]
     layer3: Option<Layer3Result>,
+    /// PQC fuel budget for this session (ACTS-VM-005).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fuel_budget: Option<u64>,
 }
 
 /// Layer 3: Manifest + ML-DSA-87 signature verification result
@@ -2193,17 +2202,17 @@ async fn session_new_handler(
     Json(req): Json<NewSessionRequest>,
 ) -> (StatusCode, RespJson<NewSessionResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, contract_name: None, error: Some("rate limit exceeded — retry later".into()), layer3: None }));
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, contract_name: None, error: Some("rate limit exceeded — retry later".into()), layer3: None, fuel_budget: None }));
     }
     let raw = match hex_decode_strict(&req.bytecode) {
         Ok(b) if !b.is_empty() => b,
         Ok(_) => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None, error: Some("bytecode is empty".into()),
-            layer3: None,
+            layer3: None, fuel_budget: None,
         })),
         Err(e) => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None, error: Some(format!("bytecode hex invalid: {}", e)),
-            layer3: None,
+            layer3: None, fuel_budget: None,
         })),
     };
 
@@ -2212,7 +2221,7 @@ async fn session_new_handler(
         return (StatusCode::OK, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None,
             error: Some(format!("Bytecode verification failed: {}", e)),
-            layer3: None,
+            layer3: None, fuel_budget: None,
         }));
     }
 
@@ -2223,7 +2232,7 @@ async fn session_new_handler(
     if let Err(e) = vm.load_bytecode(&raw) {
         return (StatusCode::OK, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None, error: Some(format!("Load error: {}", e)),
-            layer3: None,
+            layer3: None, fuel_budget: None,
         }));
     }
 
@@ -2266,7 +2275,9 @@ async fn session_new_handler(
         }
     }
 
-    (StatusCode::OK, RespJson(NewSessionResponse { success: true, session_id: Some(id), contract_name: req.contract_name.clone(), error: None, layer3: layer3_result }))
+    (StatusCode::OK, RespJson(NewSessionResponse { success: true, session_id: Some(id), contract_name: req.contract_name.clone(), error: None, layer3: layer3_result,
+        fuel_budget: if FUEL_REPORTING { Some(synq_vm::DEFAULT_MAX_FUEL) } else { None },
+    }))
 }
 
 // ─── POST /session/run ────────────────────────────────────────────────────────
@@ -2310,6 +2321,12 @@ struct RunResponse {
     /// Error name extracted from the revert message.
     #[serde(skip_serializing_if = "Option::is_none")]
     error_name: Option<String>,
+    /// PQC fuel consumed by this call (ACTS-VM-005).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fuel_used: Option<u64>,
+    /// Remaining PQC fuel budget after this call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fuel_remaining: Option<u64>,
 }
 
 
@@ -2346,7 +2363,7 @@ async fn session_run_handler(
     Json(req): Json<SessionRunRequest>,
 ) -> (StatusCode, RespJson<RunResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), events: Vec::new(), error: Some("rate limit exceeded — retry later".into()), caller_syna: None, error_code: None, error_name: None }));
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), events: Vec::new(), error: Some("rate limit exceeded — retry later".into()), caller_syna: None, error_code: None, error_name: None, fuel_used: None, fuel_remaining: None }));
     }
     let mut vm_args: Vec<Value> = Vec::new();
     // Build call_sig before args are moved — used in EIP-712 digest if wallet auth is present.
@@ -2377,6 +2394,7 @@ async fn session_run_handler(
             caller_syna: None,
             error_code: None,
             error_name: None,
+            fuel_used: None, fuel_remaining: None,
             })),
         }
     }
@@ -2392,6 +2410,7 @@ async fn session_run_handler(
             caller_syna: None,
             error_code: None,
             error_name: None,
+            fuel_used: None, fuel_remaining: None,
             })),
         }
     };
@@ -2411,6 +2430,7 @@ async fn session_run_handler(
                 caller_syna: None,
                 error_code: None,
                 error_name: None,
+                fuel_used: None, fuel_remaining: None,
                 }));
             }
             Some(pn) if pn != nonce => {
@@ -2422,6 +2442,7 @@ async fn session_run_handler(
                 caller_syna: None,
                 error_code: None,
                 error_name: None,
+                fuel_used: None, fuel_remaining: None,
                 }));
             }
             _ => {}
@@ -2436,6 +2457,7 @@ async fn session_run_handler(
             caller_syna: None,
             error_code: None,
             error_name: None,
+            fuel_used: None, fuel_remaining: None,
             }));
         }
         // 3. Build EIP-712 ContractCall digest
@@ -2466,6 +2488,7 @@ async fn session_run_handler(
                 caller_syna: None,
                 error_code: None,
                 error_name: None,
+                fuel_used: None, fuel_remaining: None,
                 }));
             }
         };
@@ -2483,6 +2506,7 @@ async fn session_run_handler(
                 caller_syna: None,
                 error_code: None,
                 error_name: None,
+                fuel_used: None, fuel_remaining: None,
                 }));
             }
         };
@@ -2498,6 +2522,7 @@ async fn session_run_handler(
             caller_syna: None,
             error_code: None,
             error_name: None,
+            fuel_used: None, fuel_remaining: None,
             }));
         }
         // 6. Consume the nonce
@@ -2514,6 +2539,7 @@ async fn session_run_handler(
         caller_syna: None,
         error_code: None,
         error_name: None,
+        fuel_used: None, fuel_remaining: None,
         }));
     } else {
         // Unauthenticated call — caller == zero address
@@ -2642,6 +2668,12 @@ async fn session_run_handler(
 
     let call_result = session.vm.call_function(&req.function, &vm_args);
     eprintln!("[RUN] result={:?}", call_result);
+    // ACTS-VM-005: read fuel consumption after the call
+    let (fuel_used, fuel_remaining) = if FUEL_REPORTING {
+        (Some(session.vm.fuel_used()), Some(session.vm.fuel_remaining()))
+    } else {
+        (None, None)
+    };
     session.vm.call_context = synq_vm::CallContext::anonymous();
     let raw_log = std::mem::take(&mut session.vm.print_log);
     session.last_used = Instant::now();
@@ -2659,7 +2691,7 @@ async fn session_run_handler(
             };
             {
         let caller_syna = if let Some(ref synw) = req.display_synw { Some(synw.clone()) } else { synq_vm::bech32::evm_to_syna(&caller_addr).ok() };
-        (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None, error_code: None, error_name: None, caller_syna }))
+        (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None, error_code: None, error_name: None, caller_syna, fuel_used, fuel_remaining }))
     }
         }
         Err(synq_vm::VMError::RevertedNamed { code, message }) => (StatusCode::OK, RespJson(RunResponse {
@@ -2669,6 +2701,7 @@ async fn session_run_handler(
             caller_syna: req.display_synw.clone().or_else(|| synq_vm::bech32::evm_to_syna(&caller_addr).ok()),
             error_code: Some(code),
             error_name: Some(message.split('(').next().unwrap_or(&message).split("::").last().unwrap_or(&message).to_string()),
+            fuel_used: None, fuel_remaining: None,
         })),
         Err(synq_vm::VMError::Reverted(msg)) => (StatusCode::OK, RespJson(RunResponse {
             success: false, result: None, output: String::new(),
@@ -2677,6 +2710,7 @@ async fn session_run_handler(
         caller_syna: req.display_synw.clone().or_else(|| synq_vm::bech32::evm_to_syna(&caller_addr).ok()),
         error_code: None,
         error_name: None,
+        fuel_used, fuel_remaining,
         })),
         Err(e) => (StatusCode::OK, RespJson(RunResponse {
             success: false, result: None, output: String::new(),
@@ -2685,6 +2719,7 @@ async fn session_run_handler(
         caller_syna: req.display_synw.clone().or_else(|| synq_vm::bech32::evm_to_syna(&caller_addr).ok()),
         error_code: None,
         error_name: None,
+        fuel_used, fuel_remaining,
         })),
     }
 }

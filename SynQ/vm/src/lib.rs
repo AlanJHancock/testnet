@@ -5,7 +5,7 @@ pub mod assembler;
 
 // Re-export for convenience
 pub use opcode::{OpCode, VMError};
-pub use vm::{QuantumVM, Value, CallContext};
+pub use vm::{QuantumVM, Value, CallContext, DEFAULT_MAX_FUEL, DEFAULT_MAX_STEPS};
 pub use assembler::Assembler;
 pub mod uma;
 pub mod verify;
