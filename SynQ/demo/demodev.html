@@ -68,6 +68,10 @@
   .fuel-badge.active { background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.35); color:#93c5fd; }
   .fuel-badge.warn { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
   .fuel-badge.depleted { background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); color:#fca5a5; }
+  .step-badge { display:inline-flex; align-items:center; gap:5px; font-size:0.7rem; font-weight:700; letter-spacing:0.04em; padding:3px 10px; border-radius:12px; vertical-align:middle; }
+  .step-badge.active { background:rgba(168,85,247,0.12); border:1px solid rgba(168,85,247,0.35); color:#c4b5fd; }
+  .step-badge.warn { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
+  .step-badge.depleted { background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); color:#fca5a5; }
   .wallet-mode.ephemeral   { background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.3); color: #fcd34d; }
     .wallet-mode.persistent  { background: rgba(52,211,153,0.1);  border: 1px solid rgba(52,211,153,0.4);  color: #34d399; }
   .btn-wallet { display: inline-flex; align-items: center; gap: 6px; padding: 7px 18px; border-radius: 8px; font-size: 0.82rem; font-weight: 600; cursor: pointer; border: 1px solid rgba(124,58,237,0.5); background: rgba(124,58,237,0.15); color: #a78bfa; }
@@ -310,6 +314,7 @@
     <span id="verifyBadge" style="display:none;" class="verify-badge pass" title="L1 Structural (hard gate) + L2 Stack Safety (advisory) — checked at compile"></span>
     <span id="layer3Badge" style="display:none;" class="verify-badge pass" title="L3 Manifest + ML-DSA-87 signature — checked at deploy"></span>
     <span id="fuelBadge" style="display:none;" class="fuel-badge active" title="PQC Fuel Budget (ACTS-VM-005) — cost charged per AegisCall"></span>
+    <span id="stepBadge" style="display:none;" class="step-badge active" title="VM Step Budget (ACTS-VM-003) — compute steps per call"></span>
     <span id="depsHint" style="font-size:0.75rem;visibility:hidden;">&nbsp;</span>
   </div>
   <div class="status-bar" id="statusBar"></div>
@@ -840,6 +845,12 @@
     if (fb) fb.style.display = 'none';
     window._fuelBudget = undefined;
     window._fuelUsed = 0;
+  }
+  function hideStepBadge() {
+    var sb = document.getElementById('stepBadge');
+    if (sb) sb.style.display = 'none';
+    window._stepBudget = undefined;
+    window._stepUsed = 0;
   }
 
   async function resetVM() {
@@ -2644,19 +2655,39 @@
         fb.className = 'fuel-badge active';
         fb.title = 'PQC FUEL BUDGET (ACTS-VM-005)\n'
           + '===============================================\n'
-          + 'Budget: ' + budget.toLocaleString() + '\n'
-          + 'Used: 0\n'
-          + 'Remaining: ' + budget.toLocaleString() + '\n'
-          + '\n'
-          + 'Cost formula (per AegisCall):\n'
-          + '  cost = base_op,alg + cbyte * input_bytes + carg * argc\n'
-          + '\n'
-          + 'Only AegisCall (0x8F) consumes fuel.\n'
-          + 'Non-PQC contracts always show 0 used.\n'
-          + '\n'
-          + 'Step limit: ' + (data.max_steps || 100000000).toLocaleString() + '\n'
-          + '(per call_function invocation, ACTS-VM-003)';
+          + 'PQC fuel is consumed by AegisCall (0x8F) operations.\n'
+          + 'ML-DSA verify, FN-DSA verify, and ML-KEM decapsulate\n'
+          + 'each charge fuel based on algorithm parameters.\n'
+          + 'Reset on every function call (per-invocation budget).';
         fb.style.display = 'inline-flex';
+      })();
+
+      // ── Step badge: VM compute budget from /session/new ────────────────
+      (function() {
+        var sb = document.getElementById('stepBadge');
+        if (!sb) return;
+        var budget = data.max_steps;
+        if (budget === undefined || budget === null) {
+          sb.style.display = 'none';
+          return;
+        }
+        window._stepBudget = budget;
+        window._stepUsed = 0;
+        var fmtN = function(n) {
+          if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
+          if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+          if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+          return String(n);
+        };
+        sb.innerHTML = '\u25b8 STEPS: 0 / ' + fmtN(budget);
+        sb.className = 'step-badge active';
+        sb.title = 'VM STEP BUDGET (ACTS-VM-003)\n'
+          + '===============================================\n'
+          + 'Compute steps are counted per QVM instruction.\n'
+          + 'The step limit prevents infinite loops and runaway\n'
+          + 'computation. Reset on every function call.\n'
+          + 'Configurable via max_steps in session/new.';
+        sb.style.display = 'inline-flex';
       })();
 
       // Always update sessionId to the freshly deployed session.
@@ -3097,7 +3128,43 @@
             + 'Used: ' + used.toLocaleString() + '\n'
             + 'Remaining: ' + remaining.toLocaleString() + '\n'
             + 'Utilization: ' + pct.toFixed(2) + '%';
-        })();
+        })()
+
+        // ── Update step badge ───────────────────────────────────────────
+        (function() {
+          var sb = document.getElementById('stepBadge');
+          if (!sb || !window._stepBudget) return;
+          var used = data.steps_used !== undefined ? data.steps_used : 0;
+          var remaining = data.steps_remaining !== undefined ? data.steps_remaining : (window._stepBudget - used);
+          window._stepUsed = used;
+          var budget = window._stepBudget;
+          var pct = budget > 0 ? (used / budget) * 100 : 0;
+          var fmtN = function(n) {
+            if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
+            if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+            if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+            return String(n);
+          };
+          sb.innerHTML = '\u25b8 STEPS: ' + fmtN(used) + ' / ' + fmtN(budget);
+          if (pct >= 100) {
+            sb.className = 'step-badge depleted';
+          } else if (pct >= 75) {
+            sb.className = 'step-badge warn';
+          } else {
+            sb.className = 'step-badge active';
+          }
+          sb.title = 'VM STEP BUDGET (ACTS-VM-003)\n'
+            + '===============================================\n'
+            + 'Steps used this call: ' + fmtN(used) + '\n'
+            + 'Step budget: ' + fmtN(budget) + '\n'
+            + 'Remaining: ' + fmtN(remaining) + '\n'
+            + 'Usage: ' + pct.toFixed(2) + '%\n'
+            + '===============================================\n'
+            + 'Compute steps are counted per QVM instruction.\n'
+            + 'The step limit prevents infinite loops and runaway\n'
+            + 'computation. Reset on every function call.';
+          sb.style.display = 'inline-flex';
+        })();;
         var rv = data.result;
         // V3: display caller's syna... Bech32 address if present
         var callerSynaDisplay = '';
@@ -4010,18 +4077,19 @@ var LOOP_LINES = [
   '    return total;',
   '  }',
   '}',
+];
   var PQC_DEMO_LINES = [
-'// ═══ PQC DEMO ═══════════════════════════════════════════════════════════════
-  '// PQCDemo — Post-Quantum Cryptography Verification Demo
-  '// Demonstrates ML-DSA-65 (Dilithium3) signature verification
-  '// using the legacy direct-call opcode (0x80).
-  '// Also demonstrates ML-KEM-768 decapsulation (opcode 0x81).
-  '//
-  '// ACTS-15 §3: ML-DSA verify is a deterministic public operation.
-  '//             ML-KEM decapsulate requires a secret key and is
-  '//             rejected by the AEG1 deterministic dispatcher (0x8F).
-  '//             The legacy opcodes (0x80-0x83) bypass AEG1 dispatch
-  '//             and call the PQC shim directly.
+'// ═══ PQC DEMO ═══════════════════════════════════════════════════════════════',
+  '// PQCDemo — Post-Quantum Cryptography Verification Demo',
+  '// Demonstrates ML-DSA-65 (Dilithium3) signature verification',
+  '// using the legacy direct-call opcode (0x80).',
+  '// Also demonstrates ML-KEM-768 decapsulation (opcode 0x81).',
+  '//',
+  '// ACTS-15 §3: ML-DSA verify is a deterministic public operation.',
+  '//             ML-KEM decapsulate requires a secret key and is',
+  '//             rejected by the AEG1 deterministic dispatcher (0x8F).',
+  '//             The legacy opcodes (0x80-0x83) bypass AEG1 dispatch',
+  '//             and call the PQC shim directly.',
   'contract PQCDemo {',
   '  state {',
   '    initialised: bool;',
@@ -4080,7 +4148,7 @@ var LOOP_LINES = [
   '      return falcon_verify(message, signature, publicKey);',
   '    }',
   '',
-  '    // ML-KEM-768 decapsulation — requires ciphertext + secret key
+  '    // ML-KEM-768 decapsulation — requires ciphertext + secret key',
   '    // NOTE: This uses the legacy opcode 0x81 which bypasses AEG1 dispatch.',
   '    // The AEG1 deterministic dispatcher (0x8F) would reject this operation',
   '    // per ACTS-15 §3 (requires secret key material).',
@@ -4091,7 +4159,6 @@ var LOOP_LINES = [
   '    }',
   '  }',
   '}',
-];
 ];  /* ── Init ────────────────────────────────────────────────────────────────── */
   (function init() {
     document.getElementById('editor').value = VAULT_LINES.join('\n');
@@ -5170,6 +5237,21 @@ var LOOP_LINES = [
   window.loadStructField = loadStructField;
 
   // ── StackFailDemo (verification education) ───────────────────────────────
+  function loadPQCDemo() {
+    evictWorkspaceContractByName('PQCDemo');
+    document.getElementById('editor').value = PQC_DEMO_LINES.join('\n');
+    updateLineNums(); clearResults(); syncCompileBtn();
+    // Fetch a fresh ML-DSA-65 test vector from the server
+    fetch('/synq/pqc/test-vector')
+      .then(function(r) { return r.json(); })
+      .then(function(tv) {
+        window._pqcTestVector = tv;
+        console.log('[PQC] Test vector loaded: ' + tv.algorithm + ' pk=' + tv.public_key_len + 'B sig=' + tv.signature_len + 'B');
+      })
+      .catch(function(e) { console.warn('[PQC] Could not fetch test vector:', e); });
+  }
+  window.loadPQCDemo = loadPQCDemo;
+
   function loadStackFailDemo() {
     evictWorkspaceContractByName('StackFailDemo');
     var src = [
@@ -5289,17 +5371,4 @@ var LOOP_LINES = [
 })();
 </script>
 </body>
-</htmlfunction loadPQCDemo() {
-    document.getElementById('editor').value = PQC_DEMO_LINES.join('\n');
-    updateLineNums(); clearResults(); syncCompileBtn();
-    // Fetch a fresh ML-DSA-65 test vector from the server
-    fetch('/synq/pqc/test-vector')
-      .then(r => r.json())
-      .then(tv => {
-        window._pqcTestVector = tv;
-        console.log('[PQC] Test vector loaded:', tv.algorithm, 'pk=' + tv.public_key_len + 'B sig=' + tv.signature_len + 'B verified=' + tv.verified);
-      })
-      .catch(e => console.warn('[PQC] Could not fetch test vector:', e));
-  }
-
->
+</html>

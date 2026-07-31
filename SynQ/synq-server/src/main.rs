@@ -1943,6 +1943,12 @@ struct NewSessionResponse {
     /// Step limit for this session (ACTS-VM-003).
     #[serde(skip_serializing_if = "Option::is_none")]
     max_steps: Option<usize>,
+    /// VM steps used so far (0 at session creation).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    steps_used: Option<usize>,
+    /// Remaining VM step budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    steps_remaining: Option<usize>,
 }
 
 /// Layer 3: Manifest + ML-DSA-87 signature verification result
@@ -2234,17 +2240,17 @@ async fn session_new_handler(
     Json(req): Json<NewSessionRequest>,
 ) -> (StatusCode, RespJson<NewSessionResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, contract_name: None, error: Some("rate limit exceeded — retry later".into()), layer3: None, fuel_budget: None, max_steps: None }));
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, contract_name: None, error: Some("rate limit exceeded — retry later".into()), layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None }));
     }
     let raw = match hex_decode_strict(&req.bytecode) {
         Ok(b) if !b.is_empty() => b,
         Ok(_) => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None, error: Some("bytecode is empty".into()),
-            layer3: None, fuel_budget: None, max_steps: None,
+            layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
         })),
         Err(e) => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None, error: Some(format!("bytecode hex invalid: {}", e)),
-            layer3: None, fuel_budget: None, max_steps: None,
+            layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
         })),
     };
 
@@ -2253,7 +2259,7 @@ async fn session_new_handler(
         return (StatusCode::OK, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None,
             error: Some(format!("Bytecode verification failed: {}", e)),
-            layer3: None, fuel_budget: None, max_steps: None,
+            layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
         }));
     }
 
@@ -2264,7 +2270,7 @@ async fn session_new_handler(
     if let Err(e) = vm.load_bytecode(&raw) {
         return (StatusCode::OK, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None, error: Some(format!("Load error: {}", e)),
-            layer3: None, fuel_budget: None, max_steps: None,
+            layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
         }));
     }
     // Apply optional step limit override
@@ -2314,6 +2320,8 @@ async fn session_new_handler(
     (StatusCode::OK, RespJson(NewSessionResponse { success: true, session_id: Some(id), contract_name: req.contract_name.clone(), error: None, layer3: layer3_result,
         fuel_budget: if FUEL_REPORTING { Some(synq_vm::DEFAULT_MAX_FUEL) } else { None },
         max_steps: Some(effective_max_steps),
+        steps_used: if FUEL_REPORTING { Some(0) } else { None },
+        steps_remaining: if FUEL_REPORTING { Some(effective_max_steps) } else { None },
     }))
 }
 
@@ -2364,6 +2372,12 @@ struct RunResponse {
     /// Remaining PQC fuel budget after this call.
     #[serde(skip_serializing_if = "Option::is_none")]
     fuel_remaining: Option<u64>,
+    /// VM steps consumed by this call (ACTS-VM-003).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    steps_used: Option<usize>,
+    /// Remaining VM step budget after this call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    steps_remaining: Option<usize>,
 }
 
 
@@ -2400,7 +2414,7 @@ async fn session_run_handler(
     Json(req): Json<SessionRunRequest>,
 ) -> (StatusCode, RespJson<RunResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), events: Vec::new(), error: Some("rate limit exceeded — retry later".into()), caller_syna: None, error_code: None, error_name: None, fuel_used: None, fuel_remaining: None }));
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), events: Vec::new(), error: Some("rate limit exceeded — retry later".into()), caller_syna: None, error_code: None, error_name: None, fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None }));
     }
     let mut vm_args: Vec<Value> = Vec::new();
     // Build call_sig before args are moved — used in EIP-712 digest if wallet auth is present.
@@ -2431,7 +2445,7 @@ async fn session_run_handler(
             caller_syna: None,
             error_code: None,
             error_name: None,
-            fuel_used: None, fuel_remaining: None,
+            fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
             })),
         }
     }
@@ -2447,7 +2461,7 @@ async fn session_run_handler(
             caller_syna: None,
             error_code: None,
             error_name: None,
-            fuel_used: None, fuel_remaining: None,
+            fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
             })),
         }
     };
@@ -2467,7 +2481,7 @@ async fn session_run_handler(
                 caller_syna: None,
                 error_code: None,
                 error_name: None,
-                fuel_used: None, fuel_remaining: None,
+                fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
                 }));
             }
             Some(pn) if pn != nonce => {
@@ -2479,7 +2493,7 @@ async fn session_run_handler(
                 caller_syna: None,
                 error_code: None,
                 error_name: None,
-                fuel_used: None, fuel_remaining: None,
+                fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
                 }));
             }
             _ => {}
@@ -2494,7 +2508,7 @@ async fn session_run_handler(
             caller_syna: None,
             error_code: None,
             error_name: None,
-            fuel_used: None, fuel_remaining: None,
+            fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
             }));
         }
         // 3. Build EIP-712 ContractCall digest
@@ -2525,7 +2539,7 @@ async fn session_run_handler(
                 caller_syna: None,
                 error_code: None,
                 error_name: None,
-                fuel_used: None, fuel_remaining: None,
+                fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
                 }));
             }
         };
@@ -2543,7 +2557,7 @@ async fn session_run_handler(
                 caller_syna: None,
                 error_code: None,
                 error_name: None,
-                fuel_used: None, fuel_remaining: None,
+                fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
                 }));
             }
         };
@@ -2559,7 +2573,7 @@ async fn session_run_handler(
             caller_syna: None,
             error_code: None,
             error_name: None,
-            fuel_used: None, fuel_remaining: None,
+            fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
             }));
         }
         // 6. Consume the nonce
@@ -2576,7 +2590,7 @@ async fn session_run_handler(
         caller_syna: None,
         error_code: None,
         error_name: None,
-        fuel_used: None, fuel_remaining: None,
+        fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
         }));
     } else {
         // Unauthenticated call — caller == zero address
@@ -2713,6 +2727,12 @@ async fn session_run_handler(
     } else {
         (None, None)
     };
+    // ACTS-VM-003: read step consumption after the call
+    let (steps_used, steps_remaining) = if FUEL_REPORTING {
+        (Some(session.vm.steps_used()), Some(session.vm.steps_remaining()))
+    } else {
+        (None, None)
+    };
     session.vm.call_context = synq_vm::CallContext::anonymous();
     let raw_log = std::mem::take(&mut session.vm.print_log);
     session.last_used = Instant::now();
@@ -2730,7 +2750,7 @@ async fn session_run_handler(
             };
             {
         let caller_syna = if let Some(ref synw) = req.display_synw { Some(synw.clone()) } else { synq_vm::bech32::evm_to_syna(&caller_addr).ok() };
-        (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None, error_code: None, error_name: None, caller_syna, fuel_used, fuel_remaining }))
+        (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None, error_code: None, error_name: None, caller_syna, fuel_used, fuel_remaining, steps_used, steps_remaining }))
     }
         }
         Err(synq_vm::VMError::RevertedNamed { code, message }) => (StatusCode::OK, RespJson(RunResponse {
@@ -2740,7 +2760,7 @@ async fn session_run_handler(
             caller_syna: req.display_synw.clone().or_else(|| synq_vm::bech32::evm_to_syna(&caller_addr).ok()),
             error_code: Some(code),
             error_name: Some(message.split('(').next().unwrap_or(&message).split("::").last().unwrap_or(&message).to_string()),
-            fuel_used: None, fuel_remaining: None,
+            fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
         })),
         Err(synq_vm::VMError::Reverted(msg)) => (StatusCode::OK, RespJson(RunResponse {
             success: false, result: None, output: String::new(),
@@ -2749,7 +2769,7 @@ async fn session_run_handler(
         caller_syna: req.display_synw.clone().or_else(|| synq_vm::bech32::evm_to_syna(&caller_addr).ok()),
         error_code: None,
         error_name: None,
-        fuel_used, fuel_remaining,
+        fuel_used, fuel_remaining, steps_used, steps_remaining,
         })),
         Err(e) => (StatusCode::OK, RespJson(RunResponse {
             success: false, result: None, output: String::new(),
@@ -2758,7 +2778,7 @@ async fn session_run_handler(
         caller_syna: req.display_synw.clone().or_else(|| synq_vm::bech32::evm_to_syna(&caller_addr).ok()),
         error_code: None,
         error_name: None,
-        fuel_used, fuel_remaining,
+        fuel_used, fuel_remaining, steps_used, steps_remaining,
         })),
     }
 }

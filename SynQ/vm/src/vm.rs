@@ -467,6 +467,10 @@ impl QuantumVM {
     pub fn fuel_used(&self) -> u64 { self.fuel_used }
     /// Remaining PQC fuel budget.
     pub fn fuel_remaining(&self) -> u64 { self.max_fuel.saturating_sub(self.fuel_used) }
+    /// VM steps consumed in the current invocation (ACTS-VM-003).
+    pub fn steps_used(&self) -> usize { self.steps }
+    /// Remaining VM step budget for this invocation.
+    pub fn steps_remaining(&self) -> usize { self.max_steps.saturating_sub(self.steps) }
 
     pub fn load_bytecode(&mut self, bytecode: &[u8]) -> Result<(), VMError> {
         let header = Header::parse(bytecode)?;
