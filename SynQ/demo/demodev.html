@@ -3477,7 +3477,7 @@
     if (!btn || btn.disabled) return;
     var src = (typeof getCode === 'function' ? getCode() : null)
               || document.getElementById('editor').value || '';
-    var m = src.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
+    var m = src.match(/^\s*contract\s+([A-Za-z_][A-Za-z0-9_]*)/m);
     var editorName = m ? m[1] : null;
     btn.innerHTML = editorName ? 'Compile &#x25B6; ' + editorName : 'Compile';
 
