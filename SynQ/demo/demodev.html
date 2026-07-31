@@ -289,6 +289,7 @@
     <button class="btn btn-secondary" onclick="loadNamedErrorDemo()" title="Named error revert — enum-based RevertCode (0x35) with structured error codes" style="border-color:rgba(239,68,68,0.4);color:rgba(248,113,113,0.9);">NamedError</button>
     <button class="btn btn-secondary" onclick="loadAssetDemo()" title="Linear asset tracking — AssetCreate/Transfer/Burn/Balance/Owner (0x57-0x5B)" style="border-color:rgba(245,158,11,0.4);color:rgba(251,191,36,0.9);">AssetDemo</button>
     <button class="btn btn-secondary" onclick="loadStructFieldTest()" title="TupleSet (0xAB) — struct field assignment via in-place tuple replacement" style="border-color:rgba(14,165,233,0.4);color:rgba(56,189,248,0.9);">StructField</button>
+    <button class="btn btn-secondary" onclick="loadStackFailDemo()" title="Stack safety verification demo — shows Layer 1+2 in action" style="border-color:rgba(239,68,68,0.4);color:rgba(252,165,165,0.9);">StackFailDemo</button>
         
   </div>
 
@@ -4941,6 +4942,116 @@ var LOOP_LINES = [
     setStatus('StructFieldTest loaded — Compile, Deploy, then call init(). Try setOrigin(42, 99), getOriginX(), getOrigin(), moveX(10), swapCoordinates().', 'info');
   }
   window.loadStructFieldTest = loadStructFieldTest;
+
+  // ── StackFailDemo (verification education) ───────────────────────────────
+  function loadStackFailDemo() {
+    evictWorkspaceContractByName('StackFailDemo');
+    var src = [
+      'pragma synq ^0.9;',
+      '',
+      '// ═══════════════════════════════════════════════════════════════════════',
+      '// StackFailDemo — Bytecode Verification Education',
+      '// ═══════════════════════════════════════════════════════════════════════',
+      '//',
+      '// This contract demonstrates the bytecode verification system.',
+      '// When you click Compile, notice the green verify badge:',
+      '//',
+      '//   ✅ VERIFY: N insts · M calls · XB',
+      '//',
+      '// This means Layer 1 (structural) and Layer 2 (stack safety) both passed.',
+      '//',
+      '// The compiler always generates stack-safe bytecode, so valid SynQ',
+      '// source will never produce stack warnings. The verifier catches:',
+      '//',
+      '// Layer 1 (hard gate — rejects at session/new):',
+      '//   • Bad magic bytes or truncated header',
+      '//   • Unknown opcodes',
+      '//   • Truncated inline operands (e.g. Push with < 4 bytes)',
+      '//   • Jump/Call targets landing mid-instruction',
+      '//   • Jump/Call targets out of bounds',
+      '//',
+      '// Layer 2 (advisory warnings — logged but not blocking):',
+      '//   • Stack underflow: opcode pops more than available',
+      '//     e.g. Add with only 1 item on stack (needs 2)',
+      '//     e.g. Store with only 1 item (needs addr + value)',
+      '//     e.g. MapSet with only 2 items (needs map_addr + key + value)',
+      '//   • Propagated across all code paths via CFG fixed-point analysis',
+      '//   • Dynamic opcodes (TuplePack/TupleUnpack) mark depth as unknown',
+      '//',
+      '// To see actual stack warnings, submit crafted bytecode directly',
+      '// to POST /session/new with hand-built QVM bytecode.',
+      '//',
+      '// ═══════════════════════════════════════════════════════════════════════',
+      '',
+      'contract StackFailDemo {',
+      '  state {',
+      '    value: u256;',
+      '    initialised: bool;',
+      '  }',
+      '',
+      '  @public',
+      '  function init() as caller -> bool {',
+      '    value = 42;',
+      '    initialised = true;',
+      '    return true;',
+      '  }',
+      '',
+      '  // Stack-safe: Push + Push + Add + Store',
+      '  @public',
+      '  function addToValue(x: u256) as caller -> bool {',
+      '    value = value + x;',
+      '    return true;',
+      '  }',
+      '',
+      '  // Stack-safe: Push + Push + Sub + Store',
+      '  @public',
+      '  function subFromValue(x: u256) as caller -> bool {',
+      '    value = value - x;',
+      '    return true;',
+      '  }',
+      '',
+      '  // Stack-safe: multiple operations with balanced stack',
+      '  @public',
+      '  function complexStackOps(a: u256, b: u256) as caller -> u256 {',
+      '    let sum = a + b;',
+      '    let product = a * b;',
+      '    let result = sum + product;',
+      '    value = result;',
+      '    return result;',
+      '  }',
+      '',
+      '  // Stack-safe: conditional with balanced branches',
+      '  @public',
+      '  function clamp(min_val: u256, max_val: u256) as caller -> bool {',
+      '    if (value < min_val) {',
+      '      value = min_val;',
+      '    }',
+      '    if (value > max_val) {',
+      '      value = max_val;',
+      '    }',
+      '    return true;',
+      '  }',
+      '',
+      '  @public',
+      '  function getValue() as caller -> u256 {',
+      '    return value;',
+      '  }',
+      '}',
+      '',
+    ].join('\n');
+
+    document.getElementById('editor').value = src;
+    updateLineNums();
+    clearResults();
+    syncCompileBtn();
+    currentContractName = 'StackFailDemo';
+    currentBytecode = null;
+    currentExternContracts = [];
+    stateSnapshot = {};
+    deployedContracts = {};
+    setStatus('StackFailDemo loaded — Compile to see the ✅ VERIFY badge. Each function uses balanced stack operations that Layer 2 verifies.', 'info');
+  }
+  window.loadStackFailDemo = loadStackFailDemo;
 
 })();
 </script>
