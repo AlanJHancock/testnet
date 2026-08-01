@@ -121,14 +121,31 @@ impl IrFunction {
         if let Some(rt) = &self.return_type {
             out.push_str(&format!(" -> {}", rt.name()));
         }
+
+        // Show attributes
+        let attrs: Vec<String> = self.attributes.iter()
+            .map(|a| format!("{:?}", a))
+            .collect();
+        if !attrs.is_empty() {
+            out.push_str(&format!("  // attrs: {}", attrs.join(", ")));
+        }
+
         out.push_str(" {\n");
 
         for block in &self.blocks {
+            // Skip empty unreachable blocks in dump
+            if !block.reachable && block.insts.is_empty() {
+                continue;
+            }
             out.push_str(&format!("  block_{}:{{\n", block.id));
             // Show predecessors
             if !block.preds.is_empty() {
                 let preds: Vec<String> = block.preds.iter().map(|p| format!("block_{}", p)).collect();
                 out.push_str(&format!("    // preds: {}\n", preds.join(", ")));
+            }
+            // Show reachability
+            if !block.reachable {
+                out.push_str("    // UNREACHABLE\n");
             }
             for (i, inst) in block.insts.iter().enumerate() {
                 let val_id = i as ValueId;

@@ -28,6 +28,7 @@ pub mod function;
 pub mod module;
 pub mod builder;
 pub mod analyzer;
+pub mod passes;
 
 pub use types::*;
 pub use instructions::*;
@@ -36,3 +37,4 @@ pub use function::*;
 pub use module::*;
 pub use builder::*;
 pub use analyzer::*;
+pub use passes::*;

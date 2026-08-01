@@ -948,11 +948,15 @@ async fn compile_handler(
         }
     }
 
-    // Build SSA IR dump for display
+    // Build SSA IR dump for display (with optimization passes)
     let ir_dump: Vec<String> = {
         let mut builder = synq_compiler::ir::IrBuilder::new();
         match builder.build(&ast) {
             Ok(mut module) => {
+                // Run SSA optimization passes (phi insertion, DCE, constant folding)
+                for func in &mut module.functions {
+                    let _pass_reports = synq_compiler::ir::passes::run_passes(func);
+                }
                 let _report = synq_compiler::ir::analyze(&mut module);
                 vec![module.dump()]
             }
@@ -967,6 +971,13 @@ async fn compile_handler(
         match ir_builder.build(&ast) {
             Ok(mut ir_module) => {
                 eprintln!("[IR] built: {} functions", ir_module.functions.len());
+                // Run SSA optimization passes
+                for func in &mut ir_module.functions {
+                    let pass_reports = synq_compiler::ir::passes::run_passes(func);
+                    for report in &pass_reports {
+                        compile_warnings.push(format!("[IR] fn {}: {}", func.name, report));
+                    }
+                }
                 let ir_report = synq_compiler::ir::analyze(&mut ir_module);
                 eprintln!("[IR] analyzed: {} stats, {} errors", ir_report.function_stats.len(), ir_report.errors.len());
                 for err in &ir_report.errors {

@@ -99,11 +99,20 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
     }
 
     // 4. Build SSA IR (parallel to codegen — for analysis and future backend)
+    //    v7.0: Run optimization passes (phi insertion, DCE, constant folding)
     let mut ir_dump: Vec<String> = Vec::new();
     {
         let mut ir_builder = ir::IrBuilder::new();
         match ir_builder.build(&ast) {
             Ok(mut ir_module) => {
+                // Run SSA optimization passes on each function
+                for func in &mut ir_module.functions {
+                    let pass_reports = ir::passes::run_passes(func);
+                    for report in &pass_reports {
+                        warnings.push(format!("[IR] fn {}: {}", func.name, report));
+                    }
+                }
+
                 let ir_report = ir::analyze(&mut ir_module);
                 if !ir_report.is_ok() {
                     for err in &ir_report.errors {
