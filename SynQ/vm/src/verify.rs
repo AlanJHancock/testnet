@@ -74,6 +74,7 @@ fn stack_effect(op: OpCode, extern_arg_count: Option<u8>) -> Option<(i32, i32)> 
         OpCode::Return => Some((0, 0)),
         OpCode::Revert => Some((0, 0)),
         OpCode::RevertCode => Some((0, 0)),
+        OpCode::RevertCodeDyn => Some((1, 0)),  // pops message from stack
 
         // Memory
         OpCode::Load      => Some((1, 1)),  // pops addr, pushes value
@@ -123,6 +124,7 @@ fn stack_effect(op: OpCode, extern_arg_count: Option<u8>) -> Option<(i32, i32)> 
         OpCode::StrLen    => Some((1, 1)),
         OpCode::StrConcat => Some((2, 1)),
         OpCode::StrEq     => Some((2, 1)),
+        OpCode::ToString   => Some((1, 1)),  // pops value, pushes Str
 
         // Compound types — fixed effect
         OpCode::TupleGet  => Some((2, 1)),  // pops idx + tuple, pushes element
@@ -157,7 +159,7 @@ fn stack_effect(op: OpCode, extern_arg_count: Option<u8>) -> Option<(i32, i32)> 
 fn is_block_terminator(op: OpCode) -> bool {
     matches!(op,
         OpCode::Jump | OpCode::JumpIf | OpCode::Call |
-        OpCode::Return | OpCode::Revert | OpCode::RevertCode |
+        OpCode::Return | OpCode::Revert | OpCode::RevertCode | OpCode::RevertCodeDyn |
         OpCode::Halt
     )
 }
@@ -223,6 +225,10 @@ fn parse_instructions(code: &[u8]) -> Result<Vec<Instruction>, VMError> {
                 let msg_len = read_u32_le!() as usize;
                 read_bytes!(msg_len);
             }
+            OpCode::RevertCodeDyn => {
+                let _ = read_u32_le!();  // error_code (4B LE)
+            }
+            OpCode::ToString => { /* no inline operands */ }
             OpCode::LoadImm => {
                 let len = read_u32_le!() as usize;
                 read_bytes!(len);
@@ -505,7 +511,7 @@ fn build_cfg_from_code(instructions: &[Instruction], code: &[u8]) -> Vec<BasicBl
                         successors.push(sorted_starts[bi + 1]); // return point
                     }
                 }
-                OpCode::Return | OpCode::Halt | OpCode::Revert | OpCode::RevertCode => {
+                OpCode::Return | OpCode::Halt | OpCode::Revert | OpCode::RevertCode | OpCode::RevertCodeDyn => {
                     // No successors — block ends execution
                 }
                 _ => {

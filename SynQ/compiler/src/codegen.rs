@@ -107,6 +107,20 @@ fn format_revert_args(args: &[Expression]) -> String {
     args.iter().map(expr_to_string).collect::<Vec<_>>().join(", ")
 }
 
+/// Emit bytecode to push a string literal onto the stack as Value::Str.
+fn emit_string_lit(asm: &mut Assembler, s: &str) {
+    let b = s.as_bytes();
+    let mut payload = Vec::with_capacity(4 + b.len());
+    payload.extend_from_slice(&(b.len() as u32).to_le_bytes());
+    payload.extend_from_slice(b);
+    asm.emit_op(OpCode::LoadImm);
+    asm.emit_bytes(&payload);
+}
+
+
+
+
+
 /// One PQC/KEM builtin call compiles directly to its matching VM opcode.
 /// The tuple is (arg count, opcode, pushes a Bool/Bytes result).
 fn pqc_builtin_opcode(name: &str) -> Option<OpCode> {
@@ -598,6 +612,42 @@ impl CodeGenerator {
         Err(format!("Undefined variable: {}", name))
     }
 
+
+    /// Build a dynamic revert message at runtime using ToString + StrConcat.
+    /// When args is empty, uses static RevertCode with inline message.
+    fn emit_dynamic_revert(
+        &mut self,
+        code: u32,
+        prefix: &str,
+        suffix: &str,
+        args: &[Expression],
+        scope: &mut FunctionScope,
+    ) {
+        if args.is_empty() {
+            let msg = format!("{}{}", prefix, suffix);
+            self.assembler.emit_op(OpCode::RevertCode);
+            self.assembler.emit_u32(code);
+            self.assembler.emit_bytes(msg.as_bytes());
+            return;
+        }
+        emit_string_lit(&mut self.assembler, prefix);
+        for (i, arg) in args.iter().enumerate() {
+            if i > 0 {
+                emit_string_lit(&mut self.assembler, ", ");
+                self.assembler.emit_op(OpCode::StrConcat);
+            }
+            self.gen_expression(arg, scope).unwrap();
+            self.assembler.emit_op(OpCode::ToString);
+            self.assembler.emit_op(OpCode::StrConcat);
+        }
+        if !suffix.is_empty() {
+            emit_string_lit(&mut self.assembler, suffix);
+            self.assembler.emit_op(OpCode::StrConcat);
+        }
+        self.assembler.emit_op(OpCode::RevertCodeDyn);
+        self.assembler.emit_u32(code);
+    }
+
     fn gen_statement(&mut self, stmt: &Statement, scope: &mut FunctionScope) -> Result<(), String> {
         match stmt {
             Statement::Expression(expr) => {
@@ -720,10 +770,6 @@ impl CodeGenerator {
             // ── Named error revert: `revert ErrorName(args...)` ────────────
             Statement::RevertNamed { error, args } => {
                 // Named error: try to resolve the error name to an enum variant tag.
-                // If found, emit RevertCode (0x35) with the structured error code.
-                // If not found, fall back to string-based Revert (0x34).
-                
-                // Search all enum definitions for a matching variant.
                 let mut found_code: Option<(u32, String)> = None;
                 for (enum_name, enum_info) in &self.enum_defs {
                     if let Some(idx) = enum_info.variants.iter().position(|v| v.name == *error) {
@@ -731,34 +777,20 @@ impl CodeGenerator {
                         break;
                     }
                 }
-                
-                // Build the display message with arg expressions formatted.
-                let msg = if args.is_empty() {
-                    if let Some((_, ref en)) = found_code { format!("{}::{}", en, error) }
-                    else { error.clone() }
+
+                if let Some((code, enum_name)) = found_code {
+                    let prefix = format!("{}::{}(", enum_name, error);
+                    self.emit_dynamic_revert(code, &prefix, ")", args, scope);
                 } else {
-                    let prefix = if let Some((_, ref en)) = found_code { format!("{}::{}", en, error) }
-                    else { error.clone() };
-                    format!("{}({})", prefix, format_revert_args(&args))
-                };
-                
-                // Evaluate args and Print their runtime values before reverting.
-                for arg in args.iter() {
-                    self.gen_expression(arg, scope)?;
-                    self.assembler.emit_op(OpCode::Print);
-                }
-                
-                let msg_bytes = msg.as_bytes();
-                
-                if let Some((code, _)) = found_code {
-                    // Emit RevertCode: opcode + error_code (4B LE) + msg_len (4B LE) + msg
-                    self.assembler.emit_op(OpCode::RevertCode);
-                    self.assembler.emit_u32(code);
-                    self.assembler.emit_bytes(msg_bytes);
-                } else {
-                    // Fall back to string-based Revert for unknown error names.
+                    // Unknown error name — fall back to string-based Revert
+                    let msg = if args.is_empty() { error.clone() }
+                        else { format!("{}({})", error, format_revert_args(&args)) };
+                    for arg in args.iter() {
+                        self.gen_expression(arg, scope)?;
+                        self.assembler.emit_op(OpCode::Pop);
+                    }
                     self.assembler.emit_op(OpCode::Revert);
-                    self.assembler.emit_bytes(msg_bytes);
+                    self.assembler.emit_bytes(msg.as_bytes());
                 }
                 Ok(())
             }
@@ -767,9 +799,8 @@ impl CodeGenerator {
             // The server collects Print output and surfaces it as "events" in the
             // run response. A dedicated Emit opcode (0x70) will replace this
             // once the VM log/receipt subsystem is implemented.
-                        Statement::RevertEnum { enum_name, error, args } => {
+            Statement::RevertEnum { enum_name, error, args } => {
                 // Qualified named error: revert EnumName::VariantName(args)
-                // Look up the specific enum, then find the variant tag.
                 let code = if let Some(enum_info) = self.enum_defs.get(enum_name.as_str()) {
                     enum_info.variants.iter().position(|v| v.name == *error)
                         .map(|p| p as u32)
@@ -777,23 +808,8 @@ impl CodeGenerator {
                 } else {
                     return Err(format!("unknown enum '{}' in revert statement", enum_name));
                 };
-                
-                let msg = if args.is_empty() {
-                    format!("{}::{}", enum_name, error)
-                } else {
-                    format!("{}::{}({})", enum_name, error, format_revert_args(&args))
-                };
-                
-                // Evaluate args and Print their runtime values before reverting.
-                for arg in args.iter() {
-                    self.gen_expression(arg, scope)?;
-                    self.assembler.emit_op(OpCode::Print);
-                }
-                
-                let msg_bytes = msg.as_bytes();
-                self.assembler.emit_op(OpCode::RevertCode);
-                self.assembler.emit_u32(code);
-                self.assembler.emit_bytes(msg_bytes);
+                let prefix = format!("{}::{}(", enum_name, error);
+                self.emit_dynamic_revert(code, &prefix, ")", args, scope);
                 Ok(())
             }
 Statement::Emit { event, args } => {

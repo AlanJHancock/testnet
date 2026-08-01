@@ -2324,7 +2324,7 @@
         sb.style.visibility = 'visible';
         sb.style.pointerEvents = 'auto';
         var sizeKb = Math.round(currentSqb.length * 0.75 / 1024);
-        sb.textContent = '\u2B07 .sqb (' + sizeKb + ' KB)';
+        sb.textContent = '\u2B07 ' + (currentContractName || 'contract') + '.sqb (' + sizeKb + ' KB)';
       } else if (sb) {
         sb.style.visibility = 'hidden';
         sb.style.pointerEvents = 'none';
@@ -5147,6 +5147,11 @@ var LOOP_LINES = [
       '  }',
       '',
       '  @public',
+      '  function withdraw(amount: u256) as caller -> bool {',
+      '    revert VaultError::InsufficientBalance(amount);',
+      '  }',
+      '',
+      '  @public',
       '  function failUnauthorized() as caller -> bool {',
       '    revert VaultError::Unauthorized;',
       '  }',
@@ -5166,7 +5171,7 @@ var LOOP_LINES = [
     updateLineNums();
     clearResults();
     syncCompileBtn();
-    setStatus('NamedError loaded — Compile, Deploy, then call init(). Try failInsufficient(), failInvalid(), failOverflow() to see structured error codes with arg formatting.', 'info');
+    setStatus('NamedError loaded — Compile, Deploy, then call init(). Try withdraw(42) to see runtime arg in error, failOverflow() for multi-arg, or failUnauthorized() for no-arg.', 'info');
   }
   window.loadNamedError = loadNamedError;
 

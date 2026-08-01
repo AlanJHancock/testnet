@@ -66,6 +66,7 @@ pub enum OpCode {
     Return = 0x33,
     Revert = 0x34,  // require() failure — followed by 4-byte LE len + message bytes
     RevertCode = 0x35, // named error revert — followed by error_code(4B LE) + msg_len(4B LE) + msg
+    RevertCodeDyn = 0x36, // named error revert, error_code inline, pops msg from stack
 
     // Memory operations
     Load       = 0x40,
@@ -95,6 +96,7 @@ pub enum OpCode {
     StrLen      = 0x9C,   // pops Bytes/string addr → pushes I32(len)
     StrConcat   = 0x9D,   // pops b, pops a → pushes Bytes(a+b)
     StrEq       = 0x9E,   // pops b, pops a → pushes Bool
+    ToString    = 0x9F,   // pops value -> pushes Str (runtime display)
 
     // Compound type constructors (0xA0-0xAA)
     TuplePack    = 0xA0,
@@ -164,6 +166,7 @@ impl TryFrom<u8> for OpCode {
             0x33 => Ok(OpCode::Return),
             0x34 => Ok(OpCode::Revert),
             0x35 => Ok(OpCode::RevertCode),
+            0x36 => Ok(OpCode::RevertCodeDyn),
             0x40 => Ok(OpCode::Load),
             0x41 => Ok(OpCode::Store),
             0x42 => Ok(OpCode::LoadImm),
@@ -188,6 +191,7 @@ impl TryFrom<u8> for OpCode {
             0x9C => Ok(OpCode::StrLen),
             0x9D => Ok(OpCode::StrConcat),
             0x9E => Ok(OpCode::StrEq),
+            0x9F => Ok(OpCode::ToString),
             0xA0 => Ok(OpCode::TuplePack),
             0xA1 => Ok(OpCode::TupleUnpack),
             0xA2 => Ok(OpCode::TupleGet),

@@ -1525,6 +1525,10 @@ OpCode::MapNew => {
                 let some = matches!(v, Value::SynqOption(Some(_)));
                 self.stack.push(Value::I32(if some { 1 } else { 0 }));
             }
+            OpCode::ToString => {
+                let value = self.pop()?;
+                self.push(Value::Str(vm_value_display(&value)))?;
+            }
             OpCode::Print => {
                 let value = self.pop()?;
                 self.print_log.push(vm_value_display(&value));
@@ -1548,6 +1552,17 @@ OpCode::MapNew => {
                 let msg_bytes = self.read_bytes(msg_len)?;
                 let msg = String::from_utf8(msg_bytes.to_vec())
                     .unwrap_or_else(|e| format!("revert(0x{})", hex::encode(&msg_bytes[..e.utf8_error().valid_up_to()])));
+                return Err(VMError::RevertedNamed { code, message: msg });
+            }
+            OpCode::RevertCodeDyn => {
+                let code = self.read_u32()?;
+                let msg_val = self.pop()?;
+                let msg = match &msg_val {
+                    Value::Str(s) => s.clone(),
+                    Value::Bytes(b) => String::from_utf8(b.clone())
+                        .unwrap_or_else(|_| format!("0x{}", hex::encode(b))),
+                    _ => vm_value_display(&msg_val),
+                };
                 return Err(VMError::RevertedNamed { code, message: msg });
             }
         }
