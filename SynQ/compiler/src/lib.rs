@@ -288,6 +288,8 @@ const PQC_BUILTINS: &[&str] = &[
     "aegis_call", "aegis_verify", "aegis_decaps",
     // String builtins
     "str_len", "str_concat", "str_eq",
+    // Asset builtins
+    "asset_create", "asset_transfer", "asset_burn", "asset_balance", "asset_owner",
 ];
 
 fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String>) -> Result<(), String> {

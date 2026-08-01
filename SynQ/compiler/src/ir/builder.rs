@@ -106,8 +106,10 @@ impl IrBuilder {
                 ir_module.enum_defs = self.enum_defs.clone();
                 ir_module.event_defs = self.event_defs.clone();
 
-                // Collect state vars into module
-                for (name, (ty, addr)) in &self.state_vars {
+                // Collect state vars into module — sorted by address for deterministic ordering
+                let mut sv_list: Vec<_> = self.state_vars.iter().collect();
+                sv_list.sort_by_key(|(_, (_, addr))| *addr);
+                for (name, (ty, addr)) in sv_list {
                     ir_module.state_vars.push((name.clone(), ty.clone(), *addr));
                 }
 

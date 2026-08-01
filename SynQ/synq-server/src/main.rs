@@ -908,18 +908,33 @@ async fn compile_handler(
         format!("0x{}", hex_encode(&hash[12..]))
     });
 
-    let (bytecode, state_vars) = match synq_compiler::codegen::CodeGenerator::new().generate(&ast) {
-        Ok(b)  => b,
-        Err(e) => return (StatusCode::OK, RespJson(CompileResponse {
-            success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
-            errors: vec![format!("Codegen error: {}", e)], warnings: vec![],
-            functions:        Vec::new(),
-            state_var_types:  std::collections::HashMap::new(),
-            manifest:           None,
-            ir_dump:            vec![],
-            sqb:               None,
-        })),
+    // ── Primary compilation path: SSA IR backend ───────────────────────────
+    // compile_ir() handles parse -> semantic checks -> IR build -> optimization
+    // passes -> analysis -> lowering to QVM bytecode, returning a CompileResult
+    // with bytecode, state_vars, warnings, extern_contracts, and ir_dump.
+    // Falls back to direct codegen if the IR backend encounters an error.
+    let compile_result = match synq_compiler::compile_ir(&req.source) {
+        Ok(r)  => r,
+        Err(e) => {
+            eprintln!("[IR] compile_ir failed, falling back to direct codegen: {}", e);
+            match synq_compiler::compile(&req.source) {
+                Ok(r)  => r,
+                Err(e2) => return (StatusCode::OK, RespJson(CompileResponse {
+                    success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
+                    errors: vec![format!("Compile error: {}", e2)], warnings: vec![],
+                    functions:        Vec::new(),
+                    state_var_types:  std::collections::HashMap::new(),
+                    manifest:           None,
+                    ir_dump:            vec![],
+                    sqb:               None,
+                })),
+            }
+        }
     };
+    let bytecode = compile_result.bytecode;
+    let state_vars = compile_result.state_vars;
+    // Merge IR backend warnings (pass reports, analysis stats) into compile warnings
+    compile_warnings.extend(compile_result.warnings);
 
     // Layer 1 + Layer 2 verification — belt-and-suspenders check on our own codegen output
     match synq_vm::verify::verify(&bytecode) {
@@ -948,57 +963,11 @@ async fn compile_handler(
         }
     }
 
-    // Build SSA IR dump for display (with optimization passes)
-    let ir_dump: Vec<String> = {
-        let mut builder = synq_compiler::ir::IrBuilder::new();
-        match builder.build(&ast) {
-            Ok(mut module) => {
-                // Run SSA optimization passes (phi insertion, DCE, constant folding)
-                for func in &mut module.functions {
-                    let _pass_reports = synq_compiler::ir::passes::run_passes(func);
-                }
-                let _report = synq_compiler::ir::analyze(&mut module);
-                vec![module.dump()]
-            }
-            Err(_) => vec![],
-        }
-    };
+    // IR dump comes from compile_ir() — no separate build needed
+    let ir_dump: Vec<String> = compile_result.ir_dump;
 
-    // ── SSA IR analysis (parallel to codegen) ──────────────────────────────
-    {
-        let mut ir_builder = synq_compiler::ir::IrBuilder::new();
-        eprintln!("[IR] building...");
-        match ir_builder.build(&ast) {
-            Ok(mut ir_module) => {
-                eprintln!("[IR] built: {} functions", ir_module.functions.len());
-                // Run SSA optimization passes
-                for func in &mut ir_module.functions {
-                    let pass_reports = synq_compiler::ir::passes::run_passes(func);
-                    for report in &pass_reports {
-                        compile_warnings.push(format!("[IR] fn {}: {}", func.name, report));
-                    }
-                }
-                let ir_report = synq_compiler::ir::analyze(&mut ir_module);
-                eprintln!("[IR] analyzed: {} stats, {} errors", ir_report.function_stats.len(), ir_report.errors.len());
-                for err in &ir_report.errors {
-                    compile_warnings.push(format!("[IR] {}", err));
-                }
-                for stat in &ir_report.function_stats {
-                    compile_warnings.push(format!(
-                        "[IR] fn {}: {} blocks, {} insts, {} reachable, {} effects, {} host, {} auth, {} lin_create, {} lin_consume",
-                        stat.name, stat.block_count, stat.instruction_count,
-                        stat.reachable_blocks, stat.effects.len(),
-                        stat.host_profiles, stat.authority_checks,
-                        stat.linear_creates, stat.linear_consumes
-                    ));
-                }
-            }
-            Err(e) => {
-                eprintln!("[IR] build error: {}", e);
-                compile_warnings.push(format!("[IR] build error: {}", e));
-            }
-        }
-    }
+    // ── SSA IR analysis already done by compile_ir() ──────────────────────
+    // Pass reports and analysis stats are merged into compile_warnings above.
 
 
     // PR-G: use persistent compiler key when available, ephemeral otherwise
