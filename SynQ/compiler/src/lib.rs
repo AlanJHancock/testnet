@@ -140,6 +140,85 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
     Ok(CompileResult { bytecode, state_vars, warnings, extern_contracts, ir_dump })
 }
 
+/// Compile using the IR -> bytecode backend (v7.0 path).
+/// Builds SSA IR, runs optimization passes, and lowers to QVM bytecode.
+/// This is the alternative to the direct AST -> bytecode codegen path.
+pub fn compile_ir(source: &str) -> Result<CompileResult, String> {
+    let mut warnings: Vec<String> = Vec::new();
+
+    // 1. Parse
+    let ast = parser::parse(source)?;
+
+    // 2. Semantic checks per contract
+    for unit in &ast {
+        if let SourceUnit::Contract(ref c) = unit {
+            check_undefined_refs(c, &mut warnings)?;
+            check_call_graph(c)?;
+        }
+    }
+
+    // 3. Collect extern_call targets
+    let mut extern_contracts: Vec<String> = Vec::new();
+    for unit in &ast {
+        if let SourceUnit::Contract(ref c) = unit {
+            for part in &c.parts {
+                if let crate::ast::ContractPart::Function(f) = part {
+                    for stmt in &f.body.statements {
+                        collect_extern_contracts_stmt(stmt, &mut extern_contracts);
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Build SSA IR and run optimization passes
+    let mut ir_dump: Vec<String> = Vec::new();
+    let mut ir_module = {
+        let mut ir_builder = ir::IrBuilder::new();
+        match ir_builder.build(&ast) {
+            Ok(m) => m,
+            Err(e) => return Err(format!("IR build error: {}", e)),
+        }
+    };
+
+    // Run SSA optimization passes
+    for func in &mut ir_module.functions {
+        let pass_reports = ir::passes::run_passes(func);
+        for report in &pass_reports {
+            warnings.push(format!("[IR] fn {}: {}", func.name, report));
+        }
+    }
+
+    let ir_report = ir::analyze(&mut ir_module);
+    if !ir_report.is_ok() {
+        for err in &ir_report.errors {
+            warnings.push(format!("[IR] {}", err));
+        }
+    }
+    for stat in &ir_report.function_stats {
+        warnings.push(format!(
+            "[IR] fn {}: {} blocks, {} insts, {} reachable, {} effects, {} host_profiles, {} auth_checks, {} linear_creates, {} linear_consumes",
+            stat.name, stat.block_count, stat.instruction_count,
+            stat.reachable_blocks, stat.effects.len(),
+            stat.host_profiles, stat.authority_checks,
+            stat.linear_creates, stat.linear_consumes
+        ));
+    }
+
+    ir_dump.push(ir_module.dump());
+
+    // 5. Lower IR to bytecode
+    let bytecode = ir::lower::IrLowerer::lower(&ir_module)?;
+
+    // Collect state vars from IR module
+    let state_vars: Vec<(String, u32)> = ir_module.state_vars.iter()
+        .map(|(name, _ty, addr)| (name.clone(), *addr))
+        .collect();
+
+    Ok(CompileResult { bytecode, state_vars, warnings, extern_contracts, ir_dump })
+}
+
+
 // ─── Semantic check: undefined variables and calls ───────────────────────────
 
 fn collect_identifiers(expr: &Expression, out: &mut Vec<String>) {
@@ -515,6 +594,225 @@ contract PairTest {
     // Count TupleGet opcodes — should be 1 (in get_a)
     let get_count = bytecode.windows(1).filter(|w| w[0] == 0xA2).count();
     assert_eq!(get_count, 1, "should have exactly 1 TupleGet for field access");
+}
+
+
+// ── IR → Bytecode Backend Tests ────────────────────────────────────────────
+
+#[test]
+fn test_ir_backend_simple_contract() {
+    let source = r#"pragma synq ^0.9;
+contract SimpleContract {
+    state {
+        value: u256;
+        initialised: bool;
+    }
+    @public
+    function init() -> bool {
+        if (!initialised) {
+            value = 42;
+            initialised = true;
+        }
+        return true;
+    }
+    @public
+    function get_value() -> u256 {
+        return value;
+    }
+}
+"#;
+    let result = compile_ir(source).expect("IR compile failed");
+    assert!(!result.bytecode.is_empty(), "IR bytecode should not be empty");
+    assert!(result.bytecode.len() > 20, "IR bytecode should have header + code");
+    // Verify header magic (QVM\0)
+    let magic = u32::from_le_bytes(result.bytecode[0..4].try_into().unwrap());
+    assert_eq!(magic, 0x51564D00, "IR bytecode should have QVM magic");
+    // Verify state vars
+    assert_eq!(result.state_vars.len(), 2, "should have 2 state vars");
+}
+
+#[test]
+fn test_ir_backend_arithmetic() {
+    let source = r#"pragma synq ^0.9;
+contract ArithContract {
+    state {
+        a: u256;
+        b: u256;
+    }
+    @public
+    function set_values(x: u256, y: u256) -> bool {
+        a = x;
+        b = y;
+        return true;
+    }
+    @public
+    function add() -> u256 {
+        return a + b;
+    }
+    @public
+    function multiply() -> u256 {
+        return a * b;
+    }
+}
+"#;
+    let result = compile_ir(source).expect("IR compile failed");
+    assert!(!result.bytecode.is_empty());
+    // Should have Add (0x10) and Mul (0x12) opcodes somewhere in the bytecode
+    let code_start = 15; // past header
+    let code = &result.bytecode[code_start..];
+    assert!(code.contains(&(0x10)), "IR bytecode should contain Add opcode");
+    assert!(code.contains(&(0x12)), "IR bytecode should contain Mul opcode");
+}
+
+#[test]
+fn test_ir_backend_conditional() {
+    let source = r#"pragma synq ^0.9;
+contract CondContract {
+    state {
+        flag: bool;
+        result: u256;
+    }
+    @public
+    function set_if(x: u256) -> bool {
+        if (x > 10) {
+            result = x;
+            flag = true;
+        } else {
+            result = 0;
+            flag = false;
+        }
+        return true;
+    }
+    @public
+    function get_result() -> u256 {
+        return result;
+    }
+}
+"#;
+    let result = compile_ir(source).expect("IR compile failed");
+    assert!(!result.bytecode.is_empty());
+    // Should have JumpIf (0x31) and Jump (0x30) for if/else
+    let code = &result.bytecode[15..];
+    assert!(code.contains(&(0x31)), "IR bytecode should contain JumpIf for if/else");
+    assert!(code.contains(&(0x30)), "IR bytecode should contain Jump for else branch");
+}
+
+#[test]
+fn test_ir_backend_loop() {
+    let source = r#"pragma synq ^0.9;
+contract LoopContract {
+    state {
+        counter: u256;
+        sum: u256;
+    }
+    @public
+    function loop_sum(n: u256) -> bool {
+        let i: u256 = 0;
+        sum = 0;
+        while (i < n) {
+            sum = sum + i;
+            i = i + 1;
+        }
+        return true;
+    }
+    @public
+    function get_sum() -> u256 {
+        return sum;
+    }
+}
+"#;
+    let result = compile_ir(source).expect("IR compile failed");
+    assert!(!result.bytecode.is_empty());
+    // Should have JumpIf (0x31) for while loop condition and Jump (0x30) for back-edge
+    let code = &result.bytecode[15..];
+    assert!(code.contains(&(0x31)), "IR bytecode should contain JumpIf for while loop");
+}
+
+#[test]
+fn test_ir_backend_state_vars_match() {
+    let source = r#"pragma synq ^0.9;
+contract StateMatchContract {
+    state {
+        balance: u256;
+        owner: u256;
+    }
+    @public
+    function init() -> bool {
+        balance = 1000;
+        return true;
+    }
+}
+"#;
+    let result_codegen = compile(source).expect("codegen compile failed");
+    let result_ir = compile_ir(source).expect("IR compile failed");
+    
+    // State vars should match between both backends
+    assert_eq!(
+        result_codegen.state_vars.len(),
+        result_ir.state_vars.len(),
+        "state var count should match between codegen and IR backend"
+    );
+    for (cg_var, ir_var) in result_codegen.state_vars.iter().zip(result_ir.state_vars.iter()) {
+        assert_eq!(cg_var.0, ir_var.0, "state var name should match");
+        assert_eq!(cg_var.1, ir_var.1, "state var address should match for {}", cg_var.0);
+    }
+}
+
+#[test]
+fn test_ir_backend_struct_contract() {
+    let source = r#"pragma synq ^0.9;
+struct Point {
+    x: u256;
+    y: u256;
+}
+contract StructContract {
+    state {
+        origin: Point;
+    }
+    @public
+    function set_origin(x: u256, y: u256) -> bool {
+        origin = Point { x: x, y: y };
+        return true;
+    }
+    @public
+    function get_x() -> u256 {
+        return origin.x;
+    }
+}
+"#;
+    let result = compile_ir(source).expect("IR compile failed");
+    assert!(!result.bytecode.is_empty());
+    // Should have TuplePack (0xA0) for struct literal
+    let code = &result.bytecode[15..];
+    assert!(code.contains(&(0xA0)), "IR bytecode should contain TuplePack for struct literal");
+}
+
+#[test]
+fn test_ir_backend_enum_access() {
+    let source = r#"pragma synq ^0.9;
+enum Status { Active, Inactive, Pending }
+contract EnumContract {
+    state {
+        status: u256;
+    }
+    @public
+    function set_active() -> bool {
+        status = Status::Active;
+        return true;
+    }
+    @public
+    function set_pending() -> bool {
+        status = Status::Pending;
+        return true;
+    }
+}
+"#;
+    let result = compile_ir(source).expect("IR compile failed");
+    assert!(!result.bytecode.is_empty());
+    // Status::Active should emit Push 0, Status::Pending should emit Push 2
+    let code = &result.bytecode[15..];
+    // Just verify it compiles and has Push opcodes
+    assert!(code.contains(&(0x01)), "IR bytecode should contain Push for enum tag");
 }
 
 }

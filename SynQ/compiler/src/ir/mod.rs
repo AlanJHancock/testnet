@@ -29,6 +29,7 @@ pub mod module;
 pub mod builder;
 pub mod analyzer;
 pub mod passes;
+pub mod lower;
 
 pub use types::*;
 pub use instructions::*;
@@ -38,3 +39,4 @@ pub use module::*;
 pub use builder::*;
 pub use analyzer::*;
 pub use passes::*;
+pub use lower::*;
