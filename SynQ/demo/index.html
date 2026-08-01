@@ -886,7 +886,8 @@
         try { await fetch(SESSION_DEL_URL + c.session_id, { method: 'DELETE' }); } catch(e){}
       }
       // 2. Create a fresh session
-      var resetBody = { bytecode: c.bytecode, state_vars: c.stateVars || c.state_vars || [] };
+      var resetBody = { state_vars: c.stateVars || c.state_vars || [] };
+      if (c.sqb) { resetBody.sqb = c.sqb; } else { resetBody.bytecode = c.bytecode; }
       if (c.manifest) resetBody.manifest = c.manifest;
       if (c.name)      resetBody.contract_name = c.name;
       if (workspaceId)        resetBody.workspace_id    = workspaceId;
@@ -2598,14 +2599,22 @@
 
     // Create a new persistent VM session on the server
     try {
+      // v7.0: Deploy from SQB artifact when available (unified deployment unit)
+      var deployBody = Object.assign(
+        { state_vars: currentStateVars, contract_name: currentContractName },
+        workspaceId ? { workspace_id: workspaceId } : {}
+      );
+      if (currentSqb) {
+        deployBody.sqb = currentSqb;
+        console.log('[SQB] Deploying from .sqb artifact (' + Math.round(currentSqb.length * 0.75 / 1024) + ' KB)');
+      } else {
+        deployBody.bytecode = currentBytecode;
+        if (currentManifest) deployBody.manifest = currentManifest;
+      }
       var res  = await fetch(SESSION_NEW_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(Object.assign(
-          { bytecode: currentBytecode, state_vars: currentStateVars, contract_name: currentContractName },
-          currentManifest ? { manifest: currentManifest } : {},
-          workspaceId ? { workspace_id: workspaceId } : {}
-        ))
+        body: JSON.stringify(deployBody)
       });
       var data = await res.json();
 
@@ -2617,11 +2626,17 @@
         return;
       }
 
+      // v7.0: Log SQB verification status
+      if (data.sqb_verified !== undefined && data.sqb_verified !== null) {
+        console.log('[SQB] Artifact verified: ' + data.sqb_verified);
+      }
+
       const deployedSessionId  = data.session_id;
       const deployedName       = currentContractName || 'Contract';
       const deployedAddress    = currentContractAddress;
       const deployedBytecode   = currentBytecode;
       const deployedStateVars  = currentStateVars.slice();
+      const deployedSqb        = currentSqb;
 
       // ── Layer 3 badge: Manifest + ML-DSA-87 signature verification ──────
       (function() {
@@ -2723,7 +2738,7 @@
 
       // Register into workspace (pre-created at compile time)
       if (workspaceId) {
-        await registerInWorkspace(deployedSessionId, deployedName, deployedAddress, deployedBytecode, deployedStateVars, _evictedDeployIndex);
+        await registerInWorkspace(deployedSessionId, deployedName, deployedAddress, deployedBytecode, deployedStateVars, _evictedDeployIndex, deployedSqb);
       }
 
     } catch (e) {
@@ -3649,7 +3664,8 @@
         try { await fetch(SESSION_DEL_URL + c.session_id, { method: 'DELETE' }); } catch(e){}
       }
       // 2. Create a fresh session
-      var resetBody = { bytecode: c.bytecode, state_vars: c.stateVars || c.state_vars || [] };
+      var resetBody = { state_vars: c.stateVars || c.state_vars || [] };
+      if (c.sqb) { resetBody.sqb = c.sqb; } else { resetBody.bytecode = c.bytecode; }
       if (c.manifest) resetBody.manifest = c.manifest;
       if (c.name)      resetBody.contract_name = c.name;
       if (workspaceId)        resetBody.workspace_id    = workspaceId;
@@ -4826,7 +4842,8 @@ var LOOP_LINES = [
                               bytecode: bytecode, stateVars: stateVars, deploy_index: idx,
                               stateVarTypes: currentStateVarTypes,
                               fnReturnTypes: currentFnReturnTypes,
-                              compileFunctions: compileFunctions });
+                              compileFunctions: compileFunctions,
+                              sqb: arguments.length > 6 ? arguments[6] : null });
     workspaceContracts.sort(function(a, b){ return a.deploy_index - b.deploy_index; });
     renderWorkspacePanel();
     // Re-evaluate the deps hint now that workspace membership has changed.
@@ -5148,7 +5165,11 @@ var LOOP_LINES = [
       '',
       '  @public',
       '  function withdraw(amount: u256) as caller -> bool {',
-      '    revert VaultError::InsufficientBalance(amount);',
+      '    if (amount > balance) {',
+      '      revert VaultError::InsufficientBalance(amount);',
+      '    }',
+      '    balance = balance - amount;',
+      '    return true;',
       '  }',
       '',
       '  @public',
@@ -5362,7 +5383,7 @@ var LOOP_LINES = [
       '//   • Dynamic opcodes (TuplePack/TupleUnpack) mark depth as unknown',
       '//',
       '// To see actual stack warnings, submit crafted bytecode directly',
-      '// to POST /session/new with hand-built QVM bytecode.',
+      '// to POST /session/new with SQB artifact or hand-built QVM bytecode.',
       '//',
       '// ═══════════════════════════════════════════════════════════════════════',
       '',

@@ -1341,11 +1341,22 @@ async fn compile_handler(
             // MANIFEST section: V3 manifest JSON (self-contained)
             let artifact_hash = hex::encode(Sha3_256::digest(&bytecode));
             let source_hash = hex::encode(Sha3_256::digest(sqb_source.as_bytes()));
+            // Build SQB manifest JSON — self-contained with signature fields
+            // so L3 verification works from the SQB artifact alone.
+            let sqb_key_id = match state.compiler_key.as_ref() {
+                CompilerKey::Persistent { key_id, .. } => Some(key_id.clone()),
+                CompilerKey::Ephemeral => None,
+            };
+            let sqb_gov_scopes: std::collections::HashMap<String, String> = sqb_functions.iter()
+                .filter_map(|f| f.governance_scope.as_ref().map(|s| (f.name.clone(), s.clone())))
+                .collect();
+
             let manifest_json = serde_json::json!({
                 "artifact_hash": artifact_hash,
                 "source_hash": source_hash,
                 "chain_id": V3_CHAIN_ID,
                 "network_id": V3_NETWORK_ID,
+                "required_signature_algorithm": SIGNING_ALGORITHM,
                 "signature_domains": {
                     "deploy": V3_DOMAIN_DEPLOY,
                     "call": V3_DOMAIN_CALL,
@@ -1373,6 +1384,84 @@ async fn compile_handler(
                     };
                     ty
                 }).collect::<Vec<_>>(),
+                "governance_scopes": sqb_gov_scopes,
+                "authority_scopes": {},
+            });
+
+            // Compute manifest signature using the SAME canonical 8-field form
+            // that verify_manifest() reconstructs — this is critical for L3.
+            let canonical_manifest = serde_json::json!({
+                "artifact_hash":   manifest_json.get("artifact_hash").cloned().unwrap_or_default(),
+                "source_hash":     manifest_json.get("source_hash").cloned().unwrap_or_default(),
+                "chain_id":        manifest_json.get("chain_id").cloned().unwrap_or_default(),
+                "network_id":      manifest_json.get("network_id").cloned().unwrap_or_default(),
+                "functions":       manifest_json.get("functions").cloned().unwrap_or_default(),
+                "state_vars":      manifest_json.get("state_vars").cloned().unwrap_or_default(),
+                "governance_scopes": manifest_json.get("governance_scopes").cloned().unwrap_or_default(),
+                "authority_scopes":  manifest_json.get("authority_scopes").cloned().unwrap_or_default(),
+            });
+            let sqb_manifest_bytes = serde_json::to_vec(&canonical_manifest).unwrap_or_default();
+            let sqb_manifest_hash = Sha3_256::digest(&sqb_manifest_bytes);
+            let (sqb_mf_sig, sqb_mf_pubkey) = match state.compiler_key.as_ref() {
+                CompilerKey::Persistent { private_key, public_key, .. } => {
+                    let pqc = PQCCompiler::new(PQCSecurityLevel::Enhanced);
+                    match pqc.sign_message(private_key, &sqb_manifest_hash, SIGNING_ALGORITHM) {
+                        Ok(sig) => (Some(hex_encode(&sig.signature)), Some(hex_encode(public_key))),
+                        Err(_) => (None, None),
+                    }
+                }
+                CompilerKey::Ephemeral => {
+                    let pqc = PQCCompiler::new(PQCSecurityLevel::Enhanced);
+                    let keypair = match pqc.generate_keypair(SIGNING_ALGORITHM) {
+                        Ok(k) => (k.private_key, k.public_key),
+                        Err(_) => (vec![], vec![]),
+                    };
+                    match pqc.sign_message(&keypair.0, &sqb_manifest_hash, SIGNING_ALGORITHM) {
+                        Ok(sig) => (Some(hex_encode(&sig.signature)), Some(hex_encode(&keypair.1))),
+                        Err(_) => (None, None),
+                    }
+                }
+            };
+
+            // Rebuild manifest JSON with signature fields included
+            let manifest_json = serde_json::json!({
+                "artifact_hash": artifact_hash,
+                "source_hash": source_hash,
+                "chain_id": V3_CHAIN_ID,
+                "network_id": V3_NETWORK_ID,
+                "required_signature_algorithm": SIGNING_ALGORITHM,
+                "manifest_signature": sqb_mf_sig,
+                "compiler_public_key": sqb_mf_pubkey,
+                "key_id": sqb_key_id,
+                "signature_domains": {
+                    "deploy": V3_DOMAIN_DEPLOY,
+                    "call": V3_DOMAIN_CALL,
+                    "governance": V3_DOMAIN_GOVERNANCE,
+                    "attest": V3_DOMAIN_ATTEST,
+                },
+                "functions": sqb_functions.iter().map(|f| serde_json::json!({
+                    "name": f.name,
+                    "params": f.params,
+                    "return_type": f.return_type,
+                })).collect::<Vec<_>>(),
+                "state_vars": sqb_state_vars.iter().map(|(name, slot)| {
+                    let ty = {
+                        let mut t = "u256".to_string();
+                        for unit in &ast {
+                            if let synq_compiler::ast::SourceUnit::Contract(c) = unit {
+                                for part in &c.parts {
+                                    if let synq_compiler::ast::ContractPart::StateVariable(sv) = part {
+                                        if sv.name == *name { t = type_name(&sv.ty); }
+                                    }
+                                }
+                            }
+                        }
+                        serde_json::json!({"name": name, "ty": t, "slot": slot})
+                    };
+                    ty
+                }).collect::<Vec<_>>(),
+                "governance_scopes": sqb_gov_scopes,
+                "authority_scopes": {},
             });
             let manifest_bytes = serde_json::to_vec(&manifest_json).unwrap_or_default();
 
@@ -1392,17 +1481,92 @@ async fn compile_handler(
             });
             let meta_bytes = serde_json::to_vec(&meta_json).unwrap_or_default();
 
-            let encoder = sqb::SqbEncoder::new(V3_CHAIN_ID as u32)
+            // EFFECTS section: per-function read/write/emit declarations
+            let effects_json = serde_json::json!({
+                "functions": sqb_functions.iter().map(|f| serde_json::json!({
+                    "name": f.name,
+                    "requires_state": f.requires_state,
+                    "modifies": f.modifies,
+                })).collect::<Vec<_>>(),
+            });
+            let effects_bytes = serde_json::to_vec(&effects_json).unwrap_or_default();
+
+            // STATE_LAYOUT section: canonical state variable slot mapping
+            let state_layout_json = serde_json::json!({
+                "state_vars": sqb_state_vars.iter().map(|(name, slot)| {
+                    let ty = {
+                        let mut t = "u256".to_string();
+                        for unit in &ast {
+                            if let synq_compiler::ast::SourceUnit::Contract(c) = unit {
+                                for part in &c.parts {
+                                    if let synq_compiler::ast::ContractPart::StateVariable(sv) = part {
+                                        if sv.name == *name { t = type_name(&sv.ty); }
+                                    }
+                                }
+                            }
+                        }
+                        serde_json::json!({"name": name, "ty": t, "slot": slot})
+                    };
+                    ty
+                }).collect::<Vec<_>>(),
+            });
+            let state_layout_bytes = serde_json::to_vec(&state_layout_json).unwrap_or_default();
+
+            // Sign the artifact root with the compiler's ML-DSA-87 key
+            // (v7.0: SQB artifacts are signed at the artifact-root level)
+            let sqb_signature = match state.compiler_key.as_ref() {
+                CompilerKey::Persistent { private_key, .. } => {
+                    // Build the SQB without signature first to compute the root
+                    let pre_sig = sqb::SqbEncoder::new(V3_CHAIN_ID as u32)
+                        .code(sqb_code.clone())
+                        .abi(abi_bytes.clone())
+                        .manifest(manifest_bytes.clone())
+                        .ir_dump(ir_bytes.clone())
+                        .effects(effects_bytes.clone())
+                        .state_layout(state_layout_bytes.clone())
+                        .meta(meta_bytes.clone())
+                        .build();
+                    match pre_sig {
+                        Ok(bin) => {
+                            // Extract artifact root (last 32 bytes before any signature)
+                            let root_offset = bin.len() - sqb::HASH_SIZE;
+                            let root: [u8; 32] = bin[root_offset..].try_into().unwrap_or([0u8; 32]);
+                            let pqc = PQCCompiler::new(PQCSecurityLevel::Enhanced);
+                            match pqc.sign_message(private_key, &root, SIGNING_ALGORITHM) {
+                                Ok(sig) => Some(sig.signature),
+                                Err(e) => {
+                                    eprintln!("[SQB] Failed to sign artifact root: {}", e);
+                                    None
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("[SQB] Pre-sig build failed: {}", e);
+                            None
+                        }
+                    }
+                }
+                CompilerKey::Ephemeral => None,
+            };
+
+            let mut encoder = sqb::SqbEncoder::new(V3_CHAIN_ID as u32)
                 .code(sqb_code)
                 .abi(abi_bytes)
                 .manifest(manifest_bytes)
                 .ir_dump(ir_bytes)
+                .effects(effects_bytes)
+                .state_layout(state_layout_bytes)
                 .meta(meta_bytes);
+
+            let was_signed = sqb_signature.is_some();
+            if let Some(sig) = sqb_signature {
+                encoder = encoder.signature(sig);
+            }
 
             match encoder.build() {
                 Ok(sqb_binary) => {
-                    eprintln!("[SQB] Artifact encoded: {} bytes, {} sections",
-                               sqb_binary.len(), 5);
+                    eprintln!("[SQB] Artifact encoded: {} bytes, 7 sections, signed={}",
+                               sqb_binary.len(), was_signed);
                     Some(BASE64_STANDARD.encode(&sqb_binary))
                 }
                 Err(e) => {
@@ -2056,7 +2220,8 @@ async fn attest_handler(
 
 #[derive(Deserialize)]
 struct NewSessionRequest {
-    bytecode:        String,
+    #[serde(default)]
+    bytecode:        Option<String>,
     state_vars:      Vec<(String, u32)>,
     contract_name:   Option<String>,
     workspace_id:    Option<String>,
@@ -2070,6 +2235,12 @@ struct NewSessionRequest {
     /// a lower limit for testing or a higher limit for loop-heavy contracts.
     #[serde(default)]
     max_steps: Option<usize>,
+    /// SQB binary artifact (base64-encoded) — v7.0 unified deployment unit.
+    /// If provided, the CODE section is extracted and used as the bytecode,
+    /// and the SQB's embedded manifest+signature are used for L3 verification.
+    /// The raw `bytecode` field is ignored when `sqb` is present.
+    #[serde(default)]
+    sqb: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -2093,6 +2264,10 @@ struct NewSessionResponse {
     /// Remaining VM step budget.
     #[serde(skip_serializing_if = "Option::is_none")]
     steps_remaining: Option<usize>,
+    /// SQB artifact verification result (v7.0 unified deployment).
+    /// Present when deployment was via SQB artifact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sqb_verified: Option<bool>,
 }
 
 /// Layer 3: Manifest + ML-DSA-87 signature verification result
@@ -2384,18 +2559,109 @@ async fn session_new_handler(
     Json(req): Json<NewSessionRequest>,
 ) -> (StatusCode, RespJson<NewSessionResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, contract_name: None, error: Some("rate limit exceeded — retry later".into()), layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None }));
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, contract_name: None, error: Some("rate limit exceeded — retry later".into()), layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None, sqb_verified: None }));
     }
-    let raw = match hex_decode_strict(&req.bytecode) {
-        Ok(b) if !b.is_empty() => b,
-        Ok(_) => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
-            success: false, session_id: None, contract_name: None, error: Some("bytecode is empty".into()),
-            layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
-        })),
-        Err(e) => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
-            success: false, session_id: None, contract_name: None, error: Some(format!("bytecode hex invalid: {}", e)),
-            layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
-        })),
+
+    // ── v7.0: SQB unified deployment path ────────────────────────────────────
+    // If an SQB artifact is provided, decode it, extract the CODE section,
+    // and use the SQB's embedded manifest+signature for L3 verification.
+    // The raw bytecode field is ignored when SQB is present.
+    let mut sqb_verified = None;
+    let mut sqb_manifest = None;
+
+    let raw = if let Some(ref sqb_b64) = req.sqb {
+        use base64::{Engine, prelude::BASE64_STANDARD};
+
+        let sqb_bytes = match BASE64_STANDARD.decode(sqb_b64) {
+            Ok(b) => b,
+            Err(e) => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
+                success: false, session_id: None, contract_name: None,
+                error: Some(format!("SQB base64 decode failed: {}", e)),
+                layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
+                sqb_verified: None,
+            })),
+        };
+
+        let artifact = match sqb::decode(&sqb_bytes) {
+            Ok(a) => a,
+            Err(e) => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
+                success: false, session_id: None, contract_name: None,
+                error: Some(format!("SQB decode failed: {}", e)),
+                layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
+                sqb_verified: None,
+            })),
+        };
+
+        // Extract CODE section
+        let code = match artifact.code() {
+            Some(c) => c.to_vec(),
+            None => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
+                success: false, session_id: None, contract_name: None,
+                error: Some("SQB artifact has no CODE section".into()),
+                layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
+                sqb_verified: None,
+            })),
+        };
+
+        // Verify artifact signature (if present)
+        let sig_ok = if let Some(ref sig) = artifact.signature {
+            // Verify ML-DSA-87 signature over artifact root
+            match state.compiler_key.as_ref() {
+                CompilerKey::Persistent { public_key, .. } => {
+                    // For SQB with embedded signature, we verify against the
+                    // manifest's compiler_public_key if available
+                    if let Some(manifest_str) = artifact.manifest_json() {
+                        if let Ok(mf) = serde_json::from_str::<serde_json::Value>(manifest_str) {
+                            let pk_hex = mf.get("compiler_public_key")
+                                .and_then(|v| v.as_str()).unwrap_or("");
+                            if let Ok(pk) = hex::decode(pk_hex) {
+                                let pqc = synq_compiler::PQCCompiler::new(PQCSecurityLevel::Enhanced);
+                                match pqc.verify_signature(&pk, sig, &artifact.artifact_root, SIGNING_ALGORITHM) {
+                                    Ok(valid) => valid,
+                                    Err(_) => false,
+                                }
+                            } else { false }
+                        } else { false }
+                    } else { false }
+                }
+                CompilerKey::Ephemeral => true, // devnet: accept unsigned/ephemeral
+            }
+        } else {
+            true // No signature present — acceptable in devnet
+        };
+
+        sqb_verified = Some(sig_ok);
+
+        if !sig_ok {
+            return (StatusCode::OK, RespJson(NewSessionResponse {
+                success: false, session_id: None, contract_name: None,
+                error: Some("SQB signature verification failed — artifact may be tampered".into()),
+                layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
+                sqb_verified: Some(false),
+            }));
+        }
+
+        // Extract manifest from SQB for L3 (if present)
+        if let Some(manifest_str) = artifact.manifest_json() {
+            if let Ok(mf) = serde_json::from_str::<serde_json::Value>(manifest_str) {
+                sqb_manifest = Some(mf);
+            }
+        }
+
+        eprintln!("[SQB] Deployed from artifact: {} sections, {} bytes, sig_verified={}",
+            artifact.sections.len(), code.len(), sig_ok);
+
+        code
+    } else {
+        // Legacy path: raw bytecode hex (now optional — may be None when SQB not provided either)
+        match req.bytecode.as_deref().and_then(|s| hex_decode_strict(s).ok()).filter(|b| !b.is_empty()) {
+            Some(b) => b,
+            None => return (StatusCode::BAD_REQUEST, RespJson(NewSessionResponse {
+                success: false, session_id: None, contract_name: None, error: Some("no bytecode or SQB artifact provided".into()),
+                layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
+                sqb_verified: None,
+            })),
+        }
     };
 
     // Layer 1 structural verification — reject malformed bytecode before loading
@@ -2404,17 +2670,21 @@ async fn session_new_handler(
             success: false, session_id: None, contract_name: None,
             error: Some(format!("Bytecode verification failed: {}", e)),
             layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
+            sqb_verified,
         }));
     }
 
-    // Layer 3: Manifest + ML-DSA-87 signature verification (if manifest provided)
-    let layer3_result = req.manifest.as_ref().map(|m| verify_manifest(&raw, m));
+    // Layer 3: Manifest + ML-DSA-87 signature verification
+    // Priority: SQB-embedded manifest > request manifest > skip
+    let l3_manifest = sqb_manifest.as_ref().or(req.manifest.as_ref());
+    let layer3_result = l3_manifest.map(|m| verify_manifest(&raw, m));
 
     let mut vm = QuantumVM::new();
     if let Err(e) = vm.load_bytecode(&raw) {
         return (StatusCode::OK, RespJson(NewSessionResponse {
             success: false, session_id: None, contract_name: None, error: Some(format!("Load error: {}", e)),
             layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
+            sqb_verified,
         }));
     }
     // Apply optional step limit override
@@ -2466,6 +2736,7 @@ async fn session_new_handler(
         max_steps: Some(effective_max_steps),
         steps_used: if FUEL_REPORTING { Some(0) } else { None },
         steps_remaining: if FUEL_REPORTING { Some(effective_max_steps) } else { None },
+        sqb_verified,
     }))
 }
 
