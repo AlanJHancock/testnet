@@ -1252,7 +1252,7 @@
               chainId: V3_CHAIN_ID_HEX,
               chainName: 'Synergy Testnet V3',
               nativeCurrency: { name: 'SYNR', symbol: 'SYNR', decimals: 18 },
-              rpcUrls: ['https://hanksweb.co.uk/synq-rpc/'],
+              rpcUrls: ['https://testnet-core-rpc.synergy-network.io'],
               blockExplorerUrls: []
             }]
           });
@@ -1261,7 +1261,7 @@
         } catch(addErr) {
           console.warn('[SynQ Wallet] Could not add chain 1266:', addErr.message || addErr);
           throw new Error('Could not add Synergy Testnet V3 to wallet. ' +
-            'Manually add chainId 1266 with RPC https://hanksweb.co.uk/synq-rpc/ and try again.');
+            'Manually add chainId 1266 with RPC https://testnet-core-rpc.synergy-network.io and try again.');
         }
       } else if (switchErr.code === 4001) {
         throw new Error('Chain switch rejected — approve in wallet to continue.');
