@@ -3178,6 +3178,13 @@
         callBody.call_nonce    = callNonce;
       }
 
+      // ── Gas exhaustion guard: block calls when budget is spent ───────────
+      if (window._gasUsed && window._gasBudget && window._gasUsed >= window._gasBudget) {
+        setVMOutput('<span class="err">\u26a0 GAS EXHAUSTED — cumulative gas (' + window._gasUsed.toLocaleString() + ') has reached the budget (' + window._gasBudget.toLocaleString() + ').\nReset VM to continue.</span>');
+        btn.disabled = false;
+        btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Function';
+        return;
+      }
       var res = await fetch(SESSION_RUN_URL, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3201,6 +3208,21 @@
           var budget = window._gasBudget;
           var pct = budget > 0 ? (used / budget) * 100 : 0;
           var lastCallGas = callGas;
+          // ── Gas exhaustion: turn red and block further calls ──────────────
+          var gasExhausted = used >= budget;
+          if (gasExhausted) {
+            fb.style.color = '#ef4444';
+            fb.style.borderColor = '#ef4444';
+            fb.textContent = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget) + ' \u26a0 EXHAUSTED';
+          } else if (pct > 80) {
+            fb.style.color = '#f59e0b';
+            fb.style.borderColor = '#f59e0b';
+            fb.textContent = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget);
+          } else {
+            fb.style.color = '';
+            fb.style.borderColor = '';
+            fb.textContent = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget);
+          }
           var fmtN = function(n) {
             if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
             if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
@@ -3224,7 +3246,7 @@
             + '    - Steps: ' + stepCost.toLocaleString() + '\n'
             + '    - PQC: ' + pqcCost.toLocaleString() + '\n'
             + 'Gas Remaining: ' + remaining.toLocaleString() + '\n'
-            + 'Utilization: ' + pct.toFixed(2) + '%';
+            + 'Utilization: ' + pct.toFixed(2) + '%' + (gasExhausted ? '\n\n\u26a0 GAS EXHAUSTED — further calls blocked. Reset VM to continue.' : '') + (pct > 80 && !gasExhausted ? '\n\n\u26a0 Approaching gas limit.' : '');
       if (fb2) { fb2.innerHTML = fb.innerHTML; fb2.className = fb.className; fb2.title = fb.title; fb2.style.display = fb.style.display; }
       })();
 
