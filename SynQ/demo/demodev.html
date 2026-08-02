@@ -5733,11 +5733,58 @@ var LOOP_LINES = [
           return;
         }
 
+        // Build combined output: if original source is present, show side-by-side
+        var combinedSource;
+        var hasOriginal = result.original_source && result.original_source.length > 0;
+
+        if (hasOriginal) {
+          combinedSource = '// ═════════════════════════════════════════════════════════════════
+';
+          combinedSource += '//  SQB DECOMPILE REPORT — Side-by-side comparison
+';
+          combinedSource += '//  Contract: ' + result.contract_name + '\n';
+          combinedSource += '//  ═════════════════════════════════════════════════════════════════
+';
+          combinedSource += '//
+';
+          combinedSource += '//  LEFT: Original source (from SQB SOURCE section, PQC-authenticated)
+';
+          combinedSource += '//  RIGHT: Decompiled SSA pseudo-SynQ (from SIR1 IR section)
+';
+          combinedSource += '//
+';
+          combinedSource += '//  The original source is cryptographically tied to the bytecode via
+';
+          combinedSource += '//  the SQB ML-DSA-87 signature. Compare the logic to verify the
+';
+          combinedSource += '//  compiler faithfully translated the source.
+';
+          combinedSource += '// ═════════════════════════════════════════════════════════════════
+
+';
+
+          // Original source with line numbers
+          combinedSource += '// ── ORIGINAL SOURCE (from SQB) ──────────────────────────────
+';
+          var origLines = result.original_source.split('\n');
+          for (var i = 0; i < origLines.length; i++) {
+            combinedSource += '// ' + (i+1).toString().padStart(3, ' ') + ' | ' + origLines[i] + '\n';
+          }
+          combinedSource += '// ────────────────────────────────────────────────────────────
+
+';
+
+          // Decompiled SSA
+          combinedSource += result.source;
+        } else {
+          // No original source — just show decompiled
+          combinedSource = result.source;
+        }
+
         // Put decompiled source into the editor
         var editor = document.getElementById('codeEditor');
         if (editor) {
-          editor.value = result.source;
-          // Trigger syntax highlighting if applicable
+          editor.value = combinedSource;
           if (typeof onCodeInput === 'function') onCodeInput();
         }
 
@@ -5748,9 +5795,15 @@ var LOOP_LINES = [
           if (cn) cn.textContent = result.contract_name;
         }
 
-        setStatus('Decompiled ' + result.contract_name + ' from SIR1 IR — ' + result.source.length + ' chars of pseudo-SynQ source loaded into editor.', 'success');
+        var statusMsg = 'Decompiled ' + result.contract_name + ' from SIR1 IR — ' + result.source.length + ' chars';
+        if (hasOriginal) {
+          statusMsg += ' (original source: ' + result.original_source.length + ' chars, side-by-side view)';
+        } else {
+          statusMsg += ' (no original source in SQB)';
+        }
+        setStatus(statusMsg, 'success');
 
-        console.log('[DECOMPILE] Success: ' + result.contract_name + ', ' + result.source.length + ' chars');
+        console.log('[DECOMPILE] Success: ' + result.contract_name + ', decompiled=' + result.source.length + ', original=' + (hasOriginal ? result.original_source.length : 'none'));
       } catch(e) {
         console.error('[DECOMPILE] Failed:', e);
         setStatus('Decompile failed: ' + e.message, 'error');

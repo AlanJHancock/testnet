@@ -73,6 +73,7 @@ pub const SECTION_PREFIX_SIZE: usize = 5; // 1 + 4
 pub const FLAG_HAS_MANIFEST:  u8 = 0x01;
 pub const FLAG_HAS_SIGNATURE: u8 = 0x02;
 pub const FLAG_HAS_IR_DUMP:   u8 = 0x04;
+pub const FLAG_HAS_SOURCE:   u8 = 0x08;
 
 // ── Section Types (ACTS-VM-004: canonical identifiers) ───────────────────────
 
@@ -95,6 +96,8 @@ pub enum SectionType {
     StateLayout = 0x06,
     /// Metadata (JSON): compiler version, chain_id, network_id, contract name
     Meta        = 0x07,
+    /// Original SynQ source (UTF-8 text) — for audit/inspection
+    Source      = 0x08,
 }
 
 impl SectionType {
@@ -108,6 +111,7 @@ impl SectionType {
             0x05 => Some(Self::Effects),
             0x06 => Some(Self::StateLayout),
             0x07 => Some(Self::Meta),
+            0x08 => Some(Self::Source),
             _    => None,
         }
     }
@@ -316,6 +320,13 @@ impl SqbEncoder {
         self
     }
 
+    /// Add a SOURCE section (UTF-8 text). Sets FLAG_HAS_SOURCE.
+    pub fn source(mut self, text: Vec<u8>) -> Self {
+        self.sections.push(SqbSection::new(SectionType::Source, text));
+        self.flags |= FLAG_HAS_SOURCE;
+        self
+    }
+
     /// Attach an ML-DSA-87 signature over the artifact root. Sets FLAG_HAS_SIGNATURE.
     pub fn signature(mut self, sig: Vec<u8>) -> Self {
         self.flags |= FLAG_HAS_SIGNATURE;
@@ -396,6 +407,11 @@ impl SqbArtifact {
     /// Get CODE section data (convenience).
     pub fn code(&self) -> Option<&[u8]> {
         self.get(SectionType::Code).map(|s| s.data.as_slice())
+    }
+
+    /// Get the original source section, if present.
+    pub fn source_text(&self) -> Option<&str> {
+        self.get(SectionType::Source).and_then(|s| std::str::from_utf8(&s.data).ok())
     }
 
     /// Get MANIFEST section data as UTF-8 (convenience).

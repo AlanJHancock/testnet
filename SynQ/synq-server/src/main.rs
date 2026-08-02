@@ -1364,6 +1364,7 @@ async fn compile_handler(
             // This covers CODE, ABI, IR, EFFECTS, STATE_LAYOUT, META — everything except
             // the manifest itself. Embedded in the manifest so the manifest signature
             // covers ALL sections, not just bytecode (ACTS-VM-009 extended).
+            let source_bytes = req.source.clone().into_bytes();
             let sections_hash = {
                 let code_h = Sha3_256::digest(&sqb_code);
                 let abi_h = Sha3_256::digest(&abi_bytes);
@@ -1371,6 +1372,7 @@ async fn compile_handler(
                 let effects_h = Sha3_256::digest(&effects_bytes);
                 let state_layout_h = Sha3_256::digest(&state_layout_bytes);
                 let meta_h = Sha3_256::digest(&meta_bytes);
+                let source_h = Sha3_256::digest(&source_bytes);
                 let mut concat = Vec::new();
                 concat.extend_from_slice(&code_h);
                 concat.extend_from_slice(&abi_h);
@@ -1378,6 +1380,7 @@ async fn compile_handler(
                 concat.extend_from_slice(&effects_h);
                 concat.extend_from_slice(&state_layout_h);
                 concat.extend_from_slice(&meta_h);
+                concat.extend_from_slice(&source_h);
                 hex::encode(Sha3_256::digest(&concat))
             };
 
@@ -1524,6 +1527,7 @@ async fn compile_handler(
                         .effects(effects_bytes.clone())
                         .state_layout(state_layout_bytes.clone())
                         .meta(meta_bytes.clone())
+                        .source(source_bytes.clone())
                         .build();
                     match pre_sig {
                         Ok(bin) => {
@@ -1555,7 +1559,8 @@ async fn compile_handler(
                 .ir_dump(ir_bytes)
                 .effects(effects_bytes)
                 .state_layout(state_layout_bytes)
-                .meta(meta_bytes);
+                .meta(meta_bytes)
+                .source(source_bytes);
 
             let was_signed = sqb_signature.is_some();
             if let Some(sig) = sqb_signature {
@@ -1593,6 +1598,8 @@ struct DecompileRequest {
 struct DecompileResponse {
     success: bool,
     source: Option<String>,
+    /// Original source from SQB SOURCE section (if embedded)
+    original_source: Option<String>,
     contract_name: Option<String>,
     error: Option<String>,
 }
@@ -1608,6 +1615,7 @@ async fn decompile_handler(
         return (StatusCode::TOO_MANY_REQUESTS, RespJson(DecompileResponse {
             success: false, source: None, contract_name: None,
             error: Some("rate limit exceeded".into()),
+            original_source: None,
         }));
     }
 
@@ -1616,6 +1624,7 @@ async fn decompile_handler(
         Err(e) => return (StatusCode::BAD_REQUEST, RespJson(DecompileResponse {
             success: false, source: None, contract_name: None,
             error: Some(format!("SQB base64 decode failed: {}", e)),
+            original_source: None,
         })),
     };
 
@@ -1624,6 +1633,7 @@ async fn decompile_handler(
         Err(e) => return (StatusCode::BAD_REQUEST, RespJson(DecompileResponse {
             success: false, source: None, contract_name: None,
             error: Some(format!("SQB decode failed: {}", e)),
+            original_source: None,
         })),
     };
 
@@ -1633,6 +1643,7 @@ async fn decompile_handler(
         None => return (StatusCode::OK, RespJson(DecompileResponse {
             success: false, source: None, contract_name: None,
             error: Some("SQB artifact has no IR section — cannot decompile".into()),
+            original_source: None,
         })),
     };
 
@@ -1642,6 +1653,7 @@ async fn decompile_handler(
         Err(e) => return (StatusCode::OK, RespJson(DecompileResponse {
             success: false, source: None, contract_name: None,
             error: Some(format!("SIR1 deserialization failed: {}", e)),
+            original_source: None,
         })),
     };
 
@@ -1652,9 +1664,12 @@ async fn decompile_handler(
 
     eprintln!("[DECOMPILE] Contract: {}, source: {} bytes", contract_name, source.len());
 
+    let original_source = artifact.source_text().map(|s| s.to_string());
+
     (StatusCode::OK, RespJson(DecompileResponse {
         success: true,
         source: Some(source),
+        original_source,
         contract_name: Some(contract_name),
         error: None,
     }))
