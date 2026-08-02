@@ -64,10 +64,10 @@
   .verify-badge.pass { background:rgba(16,185,129,0.12); border:1px solid rgba(16,185,129,0.35); color:#6ee7b7; }
   .verify-badge.warn { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
   .verify-badge.fail { background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); color:#fca5a5; }
-  .fuel-badge { display:inline-flex; align-items:center; gap:5px; font-size:0.7rem; font-weight:700; letter-spacing:0.04em; padding:3px 10px; border-radius:12px; vertical-align:middle; }
-  .fuel-badge.active { background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.35); color:#93c5fd; }
-  .fuel-badge.warn { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
-  .fuel-badge.depleted { background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); color:#fca5a5; }
+  .gas-badge { display:inline-flex; align-items:center; gap:5px; font-size:0.7rem; font-weight:700; letter-spacing:0.04em; padding:3px 10px; border-radius:12px; vertical-align:middle; }
+  .gas-badge.active { background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.35); color:#93c5fd; }
+  .gas-badge.warn { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
+  .gas-badge.depleted { background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); color:#fca5a5; }
   .step-badge { display:inline-flex; align-items:center; gap:5px; font-size:0.7rem; font-weight:700; letter-spacing:0.04em; padding:3px 10px; border-radius:12px; vertical-align:middle; }
   .step-badge.active { background:rgba(168,85,247,0.12); border:1px solid rgba(168,85,247,0.35); color:#c4b5fd; }
   .step-badge.warn { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
@@ -314,7 +314,7 @@
     <span id="pqcSimBadge" style="display:none;" class="wasm-toolbar-badge" title="PQC builtins will throw RuntimeError in browser — deploy to synq-server for real verification">&#x26A0; PQC Simulation</span>
     <span id="verifyBadge" style="display:none;" class="verify-badge pass" title="L1 Structural (hard gate) + L2 Stack Safety (advisory) — checked at compile"></span>
     <span id="layer3Badge" style="display:none;" class="verify-badge pass" title="L3 Manifest + ML-DSA-87 signature — checked at deploy"></span>
-    <span id="fuelBadge" style="display:none;" class="fuel-badge active" title="PQC Fuel Budget (ACTS-VM-005) — cost charged per AegisCall"></span>
+    <span id="gasBadge" style="display:none;" class="gas-badge active" title="Gas Budget (ACTS-VM-003 + ACTS-VM-005) — compute + PQC cost per invocation"></span>
     <span id="stepBadge" style="display:none;" class="step-badge active" title="VM Step Budget (ACTS-VM-003) — compute steps per call"></span>
     <span id="depsHint" style="font-size:0.75rem;visibility:hidden;">&nbsp;</span>
   </div>
@@ -358,7 +358,7 @@
       color:#6ee7b7; border-radius:10px; padding:2px 10px; letter-spacing:0.04em;">
       ● QVM — SynQ Virtual Machine active
     </span>
-    <span id="fuelBadge2" style="display:none;" class="fuel-badge active" title="PQC Fuel Budget (ACTS-VM-005) — cost charged per AegisCall"></span>
+    <span id="gasBadge2" style="display:none;" class="gas-badge active" title="Gas Budget (ACTS-VM-003 + ACTS-VM-005) — compute + PQC cost per invocation"></span>
     <span id="stepBadge2" style="display:none;" class="step-badge active" title="VM Step Budget (ACTS-VM-003) — compute steps per call"></span>
   </div>
 
@@ -844,13 +844,13 @@
     renderWorkspacePanel();
   }
 
-  function hideFuelBadge() {
-    var fb = document.getElementById('fuelBadge');
-    var fb2 = document.getElementById('fuelBadge2');
+  function hideGasBadge() {
+    var fb = document.getElementById('gasBadge');
+    var fb2 = document.getElementById('gasBadge2');
     if (fb) fb.style.display = 'none';
     if (fb2) fb2.style.display = 'none';
-    window._fuelBudget = undefined;
-    window._fuelUsed = 0;
+    window._gasBudget = undefined;
+    window._gasUsed = 0;
   }
   function hideStepBadge() {
     var sb = document.getElementById('stepBadge');
@@ -2681,31 +2681,30 @@
         l3el.style.display = 'inline-flex';
       })();
 
-      // ── Fuel badge: PQC budget from /session/new ──────────────────────
+      // ── Gas badge: budget from /session/new ──────────────────────
       (function() {
-        var fb = document.getElementById('fuelBadge');
-        var fb2 = document.getElementById('fuelBadge2');
+        var fb = document.getElementById('gasBadge');
+        var fb2 = document.getElementById('gasBadge2');
         if (!fb) return;
         var budget = data.fuel_budget;
         if (budget === undefined || budget === null) {
           fb.style.display = 'none';
           return;
         }
-        window._fuelBudget = budget;
-        window._fuelUsed = 0;
+        window._gasBudget = budget;
+        window._gasUsed = 0;
         var fmtN = function(n) {
           if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
           if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
           if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
           return String(n);
         };
-        fb.innerHTML = '\u26a1 FUEL: 0 / ' + fmtN(budget);
-        fb.className = 'fuel-badge active';
-        fb.title = 'PQC FUEL BUDGET (ACTS-VM-005)\n'
+        fb.innerHTML = '\u26fd GAS: 0 / ' + fmtN(budget);
+        fb.className = 'gas-badge active';
+        fb.title = 'GAS BUDGET (ACTS-VM-003 + ACTS-VM-005)\n'
           + '===============================================\n'
-          + 'PQC fuel is consumed by AegisCall (0x8F) operations.\n'
-          + 'ML-DSA verify, FN-DSA verify, and ML-KEM decapsulate\n'
-          + 'each charge fuel based on algorithm parameters.\n'
+          + 'Gas = VM steps (compute) + PQC gas (AegisCall)\n'
+          + 'Every opcode charges 1 gas. PQC ops charge extra.\n'
           + 'Reset on every function call (per-invocation budget).';
         fb.style.display = 'inline-flex';
         if (fb2) { fb2.innerHTML = fb.innerHTML; fb2.className = fb.className; fb2.title = fb.title; fb2.style.display = fb.style.display; }
@@ -3184,15 +3183,18 @@
       });
       var data = await res.json();
 
-      // ── Update fuel + step badges (runs on both success and error) ───────
+      // ── Update gas + step badges (runs on both success and error) ───────
       (function() {
-        var fb = document.getElementById('fuelBadge');
-        var fb2 = document.getElementById('fuelBadge2');
-        if (!fb || !window._fuelBudget) return;
-          var used = data.fuel_used !== undefined ? data.fuel_used : 0;
-          var remaining = data.fuel_remaining !== undefined ? data.fuel_remaining : (window._fuelBudget - used);
-          window._fuelUsed = used;
-          var budget = window._fuelBudget;
+        var fb = document.getElementById('gasBadge');
+        var fb2 = document.getElementById('gasBadge2');
+        if (!fb || !window._gasBudget) return;
+          // Gas = VM steps (compute cost) + PQC gas (AegisCall cost)
+          var stepCost = data.steps_used !== undefined ? data.steps_used : 0;
+          var pqcCost  = data.fuel_used  !== undefined ? data.fuel_used  : 0;
+          var used = stepCost + pqcCost;
+          var remaining = window._gasBudget > used ? window._gasBudget - used : 0;
+          window._gasUsed = used;
+          var budget = window._gasBudget;
           var pct = budget > 0 ? (used / budget) * 100 : 0;
           var fmtN = function(n) {
             if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
@@ -3200,19 +3202,22 @@
             if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
             return String(n);
           };
-          fb.innerHTML = '\u26a1 FUEL: ' + fmtN(used) + ' / ' + fmtN(budget);
+          fb.innerHTML = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget);
           if (pct >= 100) {
-            fb.className = 'fuel-badge depleted';
+            fb.className = 'gas-badge depleted';
           } else if (pct >= 75) {
-            fb.className = 'fuel-badge warn';
+            fb.className = 'gas-badge warn';
           } else {
-            fb.className = 'fuel-badge active';
+            fb.className = 'gas-badge active';
           }
-          fb.title = 'PQC FUEL BUDGET (ACTS-VM-005)\n'
+          fb.title = 'GAS BUDGET (ACTS-VM-003 + ACTS-VM-005)\n'
             + '===============================================\n'
-            + 'Budget: ' + budget.toLocaleString() + '\n'
-            + 'Used: ' + used.toLocaleString() + '\n'
-            + 'Remaining: ' + remaining.toLocaleString() + '\n'
+            + 'Gas = VM steps (compute) + PQC gas (AegisCall)\n'
+            + 'Gas Budget: ' + budget.toLocaleString() + '\n'
+            + 'Gas Used: ' + used.toLocaleString() + '\n'
+            + '  - Steps: ' + stepCost.toLocaleString() + '\n'
+            + '  - PQC: ' + pqcCost.toLocaleString() + '\n'
+            + 'Gas Remaining: ' + remaining.toLocaleString() + '\n'
             + 'Utilization: ' + pct.toFixed(2) + '%';
       if (fb2) { fb2.innerHTML = fb.innerHTML; fb2.className = fb.className; fb2.title = fb.title; fb2.style.display = fb.style.display; }
       })();
@@ -3245,7 +3250,7 @@
             + '===============================================\n'
             + 'Steps used this call: ' + fmtN(used) + '\n'
             + 'Step budget: ' + fmtN(budget) + '\n'
-            + 'Remaining: ' + fmtN(remaining) + '\n'
+            + 'Gas Remaining: ' + fmtN(remaining) + '\n'
             + 'Usage: ' + pct.toFixed(2) + '%\n'
             + '===============================================\n'
             + 'Compute steps are counted per QVM instruction.\n'
