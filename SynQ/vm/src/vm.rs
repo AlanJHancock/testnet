@@ -1316,33 +1316,58 @@ OpCode::MapNew => {
                 self.push(Value::Bool(eq))?;
             }
 
+            // ── Legacy PQC opcodes (0x80-0x83): also charge fuel (ACTS-VM-005) ──
             OpCode::DilithiumVerify => {
+                let cost = AEGIS_MIN_COST;
+                let remaining = self.max_fuel.saturating_sub(self.fuel_used);
+                if cost > remaining {
+                    return Err(VMError::FuelExhausted { cost, remaining });
+                }
                 let public_key = self.pop()?.as_bytes()?.to_vec();
                 let message    = self.pop()?.as_bytes()?.to_vec();
                 let signature  = self.pop()?.as_bytes()?.to_vec();
                 let result = dilithium::verify(&message, &signature, &public_key);
                 self.push(Value::Bool(result))?;
+                self.fuel_used += cost;
             }
             OpCode::KyberKeyExchange => {
+                let cost = AEGIS_MIN_COST;
+                let remaining = self.max_fuel.saturating_sub(self.fuel_used);
+                if cost > remaining {
+                    return Err(VMError::FuelExhausted { cost, remaining });
+                }
                 let private_key = self.pop()?.as_bytes()?.to_vec();
                 let ciphertext  = self.pop()?.as_bytes()?.to_vec();
                 let shared_secret = kyber::decaps(&ciphertext, &private_key)
                     .map_err(VMError::RuntimeError)?;
                 self.push(Value::Bytes(shared_secret))?;
+                self.fuel_used += cost;
             }
             OpCode::FalconVerify => {
+                let cost = AEGIS_MIN_COST;
+                let remaining = self.max_fuel.saturating_sub(self.fuel_used);
+                if cost > remaining {
+                    return Err(VMError::FuelExhausted { cost, remaining });
+                }
                 let public_key = self.pop()?.as_bytes()?.to_vec();
                 let message    = self.pop()?.as_bytes()?.to_vec();
                 let signature  = self.pop()?.as_bytes()?.to_vec();
                 let result = falcon::verify(&message, &signature, &public_key);
                 self.push(Value::Bool(result))?;
+                self.fuel_used += cost;
             }
             OpCode::SphincsVerify => {
+                let cost = AEGIS_MIN_COST;
+                let remaining = self.max_fuel.saturating_sub(self.fuel_used);
+                if cost > remaining {
+                    return Err(VMError::FuelExhausted { cost, remaining });
+                }
                 let public_key = self.pop()?.as_bytes()?.to_vec();
                 let message    = self.pop()?.as_bytes()?.to_vec();
                 let signature  = self.pop()?.as_bytes()?.to_vec();
                 let result = sphincs::verify(&message, &signature, &public_key);
                 self.push(Value::Bool(result))?;
+                self.fuel_used += cost;
             }
 
             // ── AEG1 unified PQC dispatch (0x8F) ──────────────────────────────

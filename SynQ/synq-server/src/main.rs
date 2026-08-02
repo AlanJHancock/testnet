@@ -1684,8 +1684,8 @@ async fn source_nonce_handler(
 //      compiles source, PQC-signs canonical payload, returns compile result +
 //      source_commit sidecar.
 //
-// The canonical PQC payload (SynQSourceCommitV1):
-//   b"SynQSourceCommitV1\x00"   (19 bytes)
+// The canonical PQC payload (SynQSourceCommitV3):
+//   b"SynQSourceCommitV3\x00"   (19 bytes)
 //   source_hash   (32 bytes, raw)
 //   bytecode_hash (32 bytes, raw keccak256 of compiled bytecode)
 //   author        (20 bytes, raw recovered EVM address)
@@ -1732,7 +1732,7 @@ fn build_source_commit_pqc_payload(
 ) -> Vec<u8> {
     let cn = contract_name.as_bytes();
     let mut p = Vec::with_capacity(19 + 32 + 32 + 20 + 8 + 4 + cn.len());
-    p.extend_from_slice(b"SynQSourceCommitV1\x00");
+    p.extend_from_slice(b"SynQSourceCommitV3\x00");
     p.extend_from_slice(source_hash);
     p.extend_from_slice(bytecode_hash);
     p.extend_from_slice(author);
@@ -1942,7 +1942,7 @@ async fn sign_source_handler(
 
     // 7. Assemble source_commit sidecar + full response
     let source_commit = serde_json::json!({
-        "signing_spec":    "SourceCommitV2",
+        "signing_spec":    "SourceCommitV3",
         "author":          format!("0x{}", hex_encode(&author)),
         "source_hash":     source_hash_with_0x,
         "bytecode_hash":   format!("0x{}", hex_encode(&bytecode_hash_bytes)),
@@ -1950,8 +1950,8 @@ async fn sign_source_handler(
         "nonce":           clean_nonce,
         "issued_at":       issued_at,
         "eip712_domain": {
-            "name": "SynQ", "version": "1",
-            "chainId": 1337, "verifyingContract": vc_hex,
+            "name": "SynQ", "version": "3",
+            "chainId": 1266, "verifyingContract": vc_hex,
         },
         "pqc_signature":   pqc_sig_hex,
         "pqc_public_key":  pqc_pubkey_hex,
@@ -3152,7 +3152,7 @@ async fn session_run_handler(
             caller_syna: req.display_synw.clone().or_else(|| synq_vm::bech32::evm_to_syna(&caller_addr).ok()),
             error_code: Some(code),
             error_name: Some(message.split('(').next().unwrap_or(&message).split("::").last().unwrap_or(&message).to_string()),
-            fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
+            fuel_used, fuel_remaining, steps_used, steps_remaining,
         })),
         Err(synq_vm::VMError::Reverted(msg)) => (StatusCode::OK, RespJson(RunResponse {
             success: false, result: None, output: String::new(),

@@ -338,7 +338,7 @@
       <div id="attestRows"></div>
     </div>
     <div class="download-row">
-      <button class="btn btn-secondary" onclick="downloadQvm()" style="font-size:12px;padding:5px 14px;">Download .qvm</button>
+      <button class="btn btn-secondary" id="sqbDownloadRowBtn" onclick="downloadSqb()" style="font-size:12px;padding:5px 14px;background:#1a6b3c;color:#fff;visibility:hidden;pointer-events:none;" title="Download SQB binary artifact (.sqb)">&#x2B07; Download .sqb</button>
       <button onclick="downloadSig()" style="font-size:12px;padding:5px 14px;background:rgba(147,51,234,0.15);border:1px solid rgba(147,51,234,0.5);color:rgba(200,150,255,0.9);border-radius:6px;cursor:pointer;">Download .sig.json</button>
       <span class="hash-badge" id="hashBadge"></span>
     </div>
@@ -1757,6 +1757,7 @@
     var wb = document.getElementById('wasmBadge'); if (wb) wb.style.display = 'none';
     var _db = document.getElementById('deployBtn'); if (_db) { _db.style.visibility = 'hidden'; _db.style.pointerEvents = 'none'; }
   var _sb = document.getElementById('sqbDownloadBtn'); if (_sb) { _sb.style.visibility = 'hidden'; _sb.style.pointerEvents = 'none'; }
+      var _sbRow = document.getElementById('sqbDownloadRowBtn'); if (_sbRow) { _sbRow.style.visibility = 'hidden'; _sbRow.style.pointerEvents = 'none'; }
     if (sessionId) {
       // Only delete server session if it is NOT registered in the workspace.
       // Workspace contracts must survive template switches — they are only
@@ -1961,6 +1962,15 @@
                   data.state_vars = _xdat.state_vars;
                 if (_xdat.functions && _xdat.functions.length > 0)
                   data.functions = _xdat.functions;
+                // SQB artifact from server — WASM path doesn't produce one
+                if (_xdat.sqb) data.sqb = _xdat.sqb;
+                // Also pick up IR dump and manifest from server
+                if (_xdat.ir_dump) data.ir_dump = _xdat.ir_dump;
+                if (_xdat.manifest) data.manifest = _xdat.manifest;
+                // Server warnings include [VERIFY] L1+L2 tags — WASM doesn't produce these
+                if (_xdat.warnings && _xdat.warnings.length > 0) {
+                  data.warnings = _xdat.warnings;
+                }
               }
             } catch(_xErr) {
               console.warn('[SynQ] extern_contracts cross-check unavailable (offline?):', _xErr);
@@ -2276,7 +2286,7 @@
             var scBadge = document.getElementById('sourceCommitBadge');
             if (scBadge) {
               scBadge.style.display = 'inline-flex';
-              scBadge.title = 'SourceCommitV2 · author ' + (sc.author || '') + ' · ' + new Date((sc.issued_at || 0) * 1000).toISOString();
+              scBadge.title = 'SourceCommitV3 · author ' + (sc.author || '') + ' · ' + new Date((sc.issued_at || 0) * 1000).toISOString();
             }
             setStatus('Compiled ▶ ' + (currentContractName || 'contract') + ' — SourceCommit signed (KMAC128 · ML-DSA-65 PQC)', 'success');
           } else {
@@ -2321,14 +2331,16 @@
         db.style.opacity = '1';
       }
       var sb = document.getElementById('sqbDownloadBtn');
+      var sbRow = document.getElementById('sqbDownloadRowBtn');
       if (sb && currentSqb) {
         sb.style.visibility = 'visible';
         sb.style.pointerEvents = 'auto';
         var sizeKb = Math.round(currentSqb.length * 0.75 / 1024);
         sb.textContent = '\u2B07 ' + (currentContractName || 'contract') + '.sqb (' + sizeKb + ' KB)';
-      } else if (sb) {
-        sb.style.visibility = 'hidden';
-        sb.style.pointerEvents = 'none';
+        if (sbRow) { sbRow.style.visibility = 'visible'; sbRow.style.pointerEvents = 'auto'; }
+      } else {
+        if (sb) { sb.style.visibility = 'hidden'; sb.style.pointerEvents = 'none'; }
+        if (sbRow) { sbRow.style.visibility = 'hidden'; sbRow.style.pointerEvents = 'none'; }
       }
       // Dependency hint — contextual message based on what still needs deploying.
       // Uses visibility (not display) so the badge row height stays constant.
@@ -2446,7 +2458,7 @@
         : '\u2014';
       var scTrust  = sc.trust_model   || '\u2014';
       var scKeyId  = hexUp(sc.key_id  || '') || '\u2014';
-      var scSpec   = sc.signing_spec  || 'SourceCommitV2';
+      var scSpec   = sc.signing_spec  || 'SourceCommitV3';
       var scAlgo   = sc.pqc_algorithm || 'ML-DSA-65';
 
       rows +=
@@ -3172,12 +3184,11 @@
       });
       var data = await res.json();
 
-      if (data.success) {
-        // ── Update fuel badge ───────────────────────────────────────────
-        (function() {
-          var fb = document.getElementById('fuelBadge');
-          var fb2 = document.getElementById('fuelBadge2');
-          if (!fb || !window._fuelBudget) return;
+      // ── Update fuel + step badges (runs on both success and error) ───────
+      (function() {
+        var fb = document.getElementById('fuelBadge');
+        var fb2 = document.getElementById('fuelBadge2');
+        if (!fb || !window._fuelBudget) return;
           var used = data.fuel_used !== undefined ? data.fuel_used : 0;
           var remaining = data.fuel_remaining !== undefined ? data.fuel_remaining : (window._fuelBudget - used);
           window._fuelUsed = used;
@@ -3203,14 +3214,14 @@
             + 'Used: ' + used.toLocaleString() + '\n'
             + 'Remaining: ' + remaining.toLocaleString() + '\n'
             + 'Utilization: ' + pct.toFixed(2) + '%';
-          if (fb2) { fb2.innerHTML = fb.innerHTML; fb2.className = fb.className; fb2.title = fb.title; fb2.style.display = fb.style.display; }
-        })();
+      if (fb2) { fb2.innerHTML = fb.innerHTML; fb2.className = fb.className; fb2.title = fb.title; fb2.style.display = fb.style.display; }
+      })();
 
-        // ── Update step badge ───────────────────────────────────────────
-        (function() {
-          var sb = document.getElementById('stepBadge');
-          var sb2 = document.getElementById('stepBadge2');
-          if (!sb || !window._stepBudget) return;
+      // ── Update step badge ───────────────────────────────────────────
+      (function() {
+        var sb = document.getElementById('stepBadge');
+        var sb2 = document.getElementById('stepBadge2');
+        if (!sb || !window._stepBudget) return;
           var used = data.steps_used !== undefined ? data.steps_used : 0;
           var remaining = data.steps_remaining !== undefined ? data.steps_remaining : (window._stepBudget - used);
           window._stepUsed = used;
@@ -3241,8 +3252,10 @@
             + 'The step limit prevents infinite loops and runaway\n'
             + 'computation. Reset on every function call.';
           sb.style.display = 'inline-flex';
-          if (sb2) { sb2.innerHTML = sb.innerHTML; sb2.className = sb.className; sb2.title = sb.title; sb2.style.display = sb.style.display; }
-        })();
+      if (sb2) { sb2.innerHTML = sb.innerHTML; sb2.className = sb.className; sb2.title = sb.title; sb2.style.display = sb.style.display; }
+      })();
+
+      if (data.success) {
         var rv = data.result;
         // V3: display caller's syna... Bech32 address if present
         var callerSynaDisplay = '';
