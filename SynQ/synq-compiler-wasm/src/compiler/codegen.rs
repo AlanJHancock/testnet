@@ -862,14 +862,19 @@ Statement::Emit { event, args } => {
             }
             // ── Let binding: `let x = expr` ──────────────────────────────────
             Statement::LetDestructure { names, value } => {
+                // Destructuring: let (x, y, z) = tuple_expr;
+                // gen_expression(value) → TupleUnpack → Pop count → Store each in reverse
                 self.gen_expression(value, scope)?;
                 self.assembler.emit_op(OpCode::TupleUnpack);
+                // Pop the count (top of stack after TupleUnpack)
                 self.assembler.emit_op(OpCode::Pop);
+                // Allocate addresses for each name (in order)
                 let addrs: Vec<u32> = names.iter().map(|_| {
                     let addr = scope.next_local_addr;
                     scope.next_local_addr += 1;
                     addr
                 }).collect();
+                // Store in reverse order (stack is LIFO: last element is on top)
                 for i in (0..names.len()).rev() {
                     scope.locals.insert(names[i].clone(), addrs[i]);
                     self.assembler.emit_op(OpCode::Push);
@@ -1057,6 +1062,7 @@ Statement::Emit { event, args } => {
                 Ok(())
             }
             Expression::TupleIndex { object, index } => {
+                // Tuple index access: t.0, t.1 — emit object, push index, TupleGet
                 self.gen_expression(object, scope)?;
                 self.assembler.emit_op(OpCode::Push);
                 self.assembler.emit_i32(*index as i32);
@@ -1132,8 +1138,10 @@ Statement::Emit { event, args } => {
                 Ok(())
             }
             Expression::MapMethod { map, method, args } => {
+                // Check for Option/Result methods first
                 match method.as_str() {
                     "unwrap" => {
+                        // Load the option/result value and unwrap
                         if let Some(addr) = scope.locals.get(map.as_str()) {
                             self.assembler.emit_op(OpCode::Push);
                             self.assembler.emit_i32(*addr as i32);
@@ -1145,6 +1153,8 @@ Statement::Emit { event, args } => {
                         } else {
                             return Err(format!("unwrap: unknown variable '{}'", map));
                         }
+                        // Try OptionUnwrap first, then ResultUnwrap
+                        // For now, use OptionUnwrap — it panics on None
                         self.assembler.emit_op(OpCode::OptionUnwrap);
                         return Ok(());
                     }

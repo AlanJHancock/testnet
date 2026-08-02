@@ -13,6 +13,7 @@ pub enum VMError {
     Reverted(String),          // require() failure — carries the require message
     RevertedNamed { code: u32, message: String }, // named error revert — carries enum variant tag + display message
     StepLimitExceeded(usize),  // PR-B: infinite-loop / gas guard
+    FuelExhausted { cost: u64, remaining: u64 },  // ACTS-VM-005: PQC cost budget
 }
 
 impl fmt::Display for VMError {
@@ -28,6 +29,7 @@ impl fmt::Display for VMError {
             VMError::Reverted(msg)           => write!(f, "require failed: {}", msg),
             VMError::RevertedNamed { code, message } => write!(f, "revert: {} (code {})", message, code),
             VMError::StepLimitExceeded(n)    => write!(f, "step limit exceeded ({} steps): possible infinite loop", n),
+            VMError::FuelExhausted { cost, remaining } => write!(f, "fuel exhausted: needed {} but only {} remaining", cost, remaining),
         }
     }
 }
@@ -66,7 +68,7 @@ pub enum OpCode {
     Return = 0x33,
     Revert = 0x34,  // require() failure — followed by 4-byte LE len + message bytes
     RevertCode = 0x35, // named error revert — followed by error_code(4B LE) + msg_len(4B LE) + msg
-    RevertCodeDyn = 0x36, // named error revert, error_code inline, pops msg from stack
+    RevertCodeDyn = 0x36, // named error revert — error_code(4B LE) inline, pops Str/Bytes msg from stack
 
     // Memory operations
     Load       = 0x40,
@@ -75,6 +77,19 @@ pub enum OpCode {
     LoadImm128 = 0x43,   // push a 16-byte big-endian u128 (UInt256 values ≤ 2^128)
     LoadImm256 = 0x44,   // push a 32-byte big-endian U256 (full Ethereum address / real UInt256)
     LoadCaller = 0x50,   // push authenticated EVM caller address as U256 (zero if unauthenticated)
+    // Authority model opcodes (spec v7.0 alignment)
+    LoadAuthority = 0x51,  // push current call's AuthorityEnvelope as Bytes
+    AuthRequire   = 0x52,  // pop envelope + scope_hash → push Bool (validated)
+    AuthIdentity  = 0x53,  // pop envelope → push UMA identity (U256)
+    AddrEncode   = 0x54,  // pop 20-byte value → push syna... Bech32 string as Bytes
+    AddrDecode   = 0x55,  // pop Bech32 string (Bytes) → push 20-byte value as U256
+    ContractAddr = 0x56,  // pop deployer(U256) + nonce(U256) + artifact_hash(Bytes32) → push sync... Bech32 string
+    // ── Linear asset tracking (0x57-0x5B) ──────────────────────────────
+    AssetCreate   = 0x57,  // pop type_tag(I32) + value(U256) → push asset_id(U256)
+    AssetTransfer = 0x58,  // pop new_owner(U256) + asset_id(U256) → push new_asset_id(U256)
+    AssetBurn     = 0x59,  // pop asset_id(U256) → push value(U256)
+    AssetBalance  = 0x5A,  // pop asset_id(U256) → push value(U256)
+    AssetOwner    = 0x5B,  // pop asset_id(U256) → push owner(U256)
     ExternCall = 0x60,   // call a function on another contract in the same workspace
 
     // Map operations (0x90-0x96)
@@ -112,28 +127,13 @@ pub enum OpCode {
     IsSome       = 0xAA,
     TupleSet     = 0xAB,   // pops index, value, tuple → pushes new tuple with element replaced
 
-    // Authority model (0x51-0x53)
-    LoadAuthority = 0x51,   // push 104-byte AuthorityEnvelope from call context
-    AuthRequire   = 0x52,   // pop scope_hash(U256) → verify envelope covers scope → push Bool
-    AuthIdentity  = 0x53,   // pop → push identity bytes from AuthorityEnvelope[0..32]
-
-    // Bech32 address operations (0x54-0x56)
-    AddrEncode   = 0x54,   // pop 20-byte U256 → push syna Bech32 string
-    AddrDecode   = 0x55,   // pop syna/sync Bech32 string → push 20-byte U256
-    ContractAddr = 0x56,   // pop deployer+nonce+artifact_hash → push sync Bech32 string
-    // ── Linear asset tracking (0x57-0x5B) ──────────────────────────────
-    AssetCreate   = 0x57,  // pop type_tag(I32) + value(U256) → push asset_id(U256)
-    AssetTransfer = 0x58,  // pop new_owner(U256) + asset_id(U256) → push new_asset_id(U256)
-    AssetBurn     = 0x59,  // pop asset_id(U256) → push value(U256)
-    AssetBalance  = 0x5A,  // pop asset_id(U256) → push value(U256)
-    AssetOwner    = 0x5B,  // pop asset_id(U256) → push owner(U256)
-
-    // PQC operations
+    // PQC operations — legacy algorithm-specific opcodes (backward compat)
     DilithiumVerify  = 0x80,
     KyberKeyExchange = 0x81,
     FalconVerify     = 0x82,
     SphincsVerify    = 0x83,
-    AegisCall        = 0x8F,   // unified AEG1 PQC dispatch
+    // AEG1 unified dispatch — preferred for spec v7.0 alignment
+    AegisCall        = 0x8F,
 
     // Utility
     Print = 0xF0,
@@ -173,6 +173,17 @@ impl TryFrom<u8> for OpCode {
             0x43 => Ok(OpCode::LoadImm128),
             0x44 => Ok(OpCode::LoadImm256),
             0x50 => Ok(OpCode::LoadCaller),
+            0x51 => Ok(OpCode::LoadAuthority),
+            0x52 => Ok(OpCode::AuthRequire),
+            0x53 => Ok(OpCode::AuthIdentity),
+            0x54 => Ok(OpCode::AddrEncode),
+            0x55 => Ok(OpCode::AddrDecode),
+            0x56 => Ok(OpCode::ContractAddr),
+            0x57 => Ok(OpCode::AssetCreate),
+            0x58 => Ok(OpCode::AssetTransfer),
+            0x59 => Ok(OpCode::AssetBurn),
+            0x5A => Ok(OpCode::AssetBalance),
+            0x5B => Ok(OpCode::AssetOwner),
             0x60 => Ok(OpCode::ExternCall),
             // Map ops
             0x90 => Ok(OpCode::MapNew),
@@ -204,17 +215,6 @@ impl TryFrom<u8> for OpCode {
             0xA9 => Ok(OpCode::IsOk),
             0xAA => Ok(OpCode::IsSome),
             0xAB => Ok(OpCode::TupleSet),
-            0x51 => Ok(OpCode::LoadAuthority),
-            0x52 => Ok(OpCode::AuthRequire),
-            0x53 => Ok(OpCode::AuthIdentity),
-            0x54 => Ok(OpCode::AddrEncode),
-            0x55 => Ok(OpCode::AddrDecode),
-            0x56 => Ok(OpCode::ContractAddr),
-            0x57 => Ok(OpCode::AssetCreate),
-            0x58 => Ok(OpCode::AssetTransfer),
-            0x59 => Ok(OpCode::AssetBurn),
-            0x5A => Ok(OpCode::AssetBalance),
-            0x5B => Ok(OpCode::AssetOwner),
             0x80 => Ok(OpCode::DilithiumVerify),
             0x81 => Ok(OpCode::KyberKeyExchange),
             0x82 => Ok(OpCode::FalconVerify),
