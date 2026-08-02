@@ -1,9 +1,9 @@
-use synq_compiler::compile;
+use synq_compiler::compile_ir;
 use quantumvm::{QuantumVM, Value};
 use ruint::aliases::U256;
 
 fn compile_and_load(source: &str) -> QuantumVM {
-    let result = compile(source).expect("compile failed");
+    let result = compile_ir(source).expect("compile failed");
     let mut vm = QuantumVM::new();
     vm.load_bytecode(&result.bytecode).expect("load failed");
     vm

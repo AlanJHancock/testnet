@@ -311,7 +311,7 @@ fn test_sequential_calls_preserve_state() {
 fn test_rollback_on_revert() {
     use synq_vm::vm::{CallContext, QuantumVM, Value};
     use synq_vm::opcode::VMError;
-    use synq_compiler::compile;
+    use synq_compiler::compile_ir;
 
     let src = r#"
 pragma synq ^0.9;
@@ -323,7 +323,7 @@ contract RollbackTest {
     }
 }
 "#;
-    let result = compile(src).expect("compile failed");
+    let result = compile_ir(src).expect("compile failed");
     // CompileResult.bytecode is already Vec<u8>
     let mut vm = QuantumVM::new();
     vm.call_context = CallContext::from_address([1; 20]);

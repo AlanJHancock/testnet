@@ -33,6 +33,8 @@ pub struct IrBuilder {
     next_state_addr: u32,
     /// Extern call targets collected during building
     extern_contracts: Vec<String>,
+    /// Function name → return type (for cross-function call type resolution)
+    function_return_types: HashMap<String, IrType>,
 }
 
 impl IrBuilder {
@@ -44,6 +46,7 @@ impl IrBuilder {
             event_defs: Vec::new(),
             next_state_addr: 0,
             extern_contracts: Vec::new(),
+            function_return_types: HashMap::new(),
         }
     }
 
@@ -111,6 +114,22 @@ impl IrBuilder {
                 sv_list.sort_by_key(|(_, (_, addr))| *addr);
                 for (name, (ty, addr)) in sv_list {
                     ir_module.state_vars.push((name.clone(), ty.clone(), *addr));
+                }
+
+                // Collect function return types for cross-function call resolution
+                for part in &c.parts {
+                    if let ContractPart::Function(f) = part {
+                        let ret_ty = f.returns.as_ref()
+                            .map(IrType::from_ast)
+                            .unwrap_or(IrType::U256);
+                        self.function_return_types.insert(f.name.clone(), ret_ty);
+                    }
+                }
+                for f in &c.test_fns {
+                    let ret_ty = f.returns.as_ref()
+                        .map(IrType::from_ast)
+                        .unwrap_or(IrType::U256);
+                    self.function_return_types.insert(f.name.clone(), ret_ty);
                 }
 
                 // Build each function
@@ -186,6 +205,7 @@ impl IrBuilder {
             state_vars: &self.state_vars,
             struct_defs: &self.struct_defs,
             enum_defs: &self.enum_defs,
+            function_return_types: &self.function_return_types,
             current_block: 0,
             break_targets: Vec::new(),
             continue_targets: Vec::new(),
@@ -238,6 +258,8 @@ struct BuildContext<'a> {
     struct_defs: &'a HashMap<String, StructDefinition>,
     /// Enum definitions
     enum_defs: &'a HashMap<String, EnumDefinition>,
+    /// Function return types for cross-function call type resolution
+    function_return_types: &'a HashMap<String, IrType>,
     /// Current block ID being built.
     current_block: BlockId,
     /// Stack of break target block IDs (for while loops)
@@ -454,7 +476,7 @@ impl<'a> BuildContext<'a> {
                 // Build IR for destructuring — each name gets a tuple element
                 for (i, name) in names.iter().enumerate() {
                     let elem = self.push_value(
-                        IrOp::FieldAccess(val, format!(".{}", i)),
+                        IrOp::FieldAccess(val, i as u32),
                         IrType::U256,
                     );
                     // Allocate memory slot for each destructured variable
@@ -663,6 +685,18 @@ impl<'a> BuildContext<'a> {
             }
 
             Expression::BinaryOp(lhs, op, rhs) => {
+                // Compile-time divide/modulo by zero detection
+                if matches!(op, BinaryOperator::Div | BinaryOperator::Mod) {
+                    match rhs.as_ref() {
+                        Expression::Literal(Literal::Number(0)) =>
+                            return Err(format!("{} by zero (compile-time literal)",
+                                if matches!(*op, BinaryOperator::Div) { "Division" } else { "Modulo" })),
+                        Expression::Literal(Literal::BigNumber(s)) if s == "0" =>
+                            return Err(format!("{} by zero (compile-time literal)",
+                                if matches!(*op, BinaryOperator::Div) { "Division" } else { "Modulo" })),
+                        _ => {}
+                    }
+                }
                 let lhs_val = self.build_expression(lhs)?;
                 let rhs_val = self.build_expression(rhs)?;
                 let result_ty = match op {
@@ -762,8 +796,11 @@ impl<'a> BuildContext<'a> {
                         Ok(self.push_value(IrOp::AegisCall(arg_vals), IrType::Bytes))
                     }
                     _ => {
-                        // User-defined function call
-                        Ok(self.push_value(IrOp::Call(name.clone(), arg_vals), IrType::U256))
+                        // User-defined function call — resolve return type
+                        let ret_ty = self.function_return_types.get(name)
+                            .cloned()
+                            .unwrap_or(IrType::U256);
+                        Ok(self.push_value(IrOp::Call(name.clone(), arg_vals), ret_ty))
                     }
                 }
             }
@@ -837,13 +874,29 @@ impl<'a> BuildContext<'a> {
 
             Expression::FieldAccess { object, field } => {
                 let obj_val = self.build_expression(object)?;
-                let field_idx = self.get_field_index(object, field);
-                Ok(self.push_value(IrOp::FieldAccess(obj_val, field.clone()), IrType::U256))
+                // Try to resolve field index from the object's IR type first,
+                // then fall back to expression-based lookup.
+                let obj_ty = self.lookup_value_type(obj_val);
+                let (field_idx, field_ty) = if let IrType::Named(ref sname) = obj_ty {
+                    if let Some(def) = self.struct_defs.get(sname) {
+                        let idx = def.fields.iter().position(|f| &f.name == field)
+                            .map(|i| i as u32).unwrap_or(0);
+                        let fty = def.fields.get(idx as usize)
+                            .map(|f| IrType::from_ast(&f.ty))
+                            .unwrap_or(IrType::U256);
+                        (idx, fty)
+                    } else {
+                        (self.get_field_index(object, field), IrType::U256)
+                    }
+                } else {
+                    (self.get_field_index(object, field), IrType::U256)
+                };
+                Ok(self.push_value(IrOp::FieldAccess(obj_val, field_idx), field_ty))
             }
 
             Expression::TupleIndex { object, index } => {
                 let obj_val = self.build_expression(object)?;
-                Ok(self.push_value(IrOp::FieldAccess(obj_val, format!(".{}", index)), IrType::U256))
+                Ok(self.push_value(IrOp::FieldAccess(obj_val, *index as u32), IrType::U256))
             }
 
             Expression::EnumAccess { enum_name, variant_name } => {
@@ -866,9 +919,13 @@ impl<'a> BuildContext<'a> {
         // Try to get the struct type name from the object
         let struct_name = match obj {
             Expression::Identifier(name) => {
-                // Check if it's a state var or local with a Named type
+                // Check if it's a state var, local, or param with a Named type
                 self.state_vars.get(name).map(|(ty, _)| ty.clone())
                     .or_else(|| self.local_values.get(name).and_then(|vid| {
+                        let ty = self.lookup_value_type(*vid);
+                        if let IrType::Named(n) = ty { Some(IrType::Named(n.clone())) } else { None }
+                    }))
+                    .or_else(|| self.param_values.get(name).and_then(|vid| {
                         let ty = self.lookup_value_type(*vid);
                         if let IrType::Named(n) = ty { Some(IrType::Named(n.clone())) } else { None }
                     }))
@@ -879,7 +936,7 @@ impl<'a> BuildContext<'a> {
 
         if let Some(sname) = struct_name {
             if let Some(def) = self.struct_defs.get(&sname) {
-                return def.fields.iter().position(|f| f.name == field)
+                return def.fields.iter().position(|f| &f.name == field)
                     .map(|i| i as u32).unwrap_or(0);
             }
         }

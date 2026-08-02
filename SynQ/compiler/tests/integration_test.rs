@@ -20,8 +20,7 @@ fn test_parse_simple_contract_with_function_params() {
 }
 
 fn compile(source: &str) -> Vec<u8> {
-    let ast = parser::parse(source).expect("parse failed");
-    CodeGenerator::new().generate(&ast).expect("codegen failed").0
+    synq_compiler::compile_ir(source).expect("compile failed").bytecode
 }
 
 #[test]
@@ -444,13 +443,13 @@ fn test_u128_sub_with_i32_arg() {
 // ══════════════════════════════════════════════════════════════════════════════
 
 fn ok_bytecode(src: &str) -> Vec<u8> {
-    let r = synq_compiler::compile(src).expect("expected Ok compile");
+    let r = synq_compiler::compile_ir(src).expect("expected Ok compile");
     assert!(!r.bytecode.is_empty(), "bytecode should be non-empty");
     r.bytecode
 }
 
 fn expect_err(src: &str, fragment: &str) {
-    match synq_compiler::compile(src) {
+    match synq_compiler::compile_ir(src) {
         Err(e) => assert!(e.contains(fragment),
             "error should contain {:?}, got: {:?}", fragment, e),
         Ok(_) => panic!("expected compile error containing {:?}", fragment),
@@ -683,8 +682,8 @@ contract Token {
     }
     function getTotal() { return total; }
 }"#;
-    let b1 = synq_compiler::compile(src).unwrap().bytecode;
-    let b2 = synq_compiler::compile(src).unwrap().bytecode;
+    let b1 = synq_compiler::compile_ir(src).unwrap().bytecode;
+    let b2 = synq_compiler::compile_ir(src).unwrap().bytecode;
     assert_eq!(b1, b2, "bytecode must be deterministic across compilations");
 }
 
@@ -694,13 +693,13 @@ contract Token {
 fn test_missing_semicolon() {
     let src = r#"pragma synq ^0.9;
 contract T { total: UInt256; function set() { total = 1 return total; } }"#;
-    assert!(synq_compiler::compile(src).is_err(), "missing semicolon should fail");
+    assert!(synq_compiler::compile_ir(src).is_err(), "missing semicolon should fail");
 }
 
 #[test]
 fn test_unclosed_brace() {
     let src = "pragma synq ^0.9;\ncontract T { total: UInt256; function get() { return total; }";
-    assert!(synq_compiler::compile(src).is_err(), "unclosed brace should fail");
+    assert!(synq_compiler::compile_ir(src).is_err(), "unclosed brace should fail");
 }
 
 #[test]
@@ -710,7 +709,7 @@ contract T {
     total: UInt256;
     function set() as caller { total = 0 - 5; return total; }
 }"#;
-    let r = synq_compiler::compile(src).expect("should compile with warning");
+    let r = synq_compiler::compile_ir(src).expect("should compile with warning");
     assert!(r.warnings.iter().any(|w| w.contains("negative") || w.contains("underflow")),
         "expected a warning about negative literal, got: {:?}", r.warnings);
 }

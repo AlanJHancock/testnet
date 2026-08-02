@@ -55,7 +55,7 @@ pub enum IrOp {
     /// Set method: result = set.method(args).
     SetMethod(String, String, Vec<ValueId>),
     /// Struct field read: result = obj.field.
-    FieldAccess(ValueId, String),
+    FieldAccess(ValueId, u32),
     /// Enum variant access: result = Enum::Variant (integer tag).
     EnumAccess(String, String),
     /// Struct literal: result = Type { field: val, ... }.
@@ -185,7 +185,7 @@ impl Instruction {
             IrOp::ExternCall(_, _, args) => args.clone(),
             IrOp::MapGet(_, key) => vec![*key],
             IrOp::MapMethod(_, _, args) | IrOp::SetMethod(_, _, args) => args.clone(),
-            IrOp::FieldAccess(obj, _) => vec![*obj],
+            IrOp::FieldAccess(obj, _) => vec![*obj],  // idx is not a ValueId
             IrOp::StructLiteral(_, fields) => fields.iter().map(|(_, v)| *v).collect(),
             IrOp::Tuple(vals) => vals.clone(),
             IrOp::Phi(pairs) => pairs.iter().map(|(_, v)| *v).collect(),

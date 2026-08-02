@@ -89,6 +89,20 @@ impl IrLowerer {
             lowerer.function_entries.insert(func.name.clone(), 0); // placeholder
         }
 
+        // Pre-compute param addresses for all functions (for Call arg marshaling)
+        {
+            const BASE: u32 = 1024;
+            const STRIDE: u32 = 16;
+            for (fidx, func) in module.functions.iter().enumerate() {
+                let mut p_addrs = HashMap::new();
+                for (i, (name, _ty)) in func.params.iter().enumerate() {
+                    let addr = BASE + (fidx as u32) * STRIDE + i as u32;
+                    p_addrs.insert(name.clone(), addr);
+                }
+                lowerer.all_param_addrs.insert(func.name.clone(), p_addrs);
+            }
+        }
+
         // Lower each function
         for func in &module.functions {
             lowerer.lower_function(func, module)?;
@@ -138,13 +152,18 @@ impl IrLowerer {
         self.next_local_addr = self.state_var_addrs.len() as u32;
 
         // Assign parameter addresses
-        const FUNCTION_LOCAL_BASE: u32 = 1024;
-        const FUNCTION_LOCAL_STRIDE: u32 = 16;
-        let func_idx = self.function_entries.len() as u32;
-        let func_idx = func_idx.saturating_sub(1); // account for placeholder
-        for (i, (name, _ty)) in func.params.iter().enumerate() {
-            let addr = FUNCTION_LOCAL_BASE + func_idx * FUNCTION_LOCAL_STRIDE + i as u32;
-            self.param_addrs.insert(name.clone(), addr);
+        // Use pre-computed param addresses (consistent with Call arg marshaling)
+        if let Some(precomputed) = self.all_param_addrs.get(&func.name) {
+            self.param_addrs = precomputed.clone();
+        } else {
+            const FUNCTION_LOCAL_BASE: u32 = 1024;
+            const FUNCTION_LOCAL_STRIDE: u32 = 16;
+            let fidx = module.functions.iter().position(|f| f.name == func.name)
+                .unwrap_or(0);
+            for (i, (name, _ty)) in func.params.iter().enumerate() {
+                let addr = FUNCTION_LOCAL_BASE + (fidx as u32) * FUNCTION_LOCAL_STRIDE + i as u32;
+                self.param_addrs.insert(name.clone(), addr);
+            }
         }
 
         // Record function entry position
@@ -528,12 +547,25 @@ impl IrLowerer {
 
             // ── Function calls ──
             IrOp::Call(name, args) => {
-                for arg in args {
+                // Store args to callee's param memory slots (matching direct codegen).
+                // The VM Call opcode is a plain jump — no register-passing ABI.
+                let callee_func = module.functions.iter().find(|f| f.name == *name);
+                let callee_params = self.all_param_addrs.get(name);
+                for (i, arg) in args.iter().enumerate() {
                     load_val!(self, *arg);
+                    let addr = if let (Some(cf), Some(pm)) = (callee_func, callee_params) {
+                        // Sort params by declaration order, get i-th address
+                        let mut sorted: Vec<(&String, &u32)> = pm.iter().collect();
+                        sorted.sort_by_key(|(n, _)| cf.params.iter().position(|(pn, _)| pn == *n).unwrap_or(0));
+                        *sorted.get(i).map(|(_, a)| *a).unwrap_or(&(SSA_SLOT_BASE + i as u32))
+                    } else {
+                        SSA_SLOT_BASE + i as u32
+                    };
+                    self.asm.emit_op(OpCode::Push);
+                    self.asm.emit_i32(addr as i32);
+                    self.asm.emit_op(OpCode::Store);
                 }
                 self.asm.emit_op(OpCode::Call);
-                // Emit a placeholder 4-byte target; patched after all functions
-                // are lowered (matching direct codegen's backpatch approach).
                 let patch_pos = self.asm.emit_placeholder_u32();
                 self.pending_call_patches.push((patch_pos, name.clone()));
             }
@@ -553,10 +585,10 @@ impl IrLowerer {
             }
 
             // ── Struct / Tuple operations ──
-            IrOp::FieldAccess(obj, _field) => {
+            IrOp::FieldAccess(obj, field_idx) => {
                 load_val!(self, *obj);
                 self.asm.emit_op(OpCode::Push);
-                self.asm.emit_i32(0); // TODO: resolve field index from struct defs
+                self.asm.emit_i32(*field_idx as i32);
                 self.asm.emit_op(OpCode::TupleGet);
             }
 
@@ -564,16 +596,18 @@ impl IrLowerer {
                 for (_, val) in fields {
                     load_val!(self, *val);
                 }
+                self.asm.emit_op(OpCode::Push);
+                self.asm.emit_i32(fields.len() as i32);
                 self.asm.emit_op(OpCode::TuplePack);
-                self.asm.emit_u32(fields.len() as u32);
             }
 
             IrOp::Tuple(vals) => {
                 for v in vals {
                     load_val!(self, *v);
                 }
+                self.asm.emit_op(OpCode::Push);
+                self.asm.emit_i32(vals.len() as i32);
                 self.asm.emit_op(OpCode::TuplePack);
-                self.asm.emit_u32(vals.len() as u32);
             }
 
             IrOp::TupleSet(t, idx, val) => {
@@ -903,9 +937,12 @@ impl IrLowerer {
                 self.asm.emit_u32(bytes.len() as u32);
                 self.asm.emit_raw(bytes);
             }
-            Literal::BigNumber(bytes) => {
+            Literal::BigNumber(s) => {
+                // Parse decimal string → U256 → 32 big-endian bytes.
+                use ruint::aliases::U256;
+                let v: U256 = s.parse().map_err(|_| format!("Invalid UInt256 literal: {}", s))?;
                 self.asm.emit_op(OpCode::LoadImm256);
-                self.asm.emit_raw(bytes.as_bytes());
+                self.asm.emit_raw(&v.to_be_bytes::<32>());
             }
         }
         Ok(())

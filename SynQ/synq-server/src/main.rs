@@ -908,28 +908,22 @@ async fn compile_handler(
         format!("0x{}", hex_encode(&hash[12..]))
     });
 
-    // ── Primary compilation path: SSA IR backend ───────────────────────────
+    // ── Primary compilation path: SSA IR backend (sole path, no fallback) ───
     // compile_ir() handles parse -> semantic checks -> IR build -> optimization
-    // passes -> analysis -> lowering to QVM bytecode, returning a CompileResult
-    // with bytecode, state_vars, warnings, extern_contracts, and ir_dump.
-    // Falls back to direct codegen if the IR backend encounters an error.
+    // passes (including mem2reg/phi insertion) -> analysis -> lowering to QVM
+    // bytecode, returning a CompileResult with bytecode, state_vars, warnings,
+    // extern_contracts, and ir_dump.
     let compile_result = match synq_compiler::compile_ir(&req.source) {
         Ok(r)  => r,
-        Err(e) => {
-            eprintln!("[IR] compile_ir failed, falling back to direct codegen: {}", e);
-            match synq_compiler::compile(&req.source) {
-                Ok(r)  => r,
-                Err(e2) => return (StatusCode::OK, RespJson(CompileResponse {
-                    success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
-                    errors: vec![format!("Compile error: {}", e2)], warnings: vec![],
-                    functions:        Vec::new(),
-                    state_var_types:  std::collections::HashMap::new(),
-                    manifest:           None,
-                    ir_dump:            vec![],
-                    sqb:               None,
-                })),
-            }
-        }
+        Err(e) => return (StatusCode::OK, RespJson(CompileResponse {
+            success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
+            errors: vec![format!("Compile error: {}", e)], warnings: vec![],
+            functions:        Vec::new(),
+            state_var_types:  std::collections::HashMap::new(),
+            manifest:           None,
+            ir_dump:            vec![],
+            sqb:               None,
+        })),
     };
     let bytecode = compile_result.bytecode;
     let state_vars = compile_result.state_vars;
@@ -1874,7 +1868,8 @@ async fn sign_source_handler(
         }
     }
 
-    let (bytecode, state_vars_raw) = match synq_compiler::codegen::CodeGenerator::new().generate(&ast) {
+    // Use compile_ir() as the sole compilation path (SSA IR backend with phi).
+    let wasm_compile = match synq_compiler::compile_ir(&req.source) {
         Ok(r)  => r,
         Err(e) => return (StatusCode::OK, RespJson(CompileResponse {
             success: false, bytecode: None, signature_sidecar: None,
@@ -1888,6 +1883,8 @@ async fn sign_source_handler(
             sqb:               None,
         })),
     };
+    let bytecode = wasm_compile.bytecode;
+    let state_vars_raw = wasm_compile.state_vars;
     let bytecode_hash_bytes: [u8; 32] = Keccak256::digest(&bytecode).into();
 
     // 4. Verify EIP-712 SourceCommit signature
@@ -3338,8 +3335,8 @@ async fn bench_compile_handler(
     let parse_ns = t0.elapsed().as_nanos() as u64;
 
     let t1 = Instant::now();
-    let (bytecode, _state_vars) = match synq_compiler::codegen::CodeGenerator::new().generate(&ast) {
-        Ok(b)  => b,
+    let bench_result = match synq_compiler::compile_ir(&req.source) {
+        Ok(r)  => r,
         Err(e) => return RespJson(BenchCompileResponse {
             success: false, parse_ns,
             codegen_ns: t1.elapsed().as_nanos() as u64,
@@ -3348,6 +3345,7 @@ async fn bench_compile_handler(
 
         }),
     };
+    let bytecode = bench_result.bytecode;
     let codegen_ns = t1.elapsed().as_nanos() as u64;
 
     RespJson(BenchCompileResponse {
