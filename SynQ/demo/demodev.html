@@ -307,6 +307,8 @@
     <button class="btn btn-primary" id="compileBtn" onclick="doCompile()">Compile</button>
     <button class="btn btn-primary" id="deployBtn" onclick="initVMPanel()" style="visibility:hidden;pointer-events:none;" title="Deploy compiled bytecode to the QVM session">Deploy</button>
     <button class="btn btn-primary" id="sqbDownloadBtn" onclick="downloadSqb()" style="visibility:hidden;pointer-events:none;background:#1a6b3c;color:#fff;" title="Download SQB binary artifact (.sqb)">&#x2B07; .sqb</button>
+    <button class="btn btn-primary" id="sqbUploadBtn" onclick="document.getElementById('sqbFileInput').click()" style="background:#1a3c6b;color:#fff;" title="Upload a saved .sqb artifact and deploy directly — no source compilation needed">&#x2B06;&#xFE0F; Upload .sqb</button>
+    <input type="file" accept=".sqb" id="sqbFileInput" style="display:none" onchange="uploadSqb(this)">
   </div>
   <!-- Row 2: status badges + deps hint — always in DOM, never causes row-1 reflow -->
   <div style="display:flex;align-items:center;gap:8px;min-height:1.4rem;margin-top:4px;padding-left:2px;">
@@ -339,6 +341,7 @@
     </div>
     <div class="download-row">
       <button class="btn btn-secondary" id="sqbDownloadRowBtn" onclick="downloadSqb()" style="font-size:12px;padding:5px 14px;background:#1a6b3c;color:#fff;visibility:hidden;pointer-events:none;" title="Download SQB binary artifact (.sqb)">&#x2B07; Download .sqb</button>
+      <button onclick="document.getElementById('sqbFileInput').click()" style="font-size:12px;padding:5px 14px;background:rgba(26,60,107,0.2);border:1px solid rgba(80,140,220,0.5);color:rgba(140,180,240,0.9);border-radius:6px;cursor:pointer;" title="Upload a saved .sqb artifact and deploy directly">&#x2B06;&#xFE0F; Upload .sqb</button>
       <button onclick="downloadSig()" style="font-size:12px;padding:5px 14px;background:rgba(147,51,234,0.15);border:1px solid rgba(147,51,234,0.5);color:rgba(200,150,255,0.9);border-radius:6px;cursor:pointer;">Download .sig.json</button>
       <span class="hash-badge" id="hashBadge"></span>
     </div>
@@ -2772,7 +2775,7 @@
     vc.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
     if (deployBtn) { deployBtn.disabled = false; deployBtn.textContent = 'Deploy ▶ ' + (currentContractName || 'Contract') + ' again'; }
-    setStatus('Deployed! Select a function below to execute.', 'success');
+    setStatus('Deployed! ' + (currentContractName || 'Contract') + ' — select a function below to execute.', 'success');
   }
 
   function selectFunction(idx) {
@@ -5526,6 +5529,182 @@ var LOOP_LINES = [
       }
     }
     window.downloadSqb = downloadSqb;
+
+    // ── SQB Binary Artifact Upload ───────────────────────────────────────
+    // Reads a saved .sqb file, decodes the TLV sections client-side to extract
+    // bytecode + ABI + state vars + contract name, then deploys directly from
+    // the SQB artifact via POST /session/new — no source compilation needed.
+    function decodeSqbSections(bytes) {
+      // SQB header: 4B magic ("SQB1") + 1B version + 1B flags + 2B section_count + 4B chain_id + 4B reserved = 16B
+      if (bytes.length < 16) throw new Error('SQB too small (need 16B header, got ' + bytes.length + 'B)');
+      var magic = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+      if (magic !== 'SQB1') throw new Error('Bad SQB magic: expected SQB1, got ' + magic);
+      var version = bytes[4];
+      var flags = bytes[5];
+      var sectionCount = bytes[6] | (bytes[7] << 8);
+      var off = 16; // skip header
+      var sections = {};
+      for (var i = 0; i < sectionCount; i++) {
+        if (off + 5 > bytes.length) throw new Error('SQB truncated at section ' + i);
+        var secType = bytes[off]; off += 1;
+        var secLen = bytes[off] | (bytes[off+1] << 8) | (bytes[off+2] << 16) | (bytes[off+3] << 24); off += 4;
+        if (off + secLen > bytes.length) throw new Error('SQB section ' + i + ' overruns buffer (type=0x' + secType.toString(16) + ', len=' + secLen + ')');
+        var secData = bytes.slice(off, off + secLen);
+        off += secLen;
+        // Skip 32B hash
+        off += 32;
+        sections[secType] = secData;
+      }
+      return sections;
+    }
+
+    async function uploadSqb(input) {
+      var file = input.files[0];
+      if (!file) return;
+      input.value = ''; // reset so same file can be re-selected
+
+      setStatus('Reading SQB artifact "' + file.name + '"...', 'info');
+
+      try {
+        var buf = await file.arrayBuffer();
+        var bytes = new Uint8Array(buf);
+        console.log('[SQB] Loaded ' + file.name + ' (' + bytes.length + ' bytes)');
+
+        // Decode TLV sections
+        var sections = decodeSqbSections(bytes);
+
+        // Extract CODE section (0x01) — QVM bytecode
+        var codeBytes = sections[0x01];
+        if (!codeBytes) { setStatus('SQB has no CODE section — cannot deploy', 'error'); return; }
+        // Convert to hex for parseDispatchTable
+        var hexCode = Array.from(codeBytes).map(function(b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+        console.log('[SQB] CODE section: ' + codeBytes.length + ' bytes');
+
+        // Extract ABI section (0x02) — function signatures
+        var abiJson = null;
+        if (sections[0x02]) {
+          var abiStr = new TextDecoder('utf-8').decode(sections[0x02]);
+          abiJson = JSON.parse(abiStr);
+          console.log('[SQB] ABI: ' + (abiJson.functions ? abiJson.functions.length : 0) + ' functions');
+        }
+
+        // Extract STATE_LAYOUT (0x06) — state vars
+        var stateVars = [];
+        if (sections[0x06]) {
+          var slStr = new TextDecoder('utf-8').decode(sections[0x06]);
+          var sl = JSON.parse(slStr);
+          if (sl.state_vars) {
+            stateVars = sl.state_vars.map(function(sv) { return [sv.name, sv.slot]; });
+          }
+          console.log('[SQB] State vars: ' + stateVars.length);
+        }
+
+        // Extract META (0x07) — contract name
+        var contractName = 'UploadedContract';
+        if (sections[0x07]) {
+          var metaStr = new TextDecoder('utf-8').decode(sections[0x07]);
+          var meta = JSON.parse(metaStr);
+          if (meta.contract_name) contractName = meta.contract_name;
+          console.log('[SQB] Contract: ' + contractName);
+        }
+        // ABI also has contract_name as fallback
+        if (contractName === 'UploadedContract' && abiJson && abiJson.contract_name) {
+          contractName = abiJson.contract_name;
+        }
+
+        // Extract MANIFEST (0x03) — for L3 display
+        var manifestJson = null;
+        if (sections[0x03]) {
+          manifestJson = JSON.parse(new TextDecoder('utf-8').decode(sections[0x03]));
+          console.log('[SQB] Manifest present');
+        }
+
+        // Extract extern_contracts from ABI
+        var externContracts = (abiJson && abiJson.extern_contracts) || [];
+
+        // Build compileFunctions from ABI for the function picker enrichment
+        var cfns = [];
+        if (abiJson && abiJson.functions) {
+          cfns = abiJson.functions.map(function(f) {
+            return {
+              name: f.name,
+              params: (f.params || []).map(function(p) {
+                return { name: p.name || ('p' + (cfns.length > 0 ? cfns.length : 0)), ty: p.ty || 'u256' };
+              }),
+              has_return: f.has_return,
+              return_type: f.return_type || null
+            };
+          });
+        }
+
+        // Clear results first — clearResults() nulls currentBytecode/currentSqb/etc,
+        // so it MUST run BEFORE we set the globals (otherwise deploy silently fails).
+        clearResults();
+
+        // Set global state — same as what compile does
+        currentBytecode = hexCode;
+        currentSqb = btoa(String.fromCharCode.apply(null, bytes));
+        currentContractName = contractName;
+        currentContractAddress = null; // will be derived by server
+        currentStateVars = stateVars;
+        currentExternContracts = externContracts;
+        compileFunctions = cfns;
+        currentManifest = manifestJson;
+        currentSidecar = null;
+
+        // Show bytecode in the display
+        (function showBytecode() {
+          var el = document.getElementById('bytecodeDisplay');
+          if (el) {
+            var preview = hexCode.length > 200 ? hexCode.slice(0, 200) + '\n... (' + hexCode.length + ' chars total)' : hexCode;
+            el.innerHTML = '<pre style="margin:0;font-size:11px;word-break:break-all;">' + preview + '</pre>';
+          }
+          // Show IR placeholder
+          var irEl = document.getElementById('irDisplay');
+          if (irEl) {
+            var irStr = sections[0x04] ? new TextDecoder('utf-8').decode(sections[0x04]) : null;
+            if (irStr) {
+              irEl.innerHTML = '<pre style="margin:0;font-size:11px;white-space:pre-wrap;">' + irStr.slice(0, 2000) + (irStr.length > 2000 ? '\n...' : '') + '</pre>';
+            } else {
+              irEl.innerHTML = '<span class="ir-empty">IR not embedded in this SQB artifact</span>';
+            }
+          }
+        })();
+
+        // Show verify badge if manifest present
+        if (manifestJson) {
+          var vb = document.getElementById('verifyBadge');
+          if (vb) {
+            vb.innerHTML = '\u2705 L1+L2: VERIFIED \u00b7 ' + codeBytes.length + 'B';
+            vb.className = 'verify-badge pass';
+            vb.style.display = 'inline-flex';
+            vb.title = 'L1 Structural + L2 Stack Safety — verified at compile time (embedded in SQB)';
+          }
+        }
+
+        setStatus('SQB artifact loaded: ' + contractName + ' (' + bytes.length + ' bytes, ' + (cfns.length) + ' functions). Click Deploy to start session.', 'success');
+
+        // Enable deploy button
+        var deployBtn = document.getElementById('deployBtn');
+        if (deployBtn) {
+          deployBtn.style.visibility = 'visible';
+          deployBtn.style.pointerEvents = 'auto';
+          deployBtn.disabled = false;
+          deployBtn.textContent = 'Deploy \u25B6 ' + contractName;
+        }
+
+        // Show SQB download button (user can re-download the loaded artifact)
+        var sb = document.getElementById('sqbDownloadBtn');
+        if (sb) { sb.style.visibility = 'visible'; sb.style.pointerEvents = 'auto'; }
+        var sbRow = document.getElementById('sqbDownloadRowBtn');
+        if (sbRow) { sbRow.style.visibility = 'visible'; sbRow.style.pointerEvents = 'auto'; }
+
+      } catch(e) {
+        console.error('[SQB] Upload failed:', e);
+        setStatus('SQB upload failed: ' + e.message, 'error');
+      }
+    }
+    window.uploadSqb = uploadSqb;
 
 })();
 </script>

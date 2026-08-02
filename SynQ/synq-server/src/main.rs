@@ -2652,9 +2652,48 @@ async fn session_new_handler(
     }
 
     // Layer 3: Manifest + ML-DSA-87 signature verification
-    // Priority: SQB-embedded manifest > request manifest > skip
-    let l3_manifest = sqb_manifest.as_ref().or(req.manifest.as_ref());
+    // ── MANDATORY for SQB deployments (ACTS-VM-008) ──────────────────────
+    // SQB artifacts always embed a manifest; if missing or verification
+    // fails, the deployment is REJECTED — no skip path for SQB.
+    // For raw bytecode deployments (no SQB), L3 remains advisory:
+    //   priority: request-provided manifest > skip
+    let l3_manifest = if sqb_verified.unwrap_or(false) {
+        // SQB path — manifest must come from the artifact itself
+        match sqb_manifest.as_ref() {
+            Some(m) => Some(m),
+            None => return (StatusCode::OK, RespJson(NewSessionResponse {
+                success: false, session_id: None, contract_name: None,
+                error: Some("SQB artifact missing manifest — L3 verification mandatory for SQB deployments".into()),
+                layer3: None, fuel_budget: None, max_steps: None, steps_used: None,
+                steps_remaining: None, sqb_verified,
+            })),
+        }
+    } else {
+        // Raw bytecode path — advisory, may skip
+        sqb_manifest.as_ref().or(req.manifest.as_ref())
+    };
     let layer3_result = l3_manifest.map(|m| verify_manifest(&raw, m));
+
+    // Enforce L3: reject if SQB deploy and L3 failed
+    if sqb_verified.unwrap_or(false) {
+        if let Some(ref l3) = layer3_result {
+            if !l3.verified {
+                let reason = if !l3.artifact_hash_match {
+                    "artifact hash mismatch — bytecode has been tampered"
+                } else if !l3.signature_valid {
+                    "ML-DSA-87 signature invalid — manifest is forged or corrupted"
+                } else {
+                    "unknown L3 verification failure"
+                };
+                return (StatusCode::OK, RespJson(NewSessionResponse {
+                    success: false, session_id: None, contract_name: None,
+                    error: Some(format!("L3 verification FAILED: {}", reason)),
+                    layer3: layer3_result.clone(), fuel_budget: None, max_steps: None,
+                    steps_used: None, steps_remaining: None, sqb_verified,
+                }));
+            }
+        }
+    }
 
     let mut vm = QuantumVM::new();
     if let Err(e) = vm.load_bytecode(&raw) {

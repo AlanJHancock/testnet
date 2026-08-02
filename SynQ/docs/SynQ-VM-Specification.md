@@ -196,7 +196,7 @@ Symbolic stack depth analysis. Warnings surfaced but do not block execution.
 - Flags return stack depth mismatches
 - Reports maximum stack depth
 
-### Layer 3 — Manifest Signature (Planned)
+### Layer 3 — Manifest Signature (Mandatory for SQB)
 
 ML-DSA-87 signature verification over manifest hash. Not yet implemented.
 

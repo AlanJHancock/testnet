@@ -44,7 +44,7 @@ IR Lowering ──▶ QVM Bytecode
 Bytecode Verification
   │  ▶ Layer 1: Structural integrity (MANDATORY)
   │  ▶ Layer 2: Stack safety (ADVISORY)
-  │  ▶ Layer 3: Manifest signature (PLANNED)
+  │  ▶ Layer 3: Manifest signature (MANDATORY for SQB)
   │
   ▼
 Compiler Attestation ──▶ ML-DSA-87 signature over bytecode
@@ -306,9 +306,9 @@ The HQC-128 crate's `decapsulate()` function panics on malformed input (FFI boun
 
 ## 8. Known Security Limitations
 
-### 8.1 Layer 3 Not Implemented
+### 8.1 Layer 3 Enforcement (Resolved 2026-08-02)
 
-Bytecode provenance is incomplete without Layer 3 (manifest signature verification). Currently, bytecode is verified structurally (L1) and for stack safety (L2), but manifest integrity is not verified at load time. This means a modified manifest could be paired with valid bytecode without detection at the VM level.
+L3 is now mandatory for all SQB deployments. SQB artifacts without a manifest, with a hash mismatch, or with an invalid ML-DSA-87 signature are rejected. For raw bytecode (non-SQB) deployments, L3 remains advisory. The per-section SHA3-256 hashes in the SQB TLV structure provide a first line of defense against tampering; L3 proves those hashes were signed by a trusted compiler key.
 
 ### 8.2 Devnet Wildcard
 
