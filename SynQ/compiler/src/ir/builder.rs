@@ -172,6 +172,10 @@ impl IrBuilder {
         // Calculate next local address: after all state vars
         let next_local = self.state_vars.len() as u32;
 
+        // Clone return type before ctx borrows ir_fn mutably
+        let has_return_type = ir_fn.return_type.is_some();
+        let ret_type_clone = ir_fn.return_type.clone();
+
         let mut ctx = BuildContext {
             ir_fn: &mut ir_fn,
             param_values,
@@ -186,6 +190,7 @@ impl IrBuilder {
             break_targets: Vec::new(),
             continue_targets: Vec::new(),
             extern_contracts: &mut self.extern_contracts,
+            last_value: None,
         };
 
         for stmt in &f.body.statements {
@@ -193,9 +198,19 @@ impl IrBuilder {
         }
 
         // Ensure the current block is terminated
+        // Use pre-cloned return type + last_value for implicit returns
+        let last_val = ctx.last_value.take();
         if !ctx.current_block_terminated() {
-            // Implicit return
-            let ret_inst = Instruction::effect(IrOp::Return(None));
+            // Implicit return — if the function has a return type and the last
+            // statement produced a value (e.g. extern_call), use it as the return value.
+            // This mirrors direct codegen which leaves the extern_call result on the stack.
+            let ret_val = if has_return_type { last_val } else { None };
+            let ret_inst = if let Some(v) = ret_val {
+                let ret_ty = ret_type_clone.unwrap_or(IrType::U256);
+                Instruction::value(IrOp::Return(Some(v)), ret_ty)
+            } else {
+                Instruction::effect(IrOp::Return(None))
+            };
             ctx.ir_fn.block_mut(ctx.current_block).set_terminator(ret_inst);
         }
 
@@ -231,6 +246,8 @@ struct BuildContext<'a> {
     continue_targets: Vec<BlockId>,
     /// Extern call targets collected during building
     extern_contracts: &'a mut Vec<String>,
+    /// Last value-producing operation's ValueId (for implicit returns)
+    last_value: Option<ValueId>,
 }
 
 impl<'a> BuildContext<'a> {
@@ -469,10 +486,12 @@ impl<'a> BuildContext<'a> {
                     .collect();
                 let arg_vals = arg_vals?;
                 let ret_ty = IrType::U256; // extern calls return u256 (could be improved with type info)
-                let _ = self.push_value(
+                let extern_vid = self.push_value(
                     IrOp::ExternCall(contract.clone(), function.clone(), arg_vals),
                     ret_ty.clone(),
                 );
+                // Track for implicit return (functions ending with extern_call)
+                self.last_value = Some(extern_vid);
                 // Record host profile
                 self.ir_fn.host_profiles.push(HostFnProfile {
                     kind: HostFnKind::ExternCall,
