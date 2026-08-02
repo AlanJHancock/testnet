@@ -31,6 +31,7 @@ pub mod analyzer;
 pub mod passes;
 pub mod lower;
 pub mod serialize;
+pub mod decompile;
 
 pub use types::*;
 pub use instructions::*;
@@ -42,3 +43,4 @@ pub use analyzer::*;
 pub use passes::*;
 pub use lower::*;
 pub use serialize::{serialize, deserialize};
+pub use decompile::decompile;

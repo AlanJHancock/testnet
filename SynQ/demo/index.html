@@ -308,7 +308,9 @@
     <button class="btn btn-primary" id="deployBtn" onclick="initVMPanel()" style="visibility:hidden;pointer-events:none;" title="Deploy compiled bytecode to the QVM session">Deploy</button>
     <button class="btn btn-primary" id="sqbDownloadBtn" onclick="downloadSqb()" style="visibility:hidden;pointer-events:none;background:#1a6b3c;color:#fff;" title="Download SQB binary artifact (.sqb)">&#x2B07; .sqb</button>
     <button class="btn btn-primary" id="sqbUploadBtn" onclick="document.getElementById('sqbFileInput').click()" style="background:#1a3c6b;color:#fff;" title="Upload a saved .sqb artifact and deploy directly — no source compilation needed">&#x2B06;&#xFE0F; Upload .sqb</button>
+    <button class="btn btn-primary" id="sqbDecompileBtn" onclick="document.getElementById('sqbDecompileInput').click()" style="background:#5c2d6b;color:#fff;" title="Decompile an .sqb artifact — reads the SIR1 IR section and reconstructs pseudo-SynQ source for inspection">&#x1F50D; Decompile .sqb</button>
     <input type="file" accept=".sqb" id="sqbFileInput" style="display:none" onchange="uploadSqb(this)">
+    <input type="file" accept=".sqb" id="sqbDecompileInput" style="display:none" onchange="decompileSqb(this)">
   </div>
   <!-- Row 2: status badges + deps hint — always in DOM, never causes row-1 reflow -->
   <div style="display:flex;align-items:center;gap:8px;min-height:1.4rem;margin-top:4px;padding-left:2px;">
@@ -342,6 +344,7 @@
     <div class="download-row">
       <button class="btn btn-secondary" id="sqbDownloadRowBtn" onclick="downloadSqb()" style="font-size:12px;padding:5px 14px;background:#1a6b3c;color:#fff;visibility:hidden;pointer-events:none;" title="Download SQB binary artifact (.sqb)">&#x2B07; Download .sqb</button>
       <button onclick="document.getElementById('sqbFileInput').click()" style="font-size:12px;padding:5px 14px;background:rgba(26,60,107,0.2);border:1px solid rgba(80,140,220,0.5);color:rgba(140,180,240,0.9);border-radius:6px;cursor:pointer;" title="Upload a saved .sqb artifact and deploy directly">&#x2B06;&#xFE0F; Upload .sqb</button>
+      <button onclick="document.getElementById('sqbDecompileInput').click()" style="font-size:12px;padding:5px 14px;background:rgba(92,45,107,0.2);border:1px solid rgba(140,80,160,0.5);color:rgba(200,160,220,0.9);border-radius:6px;cursor:pointer;" title="Decompile an .sqb artifact — reads SIR1 IR and reconstructs pseudo-SynQ source">&#x1F50D; Decompile .sqb</button>
       <button onclick="downloadSig()" style="font-size:12px;padding:5px 14px;background:rgba(147,51,234,0.15);border:1px solid rgba(147,51,234,0.5);color:rgba(200,150,255,0.9);border-radius:6px;cursor:pointer;">Download .sig.json</button>
       <span class="hash-badge" id="hashBadge"></span>
     </div>
@@ -5704,6 +5707,57 @@ var LOOP_LINES = [
         setStatus('SQB upload failed: ' + e.message, 'error');
       }
     }
+    async function decompileSqb(input) {
+      var file = input.files[0];
+      if (!file) return;
+      input.value = '';
+
+      setStatus('Decompiling SQB artifact "' + file.name + '"...', 'info');
+
+      try {
+        var buf = await file.arrayBuffer();
+        var bytes = new Uint8Array(buf);
+        console.log('[DECOMPILE] Loaded ' + file.name + ' (' + bytes.length + ' bytes)');
+
+        var sqbB64 = btoa(String.fromCharCode.apply(null, bytes));
+
+        var resp = await fetch(SYNQ_SERVER + '/decompile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sqb: sqbB64 })
+        });
+        var result = await resp.json();
+
+        if (!result.success) {
+          setStatus('Decompile failed: ' + (result.error || 'unknown error'), 'error');
+          return;
+        }
+
+        // Put decompiled source into the editor
+        var editor = document.getElementById('codeEditor');
+        if (editor) {
+          editor.value = result.source;
+          // Trigger syntax highlighting if applicable
+          if (typeof onCodeInput === 'function') onCodeInput();
+        }
+
+        // Update contract name
+        if (result.contract_name) {
+          currentContractName = result.contract_name;
+          var cn = document.getElementById('contractName');
+          if (cn) cn.textContent = result.contract_name;
+        }
+
+        setStatus('Decompiled ' + result.contract_name + ' from SIR1 IR — ' + result.source.length + ' chars of pseudo-SynQ source loaded into editor.', 'success');
+
+        console.log('[DECOMPILE] Success: ' + result.contract_name + ', ' + result.source.length + ' chars');
+      } catch(e) {
+        console.error('[DECOMPILE] Failed:', e);
+        setStatus('Decompile failed: ' + e.message, 'error');
+      }
+    }
+    window.decompileSqb = decompileSqb;
+
     window.uploadSqb = uploadSqb;
 
 })();

@@ -1577,6 +1577,89 @@ async fn compile_handler(
     }))
 }
 
+
+// ── POST /decompile ─────────────────────────────────────────────────────────────────────────────
+//
+// Decompiles an SQB artifact's SIR1 IR section into pseudo-SynQ source.
+// Takes base64-encoded SQB, extracts the IR section, deserializes SIR1,
+// and reconstructs readable pseudo-SynQ with provenance comments.
+
+#[derive(serde::Deserialize)]
+struct DecompileRequest {
+    sqb: String,
+}
+
+#[derive(serde::Serialize)]
+struct DecompileResponse {
+    success: bool,
+    source: Option<String>,
+    contract_name: Option<String>,
+    error: Option<String>,
+}
+
+async fn decompile_handler(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(req): Json<DecompileRequest>,
+) -> (StatusCode, RespJson<DecompileResponse>) {
+    use base64::{Engine, prelude::BASE64_STANDARD};
+
+    if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(DecompileResponse {
+            success: false, source: None, contract_name: None,
+            error: Some("rate limit exceeded".into()),
+        }));
+    }
+
+    let sqb_bytes = match BASE64_STANDARD.decode(&req.sqb) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, RespJson(DecompileResponse {
+            success: false, source: None, contract_name: None,
+            error: Some(format!("SQB base64 decode failed: {}", e)),
+        })),
+    };
+
+    let artifact = match sqb::decode(&sqb_bytes) {
+        Ok(a) => a,
+        Err(e) => return (StatusCode::BAD_REQUEST, RespJson(DecompileResponse {
+            success: false, source: None, contract_name: None,
+            error: Some(format!("SQB decode failed: {}", e)),
+        })),
+    };
+
+    // Get IR section (type 0x04)
+    let ir_data = match artifact.get(sqb::SectionType::Ir) {
+        Some(s) => &s.data,
+        None => return (StatusCode::OK, RespJson(DecompileResponse {
+            success: false, source: None, contract_name: None,
+            error: Some("SQB artifact has no IR section — cannot decompile".into()),
+        })),
+    };
+
+    // Deserialize SIR1 IR
+    let module = match synq_compiler::ir::deserialize(ir_data) {
+        Ok(m) => m,
+        Err(e) => return (StatusCode::OK, RespJson(DecompileResponse {
+            success: false, source: None, contract_name: None,
+            error: Some(format!("SIR1 deserialization failed: {}", e)),
+        })),
+    };
+
+    let contract_name = module.contract_name.clone();
+
+    // Decompile
+    let source = synq_compiler::ir::decompile(&module);
+
+    eprintln!("[DECOMPILE] Contract: {}, source: {} bytes", contract_name, source.len());
+
+    (StatusCode::OK, RespJson(DecompileResponse {
+        success: true,
+        source: Some(source),
+        contract_name: Some(contract_name),
+        error: None,
+    }))
+}
+
 // ─── POST /source-nonce ───────────────────────────────────────────────────────────────────────────
 //
 // Rev-2 source signing: return a fresh single-use nonce bound to a source hash.
@@ -3644,6 +3727,7 @@ async fn main() {
         .route("/debug/ecrecover",   post(debug_ecrecover_handler))
         .route("/bench-compile",      post(bench_compile_handler))
         .route("/compile-wasm",     post(wasm_compiler::compile_wasm_handler))
+        .route("/decompile",         post(decompile_handler))
         .with_state(store.clone())
         .layer(
             ServiceBuilder::new()
