@@ -46,6 +46,8 @@ pub struct IrLowerer {
     /// Phi stores: for each predecessor block, list of (value_id, phi_slot)
     /// to store before the terminator.
     phi_stores: HashMap<BlockId, Vec<(ValueId, u32)>>,
+    /// Pending call patches: (placeholder_offset, callee_name).
+    pending_call_patches: Vec<(usize, String)>,
 }
 
 impl IrLowerer {
@@ -60,6 +62,7 @@ impl IrLowerer {
             pending_jumps: Vec::new(),
             function_entries: HashMap::new(),
             phi_stores: HashMap::new(),
+            pending_call_patches: Vec::new(),
         }
     }
 
@@ -84,6 +87,9 @@ impl IrLowerer {
 
         // Patch all pending jumps
         lowerer.patch_jumps()?;
+
+        // Patch all pending call targets (function name → code address)
+        lowerer.patch_calls()?;
 
         // Build function dispatch table in data section
         for func in &module.functions {
@@ -499,9 +505,10 @@ impl IrLowerer {
                     load_val!(self, *arg);
                 }
                 self.asm.emit_op(OpCode::Call);
-                let nb = name.as_bytes();
-                self.asm.emit_u32(nb.len() as u32);
-                self.asm.emit_raw(nb);
+                // Emit a placeholder 4-byte target; patched after all functions
+                // are lowered (matching direct codegen's backpatch approach).
+                let patch_pos = self.asm.emit_placeholder_u32();
+                self.pending_call_patches.push((patch_pos, name.clone()));
             }
 
             IrOp::ExternCall(contract, fname, args) => {
@@ -515,6 +522,7 @@ impl IrLowerer {
                 self.asm.emit_raw(cb);
                 self.asm.emit_u32(fb.len() as u32);
                 self.asm.emit_raw(fb);
+                self.asm.emit_raw(&[args.len() as u8]);  // arg_count byte
             }
 
             // ── Struct / Tuple operations ──
@@ -881,4 +889,15 @@ impl IrLowerer {
         }
         Ok(())
     }
+
+    /// Patch all pending Call targets: resolve function names to code addresses.
+    fn patch_calls(&mut self) -> Result<(), String> {
+        for (patch_pos, callee_name) in self.pending_call_patches.drain(..) {
+            let target = *self.function_entries.get(&callee_name)
+                .ok_or_else(|| format!("Call to unknown function '{}'", callee_name))?;
+            self.asm.patch_u32(patch_pos, target);
+        }
+        Ok(())
+    }
+
 }
