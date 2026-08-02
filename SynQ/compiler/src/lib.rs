@@ -22,6 +22,8 @@ pub struct CompileResult {
     pub extern_contracts: Vec<String>,
     /// Full SSA IR dump for each function (block-by-block instruction listing).
     pub ir_dump:          Vec<String>,
+    /// Binary-serialized SSA IR (SIR1 format) for SQB IR section.
+    pub ir_binary:        Vec<u8>,
 }
 
 /// Top-level compile entry point.
@@ -137,7 +139,7 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
         }
     }
 
-    Ok(CompileResult { bytecode, state_vars, warnings, extern_contracts, ir_dump })
+    Ok(CompileResult { bytecode, state_vars, warnings, extern_contracts, ir_dump, ir_binary: vec![] })
 }
 
 /// Compile using the IR -> bytecode backend (v7.0 path).
@@ -215,7 +217,10 @@ pub fn compile_ir(source: &str) -> Result<CompileResult, String> {
         .map(|(name, _ty, addr)| (name.clone(), *addr))
         .collect();
 
-    Ok(CompileResult { bytecode, state_vars, warnings, extern_contracts, ir_dump })
+    // Serialize IR module to binary format for SQB
+    let ir_binary = ir::serialize::serialize(&ir_module);
+
+    Ok(CompileResult { bytecode, state_vars, warnings, extern_contracts, ir_dump, ir_binary })
 }
 
 

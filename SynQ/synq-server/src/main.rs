@@ -1439,8 +1439,8 @@ async fn compile_handler(
             });
             let manifest_bytes = serde_json::to_vec(&manifest_json).unwrap_or_default();
 
-            // IR section: join all IR dump strings
-            let ir_bytes = sqb_ir_dump.join("\n").into_bytes();
+            // IR section: binary SIR1 format (compact, machine-readable)
+            let ir_bytes = compile_result.ir_binary.clone();
 
             // META section: compiler metadata
             let meta_json = serde_json::json!({
