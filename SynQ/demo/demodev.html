@@ -3208,30 +3208,17 @@
           var budget = window._gasBudget;
           var pct = budget > 0 ? (used / budget) * 100 : 0;
           var lastCallGas = callGas;
-          // ── Gas exhaustion: turn red and block further calls ──────────────
-          var gasExhausted = used >= budget;
-          if (gasExhausted) {
-            fb.style.color = '#ef4444';
-            fb.style.borderColor = '#ef4444';
-            fb.textContent = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget) + ' \u26a0 EXHAUSTED';
-          } else if (pct > 80) {
-            fb.style.color = '#f59e0b';
-            fb.style.borderColor = '#f59e0b';
-            fb.textContent = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget);
-          } else {
-            fb.style.color = '';
-            fb.style.borderColor = '';
-            fb.textContent = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget);
-          }
           var fmtN = function(n) {
             if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
             if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
             if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
             return String(n);
           };
+          var gasExhausted = used >= budget;
           fb.innerHTML = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget);
-          if (pct >= 100) {
+          if (gasExhausted) {
             fb.className = 'gas-badge depleted';
+            fb.innerHTML = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget) + ' \u26a0 EXHAUSTED';
           } else if (pct >= 75) {
             fb.className = 'gas-badge warn';
           } else {
