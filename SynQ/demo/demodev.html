@@ -864,6 +864,8 @@
   async function resetVM() {
     var out = document.getElementById('vmOutput');
     out.innerHTML = '<span class="dim">Resetting all VM sessions...</span>';
+    // Reset cumulative gas counter
+    window._gasUsed = 0;
 
     // ── Reset every contract in the workspace, not just the active one ──────
     // This ensures all contracts (e.g. SimpleToken) start with clean state
@@ -3188,14 +3190,17 @@
         var fb = document.getElementById('gasBadge');
         var fb2 = document.getElementById('gasBadge2');
         if (!fb || !window._gasBudget) return;
-          // Gas = VM steps (compute cost) + PQC gas (AegisCall cost)
+          // Gas = cumulative across all calls in this session
+          // (VM steps for compute + PQC fuel for AegisCall)
           var stepCost = data.steps_used !== undefined ? data.steps_used : 0;
           var pqcCost  = data.fuel_used  !== undefined ? data.fuel_used  : 0;
-          var used = stepCost + pqcCost;
+          var callGas  = stepCost + pqcCost;
+          window._gasUsed = (window._gasUsed || 0) + callGas;
+          var used = window._gasUsed;
           var remaining = window._gasBudget > used ? window._gasBudget - used : 0;
-          window._gasUsed = used;
           var budget = window._gasBudget;
           var pct = budget > 0 ? (used / budget) * 100 : 0;
+          var lastCallGas = callGas;
           var fmtN = function(n) {
             if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
             if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
@@ -3214,9 +3219,10 @@
             + '===============================================\n'
             + 'Gas = VM steps (compute) + PQC gas (AegisCall)\n'
             + 'Gas Budget: ' + budget.toLocaleString() + '\n'
-            + 'Gas Used: ' + used.toLocaleString() + '\n'
-            + '  - Steps: ' + stepCost.toLocaleString() + '\n'
-            + '  - PQC: ' + pqcCost.toLocaleString() + '\n'
+            + 'Gas Used (cumulative): ' + used.toLocaleString() + '\n'
+            + '  Last call: ' + lastCallGas.toLocaleString() + '\n'
+            + '    - Steps: ' + stepCost.toLocaleString() + '\n'
+            + '    - PQC: ' + pqcCost.toLocaleString() + '\n'
             + 'Gas Remaining: ' + remaining.toLocaleString() + '\n'
             + 'Utilization: ' + pct.toFixed(2) + '%';
       if (fb2) { fb2.innerHTML = fb.innerHTML; fb2.className = fb.className; fb2.title = fb.title; fb2.style.display = fb.style.display; }
@@ -3660,6 +3666,8 @@
   async function resetVM() {
     var out = document.getElementById('vmOutput');
     out.innerHTML = '<span class="dim">Resetting all VM sessions...</span>';
+    // Reset cumulative gas counter
+    window._gasUsed = 0;
 
     // ── Reset every contract in the workspace, not just the active one ──────
     // This ensures all contracts (e.g. SimpleToken) start with clean state
