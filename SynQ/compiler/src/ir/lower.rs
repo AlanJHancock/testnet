@@ -25,6 +25,9 @@ use super::module::*;
 /// Slot base for SSA intermediate values — well above state vars (0-N)
 /// and function locals (1024+).
 const SSA_SLOT_BASE: u32 = 2048;
+/// Maximum SSA value slots per function. Must be large enough for any
+/// single function's SSA values (instructions with non-void result_type).
+const SSA_SLOTS_PER_FUNC: u32 = 512;
 
 /// IR → bytecode lowerer.
 pub struct IrLowerer {
@@ -43,6 +46,8 @@ pub struct IrLowerer {
     value_slots: HashMap<ValueId, u32>,
     /// Next available slot address.
     next_slot: u32,
+    /// Per-function slot base (incremented by SSA_SLOTS_PER_FUNC per function).
+    func_slot_base: u32,
     /// Block ID → code position (for jump patching).
     block_positions: HashMap<BlockId, u32>,
     /// Pending jump patches: (patch_offset, target_block_id).
@@ -67,6 +72,7 @@ impl IrLowerer {
             all_param_addrs: HashMap::new(),
             value_slots: HashMap::new(),
             next_slot: SSA_SLOT_BASE,
+            func_slot_base: SSA_SLOT_BASE,
             block_positions: HashMap::new(),
             pending_jumps: Vec::new(),
             function_entries: HashMap::new(),
@@ -143,7 +149,17 @@ impl IrLowerer {
     fn lower_function(&mut self, func: &IrFunction, module: &IrModule) -> Result<(), String> {
         // Reset per-function state
         self.value_slots.clear();
-        self.next_slot = SSA_SLOT_BASE;
+        // ── Slot aliasing fix ───────────────────────────────────────────
+        // Each function must use a DISJOINT slot range. If two functions
+        // share the same SSA_SLOT_BASE, a Call from one to the other will
+        // overwrite the caller's value slots in VM memory, corrupting the
+        // caller's state. This is critical for Call-inside-loop patterns.
+        //
+        // Allocation: function fidx gets slots starting at
+        //   SSA_SLOT_BASE + fidx * SSA_SLOTS_PER_FUNC
+        // where SSA_SLOTS_PER_FUNC is large enough for any function.
+        self.next_slot = self.func_slot_base;
+        self.func_slot_base += SSA_SLOTS_PER_FUNC;
         self.block_positions.clear();
         self.pending_jumps.clear();
         self.param_addrs.clear();
@@ -381,18 +397,32 @@ impl IrLowerer {
     /// Emit phi stores: for each successor block that has phi nodes,
     /// store the phi values from this block to their slots.
     fn emit_phi_stores(&mut self, block_id: BlockId) -> Result<(), String> {
+        // ── Parallel copy semantics ─────────────────────────────────────
+        // Phi nodes represent parallel assignments: all source values are
+        // read simultaneously, then all destinations are written. If we emit
+        // sequential load-store pairs, a destination slot that's also a
+        // source for another phi can be clobbered before it's read.
+        //
+        // Fix: Phase 1 — push ALL source values onto the stack.
+        //      Phase 2 — pop and store to each destination (reverse order).
         if let Some(stores) = self.phi_stores.get(&block_id).cloned() {
-            for (val_id, phi_slot) in stores {
-                // The value might be defined in the predecessor block,
-                // or in a dominator (e.g., a parameter loaded in the entry block).
-                // First try the predecessor, then search all blocks.
-                let src_slot = self.value_slots.get(&val_id)
+            if stores.is_empty() { return Ok(()); }
+
+            // Phase 1: Load all source values onto the stack
+            for (val_id, _phi_slot) in &stores {
+                let src_slot = self.value_slots.get(val_id)
                     .ok_or_else(|| format!("missing slot for phi value {}", val_id))?;
                 self.asm.emit_op(OpCode::Push);
                 self.asm.emit_i32(*src_slot as i32);
                 self.asm.emit_op(OpCode::Load);
+            }
+
+            // Phase 2: Pop and store to destinations in reverse order
+            // (stack is LIFO, so last-pushed is first-popped)
+            for (val_id, phi_slot) in stores.iter().rev() {
+                let _ = val_id; // unused in this phase
                 self.asm.emit_op(OpCode::Push);
-                self.asm.emit_i32(phi_slot as i32);
+                self.asm.emit_i32(*phi_slot as i32);
                 self.asm.emit_op(OpCode::Store);
             }
         }
