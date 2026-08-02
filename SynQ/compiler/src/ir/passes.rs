@@ -20,10 +20,17 @@ use super::function::*;
 pub fn run_passes(func: &mut IrFunction) -> Vec<String> {
     let mut reports = Vec::new();
 
-    // 1. Phi node insertion disabled — all variables (state + local) now use
-    //    explicit Load/Store with memory slots, making phi nodes unnecessary.
-    //    The memory slot naturally handles cross-block value propagation.
-    let phi_count = 0;
+    // 1. Promote local variables from Load/Store to true SSA with phi nodes.
+    //    This implements the LLVM mem2reg algorithm: identify locals defined
+    //    in multiple blocks, insert phi nodes at iterated dominance frontiers,
+    //    then rename all uses to reference SSA values directly.
+    let (phis_inserted, loads_removed) = promote_to_ssa(func);
+    if phis_inserted > 0 || loads_removed > 0 {
+        reports.push(format!(
+            "promote_to_ssa: {} phi nodes inserted, {} loads eliminated",
+            phis_inserted, loads_removed
+        ));
+    }
 
     // 2. Constant folding
     let folded = constant_folding(func);
@@ -37,7 +44,8 @@ pub fn run_passes(func: &mut IrFunction) -> Vec<String> {
         reports.push(format!("copy_propagation: {} copies propagated", propagated));
     }
 
-    // 4. Dead code elimination
+    // 4. Dead code elimination — removes the dead Store/Load instructions
+    //    left behind by promote_to_ssa.
     let removed = dead_code_elimination(func);
     if removed > 0 {
         reports.push(format!("dead_code_elimination: {} instructions removed", removed));
@@ -53,6 +61,450 @@ pub fn run_passes(func: &mut IrFunction) -> Vec<String> {
 
     reports
 }
+
+// ── mem2reg: Promote Load/Store Locals to True SSA ──────────────────────────
+//
+// Implements the classic LLVM mem2reg algorithm:
+//   1. Identify which __local_* variables are defined (Store) in multiple blocks.
+//   2. Compute the iterated dominance frontier (IDF) for each such variable.
+//   3. Insert phi nodes at each block in the IDF.
+//   4. Rename: walk the dominator tree in DFS order, replacing Load("__local_x")
+//      with the current SSA value, and updating the value on Store("__local_x", v).
+//   5. Update phi node inputs from each predecessor.
+//
+// After this pass, promoted locals no longer go through memory (Load/Store)
+// within blocks — they use SSA values directly. At merge points, phi nodes
+// (deconstructed by the lowerer) handle cross-block value propagation.
+// The existing DCE pass removes the dead Store/Load instructions.
+
+/// Promote local variables from Load/Store to SSA with phi nodes.
+/// Returns (phi_nodes_inserted, loads_eliminated).
+pub fn promote_to_ssa(func: &mut IrFunction) -> (usize, usize) {
+    // Build dominator tree
+    let dom_tree = DominatorTree::build(&func.blocks, func.entry);
+
+    // ── Phase 1: Find promotable locals and their definition blocks ──────
+    let mut local_defs: HashMap<String, HashSet<BlockId>> = HashMap::new();
+    let mut local_types: HashMap<String, IrType> = HashMap::new();
+
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if let IrOp::Store(name, val_id) = &inst.op {
+                if name.starts_with("__local_") {
+                    local_defs.entry(name.clone()).or_default().insert(block.id);
+                    // Infer type from the stored value's defining instruction
+                    if let Some(def_block) = find_def_block(func, *val_id) {
+                        for src_inst in &func.blocks[def_block as usize].insts {
+                            if src_inst.value_id == *val_id && !src_inst.result_type.is_void() {
+                                local_types.insert(name.clone(), src_inst.result_type.clone());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Only promote locals defined in 2+ blocks (need phi)
+    let promotable: Vec<String> = local_defs.iter()
+        .filter(|(_, blocks)| blocks.len() >= 2)
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    if promotable.is_empty() {
+        func.dom_tree = Some(dom_tree);
+        return (0, 0);
+    }
+
+    // ── Phase 2: Insert phi nodes at iterated dominance frontiers ────────
+    let mut phi_count = 0;
+
+    for local_name in &promotable {
+        let def_blocks = &local_defs[local_name];
+
+        // Compute iterated dominance frontier
+        let mut idf: HashSet<BlockId> = HashSet::new();
+        let mut worklist: Vec<BlockId> = def_blocks.iter().copied().collect();
+        while let Some(b) = worklist.pop() {
+            if let Some(frontier) = dom_tree.frontier.get(b as usize) {
+                if frontier.is_empty() { continue; }
+                for &f in frontier {
+                    if f as usize >= func.blocks.len() { continue; }
+                    if !idf.contains(&f) {
+                        idf.insert(f);
+                        worklist.push(f);
+                    }
+                }
+            }
+        }
+
+        // Insert phi nodes at each IDF block (if not already present)
+        let ty = local_types.get(local_name).cloned().unwrap_or(IrType::U256);
+
+        for &block_id in &idf {
+            let block = &func.blocks[block_id as usize];
+
+            // Check if a phi for this variable already exists
+            let already_has_phi = block.insts.iter().any(|inst| {
+                if let IrOp::Phi(ref pairs) = inst.op {
+                    // Check if any pair references a Store of this local
+                    pairs.iter().any(|(_, v)| {
+                        // Phi was just inserted — check by looking at the block's
+                        // instructions for a marker. We use a simpler check:
+                        // if there's already a phi at position 0 for this var.
+                        false
+                    })
+                } else {
+                    false
+                }
+            });
+
+            if already_has_phi { continue; }
+
+            // Build phi pairs from predecessors — placeholder ValueId 0
+            let phi_pairs: Vec<(BlockId, ValueId)> = block.preds.iter()
+                .map(|&pred| (pred, 0u32))
+                .collect();
+
+            if phi_pairs.is_empty() { continue; }
+
+            let phi_inst = Instruction {
+                op: IrOp::Phi(phi_pairs),
+                result_type: ty.clone(),
+                value_id: func.alloc_value(),
+                line: 0,
+            };
+
+            // Insert at beginning of block (before all other instructions)
+            func.blocks[block_id as usize].insts.insert(0, phi_inst);
+            phi_count += 1;
+        }
+    }
+
+    // ── Phase 3: Rename (SSA construction via dominator tree DFS) ─────────
+    // Build dominator tree children map
+    let n = func.blocks.len();
+    let mut dom_children: Vec<Vec<BlockId>> = vec![Vec::new(); n];
+    for b in 0..n {
+        if b as BlockId == func.entry { continue; }
+        let idom = dom_tree.immediate_dom.get(b).copied().unwrap_or(BlockId::MAX);
+        if idom != BlockId::MAX && (idom as usize) < n {
+            dom_children[idom as usize].push(b as BlockId);
+        }
+    }
+
+    // Track which variable each phi belongs to (by phi ValueId)
+    let mut phi_vars: HashMap<ValueId, String> = HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if let IrOp::Phi(_) = &inst.op {
+                // We need to figure out which local this phi is for.
+                // Since we inserted phis for specific locals, we track them.
+                // We'll match by checking if the block+phi position corresponds
+                // to a local we inserted a phi for.
+            }
+        }
+    }
+
+    // Actually, we need a better way to track which phi belongs to which local.
+    // Let's re-do: track phi insertions with their local name.
+    // Reset and redo phase 2 with tracking.
+
+    // Remove the phi nodes we just inserted (we'll re-insert with tracking)
+    for block in func.blocks.iter_mut() {
+        let phis_to_keep: Vec<bool> = block.insts.iter()
+            .map(|inst| !matches!(inst.op, IrOp::Phi(_)))
+            .collect();
+        let mut new_insts = Vec::new();
+        for (i, inst) in block.insts.drain(..).enumerate() {
+            if phis_to_keep[i] {
+                new_insts.push(inst);
+            }
+        }
+        block.insts = new_insts;
+    }
+
+    // Re-insert phis with tracking
+    phi_count = 0;
+    let mut phi_local_map: HashMap<(BlockId, usize), String> = HashMap::new(); // (block_id, phi_index) → local_name
+
+    for local_name in &promotable {
+        let def_blocks = &local_defs[local_name];
+        let mut idf: HashSet<BlockId> = HashSet::new();
+        let mut worklist: Vec<BlockId> = def_blocks.iter().copied().collect();
+        while let Some(b) = worklist.pop() {
+            if let Some(frontier) = dom_tree.frontier.get(b as usize) {
+                for &f in frontier {
+                    if f as usize >= n { continue; }
+                    if !idf.contains(&f) {
+                        idf.insert(f);
+                        worklist.push(f);
+                    }
+                }
+            }
+        }
+
+        let ty = local_types.get(local_name).cloned().unwrap_or(IrType::U256);
+
+        for &block_id in &idf {
+            let block = &func.blocks[block_id as usize];
+            let phi_pairs: Vec<(BlockId, ValueId)> = block.preds.iter()
+                .map(|&pred| (pred, 0u32))
+                .collect();
+            if phi_pairs.is_empty() { continue; }
+
+            let phi_inst = Instruction {
+                op: IrOp::Phi(phi_pairs),
+                result_type: ty.clone(),
+                value_id: func.alloc_value(),
+                line: 0,
+            };
+
+            let phi_index = 0; // inserted at position 0
+            phi_local_map.insert((block_id, phi_index), local_name.clone());
+            phi_vars.insert(phi_inst.value_id, local_name.clone());
+
+            func.blocks[block_id as usize].insts.insert(0, phi_inst);
+            phi_count += 1;
+        }
+    }
+
+    // Now do the renaming
+    let mut value_stacks: HashMap<String, Vec<ValueId>> = HashMap::new();
+    let mut loads_removed = 0;
+
+    // Substitution map: Load ValueId → replacement SSA ValueId
+    let mut substitutions: HashMap<ValueId, ValueId> = HashMap::new();
+
+    // Process blocks in dominator tree DFS order
+    rename_block_recursive(
+        func,
+        func.entry,
+        &dom_children,
+        &mut value_stacks,
+        &mut substitutions,
+        &mut loads_removed,
+        &phi_vars,
+    );
+
+    // Apply substitutions: replace all uses of old ValueIds with new ones
+    for block in func.blocks.iter_mut() {
+        for inst in block.insts.iter_mut() {
+            apply_substitution(inst, &substitutions);
+        }
+    }
+
+    // Remove dead Load instructions for promoted locals
+    // (Their ValueIds are no longer referenced after substitution)
+    let promoted_set: HashSet<String> = promotable.iter().cloned().collect();
+    for block in func.blocks.iter_mut() {
+        let mut new_insts = Vec::new();
+        for inst in block.insts.drain(..) {
+            if let IrOp::Load(ref name) = inst.op {
+                if promoted_set.contains(name) {
+                    // This Load has been replaced by an SSA value — skip it
+                    continue;
+                }
+            }
+            new_insts.push(inst);
+        }
+        block.insts = new_insts;
+    }
+
+    // Mark dead Store instructions for promoted locals
+    // (DCE will remove them since their results are void/unused)
+    // Actually, Stores are effects (void result_type), so DCE currently
+    // keeps all effects. We need to remove them explicitly.
+    for block in func.blocks.iter_mut() {
+        let mut new_insts = Vec::new();
+        for inst in block.insts.drain(..) {
+            if let IrOp::Store(ref name, _) = inst.op {
+                if promoted_set.contains(name) {
+                    // This Store is no longer needed — the value is tracked as SSA
+                    continue;
+                }
+            }
+            new_insts.push(inst);
+        }
+        block.insts = new_insts;
+    }
+
+    func.dom_tree = Some(dom_tree);
+
+    (phi_count, loads_removed)
+}
+
+/// Recursively rename variables in dominator tree DFS order.
+fn rename_block_recursive(
+    func: &mut IrFunction,
+    block_id: BlockId,
+    dom_children: &[Vec<BlockId>],
+    value_stacks: &mut HashMap<String, Vec<ValueId>>,
+    substitutions: &mut HashMap<ValueId, ValueId>,
+    loads_removed: &mut usize,
+    phi_vars: &HashMap<ValueId, String>,
+) {
+    // Track what we push so we can pop at the end
+    let mut pushed: Vec<String> = Vec::new();
+
+    // 1. For each phi at the start of this block: push the phi's ValueId
+    let phi_info: Vec<(String, ValueId)> = func.blocks[block_id as usize].insts.iter()
+        .filter(|inst| matches!(inst.op, IrOp::Phi(_)))
+        .map(|inst| {
+            let var_name = phi_vars.get(&inst.value_id)
+                .cloned()
+                .unwrap_or_default();
+            (var_name, inst.value_id)
+        })
+        .collect();
+
+    for (var_name, phi_vid) in &phi_info {
+        if var_name.is_empty() { continue; }
+        value_stacks.entry(var_name.clone()).or_default().push(*phi_vid);
+        pushed.push(var_name.clone());
+    }
+
+    // 2. Process instructions in order
+    // We need to collect the instructions first to avoid borrow issues
+    let inst_count = func.blocks[block_id as usize].insts.len();
+    let insts_info: Vec<(usize, IrOp)> = func.blocks[block_id as usize].insts.iter()
+        .enumerate()
+        .map(|(i, inst)| (i, inst.op.clone()))
+        .collect();
+
+    for (i, ref op) in insts_info {
+        match op {
+            IrOp::Load(ref name) => {
+                if name.starts_with("__local_") {
+                    if let Some(stack) = value_stacks.get(name) {
+                        if let Some(&top_val) = stack.last() {
+                            // Record substitution: this Load's ValueId → top_val
+                            let load_vid = func.blocks[block_id as usize].insts[i].value_id;
+                            substitutions.insert(load_vid, top_val);
+                            *loads_removed += 1;
+                        }
+                    }
+                }
+            }
+            IrOp::Store(ref name, val_id) => {
+                if name.starts_with("__local_") {
+                    value_stacks.entry(name.clone()).or_default().push(*val_id);
+                    pushed.push(name.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 3. Update phi inputs in successor blocks
+    let successors = func.blocks[block_id as usize].successors();
+    for succ_id in &successors {
+        let succ_block = &func.blocks[*succ_id as usize];
+        for inst in &succ_block.insts {
+            if let IrOp::Phi(ref pairs) = &inst.op {
+                let phi_vid = inst.value_id;
+                if let Some(var_name) = phi_vars.get(&phi_vid) {
+                    let current_val = value_stacks.get(var_name)
+                        .and_then(|s| s.last().copied())
+                        .unwrap_or(0);
+                    // Update the phi pair for this predecessor (block_id)
+                    // We need mutable access, so we'll do this after the loop
+                }
+            }
+        }
+    }
+
+    // Now actually update the phi pairs (mutable access)
+    for succ_id in &successors {
+        for inst in func.blocks[*succ_id as usize].insts.iter_mut() {
+            if let IrOp::Phi(ref mut pairs) = &mut inst.op {
+                let phi_vid = inst.value_id;
+                if let Some(var_name) = phi_vars.get(&phi_vid) {
+                    let current_val = value_stacks.get(var_name)
+                        .and_then(|s| s.last().copied())
+                        .unwrap_or(0);
+                    for (pred, val) in pairs.iter_mut() {
+                        if *pred == block_id {
+                            *val = current_val;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Recurse into dominator tree children
+    for &child in &dom_children[block_id as usize] {
+        rename_block_recursive(
+            func,
+            child,
+            dom_children,
+            value_stacks,
+            substitutions,
+            loads_removed,
+            phi_vars,
+        );
+    }
+
+    // 5. Pop all values pushed in this block
+    for var_name in pushed.iter().rev() {
+        if let Some(stack) = value_stacks.get_mut(var_name) {
+            stack.pop();
+        }
+    }
+}
+
+/// Apply a substitution map to an instruction's inputs.
+fn apply_substitution(inst: &mut Instruction, subs: &HashMap<ValueId, ValueId>) {
+    let apply = |v: ValueId| -> ValueId { *subs.get(&v).unwrap_or(&v) };
+
+    inst.op = match inst.op.clone() {
+        IrOp::BinOp(op, a, b) => IrOp::BinOp(op, apply(a), apply(b)),
+        IrOp::UnaryOp(op, a) => IrOp::UnaryOp(op, apply(a)),
+        IrOp::AuthIdentity(a) => IrOp::AuthIdentity(apply(a)),
+        IrOp::AuthRequire(env, s) => IrOp::AuthRequire(apply(env), s),
+        IrOp::Call(name, args) => IrOp::Call(name, args.into_iter().map(apply).collect()),
+        IrOp::ExternCall(c, f, args) => IrOp::ExternCall(c, f, args.into_iter().map(apply).collect()),
+        IrOp::MapGet(name, key) => IrOp::MapGet(name, apply(key)),
+        IrOp::MapMethod(name, m, args) => IrOp::MapMethod(name, m, args.into_iter().map(apply).collect()),
+        IrOp::SetMethod(name, m, args) => IrOp::SetMethod(name, m, args.into_iter().map(apply).collect()),
+        IrOp::FieldAccess(obj, field) => IrOp::FieldAccess(apply(obj), field),
+        IrOp::StructLiteral(name, fields) => IrOp::StructLiteral(
+            name,
+            fields.into_iter().map(|(f, v)| (f, apply(v))).collect(),
+        ),
+        IrOp::Tuple(vals) => IrOp::Tuple(vals.into_iter().map(apply).collect()),
+        IrOp::Phi(pairs) => IrOp::Phi(pairs.into_iter().map(|(b, v)| (b, apply(v))).collect()),
+        IrOp::Branch(c, t, f) => IrOp::Branch(apply(c), t, f),
+        IrOp::Return(Some(v)) => IrOp::Return(Some(apply(v))),
+        IrOp::Store(name, v) => IrOp::Store(name, apply(v)),
+        IrOp::FieldStore(name, field, v) => IrOp::FieldStore(name, field, apply(v)),
+        IrOp::Require(c, msg) => IrOp::Require(apply(c), msg),
+        IrOp::Print(v) => IrOp::Print(apply(v)),
+        IrOp::Some(v) => IrOp::Some(apply(v)),
+        IrOp::Ok(v) => IrOp::Ok(apply(v)),
+        IrOp::Err(v) => IrOp::Err(apply(v)),
+        IrOp::OptionUnwrap(v) => IrOp::OptionUnwrap(apply(v)),
+        IrOp::ResultUnwrap(v) => IrOp::ResultUnwrap(apply(v)),
+        IrOp::IsOk(v) => IrOp::IsOk(apply(v)),
+        IrOp::IsSome(v) => IrOp::IsSome(apply(v)),
+        IrOp::AddrEncode(v) => IrOp::AddrEncode(apply(v)),
+        IrOp::AddrDecode(v) => IrOp::AddrDecode(apply(v)),
+        IrOp::ContractAddr(a, b, c) => IrOp::ContractAddr(apply(a), apply(b), apply(c)),
+        IrOp::StrLen(v) => IrOp::StrLen(apply(v)),
+        IrOp::StrConcat(a, b) => IrOp::StrConcat(apply(a), apply(b)),
+        IrOp::StrEq(a, b) => IrOp::StrEq(apply(a), apply(b)),
+        IrOp::AegisCall(args) => IrOp::AegisCall(args.into_iter().map(apply).collect()),
+        IrOp::AegisVerify(args) => IrOp::AegisVerify(args.into_iter().map(apply).collect()),
+        IrOp::AegisDecaps(args) => IrOp::AegisDecaps(args.into_iter().map(apply).collect()),
+        IrOp::AssetCreate(name, v) => IrOp::AssetCreate(name, apply(v)),
+        IrOp::TupleSet(t, idx, val) => IrOp::TupleSet(apply(t), apply(idx), apply(val)),
+        IrOp::TupleGet(t, idx) => IrOp::TupleGet(apply(t), apply(idx)),
+        other => other,
+    };
+}
+
 
 // ── Phi Node Insertion ───────────────────────────────────────────────────────
 //
