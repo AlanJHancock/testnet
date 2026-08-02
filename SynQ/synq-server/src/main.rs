@@ -841,6 +841,27 @@ async fn compile_handler(
         }));
     }
 
+    // Transpile to Solidity for EVM deployment (SXCP)
+    let solidity_source = {
+        let parsed = synq_compiler::parser::parse(&req.source).ok();
+        let contract_def = parsed.as_ref().and_then(|units| {
+            units.iter().find_map(|u| {
+                if let synq_compiler::ast::SourceUnit::Contract(c) = u {
+                    Some(c.clone())
+                } else {
+                    None
+                }
+            })
+        });
+        match contract_def {
+            Some(c) => {
+                let sol = synq_compiler::transpile_solidity::transpile_to_solidity(&c);
+                if !sol.is_empty() { Some(sol) } else { None }
+            }
+            None => None,
+        }
+    };
+
     let ast = match synq_compiler::parser::parse(&req.source) {
         Ok(a)  => a,
         Err(e) => return (StatusCode::OK, RespJson(CompileResponse {
@@ -1365,6 +1386,7 @@ async fn compile_handler(
             // the manifest itself. Embedded in the manifest so the manifest signature
             // covers ALL sections, not just bytecode (ACTS-VM-009 extended).
             let source_bytes = req.source.clone().into_bytes();
+            let solidity_bytes = solidity_source.as_ref().map(|s| s.as_bytes().to_vec()).unwrap_or_default();
             let sections_hash = {
                 let code_h = Sha3_256::digest(&sqb_code);
                 let abi_h = Sha3_256::digest(&abi_bytes);
@@ -1381,6 +1403,8 @@ async fn compile_handler(
                 concat.extend_from_slice(&state_layout_h);
                 concat.extend_from_slice(&meta_h);
                 concat.extend_from_slice(&source_h);
+                let sol_h = Sha3_256::digest(&solidity_bytes);
+                concat.extend_from_slice(&sol_h);
                 hex::encode(Sha3_256::digest(&concat))
             };
 
@@ -1528,6 +1552,7 @@ async fn compile_handler(
                         .state_layout(state_layout_bytes.clone())
                         .meta(meta_bytes.clone())
                         .source(source_bytes.clone())
+                        .solidity_source(solidity_bytes.clone())
                         .build();
                     match pre_sig {
                         Ok(bin) => {
@@ -1560,7 +1585,8 @@ async fn compile_handler(
                 .effects(effects_bytes)
                 .state_layout(state_layout_bytes)
                 .meta(meta_bytes)
-                .source(source_bytes);
+                .source(source_bytes)
+                .solidity_source(solidity_bytes);
 
             let was_signed = sqb_signature.is_some();
             if let Some(sig) = sqb_signature {
@@ -1600,6 +1626,8 @@ struct DecompileResponse {
     source: Option<String>,
     /// Original source from SQB SOURCE section (if embedded)
     original_source: Option<String>,
+    /// Solidity source from SQB SOLIDITY_SOURCE section (if embedded)
+    solidity_source: Option<String>,
     contract_name: Option<String>,
     error: Option<String>,
 }
@@ -1616,6 +1644,7 @@ async fn decompile_handler(
             success: false, source: None, contract_name: None,
             error: Some("rate limit exceeded".into()),
             original_source: None,
+            solidity_source: None,
         }));
     }
 
@@ -1625,6 +1654,7 @@ async fn decompile_handler(
             success: false, source: None, contract_name: None,
             error: Some(format!("SQB base64 decode failed: {}", e)),
             original_source: None,
+            solidity_source: None,
         })),
     };
 
@@ -1634,6 +1664,7 @@ async fn decompile_handler(
             success: false, source: None, contract_name: None,
             error: Some(format!("SQB decode failed: {}", e)),
             original_source: None,
+            solidity_source: None,
         })),
     };
 
@@ -1644,6 +1675,7 @@ async fn decompile_handler(
             success: false, source: None, contract_name: None,
             error: Some("SQB artifact has no IR section — cannot decompile".into()),
             original_source: None,
+            solidity_source: None,
         })),
     };
 
@@ -1654,6 +1686,7 @@ async fn decompile_handler(
             success: false, source: None, contract_name: None,
             error: Some(format!("SIR1 deserialization failed: {}", e)),
             original_source: None,
+            solidity_source: None,
         })),
     };
 
@@ -1665,11 +1698,13 @@ async fn decompile_handler(
     eprintln!("[DECOMPILE] Contract: {}, source: {} bytes", contract_name, source.len());
 
     let original_source = artifact.source_text().map(|s| s.to_string());
+    let solidity_source = artifact.solidity_source_text().map(|s| s.to_string());
 
     (StatusCode::OK, RespJson(DecompileResponse {
         success: true,
         source: Some(source),
         original_source,
+        solidity_source,
         contract_name: Some(contract_name),
         error: None,
     }))

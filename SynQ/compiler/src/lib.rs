@@ -6,6 +6,7 @@ pub mod codegen;
 pub mod ir;
 pub mod parser;
 pub mod pqc_integration;
+pub mod transpile_solidity;
 
 pub use pqc_integration::{PQCCompiler, PQCSecurityLevel};
 

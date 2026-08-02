@@ -98,6 +98,8 @@ pub enum SectionType {
     Meta        = 0x07,
     /// Original SynQ source (UTF-8 text) — for audit/inspection
     Source      = 0x08,
+    /// Solidity source (UTF-8 text) — for EVM deployment via SXCP
+    SoliditySource = 0x09,
 }
 
 impl SectionType {
@@ -112,6 +114,7 @@ impl SectionType {
             0x06 => Some(Self::StateLayout),
             0x07 => Some(Self::Meta),
             0x08 => Some(Self::Source),
+            0x09 => Some(Self::SoliditySource),
             _    => None,
         }
     }
@@ -327,6 +330,12 @@ impl SqbEncoder {
         self
     }
 
+    /// Add a SOLIDITY_SOURCE section (UTF-8 text). For EVM deployment via SXCP.
+    pub fn solidity_source(mut self, text: Vec<u8>) -> Self {
+        self.sections.push(SqbSection::new(SectionType::SoliditySource, text));
+        self
+    }
+
     /// Attach an ML-DSA-87 signature over the artifact root. Sets FLAG_HAS_SIGNATURE.
     pub fn signature(mut self, sig: Vec<u8>) -> Self {
         self.flags |= FLAG_HAS_SIGNATURE;
@@ -412,6 +421,11 @@ impl SqbArtifact {
     /// Get the original source section, if present.
     pub fn source_text(&self) -> Option<&str> {
         self.get(SectionType::Source).and_then(|s| std::str::from_utf8(&s.data).ok())
+    }
+
+    /// Get the Solidity source section, if present.
+    pub fn solidity_source_text(&self) -> Option<&str> {
+        self.get(SectionType::SoliditySource).and_then(|s| std::str::from_utf8(&s.data).ok())
     }
 
     /// Get MANIFEST section data as UTF-8 (convenience).

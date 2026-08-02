@@ -5733,55 +5733,56 @@ var LOOP_LINES = [
           return;
         }
 
-        // Build combined output: if original source is present, show side-by-side
-        var combinedSource;
+        // Build combined output with all available sources
+        var combinedSource = '';
         var hasOriginal = result.original_source && result.original_source.length > 0;
+        var hasSolidity = result.solidity_source && result.solidity_source.length > 0;
 
+        combinedSource += '// ═════════════════════════════════════════════════════════════════\n';
+        combinedSource += '//  SQB DECOMPILE REPORT\n';
+        combinedSource += '//  Contract: ' + result.contract_name + '\n';
+        combinedSource += '//  ═════════════════════════════════════════════════════════════════\n';
+        combinedSource += '//\n';
         if (hasOriginal) {
-          combinedSource = '// ═════════════════════════════════════════════════════════════════
-';
-          combinedSource += '//  SQB DECOMPILE REPORT — Side-by-side comparison
-';
-          combinedSource += '//  Contract: ' + result.contract_name + '\n';
-          combinedSource += '//  ═════════════════════════════════════════════════════════════════
-';
-          combinedSource += '//
-';
-          combinedSource += '//  LEFT: Original source (from SQB SOURCE section, PQC-authenticated)
-';
-          combinedSource += '//  RIGHT: Decompiled SSA pseudo-SynQ (from SIR1 IR section)
-';
-          combinedSource += '//
-';
-          combinedSource += '//  The original source is cryptographically tied to the bytecode via
-';
-          combinedSource += '//  the SQB ML-DSA-87 signature. Compare the logic to verify the
-';
-          combinedSource += '//  compiler faithfully translated the source.
-';
-          combinedSource += '// ═════════════════════════════════════════════════════════════════
+          combinedSource += '//  Section 1: Original SynQ source (from SQB SOURCE section)\n';
+        }
+        combinedSource += '//  Section ' + (hasOriginal ? '2' : '1') + ': Decompiled SSA pseudo-SynQ (from SIR1 IR section)\n';
+        if (hasSolidity) {
+          combinedSource += '//  Section ' + (hasOriginal ? '3' : '2') + ': Solidity source (from SQB SOLIDITY_SOURCE section, for EVM/SXCP)\n';
+        }
+        combinedSource += '//\n';
+        combinedSource += '//  All sections are cryptographically authenticated by the SQB\n';
+        combinedSource += '//  ML-DSA-87 signature. The Solidity was auto-transpiled from the\n';
+        combinedSource += '//  same SynQ AST that produced the QVM bytecode.\n';
+        combinedSource += '// ═════════════════════════════════════════════════════════════════\n\n';
 
-';
+        var sectionNum = 1;
 
-          // Original source with line numbers
-          combinedSource += '// ── ORIGINAL SOURCE (from SQB) ──────────────────────────────
-';
+        // Section 1: Original source
+        if (hasOriginal) {
+          combinedSource += '// ── SECTION ' + sectionNum + ': ORIGINAL SYNQ SOURCE (from SQB) ──────\n';
           var origLines = result.original_source.split('\n');
           for (var i = 0; i < origLines.length; i++) {
             combinedSource += '// ' + (i+1).toString().padStart(3, ' ') + ' | ' + origLines[i] + '\n';
           }
-          combinedSource += '// ────────────────────────────────────────────────────────────
-
-';
-
-          // Decompiled SSA
-          combinedSource += result.source;
-        } else {
-          // No original source — just show decompiled
-          combinedSource = result.source;
+          combinedSource += '// ────────────────────────────────────────────────────────────\n\n';
+          sectionNum++;
         }
 
-        // Put decompiled source into the editor
+        // Section 2: Decompiled SSA
+        combinedSource += '// ── SECTION ' + sectionNum + ': DECOMPILED SSA PSEUDO-SYNQ (from SIR1 IR) ──\n';
+        combinedSource += result.source;
+        combinedSource += '\n// ────────────────────────────────────────────────────────────\n\n';
+        sectionNum++;
+
+        // Section 3: Solidity
+        if (hasSolidity) {
+          combinedSource += '// ── SECTION ' + sectionNum + ': SOLIDITY SOURCE (for EVM deployment via SXCP) ──\n';
+          combinedSource += result.solidity_source;
+          combinedSource += '\n// ────────────────────────────────────────────────────────────\n';
+        }
+
+        // Put combined output into the editor
         var editor = document.getElementById('codeEditor');
         if (editor) {
           editor.value = combinedSource;
@@ -5795,15 +5796,15 @@ var LOOP_LINES = [
           if (cn) cn.textContent = result.contract_name;
         }
 
-        var statusMsg = 'Decompiled ' + result.contract_name + ' from SIR1 IR — ' + result.source.length + ' chars';
-        if (hasOriginal) {
-          statusMsg += ' (original source: ' + result.original_source.length + ' chars, side-by-side view)';
-        } else {
-          statusMsg += ' (no original source in SQB)';
-        }
+        var statusMsg = 'Decompiled ' + result.contract_name + ' — SSA: ' + result.source.length + ' chars';
+        if (hasOriginal) statusMsg += ', original: ' + result.original_source.length + ' chars';
+        if (hasSolidity) statusMsg += ', Solidity: ' + result.solidity_source.length + ' chars';
         setStatus(statusMsg, 'success');
 
-        console.log('[DECOMPILE] Success: ' + result.contract_name + ', decompiled=' + result.source.length + ', original=' + (hasOriginal ? result.original_source.length : 'none'));
+        console.log('[DECOMPILE] Success: ' + result.contract_name + 
+          ', decompiled=' + result.source.length + 
+          ', original=' + (hasOriginal ? result.original_source.length : 'none') +
+          ', solidity=' + (hasSolidity ? result.solidity_source.length : 'none'));
       } catch(e) {
         console.error('[DECOMPILE] Failed:', e);
         setStatus('Decompile failed: ' + e.message, 'error');
