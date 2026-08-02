@@ -322,7 +322,12 @@ The SQB format wraps QVM bytecode with ABI, manifest, IR, and metadata in a hash
 
 **Artifact Root:** SHA3-256(hash_1 || hash_2 || ... || hash_N)
 
-**Optional ML-DSA-87 signature** over the 32-byte artifact root.
+**ML-DSA-87 signature** over the 32-byte artifact root (SHA3-256 of all section hashes concatenated).
+
+The manifest also embeds a `sections_hash` field (SHA3-256 of all non-manifest section hashes concatenated) that is covered by the manifest signature. This binds ALL sections (CODE, ABI, IR, EFFECTS, STATE_LAYOUT, META) to the signed manifest — not just the bytecode. Any tampering of any section is detectable through two independent checks:
+
+1. **SQB embedded signature** — ML-DSA-87 over the artifact root (covers all sections including manifest)
+2. **Manifest `sections_hash`** — SHA3-256 of non-manifest section hashes, covered by the manifest signature
 
 **Bounds:** 4 MiB max file, 256 sections max, 1 MiB per section.
 

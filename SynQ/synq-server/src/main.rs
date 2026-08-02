@@ -1312,133 +1312,6 @@ async fn compile_handler(
             });
             let abi_bytes = serde_json::to_vec(&abi_json).unwrap_or_default();
 
-            // MANIFEST section: V3 manifest JSON (self-contained)
-            let artifact_hash = hex::encode(Sha3_256::digest(&bytecode));
-            let source_hash = hex::encode(Sha3_256::digest(sqb_source.as_bytes()));
-            // Build SQB manifest JSON — self-contained with signature fields
-            // so L3 verification works from the SQB artifact alone.
-            let sqb_key_id = match state.compiler_key.as_ref() {
-                CompilerKey::Persistent { key_id, .. } => Some(key_id.clone()),
-                CompilerKey::Ephemeral => None,
-            };
-            let sqb_gov_scopes: std::collections::HashMap<String, String> = sqb_functions.iter()
-                .filter_map(|f| f.governance_scope.as_ref().map(|s| (f.name.clone(), s.clone())))
-                .collect();
-
-            let manifest_json = serde_json::json!({
-                "artifact_hash": artifact_hash,
-                "source_hash": source_hash,
-                "chain_id": V3_CHAIN_ID,
-                "network_id": V3_NETWORK_ID,
-                "required_signature_algorithm": SIGNING_ALGORITHM,
-                "signature_domains": {
-                    "deploy": V3_DOMAIN_DEPLOY,
-                    "call": V3_DOMAIN_CALL,
-                    "governance": V3_DOMAIN_GOVERNANCE,
-                    "attest": V3_DOMAIN_ATTEST,
-                },
-                "functions": sqb_functions.iter().map(|f| serde_json::json!({
-                    "name": f.name,
-                    "params": f.params,
-                    "return_type": f.return_type,
-                })).collect::<Vec<_>>(),
-                "state_vars": sqb_state_vars.iter().map(|(name, slot)| {
-                    let ty = {
-                        let mut t = "u256".to_string();
-                        for unit in &ast {
-                            if let synq_compiler::ast::SourceUnit::Contract(c) = unit {
-                                for part in &c.parts {
-                                    if let synq_compiler::ast::ContractPart::StateVariable(sv) = part {
-                                        if sv.name == *name { t = type_name(&sv.ty); }
-                                    }
-                                }
-                            }
-                        }
-                        serde_json::json!({"name": name, "ty": t, "slot": slot})
-                    };
-                    ty
-                }).collect::<Vec<_>>(),
-                "governance_scopes": sqb_gov_scopes,
-                "authority_scopes": {},
-            });
-
-            // Compute manifest signature using the SAME canonical 8-field form
-            // that verify_manifest() reconstructs — this is critical for L3.
-            let canonical_manifest = serde_json::json!({
-                "artifact_hash":   manifest_json.get("artifact_hash").cloned().unwrap_or_default(),
-                "source_hash":     manifest_json.get("source_hash").cloned().unwrap_or_default(),
-                "chain_id":        manifest_json.get("chain_id").cloned().unwrap_or_default(),
-                "network_id":      manifest_json.get("network_id").cloned().unwrap_or_default(),
-                "functions":       manifest_json.get("functions").cloned().unwrap_or_default(),
-                "state_vars":      manifest_json.get("state_vars").cloned().unwrap_or_default(),
-                "governance_scopes": manifest_json.get("governance_scopes").cloned().unwrap_or_default(),
-                "authority_scopes":  manifest_json.get("authority_scopes").cloned().unwrap_or_default(),
-            });
-            let sqb_manifest_bytes = serde_json::to_vec(&canonical_manifest).unwrap_or_default();
-            let sqb_manifest_hash = Sha3_256::digest(&sqb_manifest_bytes);
-            let (sqb_mf_sig, sqb_mf_pubkey) = match state.compiler_key.as_ref() {
-                CompilerKey::Persistent { private_key, public_key, .. } => {
-                    let pqc = PQCCompiler::new(PQCSecurityLevel::Enhanced);
-                    match pqc.sign_message(private_key, &sqb_manifest_hash, SIGNING_ALGORITHM) {
-                        Ok(sig) => (Some(hex_encode(&sig.signature)), Some(hex_encode(public_key))),
-                        Err(_) => (None, None),
-                    }
-                }
-                CompilerKey::Ephemeral => {
-                    let pqc = PQCCompiler::new(PQCSecurityLevel::Enhanced);
-                    let keypair = match pqc.generate_keypair(SIGNING_ALGORITHM) {
-                        Ok(k) => (k.private_key, k.public_key),
-                        Err(_) => (vec![], vec![]),
-                    };
-                    match pqc.sign_message(&keypair.0, &sqb_manifest_hash, SIGNING_ALGORITHM) {
-                        Ok(sig) => (Some(hex_encode(&sig.signature)), Some(hex_encode(&keypair.1))),
-                        Err(_) => (None, None),
-                    }
-                }
-            };
-
-            // Rebuild manifest JSON with signature fields included
-            let manifest_json = serde_json::json!({
-                "artifact_hash": artifact_hash,
-                "source_hash": source_hash,
-                "chain_id": V3_CHAIN_ID,
-                "network_id": V3_NETWORK_ID,
-                "required_signature_algorithm": SIGNING_ALGORITHM,
-                "manifest_signature": sqb_mf_sig,
-                "compiler_public_key": sqb_mf_pubkey,
-                "key_id": sqb_key_id,
-                "signature_domains": {
-                    "deploy": V3_DOMAIN_DEPLOY,
-                    "call": V3_DOMAIN_CALL,
-                    "governance": V3_DOMAIN_GOVERNANCE,
-                    "attest": V3_DOMAIN_ATTEST,
-                },
-                "functions": sqb_functions.iter().map(|f| serde_json::json!({
-                    "name": f.name,
-                    "params": f.params,
-                    "return_type": f.return_type,
-                })).collect::<Vec<_>>(),
-                "state_vars": sqb_state_vars.iter().map(|(name, slot)| {
-                    let ty = {
-                        let mut t = "u256".to_string();
-                        for unit in &ast {
-                            if let synq_compiler::ast::SourceUnit::Contract(c) = unit {
-                                for part in &c.parts {
-                                    if let synq_compiler::ast::ContractPart::StateVariable(sv) = part {
-                                        if sv.name == *name { t = type_name(&sv.ty); }
-                                    }
-                                }
-                            }
-                        }
-                        serde_json::json!({"name": name, "ty": t, "slot": slot})
-                    };
-                    ty
-                }).collect::<Vec<_>>(),
-                "governance_scopes": sqb_gov_scopes,
-                "authority_scopes": {},
-            });
-            let manifest_bytes = serde_json::to_vec(&manifest_json).unwrap_or_default();
-
             // IR section: binary SIR1 format (compact, machine-readable)
             let ir_bytes = compile_result.ir_binary.clone();
 
@@ -1485,6 +1358,158 @@ async fn compile_handler(
                 }).collect::<Vec<_>>(),
             });
             let state_layout_bytes = serde_json::to_vec(&state_layout_json).unwrap_or_default();
+
+
+            // Compute sections_hash = SHA3-256(concat of all non-manifest section hashes)
+            // This covers CODE, ABI, IR, EFFECTS, STATE_LAYOUT, META — everything except
+            // the manifest itself. Embedded in the manifest so the manifest signature
+            // covers ALL sections, not just bytecode (ACTS-VM-009 extended).
+            let sections_hash = {
+                let code_h = Sha3_256::digest(&sqb_code);
+                let abi_h = Sha3_256::digest(&abi_bytes);
+                let ir_h = Sha3_256::digest(&ir_bytes);
+                let effects_h = Sha3_256::digest(&effects_bytes);
+                let state_layout_h = Sha3_256::digest(&state_layout_bytes);
+                let meta_h = Sha3_256::digest(&meta_bytes);
+                let mut concat = Vec::new();
+                concat.extend_from_slice(&code_h);
+                concat.extend_from_slice(&abi_h);
+                concat.extend_from_slice(&ir_h);
+                concat.extend_from_slice(&effects_h);
+                concat.extend_from_slice(&state_layout_h);
+                concat.extend_from_slice(&meta_h);
+                hex::encode(Sha3_256::digest(&concat))
+            };
+
+            // MANIFEST section: V3 manifest JSON (self-contained)
+            let artifact_hash = hex::encode(Sha3_256::digest(&bytecode));
+            let source_hash = hex::encode(Sha3_256::digest(sqb_source.as_bytes()));
+            // Build SQB manifest JSON — self-contained with signature fields
+            // so L3 verification works from the SQB artifact alone.
+            let sqb_key_id = match state.compiler_key.as_ref() {
+                CompilerKey::Persistent { key_id, .. } => Some(key_id.clone()),
+                CompilerKey::Ephemeral => None,
+            };
+            let sqb_gov_scopes: std::collections::HashMap<String, String> = sqb_functions.iter()
+                .filter_map(|f| f.governance_scope.as_ref().map(|s| (f.name.clone(), s.clone())))
+                .collect();
+
+            let manifest_json = serde_json::json!({
+                "artifact_hash": artifact_hash,
+                "sections_hash": sections_hash,
+                "source_hash": source_hash,
+                "chain_id": V3_CHAIN_ID,
+                "network_id": V3_NETWORK_ID,
+                "required_signature_algorithm": SIGNING_ALGORITHM,
+                "signature_domains": {
+                    "deploy": V3_DOMAIN_DEPLOY,
+                    "call": V3_DOMAIN_CALL,
+                    "governance": V3_DOMAIN_GOVERNANCE,
+                    "attest": V3_DOMAIN_ATTEST,
+                },
+                "functions": sqb_functions.iter().map(|f| serde_json::json!({
+                    "name": f.name,
+                    "params": f.params,
+                    "return_type": f.return_type,
+                })).collect::<Vec<_>>(),
+                "state_vars": sqb_state_vars.iter().map(|(name, slot)| {
+                    let ty = {
+                        let mut t = "u256".to_string();
+                        for unit in &ast {
+                            if let synq_compiler::ast::SourceUnit::Contract(c) = unit {
+                                for part in &c.parts {
+                                    if let synq_compiler::ast::ContractPart::StateVariable(sv) = part {
+                                        if sv.name == *name { t = type_name(&sv.ty); }
+                                    }
+                                }
+                            }
+                        }
+                        serde_json::json!({"name": name, "ty": t, "slot": slot})
+                    };
+                    ty
+                }).collect::<Vec<_>>(),
+                "governance_scopes": sqb_gov_scopes,
+                "authority_scopes": {},
+            });
+
+            // Compute manifest signature using the SAME canonical 8-field form
+            // that verify_manifest() reconstructs — this is critical for L3.
+            let canonical_manifest = serde_json::json!({
+                "artifact_hash":   manifest_json.get("artifact_hash").cloned().unwrap_or_default(),
+                "sections_hash":   manifest_json.get("sections_hash").cloned().unwrap_or_default(),
+                "source_hash":     manifest_json.get("source_hash").cloned().unwrap_or_default(),
+                "chain_id":        manifest_json.get("chain_id").cloned().unwrap_or_default(),
+                "network_id":      manifest_json.get("network_id").cloned().unwrap_or_default(),
+                "functions":       manifest_json.get("functions").cloned().unwrap_or_default(),
+                "state_vars":      manifest_json.get("state_vars").cloned().unwrap_or_default(),
+                "governance_scopes": manifest_json.get("governance_scopes").cloned().unwrap_or_default(),
+                "authority_scopes":  manifest_json.get("authority_scopes").cloned().unwrap_or_default(),
+            });
+            let sqb_manifest_bytes = serde_json::to_vec(&canonical_manifest).unwrap_or_default();
+            let sqb_manifest_hash = Sha3_256::digest(&sqb_manifest_bytes);
+            let (sqb_mf_sig, sqb_mf_pubkey) = match state.compiler_key.as_ref() {
+                CompilerKey::Persistent { private_key, public_key, .. } => {
+                    let pqc = PQCCompiler::new(PQCSecurityLevel::Enhanced);
+                    match pqc.sign_message(private_key, &sqb_manifest_hash, SIGNING_ALGORITHM) {
+                        Ok(sig) => (Some(hex_encode(&sig.signature)), Some(hex_encode(public_key))),
+                        Err(_) => (None, None),
+                    }
+                }
+                CompilerKey::Ephemeral => {
+                    let pqc = PQCCompiler::new(PQCSecurityLevel::Enhanced);
+                    let keypair = match pqc.generate_keypair(SIGNING_ALGORITHM) {
+                        Ok(k) => (k.private_key, k.public_key),
+                        Err(_) => (vec![], vec![]),
+                    };
+                    match pqc.sign_message(&keypair.0, &sqb_manifest_hash, SIGNING_ALGORITHM) {
+                        Ok(sig) => (Some(hex_encode(&sig.signature)), Some(hex_encode(&keypair.1))),
+                        Err(_) => (None, None),
+                    }
+                }
+            };
+
+            // Rebuild manifest JSON with signature fields included
+            let manifest_json = serde_json::json!({
+                "artifact_hash": artifact_hash,
+                "sections_hash": sections_hash,
+                "source_hash": source_hash,
+                "chain_id": V3_CHAIN_ID,
+                "network_id": V3_NETWORK_ID,
+                "required_signature_algorithm": SIGNING_ALGORITHM,
+                "manifest_signature": sqb_mf_sig,
+                "compiler_public_key": sqb_mf_pubkey,
+                "key_id": sqb_key_id,
+                "signature_domains": {
+                    "deploy": V3_DOMAIN_DEPLOY,
+                    "call": V3_DOMAIN_CALL,
+                    "governance": V3_DOMAIN_GOVERNANCE,
+                    "attest": V3_DOMAIN_ATTEST,
+                },
+                "functions": sqb_functions.iter().map(|f| serde_json::json!({
+                    "name": f.name,
+                    "params": f.params,
+                    "return_type": f.return_type,
+                })).collect::<Vec<_>>(),
+                "state_vars": sqb_state_vars.iter().map(|(name, slot)| {
+                    let ty = {
+                        let mut t = "u256".to_string();
+                        for unit in &ast {
+                            if let synq_compiler::ast::SourceUnit::Contract(c) = unit {
+                                for part in &c.parts {
+                                    if let synq_compiler::ast::ContractPart::StateVariable(sv) = part {
+                                        if sv.name == *name { t = type_name(&sv.ty); }
+                                    }
+                                }
+                            }
+                        }
+                        serde_json::json!({"name": name, "ty": t, "slot": slot})
+                    };
+                    ty
+                }).collect::<Vec<_>>(),
+                "governance_scopes": sqb_gov_scopes,
+                "authority_scopes": {},
+            });
+            let manifest_bytes = serde_json::to_vec(&manifest_json).unwrap_or_default();
 
             // Sign the artifact root with the compiler's ML-DSA-87 key
             // (v7.0: SQB artifacts are signed at the artifact-root level)
@@ -2444,7 +2469,13 @@ async fn workspace_remove_handler(
 /// Verify a V3 manifest against bytecode:
 /// 1. Recompute artifact_hash = SHA3-256(bytecode) and compare with manifest
 /// 2. Reconstruct the canonical manifest JSON, hash it, verify ML-DSA-87 signature
-fn verify_manifest(bytecode: &[u8], manifest: &serde_json::Value) -> Layer3Result {
+fn verify_manifest(
+    bytecode: &[u8],
+    manifest: &serde_json::Value,
+    sqb_artifact_root: Option<&[u8; 32]>,
+    sqb_signature: Option<&[u8]>,
+    sqb_sections_hash: Option<&[u8; 32]>,
+) -> Layer3Result {
     use sha3::{Digest, Sha3_256};
 
     // Extract fields from the manifest JSON
@@ -2464,9 +2495,25 @@ fn verify_manifest(bytecode: &[u8], manifest: &serde_json::Value) -> Layer3Resul
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
-    // Step 1: artifact hash check
+    // Step 1: artifact hash check (bytecode only)
     let computed_hash = hex::encode(Sha3_256::digest(bytecode));
     let hash_match = computed_hash == artifact_hash_stored;
+
+    // Step 1b: sections hash check (ALL non-manifest sections: CODE, ABI, IR, EFFECTS, STATE_LAYOUT, META)
+    let sections_hash_stored = manifest.get("sections_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let sections_hash_match = if let Some(computed_sh) = sqb_sections_hash {
+        let computed_sh_hex = hex::encode(computed_sh);
+        if sections_hash_stored.is_empty() {
+            // Legacy manifest without sections_hash — warn but don't fail
+            true
+        } else {
+            computed_sh_hex == sections_hash_stored
+        }
+    } else {
+        true // No SQB sections available (raw bytecode path) — skip
+    };
 
     // Step 2: signature verification
     let mut sig_valid = false;
@@ -2484,6 +2531,7 @@ fn verify_manifest(bytecode: &[u8], manifest: &serde_json::Value) -> Layer3Resul
         // Reconstruct the canonical manifest JSON (same fields used during compile-time signing)
         let canonical_json = serde_json::json!({
             "artifact_hash":   manifest.get("artifact_hash").cloned().unwrap_or_default(),
+            "sections_hash":   manifest.get("sections_hash").cloned().unwrap_or_default(),
             "source_hash":     manifest.get("source_hash").cloned().unwrap_or_default(),
             "chain_id":        manifest.get("chain_id").cloned().unwrap_or_default(),
             "network_id":      manifest.get("network_id").cloned().unwrap_or_default(),
@@ -2517,7 +2565,49 @@ fn verify_manifest(bytecode: &[u8], manifest: &serde_json::Value) -> Layer3Resul
         }
     }
 
-    let verified = hash_match && sig_valid;
+    // Step 3: Verify SQB embedded signature over artifact root (covers ALL sections)
+    let mut sqb_sig_valid = false;
+    if let (Some(root), Some(sig)) = (sqb_artifact_root, sqb_signature) {
+        if !sig.is_empty() && !compiler_pubkey.is_empty() {
+            match hex::decode(compiler_pubkey) {
+                Ok(pk) => {
+                    let pqc = synq_compiler::PQCCompiler::new(
+                        synq_compiler::PQCSecurityLevel::Enhanced
+                    );
+                    match pqc.verify_signature(&pk, sig, root, algorithm) {
+                        Ok(valid) => {
+                            sqb_sig_valid = valid;
+                            if !valid && warning.is_none() {
+                                warning = Some("SQB artifact root signature invalid — a section has been tampered".into());
+                            }
+                        }
+                        Err(e) => {
+                            if warning.is_none() {
+                                warning = Some(format!("SQB signature verification error: {}", e));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    if warning.is_none() {
+                        warning = Some(format!("Compiler pubkey hex decode failed: {}", e));
+                    }
+                }
+            }
+        }
+    } else if sqb_artifact_root.is_some() && sqb_signature.is_none() {
+        // SQB has artifact root but no signature — fail
+        if warning.is_none() {
+            warning = Some("SQB artifact has no embedded signature — cannot verify section integrity".into());
+        }
+    }
+
+    // Step 4: Check sections hash mismatch
+    if !sections_hash_match && warning.is_none() {
+        warning = Some("Sections hash mismatch — one or more SQB sections (ABI, IR, META, etc.) have been tampered".into());
+    }
+
+    let verified = hash_match && sig_valid && sqb_sig_valid && sections_hash_match;
 
     Layer3Result {
         verified,
@@ -2545,6 +2635,9 @@ async fn session_new_handler(
     // The raw bytecode field is ignored when SQB is present.
     let mut sqb_verified = None;
     let mut sqb_manifest = None;
+    let mut sqb_artifact_root: Option<[u8; 32]> = None;
+    let mut sqb_signature: Option<Vec<u8>> = None;
+    let mut sqb_sections_hash: Option<[u8; 32]> = None;
 
     let raw = if let Some(ref sqb_b64) = req.sqb {
         use base64::{Engine, prelude::BASE64_STANDARD};
@@ -2625,6 +2718,23 @@ async fn session_new_handler(
             }
         }
 
+        // Extract artifact root, signature, and sections hash for L3 verification
+        sqb_artifact_root = Some(artifact.artifact_root);
+        sqb_signature = artifact.signature.clone();
+        // Compute sections_hash = SHA3-256(concat of all section hashes EXCEPT manifest)
+        // This covers ALL non-manifest sections (CODE, ABI, IR, EFFECTS, STATE_LAYOUT, META)
+        {
+            use sha3::{Digest, Sha3_256};
+            let mut hash_concat = Vec::new();
+            for s in &artifact.sections {
+                if s.section_type != sqb::SectionType::Manifest {
+                    hash_concat.extend_from_slice(&s.hash);
+                }
+            }
+            let sections_hash = Sha3_256::digest(&hash_concat);
+            sqb_sections_hash = Some(sections_hash.into());
+        }
+
         eprintln!("[SQB] Deployed from artifact: {} sections, {} bytes, sig_verified={}",
             artifact.sections.len(), code.len(), sig_ok);
 
@@ -2672,7 +2782,15 @@ async fn session_new_handler(
         // Raw bytecode path — advisory, may skip
         sqb_manifest.as_ref().or(req.manifest.as_ref())
     };
-    let layer3_result = l3_manifest.map(|m| verify_manifest(&raw, m));
+    let layer3_result = l3_manifest.map(|m| {
+        verify_manifest(
+            &raw,
+            m,
+            sqb_artifact_root.as_ref(),
+            sqb_signature.as_deref(),
+            sqb_sections_hash.as_ref(),
+        )
+    });
 
     // Enforce L3: reject if SQB deploy and L3 failed
     if sqb_verified.unwrap_or(false) {
