@@ -483,35 +483,33 @@ contract FaultDemo {
 </script>
 
 <script type="module">
-// ── WASM Loader (bundler target — self-initializing) ─────────────
-import { compile_synq, synq_version } from '/demo/wasm/synq_compiler_wasm.js';
+// ── WASM Loader ──────────────────────────────────────────────────
+import init, { compile_synq, synq_version } from '/demo/wasm/synq_compiler_wasm.js';
 
-// Bundler-target WASM self-initializes on import — no init() needed.
-const _wasmReady = Promise.resolve(true);
+const _wasmReady = init({ module_or_path: '/demo/wasm/synq_compiler_wasm_bg.wasm' });
 
 window.SynQWasm = {
   ready: _wasmReady,
   async compile(source) {
+    await _wasmReady;
     return JSON.parse(compile_synq(source));
   },
   async version() {
+    await _wasmReady;
     return synq_version();
   }
 };
 
-// Boot probe
-(async () => {
-  try {
-    const ver = synq_version();
-    const el = document.getElementById('log');
-    const probe = JSON.parse(compile_synq('pragma synq ^0.9;\ncontract _Probe { function ping() { return 1; } }'));
-    const rawLen = probe.bytecode ? (probe.bytecode.startsWith('0x') ? probe.bytecode.length/2-1 : probe.bytecode.length/2) : 0;
-    el.textContent = `[WASM boot] version=${ver}  probe_bc=${rawLen}B\n`;
-    el.textContent += probe.success !== false ? `[WASM boot] ✓ compiler functional\n\n` : `[WASM boot] ✗ compile error: ${probe.errors}\n\n`;
-  } catch(e) {
-    document.getElementById('log').textContent = `[WASM boot] ERROR: ${e}\n\n`;
-  }
-})();
+_wasmReady.then(async () => {
+  const ver = await window.SynQWasm.version();
+  const el = document.getElementById('log');
+  const probe = await window.SynQWasm.compile('pragma synq ^0.9;\ncontract _Probe { function ping() { return 1; } }');
+  const rawLen = probe.bytecode ? (probe.bytecode.startsWith('0x') ? probe.bytecode.length/2-1 : probe.bytecode.length/2) : 0;
+  el.textContent = `[WASM boot] version=${ver}  probe_bc=${rawLen}B\n`;
+  el.textContent += probe.success !== false ? `[WASM boot] ✓ compiler functional\n\n` : `[WASM boot] ✗ compile error: ${probe.errors}\n\n`;
+}).catch(e => {
+  document.getElementById('log').textContent = `[WASM boot] ERROR: ${e}\n\n`;
+});
 </script>
 
 <script>

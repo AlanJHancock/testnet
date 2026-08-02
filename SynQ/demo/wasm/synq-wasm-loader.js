@@ -1,19 +1,22 @@
 /**
- * SynQ WASM Compiler Loader (bundler target — self-initializing)
+ * SynQ WASM Compiler Loader (--target web)
  */
-import { compile_synq, synq_version } from '/demo/wasm/synq_compiler_wasm.js';
+import init, { compile_synq, synq_version }
+    from '/demo/wasm/synq_compiler_wasm.js';
 
-const _ready = Promise.resolve(true);
+const _ready = init({ module_or_path: '/demo/wasm/synq_compiler_wasm_bg.wasm' });
 
 window.SynQWasm = {
     ready: _ready,
 
     async compile(source) {
+        await _ready;
         const json = compile_synq(source);
         return JSON.parse(json);
     },
 
     async version() {
+        await _ready;
         return synq_version();
     },
 };
