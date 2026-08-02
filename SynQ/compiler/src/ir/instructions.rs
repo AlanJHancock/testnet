@@ -13,6 +13,10 @@ use super::types::*;
 pub struct Instruction {
     pub op: IrOp,
     pub result_type: IrType,
+    /// Globally-unique value ID (assigned by push_value across the function).
+    /// For effect-only (Void) instructions, this is the local instruction index
+    /// and is not used for slot lookup.
+    pub value_id: ValueId,
     /// Source line for diagnostics (0 if unknown).
     pub line: u32,
 }
@@ -153,12 +157,12 @@ pub enum IrOp {
 impl Instruction {
     /// Create a value-producing instruction.
     pub fn value(op: IrOp, result_type: IrType) -> Self {
-        Self { op, result_type, line: 0 }
+        Self { op, result_type, value_id: 0, line: 0 }
     }
 
     /// Create an effect-only instruction (Void result).
     pub fn effect(op: IrOp) -> Self {
-        Self { op, result_type: IrType::Void, line: 0 }
+        Self { op, result_type: IrType::Void, value_id: 0, line: 0 }
     }
 
     /// Is this a terminator (Branch, Jump, or Return)?

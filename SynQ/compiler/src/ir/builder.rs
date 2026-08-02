@@ -157,9 +157,11 @@ impl IrBuilder {
         for (i, (name, ty)) in params.iter().enumerate() {
             // Param values are represented as Load instructions with special names
             // For simplicity, we use the param name as the value identifier
-            let inst = Instruction {
+            let vid = ir_fn.alloc_value();
+            let mut inst = Instruction {
                 op: IrOp::Load(format!("__param_{}", name)),
                 result_type: ty.clone(),
+                value_id: vid,
                 line: 0,
             };
             let val_id = ir_fn.blocks[0].push_value(inst);
@@ -167,10 +169,16 @@ impl IrBuilder {
         }
 
         // Build the function body
+        // Calculate next local address: after all state vars
+        let next_local = self.state_vars.len() as u32;
+
         let mut ctx = BuildContext {
             ir_fn: &mut ir_fn,
             param_values,
             local_values: HashMap::new(),
+            local_addrs: HashMap::new(),
+            next_local_addr: next_local,
+            local_types: HashMap::new(),
             state_vars: &self.state_vars,
             struct_defs: &self.struct_defs,
             enum_defs: &self.enum_defs,
@@ -201,8 +209,14 @@ struct BuildContext<'a> {
     ir_fn: &'a mut IrFunction,
     /// Parameter name → SSA value ID in entry block
     param_values: HashMap<String, ValueId>,
-    /// Local variable (let bindings) → SSA value ID
+    /// Local variable (let bindings) → SSA value ID (unused for locals, kept for compat)
     local_values: HashMap<String, ValueId>,
+    /// Local variable name → memory address (for explicit Load/Store)
+    local_addrs: HashMap<String, u32>,
+    /// Next available memory address for local variables
+    next_local_addr: u32,
+    /// Local variable name → IrType (for type-aware Load)
+    local_types: HashMap<String, IrType>,
     /// State variable name → (type, address)
     state_vars: &'a HashMap<String, (IrType, u32)>,
     /// Struct definitions
@@ -225,16 +239,18 @@ impl<'a> BuildContext<'a> {
         self.ir_fn.block(self.current_block).is_terminated()
     }
 
-    /// Push a value-producing instruction and return its ValueId.
+    /// Push a value-producing instruction and return its global ValueId.
     fn push_value(&mut self, op: IrOp, result_type: IrType) -> ValueId {
-        let inst = Instruction::value(op, result_type);
+        let vid = self.ir_fn.alloc_value();
+        let mut inst = Instruction::value(op, result_type);
+        inst.value_id = vid;
         self.ir_fn.block_mut(self.current_block).push_value(inst)
     }
 
     /// Push an effect-only instruction.
     fn push_effect(&mut self, op: IrOp) {
         let inst = Instruction::effect(op);
-        self.ir_fn.block_mut(self.current_block).push_value(inst);
+        self.ir_fn.block_mut(self.current_block).push_effect(inst);
     }
 
     /// Terminate the current block and create a new one.
@@ -266,17 +282,14 @@ impl<'a> BuildContext<'a> {
         }
     }
 
-    /// Look up the result type of a value by searching all blocks.
-    /// ValueId is per-block, so we need to find which block contains it.
+    /// Look up the result type of a value by its global ValueId.
     fn lookup_value_type(&self, vid: ValueId) -> IrType {
-        // Try block 0 first (params are always there)
-        if let Some(inst) = self.ir_fn.block(0).insts.get(vid as usize) {
-            return inst.result_type.clone();
-        }
-        // Search all blocks
+        // Search all blocks for an instruction with matching value_id
         for b in 0..self.ir_fn.blocks.len() {
-            if let Some(inst) = self.ir_fn.block(b as BlockId).insts.get(vid as usize) {
-                return inst.result_type.clone();
+            for inst in &self.ir_fn.block(b as BlockId).insts {
+                if inst.value_id == vid && !inst.result_type.is_void() {
+                    return inst.result_type.clone();
+                }
             }
         }
         // Fallback — shouldn't happen but prevents panic
@@ -324,12 +337,19 @@ impl<'a> BuildContext<'a> {
                     self.push_effect(IrOp::Store(name.clone(), val));
                     // Record the write effect
                     self.ir_fn.collected_effects.push(EffectKind::Write(name.clone()));
-                } else if let Some(_vid) = self.local_values.get(name) {
-                    // Local reassignment — in SSA, this creates a new value
-                    // and updates the local_values map.
-                    self.local_values.insert(name.clone(), val);
+                } else if self.local_addrs.contains_key(name) {
+                    // Local variable — emit explicit Store to memory slot
+                    self.push_effect(IrOp::Store(format!("__local_{}", name), val));
                 } else if let Some(_vid) = self.param_values.get(name) {
-                    // Param reassignment — same as local
+                    // Param reassignment — promote to a local variable with memory slot
+                    let addr = self.next_local_addr;
+                    self.next_local_addr += 1;
+                    self.local_addrs.insert(name.clone(), addr);
+                    let ty = self.lookup_value_type(*_vid);
+                    self.local_types.insert(name.clone(), ty);
+                    self.push_effect(IrOp::Store(format!("__local_{}", name), val));
+                } else if let Some(_vid) = self.local_values.get(name) {
+                    // Fallback — shouldn't normally happen
                     self.local_values.insert(name.clone(), val);
                 } else {
                     return Err(format!("assignment to undefined variable: {}", name));
@@ -368,7 +388,12 @@ impl<'a> BuildContext<'a> {
                         IrOp::TupleSet(obj_val, idx_val, val),
                         tuple_ty,
                     );
-                    self.local_values.insert(object.clone(), new_tuple);
+                    // Store updated struct to memory slot
+                    if self.local_addrs.contains_key(object) {
+                        self.push_effect(IrOp::Store(format!("__local_{}", object), new_tuple));
+                    } else {
+                        self.local_values.insert(object.clone(), new_tuple);
+                    }
                 }
                 Ok(())
             }
@@ -397,7 +422,13 @@ impl<'a> BuildContext<'a> {
                 } else {
                     self.lookup_value_type(val)
                 };
-                self.local_values.insert(name.clone(), val);
+                // Allocate a memory slot for this local variable
+                let addr = self.next_local_addr;
+                self.next_local_addr += 1;
+                self.local_addrs.insert(name.clone(), addr);
+                self.local_types.insert(name.clone(), result_ty.clone());
+                // Emit explicit Store so the value persists across loop iterations
+                self.push_effect(IrOp::Store(format!("__local_{}", name), val));
                 Ok(())
             }
 
@@ -409,7 +440,12 @@ impl<'a> BuildContext<'a> {
                         IrOp::FieldAccess(val, format!(".{}", i)),
                         IrType::U256,
                     );
-                    self.local_values.insert(name.clone(), elem);
+                    // Allocate memory slot for each destructured variable
+                    let addr = self.next_local_addr;
+                    self.next_local_addr += 1;
+                    self.local_addrs.insert(name.clone(), addr);
+                    self.local_types.insert(name.clone(), IrType::U256);
+                    self.push_effect(IrOp::Store(format!("__local_{}", name), elem));
                 }
                 Ok(())
             }
@@ -590,14 +626,20 @@ impl<'a> BuildContext<'a> {
             }
 
             Expression::Identifier(name) => {
-                match self.lookup_var(name) {
-                    Ok((vid, _ty)) => Ok(vid),
-                    Err(e) if e.starts_with("__state_var__") => {
-                        let var_name = &e["__state_var__".len()..];
-                        let (ty, _) = self.state_vars[var_name].clone();
-                        Ok(self.push_value(IrOp::Load(var_name.to_string()), ty))
+                // Check local variables first (explicit Load from memory slot)
+                if self.local_addrs.contains_key(name) {
+                    let ty = self.local_types.get(name).cloned().unwrap_or(IrType::U256);
+                    Ok(self.push_value(IrOp::Load(format!("__local_{}", name)), ty))
+                } else {
+                    match self.lookup_var(name) {
+                        Ok((vid, _ty)) => Ok(vid),
+                        Err(e) if e.starts_with("__state_var__") => {
+                            let var_name = &e["__state_var__".len()..];
+                            let (ty, _) = self.state_vars[var_name].clone();
+                            Ok(self.push_value(IrOp::Load(var_name.to_string()), ty))
+                        }
+                        Err(e) => Err(e),
                     }
-                    Err(e) => Err(e),
                 }
             }
 
@@ -747,14 +789,14 @@ impl<'a> BuildContext<'a> {
                     .collect();
                 let vals = vals?;
                 let types: Vec<IrType> = vals.iter()
-                    .map(|v| self.ir_fn.block(self.current_block).insts[*v as usize].result_type.clone())
+                    .map(|v| self.lookup_value_type(*v))
                     .collect();
                 Ok(self.push_value(IrOp::Tuple(vals), IrType::Tuple(types)))
             }
 
             Expression::Some(inner) => {
                 let val = self.build_expression(inner)?;
-                let inner_ty = self.ir_fn.block(self.current_block).insts[val as usize].result_type.clone();
+                let inner_ty = self.lookup_value_type(val);
                 Ok(self.push_value(IrOp::Some(val), IrType::Option(Box::new(inner_ty))))
             }
 
@@ -764,13 +806,13 @@ impl<'a> BuildContext<'a> {
 
             Expression::Ok(inner) => {
                 let val = self.build_expression(inner)?;
-                let inner_ty = self.ir_fn.block(self.current_block).insts[val as usize].result_type.clone();
+                let inner_ty = self.lookup_value_type(val);
                 Ok(self.push_value(IrOp::Ok(val), IrType::Result(Box::new(inner_ty), Box::new(IrType::U256))))
             }
 
             Expression::Err(inner) => {
                 let val = self.build_expression(inner)?;
-                let inner_ty = self.ir_fn.block(self.current_block).insts[val as usize].result_type.clone();
+                let inner_ty = self.lookup_value_type(val);
                 Ok(self.push_value(IrOp::Err(val), IrType::Result(Box::new(IrType::U256), Box::new(inner_ty))))
             }
 

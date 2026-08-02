@@ -81,6 +81,13 @@ impl IrFunction {
         id
     }
 
+    /// Allocate a globally-unique ValueId for a new value-producing instruction.
+    pub fn alloc_value(&mut self) -> ValueId {
+        let id = self.next_value;
+        self.next_value += 1;
+        id
+    }
+
     /// Get the current (last-allocated, unterminated) block.
     pub fn current_block(&mut self) -> &mut BasicBlock {
         let id = self.next_block - 1;
@@ -147,12 +154,11 @@ impl IrFunction {
             if !block.reachable {
                 out.push_str("    // UNREACHABLE\n");
             }
-            for (i, inst) in block.insts.iter().enumerate() {
-                let val_id = i as ValueId;
+            for inst in &block.insts {
                 if inst.result_type.is_void() {
-                    out.push_str(&format!("    {} = {:?}", val_id, inst.op));
+                    out.push_str(&format!("    {} = {:?}", inst.value_id, inst.op));
                 } else {
-                    out.push_str(&format!("    v{}: {} = {:?}", val_id, inst.result_type.name(), inst.op));
+                    out.push_str(&format!("    v{}: {} = {:?}", inst.value_id, inst.result_type.name(), inst.op));
                 }
                 out.push_str("\n");
             }

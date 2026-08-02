@@ -42,11 +42,18 @@ impl BasicBlock {
         self.terminator().map(|t| t.successors()).unwrap_or_default()
     }
 
-    /// Push a value-producing instruction and return its ValueId.
+    /// Push a value-producing instruction and return its global ValueId.
+    /// The caller must allocate a globally-unique ValueId and set it on the instruction.
     pub fn push_value(&mut self, inst: Instruction) -> ValueId {
-        let id = self.insts.len() as ValueId;
+        let id = inst.value_id;
         self.insts.push(inst);
         id
+    }
+
+    /// Push an effect-only instruction. Uses local index as value_id (unused for Void).
+    pub fn push_effect(&mut self, mut inst: Instruction) {
+        inst.value_id = self.insts.len() as ValueId;
+        self.insts.push(inst);
     }
 
     /// Push a terminator instruction (must be last).

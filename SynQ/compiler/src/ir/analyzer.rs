@@ -78,7 +78,7 @@ fn analyze_function(func: &mut IrFunction, report: &mut AnalysisReport) -> Funct
     // 3. Block/instruction counts
     stats.block_count = func.blocks.len();
     stats.instruction_count = func.inst_count();
-    stats.value_count = func.inst_count(); // ValueId = InstId in our scheme
+    stats.value_count = func.next_value as usize; // Global ValueId counter
 
     // 4. Collect effects from instructions
     for block in &func.blocks {

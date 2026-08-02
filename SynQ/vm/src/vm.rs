@@ -1920,4 +1920,525 @@ mod authority_tests {
         let _ = vm.execute_instruction();
         assert_eq!(vm.fuel_used(), single_cost * 2);
     }
+
+    // ── End-to-end IR compilation + VM execution tests ─────────────────────────
+    //
+    // These tests compile contracts via the IR backend (compile_ir), load the
+    // resulting bytecode into the QVM, and execute functions to verify that
+    // state variables are correctly updated — not just that compilation succeeds.
+    //
+    // They specifically catch the class of bug where cross-block SSA value
+    // references resolve to the wrong memory slot (ValueId collision across
+    // blocks), which compile-only tests cannot detect.
+
+    fn compile_ir_and_load(source: &str) -> QuantumVM {
+        let result = synq_compiler::compile_ir(source)
+            .expect("IR compilation should succeed");
+        assert!(!result.bytecode.is_empty(), "IR bytecode should not be empty");
+
+        // Verify state vars are present
+        assert!(!result.state_vars.is_empty(), "should have state vars");
+
+        let mut vm = QuantumVM::new();
+        vm.load_bytecode(&result.bytecode)
+            .expect("bytecode should load into VM");
+        vm
+    }
+
+    #[test]
+    fn test_ir_loop_state_vars_update() {
+        // This contract has a loop (runIterations) that:
+        // 1. Runs a while loop accumulating a local `total`
+        // 2. After the loop, updates state vars `accumulator` and `iterationCount`
+        //
+        // The bug: ValueId collisions across blocks caused the lowerer to
+        // resolve cross-block value references to the wrong memory slots,
+        // so state vars never updated (stayed at 0).
+        let source = r#"pragma synq ^0.9;
+contract LoopStateTest {
+    state {
+        accumulator: u256;
+        iterationCount: u256;
+        initialised: bool;
+    }
+
+    @public
+    function init() -> bool {
+        if (initialised) { return false; }
+        accumulator = 0;
+        iterationCount = 0;
+        initialised = true;
+        return true;
+    }
+
+    @public
+    function runIterations(n: u256) -> u256 {
+        require(initialised, "not initialised");
+        let total: u256 = 0;
+        let i: u256 = 0;
+        while (i < n) {
+            total = total + i;
+            i = i + 1;
+        }
+        accumulator = accumulator + total;
+        iterationCount = iterationCount + n;
+        return total;
+    }
+
+    @public
+    function get_accumulator() -> u256 {
+        return accumulator;
+    }
+
+    @public
+    function get_iteration_count() -> u256 {
+        return iterationCount;
+    }
+}
+"#;
+
+        let mut vm = compile_ir_and_load(source);
+
+        // Step 1: Call init() — should return true and set initialised
+        let init_result = vm.call_function("init", &[])
+            .expect("init() should execute");
+        match init_result {
+            Some(Value::I32(1)) | Some(Value::Bool(true)) => {},
+            other => panic!("init() should return true, got {:?}", other),
+        }
+
+        // Step 2: Call runIterations(8) — should return 0+1+2+3+4+5+6+7 = 28
+        let result = vm.call_function("runIterations", &[Value::U256(U256::from(8u32))])
+            .expect("runIterations(8) should execute");
+        match result {
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(28u32),
+                "runIterations(8) should return 28 (sum 0..=7), got {}", v),
+            Some(Value::I32(v)) => assert_eq!(v, 28,
+                "runIterations(8) should return 28 (sum 0..=7), got {}", v),
+            Some(Value::I32(v)) => assert_eq!(v, 28,
+                "runIterations(8) should return 28 (sum 0..=7), got {}", v),
+            other => panic!("runIterations should return U256 or I32, got {:?}", other),
+        }
+
+        // Step 3: Verify state variables actually updated
+        // accumulator should be 28 (0+1+2+...+7)
+        let acc = vm.call_function("get_accumulator", &[])
+            .expect("get_accumulator() should execute");
+        match acc {
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(28u32),
+                "accumulator should be 28 after runIterations(8), got {}", v),
+            Some(Value::I32(v)) => assert_eq!(v, 28,
+                "accumulator should be 28 after runIterations(8), got {}", v),
+            other => panic!("get_accumulator should return U256 or I32, got {:?}", other),
+        }
+
+        // iterationCount should be 8
+        let count = vm.call_function("get_iteration_count", &[])
+            .expect("get_iteration_count() should execute");
+        match count {
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(8u32),
+                "iterationCount should be 8 after runIterations(8), got {}", v),
+            Some(Value::I32(v)) => assert_eq!(v, 8,
+                "iterationCount should be 8 after runIterations(8), got {}", v),
+            other => panic!("get_iteration_count should return U256 or I32, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ir_loop_factorial() {
+        // Test a pure loop function (factorial) to verify correct return values.
+        // factorial(5) = 5*4*3*2*1 = 120
+        let source = r#"pragma synq ^0.9;
+contract FactorialTest {
+    state {
+        initialised: bool;
+    }
+
+    @public
+    function init() -> bool {
+        if (initialised) { return false; }
+        initialised = true;
+        return true;
+    }
+
+    @public
+    function factorial(n: u256) -> u256 {
+        let result: u256 = 1;
+        let i: u256 = 1;
+        while (i <= n) {
+            result = result * i;
+            i = i + 1;
+        }
+        return result;
+    }
+}
+"#;
+
+        let mut vm = compile_ir_and_load(source);
+
+        // Init
+        vm.call_function("init", &[]).expect("init() should succeed");
+
+        // factorial(5) = 120
+        let result = vm.call_function("factorial", &[Value::U256(U256::from(5u32))])
+            .expect("factorial(5) should execute");
+        match result {
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(120u32),
+                "factorial(5) should be 120, got {}", v),
+            Some(Value::I32(v)) => assert_eq!(v, 120,
+                "factorial(5) should be 120, got {}", v),
+            other => panic!("factorial should return U256 or I32, got {:?}", other),
+        }
+
+        // factorial(10) = 3628800
+        let result = vm.call_function("factorial", &[Value::U256(U256::from(10u32))])
+            .expect("factorial(10) should execute");
+        match result {
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(3628800u32),
+                "factorial(10) should be 3628800, got {}", v),
+            Some(Value::I32(v)) => assert_eq!(v, 3628800,
+                "factorial(10) should be 3628800, got {}", v),
+            other => panic!("factorial should return U256 or I32, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ir_loop_sum_range() {
+        // Test sumRange — a loop that accumulates and returns the result.
+        // sumRange(1, 100) = 5050
+        let source = r#"pragma synq ^0.9;
+contract SumRangeTest {
+    state {
+        initialised: bool;
+    }
+
+    @public
+    function init() -> bool {
+        if (initialised) { return false; }
+        initialised = true;
+        return true;
+    }
+
+    @public
+    function sumRange(start: u256, end: u256) -> u256 {
+        let total: u256 = 0;
+        let i: u256 = start;
+        while (i <= end) {
+            total = total + i;
+            i = i + 1;
+        }
+        return total;
+    }
+}
+"#;
+
+        let mut vm = compile_ir_and_load(source);
+        vm.call_function("init", &[]).expect("init() should succeed");
+
+        // sumRange(1, 100) = 5050
+        let result = vm.call_function("sumRange", &[Value::U256(U256::from(1u32)), Value::U256(U256::from(100u32))])
+            .expect("sumRange(1, 100) should execute");
+        match result {
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(5050u32),
+                "sumRange(1,100) should be 5050, got {}", v),
+            Some(Value::I32(v)) => assert_eq!(v, 5050,
+                "sumRange(1,100) should be 5050, got {}", v),
+            other => panic!("sumRange should return U256 or I32, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ir_loop_accumulating_state_across_calls() {
+        // Call runIterations multiple times and verify state accumulates correctly.
+        // This tests that state variables persist across calls when compiled via IR.
+        let source = r#"pragma synq ^0.9;
+contract AccumStateTest {
+    state {
+        total: u256;
+        initialised: bool;
+    }
+
+    @public
+    function init() -> bool {
+        if (initialised) { return false; }
+        total = 0;
+        initialised = true;
+        return true;
+    }
+
+    @public
+    function addRange(n: u256) -> u256 {
+        require(initialised, "not initialised");
+        let sum: u256 = 0;
+        let i: u256 = 0;
+        while (i < n) {
+            sum = sum + i;
+            i = i + 1;
+        }
+        total = total + sum;
+        return total;
+    }
+
+    @public
+    function get_total() -> u256 {
+        return total;
+    }
+}
+"#;
+
+        let mut vm = compile_ir_and_load(source);
+        vm.call_function("init", &[]).expect("init() should succeed");
+
+        // First call: addRange(5) → sum = 0+1+2+3+4 = 10, total = 10
+        let r1 = vm.call_function("addRange", &[Value::U256(U256::from(5u32))])
+            .expect("addRange(5) should execute");
+        match r1 {
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(10u32),
+                "after addRange(5), total should be 10, got {}", v),
+            Some(Value::I32(v)) => assert_eq!(v, 10,
+                "after addRange(5), total should be 10, got {}", v),
+            _ => panic!("expected U256"),
+        }
+
+        // Second call: addRange(4) → sum = 0+1+2+3 = 6, total = 10 + 6 = 16
+        let r2 = vm.call_function("addRange", &[Value::U256(U256::from(4u32))])
+            .expect("addRange(4) should execute");
+        match r2 {
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(16u32),
+                "after addRange(4), total should be 16, got {}", v),
+            Some(Value::I32(v)) => assert_eq!(v, 16,
+                "after addRange(4), total should be 16, got {}", v),
+            _ => panic!("expected U256"),
+        }
+
+        // Verify via getter
+        let total = vm.call_function("get_total", &[])
+            .expect("get_total() should execute");
+        match total {
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(16u32),
+                "get_total should be 16, got {}", v),
+            Some(Value::I32(v)) => assert_eq!(v, 16,
+                "get_total should be 16, got {}", v),
+            _ => panic!("expected U256"),
+        }
+    }
+
+    #[test]
+    fn test_ir_loop_continue() {
+        // Test a loop with `continue` — exercises branching within a loop body.
+        // countEven(10) counts even numbers 2,4,6,8,10 → 5
+        let source = r#"pragma synq ^0.9;
+contract ContinueTest {
+    state {
+        initialised: bool;
+    }
+
+    @public
+    function init() -> bool {
+        if (initialised) { return false; }
+        initialised = true;
+        return true;
+    }
+
+    @public
+    function countEven(n: u256) -> u256 {
+        let count: u256 = 0;
+        let i: u256 = 1;
+        while (i <= n) {
+            let remainder: u256 = i % 2;
+            if (remainder != 0) {
+                i = i + 1;
+                continue;
+            }
+            count = count + 1;
+            i = i + 1;
+        }
+        return count;
+    }
+}
+"#;
+
+        let mut vm = compile_ir_and_load(source);
+        vm.call_function("init", &[]).expect("init() should succeed");
+
+        // countEven(10) = 5 (even numbers: 2,4,6,8,10)
+        let result = vm.call_function("countEven", &[Value::U256(U256::from(10u32))])
+            .expect("countEven(10) should execute");
+        match result {
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(5u32),
+                "countEven(10) should be 5, got {}", v),
+            Some(Value::I32(v)) => assert_eq!(v, 5,
+                "countEven(10) should be 5, got {}", v),
+            other => panic!("countEven should return U256 or I32, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_ir_loop_sqrt_binary_search() {
+        // Test binary search inside a loop — the overflow-safe sqrt pattern.
+        // sqrtFloor(100) = 10, sqrtFloor(99) = 9, sqrtFloor(1000000) = 1000
+        let source = r#"pragma synq ^0.9;
+contract SqrtTest {
+    state {
+        initialised: bool;
+    }
+
+    @public
+    function init() -> bool {
+        if (initialised) { return false; }
+        initialised = true;
+        return true;
+    }
+
+    @public
+    function sqrtFloor(target: u256) -> u256 {
+        if (target == 0) { return 0; }
+        let lo: u256 = 1;
+        let hi: u256 = target;
+        let mid: u256 = 0;
+        let result: u256 = 0;
+        while (lo <= hi) {
+            mid = lo + (hi - lo) / 2;
+            if (mid <= target / mid) {
+                result = mid;
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        return result;
+    }
+}
+"#;
+
+        let mut vm = compile_ir_and_load(source);
+        vm.call_function("init", &[]).expect("init() should succeed");
+
+        // sqrtFloor(100) = 10
+        let r1 = vm.call_function("sqrtFloor", &[Value::U256(U256::from(100u32))])
+            .expect("sqrtFloor(100) should execute");
+        match r1 {
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(10u32),
+                "sqrtFloor(100) should be 10, got {}", v),
+            Some(Value::I32(v)) => assert_eq!(v, 10,
+                "sqrtFloor(100) should be 10, got {}", v),
+            _ => panic!("expected U256"),
+        }
+
+        // sqrtFloor(99) = 9
+        let r2 = vm.call_function("sqrtFloor", &[Value::U256(U256::from(99u32))])
+            .expect("sqrtFloor(99) should execute");
+        match r2 {
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(9u32),
+                "sqrtFloor(99) should be 9, got {}", v),
+            Some(Value::I32(v)) => assert_eq!(v, 9,
+                "sqrtFloor(99) should be 9, got {}", v),
+            _ => panic!("expected U256"),
+        }
+
+        // sqrtFloor(1000000) = 1000
+        let r3 = vm.call_function("sqrtFloor", &[Value::U256(U256::from(1000000u32))])
+            .expect("sqrtFloor(1000000) should execute");
+        match r3 {
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(1000u32),
+                "sqrtFloor(1000000) should be 1000, got {}", v),
+            Some(Value::I32(v)) => assert_eq!(v, 1000,
+                "sqrtFloor(1000000) should be 1000, got {}", v),
+            _ => panic!("expected U256"),
+        }
+    }
+
+    #[test]
+    fn test_ir_bytecode_matches_codegen_for_loops() {
+        // Verify that IR and direct codegen produce FUNCTIONALLY EQUIVALENT
+        // bytecode for a contract with loops. The IR backend uses a slot-based
+        // approach (different memory layout), so byte-for-byte equality is not
+        // expected. Instead, we verify both compile and execute correctly.
+        let source = r#"pragma synq ^0.9;
+contract BytecodeMatchLoop {
+    state {
+        counter: u256;
+        sum: u256;
+        initialised: bool;
+    }
+
+    @public
+    function init() -> bool {
+        if (initialised) { return false; }
+        counter = 0;
+        sum = 0;
+        initialised = true;
+        return true;
+    }
+
+    @public
+    function loop_sum(n: u256) -> bool {
+        let i: u256 = 0;
+        sum = 0;
+        while (i < n) {
+            sum = sum + i;
+            i = i + 1;
+        }
+        counter = counter + n;
+        return true;
+    }
+
+    @public
+    function get_sum() -> u256 {
+        return sum;
+    }
+
+    @public
+    function get_counter() -> u256 {
+        return counter;
+    }
+}
+"#;
+
+        // Both should compile successfully
+        let result_codegen = synq_compiler::compile(source)
+            .expect("direct codegen should succeed");
+        let result_ir = synq_compiler::compile_ir(source)
+            .expect("IR compile should succeed");
+        assert!(!result_codegen.bytecode.is_empty(), "codegen bytecode empty");
+        assert!(!result_ir.bytecode.is_empty(), "IR bytecode empty");
+
+        // Both should contain JumpIf (0x31) for the while loop
+        let cg_code = &result_codegen.bytecode[15..];
+        let ir_code = &result_ir.bytecode[15..];
+        assert!(cg_code.contains(&0x31), "codegen should have JumpIf for while loop");
+        assert!(ir_code.contains(&0x31), "IR should have JumpIf for while loop");
+
+        // Execute both and compare results
+        let mut vm_cg = QuantumVM::new();
+        vm_cg.load_bytecode(&result_codegen.bytecode).expect("cg load");
+        let mut vm_ir = QuantumVM::new();
+        vm_ir.load_bytecode(&result_ir.bytecode).expect("ir load");
+
+        // init() on both
+        let cg_init = vm_cg.call_function("init", &[]).expect("cg init");
+        let ir_init = vm_ir.call_function("init", &[]).expect("ir init");
+        assert!(format!("{:?}", cg_init) == format!("{:?}", ir_init),
+            "init results differ: cg={:?} ir={:?}", cg_init, ir_init);
+
+        // loop_sum(5) on both — should accumulate sum=10, counter=5
+        let n = Value::U256(U256::from(5u32));
+        let cg_loop = vm_cg.call_function("loop_sum", &[n.clone()]).expect("cg loop_sum");
+        let ir_loop = vm_ir.call_function("loop_sum", &[n.clone()]).expect("ir loop_sum");
+        assert!(format!("{:?}", cg_loop) == format!("{:?}", ir_loop),
+            "loop_sum results differ: cg={:?} ir={:?}", cg_loop, ir_loop);
+
+        // Verify state vars match
+        let cg_sum = vm_cg.call_function("get_sum", &[]).expect("cg get_sum");
+        let ir_sum = vm_ir.call_function("get_sum", &[]).expect("ir get_sum");
+        assert!(format!("{:?}", cg_sum) == format!("{:?}", ir_sum),
+            "sum mismatch: cg={:?} ir={:?}", cg_sum, ir_sum);
+
+        let cg_ctr = vm_cg.call_function("get_counter", &[]).expect("cg get_counter");
+        let ir_ctr = vm_ir.call_function("get_counter", &[]).expect("ir get_counter");
+        assert!(format!("{:?}", cg_ctr) == format!("{:?}", ir_ctr),
+            "counter mismatch: cg={:?} ir={:?}", cg_ctr, ir_ctr);
+    }
+
+
 }

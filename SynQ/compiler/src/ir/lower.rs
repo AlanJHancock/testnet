@@ -33,8 +33,14 @@ pub struct IrLowerer {
     state_var_addrs: HashMap<String, u32>,
     /// Parameter name → memory address (per function).
     param_addrs: HashMap<String, u32>,
-    /// SSA value (block_id, value_id) → memory slot address.
-    value_slots: HashMap<(BlockId, ValueId), u32>,
+    /// Local variable name (__local_*) → memory address (per function).
+    local_var_addrs: HashMap<String, u32>,
+    /// Next available local variable address.
+    next_local_addr: u32,
+    /// Per-function param addresses saved for dispatch table.
+    all_param_addrs: HashMap<String, HashMap<String, u32>>,
+    /// SSA value (global ValueId) → memory slot address.
+    value_slots: HashMap<ValueId, u32>,
     /// Next available slot address.
     next_slot: u32,
     /// Block ID → code position (for jump patching).
@@ -56,6 +62,9 @@ impl IrLowerer {
             asm: Assembler::new(),
             state_var_addrs: HashMap::new(),
             param_addrs: HashMap::new(),
+            local_var_addrs: HashMap::new(),
+            next_local_addr: 0,
+            all_param_addrs: HashMap::new(),
             value_slots: HashMap::new(),
             next_slot: SSA_SLOT_BASE,
             block_positions: HashMap::new(),
@@ -95,9 +104,10 @@ impl IrLowerer {
         for func in &module.functions {
             let entry = *lowerer.function_entries.get(&func.name)
                 .ok_or_else(|| format!("missing entry for {}", func.name))?;
+            let saved_params = lowerer.all_param_addrs.get(&func.name);
             let p_addrs: Vec<u32> = func.params.iter()
                 .map(|(name, _)| {
-                    lowerer.param_addrs.get(name)
+                    saved_params.and_then(|m| m.get(name))
                         .copied()
                         .unwrap_or(SSA_SLOT_BASE)
                 })
@@ -123,6 +133,9 @@ impl IrLowerer {
         self.block_positions.clear();
         self.pending_jumps.clear();
         self.param_addrs.clear();
+        self.local_var_addrs.clear();
+        // Local addresses start after state vars
+        self.next_local_addr = self.state_var_addrs.len() as u32;
 
         // Assign parameter addresses
         const FUNCTION_LOCAL_BASE: u32 = 1024;
@@ -141,12 +154,11 @@ impl IrLowerer {
         // ── Authority prologue ───────────────────────────────────────────
         self.emit_authority_prologue(func)?;
 
-        // ── Assign slots to all SSA values ───────────────────────────────
+        // ── Assign slots to all SSA values (global ValueIds) ────────────
         for block in &func.blocks {
-            for (i, inst) in block.insts.iter().enumerate() {
+            for inst in &block.insts {
                 if !inst.result_type.is_void() {
-                    let vid = i as ValueId;
-                    self.value_slots.insert((block.id, vid), self.next_slot);
+                    self.value_slots.insert(inst.value_id, self.next_slot);
                     self.next_slot += 1;
                 }
             }
@@ -165,6 +177,9 @@ impl IrLowerer {
 
         // Patch jumps within this function
         self.patch_jumps()?;
+
+        // Save param addresses for the dispatch table
+        self.all_param_addrs.insert(func.name.clone(), self.param_addrs.clone());
 
         Ok(())
     }
@@ -274,7 +289,7 @@ impl IrLowerer {
         for block in &func.blocks {
             for (i, inst) in block.insts.iter().enumerate() {
                 if let IrOp::Phi(pairs) = &inst.op {
-                    let phi_slot = self.value_slots[&(block.id, i as ValueId)];
+                    let phi_slot = self.value_slots[&block.insts[i].value_id];
                     for (pred, val) in pairs {
                         self.phi_stores.entry(*pred)
                             .or_insert_with(Vec::new)
@@ -313,7 +328,6 @@ impl IrLowerer {
         // Determine which instructions are terminators
         let n = block.insts.len();
         for (i, inst) in block.insts.iter().enumerate() {
-            let vid = i as ValueId;
             let is_terminator = inst.is_terminator();
 
             // Before the terminator, emit phi stores for this block's successors
@@ -326,11 +340,11 @@ impl IrLowerer {
                 continue;
             }
 
-            self.lower_instruction(inst, vid, block.id, func, module)?;
+            self.lower_instruction(inst, block.id, func, module)?;
 
             // Store result to slot (if value-producing)
             if !inst.result_type.is_void() && !is_terminator {
-                let slot = self.value_slots[&(block.id, vid)];
+                let slot = self.value_slots[&inst.value_id];
                 self.asm.emit_op(OpCode::Push);
                 self.asm.emit_u32(slot);
                 self.asm.emit_op(OpCode::Store);
@@ -353,13 +367,8 @@ impl IrLowerer {
                 // The value might be defined in the predecessor block,
                 // or in a dominator (e.g., a parameter loaded in the entry block).
                 // First try the predecessor, then search all blocks.
-                let src_slot = self.value_slots.get(&(block_id, val_id))
-                    .or_else(|| {
-                        self.value_slots.iter()
-                            .find(|((_, v), _)| *v == val_id)
-                            .map(|(_, addr)| addr)
-                    })
-                    .ok_or_else(|| format!("missing slot for value {} in block {}", val_id, block_id))?;
+                let src_slot = self.value_slots.get(&val_id)
+                    .ok_or_else(|| format!("missing slot for phi value {}", val_id))?;
                 self.asm.emit_op(OpCode::Push);
                 self.asm.emit_u32(*src_slot);
                 self.asm.emit_op(OpCode::Load);
@@ -375,7 +384,6 @@ impl IrLowerer {
     fn lower_instruction(
         &mut self,
         inst: &Instruction,
-        vid: ValueId,
         block_id: BlockId,
         func: &IrFunction,
         module: &IrModule,
@@ -383,13 +391,8 @@ impl IrLowerer {
         // Helper: load a value from its slot onto the stack
         macro_rules! load_val {
             ($self:expr, $v:expr) => {{
-                let slot = $self.value_slots.get(&(block_id, $v))
-                    .or_else(|| {
-                        $self.value_slots.iter()
-                            .find(|((_, v), _)| *v == $v)
-                            .map(|(_, addr)| addr)
-                    })
-                    .ok_or_else(|| format!("missing slot for value {} in block {}", $v, block_id))?;
+                let slot = $self.value_slots.get(&$v)
+                    .ok_or_else(|| format!("missing slot for value {}", $v))?;
                 $self.asm.emit_op(OpCode::Push);
                 $self.asm.emit_u32(*slot);
                 $self.asm.emit_op(OpCode::Load);
@@ -454,6 +457,17 @@ impl IrLowerer {
                     self.asm.emit_op(OpCode::Push);
                     self.asm.emit_u32(*addr);
                     self.asm.emit_op(OpCode::Load);
+                } else if name.starts_with("__local_") {
+                    // Local variable — allocate or reuse address dynamically
+                    let addr = *self.local_var_addrs.entry(name.clone())
+                        .or_insert_with(|| {
+                            let a = self.next_local_addr;
+                            self.next_local_addr += 1;
+                            a
+                        });
+                    self.asm.emit_op(OpCode::Push);
+                    self.asm.emit_u32(addr);
+                    self.asm.emit_op(OpCode::Load);
                 } else {
                     return Err(format!("unknown load target: {}", name));
                 }
@@ -461,11 +475,24 @@ impl IrLowerer {
 
             IrOp::Store(name, val) => {
                 load_val!(self, *val);
-                let addr = self.state_var_addrs.get(name)
-                    .ok_or_else(|| format!("store to unknown var: {}", name))?;
-                self.asm.emit_op(OpCode::Push);
-                self.asm.emit_u32(*addr);
-                self.asm.emit_op(OpCode::Store);
+                if let Some(addr) = self.state_var_addrs.get(name) {
+                    self.asm.emit_op(OpCode::Push);
+                    self.asm.emit_u32(*addr);
+                    self.asm.emit_op(OpCode::Store);
+                } else if name.starts_with("__local_") {
+                    // Local variable — allocate or reuse address dynamically
+                    let addr = *self.local_var_addrs.entry(name.clone())
+                        .or_insert_with(|| {
+                            let a = self.next_local_addr;
+                            self.next_local_addr += 1;
+                            a
+                        });
+                    self.asm.emit_op(OpCode::Push);
+                    self.asm.emit_u32(addr);
+                    self.asm.emit_op(OpCode::Store);
+                } else {
+                    return Err(format!("store to unknown var: {}", name));
+                }
             }
 
             IrOp::Caller => {

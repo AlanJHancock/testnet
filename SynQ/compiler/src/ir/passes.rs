@@ -20,11 +20,10 @@ use super::function::*;
 pub fn run_passes(func: &mut IrFunction) -> Vec<String> {
     let mut reports = Vec::new();
 
-    // 1. Insert phi nodes at merge points
-    let (phi_count, _phi_debug) = insert_phi_nodes(func);
-    if phi_count > 0 {
-        reports.push(format!("phi_insertion: {} phi nodes placed", phi_count));
-    }
+    // 1. Phi node insertion disabled — all variables (state + local) now use
+    //    explicit Load/Store with memory slots, making phi nodes unnecessary.
+    //    The memory slot naturally handles cross-block value propagation.
+    let phi_count = 0;
 
     // 2. Constant folding
     let folded = constant_folding(func);
@@ -76,7 +75,7 @@ pub fn insert_phi_nodes(func: &mut IrFunction) -> (usize, String) {
     // Collect variable definitions: for each variable name, which blocks define it?
     // A "definition" is any instruction that produces a value associated with a
     // variable name (Load for state vars, or the initial assignment for locals).
-    // Since our IR uses ValueId = InstId, we track which blocks have Store/let
+    // Since our IR uses global ValueIds, we track which blocks have Store/let
     // operations for each named variable.
     let mut var_defs: HashMap<String, HashSet<BlockId>> = HashMap::new();
 
@@ -84,7 +83,10 @@ pub fn insert_phi_nodes(func: &mut IrFunction) -> (usize, String) {
         for inst in &block.insts {
             match &inst.op {
                 IrOp::Store(name, _) => {
-                    var_defs.entry(name.clone()).or_default().insert(block.id);
+                    // Skip local variables — they use explicit memory slots, no phi needed
+                    if !name.starts_with("__local_") {
+                        var_defs.entry(name.clone()).or_default().insert(block.id);
+                    }
                 }
                 IrOp::Load(name) if !name.starts_with("__param_") => {
                     // Loads are reads, not definitions — but we track them
@@ -151,6 +153,7 @@ pub fn insert_phi_nodes(func: &mut IrFunction) -> (usize, String) {
             let phi_inst = Instruction {
                 op: IrOp::Phi(phi_pairs),
                 result_type: ty.clone(),
+                value_id: func.alloc_value(),
                 line: 0,
             };
             phi_insts.push((*block_id, phi_inst));
@@ -178,8 +181,10 @@ fn infer_var_type(func: &IrFunction, var_name: &str) -> IrType {
                 if name == var_name {
                     // Find the instruction that produced val_id
                     if let Some(src_block) = find_def_block(func, *val_id) {
-                        if let Some(src_inst) = func.blocks[src_block as usize].insts.get(*val_id as usize) {
-                            return src_inst.result_type.clone();
+                        for inst in &func.blocks[src_block as usize].insts {
+                            if inst.value_id == *val_id {
+                                return inst.result_type.clone();
+                            }
                         }
                     }
                     return IrType::U256; // Fallback
@@ -193,8 +198,10 @@ fn infer_var_type(func: &IrFunction, var_name: &str) -> IrType {
 /// Find the block that contains a given ValueId definition.
 fn find_def_block(func: &IrFunction, val_id: ValueId) -> Option<BlockId> {
     for block in &func.blocks {
-        if (val_id as usize) < block.insts.len() {
-            return Some(block.id);
+        for inst in &block.insts {
+            if inst.value_id == val_id && !inst.result_type.is_void() {
+                return Some(block.id);
+            }
         }
     }
     None
@@ -251,9 +258,8 @@ pub fn validate_ssa(func: &IrFunction) -> Vec<String> {
     // Check: every used ValueId is defined (in the same block or a predecessor)
     let mut defined_values: HashSet<ValueId> = HashSet::new();
     for block in &func.blocks {
-        for (i, inst) in block.insts.iter().enumerate() {
-            let val_id = i as ValueId;
-            defined_values.insert(val_id);
+        for (idx, inst) in block.insts.iter().enumerate() {
+            defined_values.insert(inst.value_id);
 
             for input in inst.input_values() {
                 if !defined_values.contains(&input) {
@@ -270,12 +276,12 @@ pub fn validate_ssa(func: &IrFunction) -> Vec<String> {
                     // Allow references to values from predecessor blocks
                     // (our ValueId = InstId is global within the function,
                     // so a lower InstId from another block is valid)
-                    if input < val_id {
+                    if !func.blocks.iter().any(|b| b.insts.iter().any(|i| i.value_id == input && !i.result_type.is_void())) {
                         continue;
                     }
                     errors.push(format!(
                         "fn {}: block {} inst {} uses undefined value v{}",
-                        func.name, block.id, i, input
+                        func.name, block.id, idx, input
                     ));
                 }
             }
@@ -407,8 +413,8 @@ pub fn constant_folding(func: &mut IrFunction) -> usize {
         // Track constant values: ValueId → Literal
         let mut const_map: HashMap<ValueId, Literal> = HashMap::new();
 
-        for (i, inst) in block.insts.iter_mut().enumerate() {
-            let val_id = i as ValueId;
+        for inst in block.insts.iter_mut() {
+            let val_id = inst.value_id;
 
             // Track constants
             if let IrOp::Const(ref lit) = inst.op {
@@ -503,8 +509,8 @@ pub fn copy_propagation(func: &mut IrFunction) -> usize {
     let mut copy_map: HashMap<ValueId, ValueId> = HashMap::new();
 
     for block in func.blocks.iter_mut() {
-        for (i, inst) in block.insts.iter_mut().enumerate() {
-            let val_id = i as ValueId;
+        for inst in block.insts.iter_mut() {
+            let val_id = inst.value_id;
 
             // Detect simple copies: UnaryOp(Identity-like) or direct value passthrough
             // For now, we don't have identity operations, so this is a no-op
