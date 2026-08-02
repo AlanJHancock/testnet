@@ -21,7 +21,7 @@
 | Feature | Status | Notes |
 |---------|--------|-------|
 | pest grammar parser | ✅ Production | Contracts, state, functions, expressions, attributes, enums, structs |
-| Precedence-climbing expression parser | ✅ Production | +, -, *, /, %, ==, !=, <, <=, >, >=, &&, \|\| |
+| Precedence-climbing expression parser | ✅ Production | Arithmetic, comparison, logical operators |
 | Semantic analysis | ✅ Production | Type checking, attribute validation, PQC builtin resolution |
 | SSA IR builder | ✅ Production | AST → SSA with basic blocks, CFG, predecessors, terminators |
 | IR optimization passes | ✅ Production | Phi insertion (Cytron IDF), DCE, constant folding, copy propagation |
@@ -33,7 +33,7 @@
 | WASM compiler build | ✅ Production | Browser-side compilation via synq-compiler-wasm |
 | Module system | ❌ Missing | No module/use/import — single-file contracts only |
 | Pattern matching | ❌ Missing | No match expressions |
-| Generic types | ❌ Missing | No parameterized types (UInt<N>, etc.) |
+| Generic types | ❌ Missing | No parameterized types (UInt&lt;N&gt;, etc.) |
 
 ## VM / Runtime
 
@@ -187,11 +187,11 @@
 | Bytecode disassembly | ✅ Production | Opcode-by-opcode view |
 | Verify badge (L1 + L2) | ✅ Production | Green/yellow/red status |
 | SQB download | ✅ Production | Named .sqb files |
-| Wallet integration | ✅ Production | Three-tier (extension > device-link > ephemeral) |
+| Wallet integration | ✅ Production | Three-tier (extension, device-link, ephemeral) |
 | EIP-6963 discovery | ✅ Production | Multi-provider wallet detection |
 | MetaMask chain switch | ✅ Production | Chain 1266 via RPC stub |
 | Contract templates | ✅ Production | 10 templates |
-| QVM status indicator | ✅ Production | "QVM — SynQ Virtual Machine active" |
+| QVM status indicator | ✅ Production | QVM — SynQ Virtual Machine active |
 
 ---
 
