@@ -346,7 +346,7 @@ impl IrLowerer {
             if !inst.result_type.is_void() && !is_terminator {
                 let slot = self.value_slots[&inst.value_id];
                 self.asm.emit_op(OpCode::Push);
-                self.asm.emit_u32(slot);
+                self.asm.emit_i32(slot as i32);
                 self.asm.emit_op(OpCode::Store);
             }
         }
@@ -370,10 +370,10 @@ impl IrLowerer {
                 let src_slot = self.value_slots.get(&val_id)
                     .ok_or_else(|| format!("missing slot for phi value {}", val_id))?;
                 self.asm.emit_op(OpCode::Push);
-                self.asm.emit_u32(*src_slot);
+                self.asm.emit_i32(*src_slot as i32);
                 self.asm.emit_op(OpCode::Load);
                 self.asm.emit_op(OpCode::Push);
-                self.asm.emit_u32(phi_slot);
+                self.asm.emit_i32(phi_slot as i32);
                 self.asm.emit_op(OpCode::Store);
             }
         }
@@ -394,7 +394,7 @@ impl IrLowerer {
                 let slot = $self.value_slots.get(&$v)
                     .ok_or_else(|| format!("missing slot for value {}", $v))?;
                 $self.asm.emit_op(OpCode::Push);
-                $self.asm.emit_u32(*slot);
+                $self.asm.emit_i32(*slot as i32);
                 $self.asm.emit_op(OpCode::Load);
             }};
         }
@@ -451,11 +451,11 @@ impl IrLowerer {
                     let addr = self.param_addrs.get(rest)
                         .ok_or_else(|| format!("unknown param: {}", rest))?;
                     self.asm.emit_op(OpCode::Push);
-                    self.asm.emit_u32(*addr);
+                    self.asm.emit_i32(*addr as i32);
                     self.asm.emit_op(OpCode::Load);
                 } else if let Some(addr) = self.state_var_addrs.get(name) {
                     self.asm.emit_op(OpCode::Push);
-                    self.asm.emit_u32(*addr);
+                    self.asm.emit_i32(*addr as i32);
                     self.asm.emit_op(OpCode::Load);
                 } else if name.starts_with("__local_") {
                     // Local variable — allocate or reuse address dynamically
@@ -466,7 +466,7 @@ impl IrLowerer {
                             a
                         });
                     self.asm.emit_op(OpCode::Push);
-                    self.asm.emit_u32(addr);
+                    self.asm.emit_i32(addr as i32);
                     self.asm.emit_op(OpCode::Load);
                 } else {
                     return Err(format!("unknown load target: {}", name));
@@ -477,7 +477,7 @@ impl IrLowerer {
                 load_val!(self, *val);
                 if let Some(addr) = self.state_var_addrs.get(name) {
                     self.asm.emit_op(OpCode::Push);
-                    self.asm.emit_u32(*addr);
+                    self.asm.emit_i32(*addr as i32);
                     self.asm.emit_op(OpCode::Store);
                 } else if name.starts_with("__local_") {
                     // Local variable — allocate or reuse address dynamically
@@ -488,7 +488,7 @@ impl IrLowerer {
                             a
                         });
                     self.asm.emit_op(OpCode::Push);
-                    self.asm.emit_u32(addr);
+                    self.asm.emit_i32(addr as i32);
                     self.asm.emit_op(OpCode::Store);
                 } else {
                     return Err(format!("store to unknown var: {}", name));
@@ -556,7 +556,7 @@ impl IrLowerer {
             IrOp::FieldAccess(obj, _field) => {
                 load_val!(self, *obj);
                 self.asm.emit_op(OpCode::Push);
-                self.asm.emit_u32(0); // TODO: resolve field index from struct defs
+                self.asm.emit_i32(0); // TODO: resolve field index from struct defs
                 self.asm.emit_op(OpCode::TupleGet);
             }
 
@@ -706,26 +706,29 @@ impl IrLowerer {
             IrOp::MapGet(name, key) => {
                 let addr = self.state_var_addrs.get(name)
                     .ok_or_else(|| format!("unknown map: {}", name))?;
-                self.asm.emit_op(OpCode::Push);
-                self.asm.emit_u32(*addr);
+                // VM MapGet pops addr first (top), then key — push key first, addr last
                 load_val!(self, *key);
+                self.asm.emit_op(OpCode::Push);
+                self.asm.emit_i32(*addr as i32);
                 self.asm.emit_op(OpCode::MapGet);
             }
             IrOp::MapSet(name, key, val) => {
                 let addr = self.state_var_addrs.get(name)
                     .ok_or_else(|| format!("unknown map: {}", name))?;
-                self.asm.emit_op(OpCode::Push);
-                self.asm.emit_u32(*addr);
-                load_val!(self, *key);
+                // VM MapSet pops addr first (top), then key, then val — push in reverse
                 load_val!(self, *val);
+                load_val!(self, *key);
+                self.asm.emit_op(OpCode::Push);
+                self.asm.emit_i32(*addr as i32);
                 self.asm.emit_op(OpCode::MapSet);
             }
             IrOp::SetOp(name, op, val) => {
                 let addr = self.state_var_addrs.get(name)
                     .ok_or_else(|| format!("unknown set: {}", name))?;
-                self.asm.emit_op(OpCode::Push);
-                self.asm.emit_u32(*addr);
+                // VM SetAdd/SetRemove pops addr first (top), then val — push val first, addr last
                 load_val!(self, *val);
+                self.asm.emit_op(OpCode::Push);
+                self.asm.emit_i32(*addr as i32);
                 match op {
                     SetOpKind::Add => self.asm.emit_op(OpCode::SetAdd),
                     SetOpKind::Remove => self.asm.emit_op(OpCode::SetRemove),
@@ -734,11 +737,12 @@ impl IrLowerer {
             IrOp::MapMethod(name, method, args) => {
                 let addr = self.state_var_addrs.get(name)
                     .ok_or_else(|| format!("unknown map: {}", name))?;
-                self.asm.emit_op(OpCode::Push);
-                self.asm.emit_u32(*addr);
+                // Push args first, then addr last (VM pops addr from top)
                 for arg in args {
                     load_val!(self, *arg);
                 }
+                self.asm.emit_op(OpCode::Push);
+                self.asm.emit_i32(*addr as i32);
                 match method.as_str() {
                     "contains" => self.asm.emit_op(OpCode::MapContains),
                     "len" => self.asm.emit_op(OpCode::MapLen),
@@ -749,7 +753,7 @@ impl IrLowerer {
                 let addr = self.state_var_addrs.get(name)
                     .ok_or_else(|| format!("unknown set: {}", name))?;
                 self.asm.emit_op(OpCode::Push);
-                self.asm.emit_u32(*addr);
+                self.asm.emit_i32(*addr as i32);
                 for arg in args {
                     load_val!(self, *arg);
                 }
@@ -766,13 +770,13 @@ impl IrLowerer {
                 let addr = self.state_var_addrs.get(obj)
                     .ok_or_else(|| format!("unknown state var for field store: {}", obj))?;
                 self.asm.emit_op(OpCode::Push);
-                self.asm.emit_u32(*addr);
+                self.asm.emit_i32(*addr as i32);
                 self.asm.emit_op(OpCode::Load);
                 self.asm.emit_op(OpCode::Push);
-                self.asm.emit_u32(0); // TODO: resolve field index
+                self.asm.emit_i32(0); // TODO: resolve field index
                 self.asm.emit_op(OpCode::TupleSet);
                 self.asm.emit_op(OpCode::Push);
-                self.asm.emit_u32(*addr);
+                self.asm.emit_i32(*addr as i32);
                 self.asm.emit_op(OpCode::Store);
             }
 
