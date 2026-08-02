@@ -1,167 +1,142 @@
-# SynQ Spec v7.0 vs Current Implementation — Gap Analysis
-**Date:** 28 July 2026
-**Spec source:** `synergy-network-hq/protocol-documentation` (committed 25 Jul 2026)
+# SynQ Spec v7.0 vs Current Implementation — Gap Analysis (Updated)
+
+**Date:** 2 August 2026  
+**Supersedes:** 28 July 2026 version  
+**Spec source:** `synergy-network-hq/protocol-documentation`  
+**Implementation:** `synergy-network-hq/testnet`, branch `feature/real-codegen-and-dispatch`  
+**Test suite:** 203 passed, 0 failed, 1 ignored
 
 ---
 
 ## Executive Summary
 
-The CTO has released a comprehensive SynQ v7.0 specification (23 documents) alongside the AIVM Technical Specification v0.1 (14 documents) and Aegis Technical Specification (33 documents). The spec describes an authority-aware, AI-integrated, formally verifiable smart contract language with a multi-layer execution model (AIVM → SynQ-VM). Our current implementation is a working v0.x prototype that demonstrates the basic compiler → VM → server pipeline but covers a fraction of what the spec requires.
+Since the 28 July gap analysis, significant progress has been made. The SSA IR backend is now the primary compilation path, the full attribute system is implemented, structs and enums are working, bytecode verification (Layers 1 and 2) is live, and the SQB binary artifact format is implemented. The toolchain now covers substantially more of the v7.0 spec, though major gaps remain in the AIVM layer, formal verification, module system, and event system.
 
 ---
 
-## What We Have (Current Implementation)
+## Previously Reported as Missing — Now Implemented
 
-✅ Working PEG grammar parser (contracts, state, functions, expressions)
-✅ Stack-based VM (QVM) with arithmetic, logic, control flow, maps, sets, extern_call
-✅ Full U256 via ruint crate (no truncation)
-✅ PQC shims: ML-DSA-65, Falcon-512, SPHINCS+, Kyber-768, McEliece, HQC-128
-✅ HTTP compile server with sessions, workspaces, rate limiting
-✅ EIP-712 session auth with ecrecover
-✅ Persistent compiler-attestation key (ML-DSA-65, key_id, trust_model)
-✅ Loop constructs: while, break, continue
-✅ Transactional atomicity (snapshot/restore on Revert)
-✅ Deterministic bytecode (sorted dispatch table)
-✅ 84/84 tests passing
-✅ Demo IDE (compile → test → deploy → state inspection)
-✅ Benchmark tool (4 compilation paths, fuel metering)
+| Item | 28 July Status | 2 August Status |
+|------|---------------|-----------------|
+| Attribute system | "CRITICAL — not implemented" | ✅ Production — 10 attributes (@public, @authority, @governance, @effects, @requires, @ensures, @fails, @bounded, @manifest, @ai) |
+| SSA IR | "HIGH — no IR layer" | ✅ Production — Full SSA with optimization passes, IR is primary compilation path |
+| Bytecode verification | "HIGH — no verifier" | ✅ Production — Layer 1 (structural, mandatory) + Layer 2 (stack safety, advisory) |
+| Structs and enums | "HIGH — no user-defined types" | ✅ Production — C-style + algebraic enums, struct literals, field access, field assignment |
+| Deployment artifact (.sqb) | "MEDIUM — raw .qvm only" | ✅ Production — SQB1 format with 7 TLV sections, hash binding, ML-DSA-87 signature |
+| Named errors | "MEDIUM — no typed errors" | ✅ Production — RevertCode (0x35), RevertCodeDyn (0x36), enum-variant errors |
+| Authority model | "CRITICAL — wrong (raw key)" | ⚠️ Partial — AuthorityEnvelope (104B), scope hashes, @authority/@governance — but identity field is not UMA-resolved |
+| Effect system | "HIGH — not enforced" | ⚠️ Partial — @effects declared and recorded in IR analysis, but not compile-time enforced |
+| Type system | "CRITICAL — limited" | ⚠️ Partial — I32, U128, U256, Bool, Bytes, Tuple, structs, enums — but no parameterized types (UInt<N>, Tensor, etc.) |
+| Linear types | "HIGH — no linear types" | ⚠️ Partial — Asset<T> runtime-enforced (create/transfer/burn), but not compile-time linear |
 
 ---
 
-## Major Gaps (Spec v7.0 Requirements We Don't Have)
+## Remaining Gaps
 
-### 1. Authority Model (CRITICAL)
-**Spec:** `AuthorityEnvelope<S>`, `Capability<S>`, UMA identities, `@authority(Scope)` attributes, `authority::require(auth, Scope)?`. Authority is UMA-based, not raw key material. Key rotation doesn't change identity.
+### 1. AIVM Layer (CRITICAL — future)
+**Spec:** AIVM is the node-side execution platform above SynQ-VM. Handles artifact admission, UMA/Aegis checks, model validation, AI execution, state journaling, receipt production, consensus output.
+**Current:** No AIVM layer. The QVM is the execution platform. No artifact admission beyond L1/L2 verification, no model validation, no AI execution.
+**Impact:** The AIVM is the v7.0 north star. Current architecture supports it (deterministic dispatch, AEG1, authority scopes) but the layer itself does not exist.
 
-**Current:** `caller` builtin → LoadCaller (0x50) returns raw 20-byte EVM address. The spec explicitly calls `require(msg.sender == owner)` an **anti-pattern**.
-
-**Impact:** This is the most fundamental architectural gap. Our entire auth model is wrong per spec.
-
-### 2. Attribute System (CRITICAL)
-**Spec:** `@public`, `@authority`, `@effects`, `@requires`, `@ensures`, `@fails`, `@bounded`, `@manifest`, `@ai`, `@external_fact`, `@upgrade`, `@deprecated`. Every public function MUST declare authority, effects, and resource bounds.
-
-**Current:** No attribute system. We have `requires_state` and `modifies` as basic metadata, but no `@`-prefixed attribute grammar or compile-time enforcement.
-
-### 3. Effect System (HIGH)
-**Spec:** `@effects(read: [...], write: [...], emit: [...], facts: [...], models: [...])`. Compile fails when inference finds undeclared effects or callee effects exceed caller scope.
-
-**Current:** `requires_state`/`modifies` declarations exist but are not enforced at compile time.
-
-### 4. Type System (CRITICAL)
-**Spec:** `UInt<N>`, `Int<N>`, `Bytes<N>`, `Fixed<M,N>`, `Hash32`, `Height`, `Epoch`, `UMAIdentity`, `ModelId`, `Tensor<E,Shape>`, `Asset<T>`, `Capability<S>`, `AuthorityEnvelope<S>`, `VerifiedFact<T>`, `InferenceRequest<I,O>`, `InferenceReceipt<O>`, `Result<T,E>`, `Option<T>`.
-
-**Current:** `u256`, `i32`, `bool`, `str`, `map<K,V>`, `set<T>`. No parameterized types, no linear types, no sum types.
-
-### 5. Linear Types (HIGH)
-**Spec:** `linear struct Asset<T>` — consumed exactly once. Copying or dropping is a compile-time error. Assets, capabilities, and facts are linear.
-
-**Current:** No linear type system. All values are freely copyable.
-
-### 6. AIVM Layer (CRITICAL)
-**Spec:** AIVM is the node-side execution platform above SynQ-VM. It handles artifact admission, UMA/Aegis checks, model validation, AI execution, state journaling, receipt production, consensus output. SynQ-VM is just the deterministic bytecode kernel inside AIVM.
-
-**Current:** Our VM IS the execution platform. There's no AIVM layer, no artifact admission, no model validation, no AI execution.
-
-### 7. AI Integration (HIGH — per spec, not our current scope)
-**Spec:** `ai::infer_native()`, `ai::verify_proof()`, `ai::create_job()`, model registry, inference receipts, AI trust modes (NativeDeterministic, ProofVerified, AttestedReceipt), AI policy gates, bounded agents.
-
-**Current:** No AI integration whatsoever. This may be a later-phase concern.
-
-### 8. SSA IR (HIGH)
-**Spec:** Typed SSA with explicit control-flow blocks, authority checks, effect tokens, linear-resource moves, journal operations, fact consumption, AI operations. IR cannot contain implicit host calls.
-
-**Current:** Codegen goes straight from AST to stack bytecode. No IR layer.
-
-### 9. Bytecode Verification (HIGH)
-**Spec:** Pre-deployment verification: format, opcodes, control-flow, stack height, linear resources, authority/effect placement, host-function profiles, model/proof profiles, resource bounds.
-
-**Current:** No bytecode verifier. The VM trusts the compiler output.
-
-### 10. Deployment Artifacts (.sqb) (MEDIUM)
-**Spec:** `.sqb` is a canonical envelope with hash-bound sections (code, ABI, metadata, effects, models, proofs). All section hashes bound into artifact root.
-
-**Current:** `.qvm` is raw bytecode with a 15-byte header. No sections, no hash binding.
-
-### 11. Verified Facts / Cross-Chain (MEDIUM — depends on SXCP)
-**Spec:** `VerifiedFact<T>` with nullifier, proof_ref, scope_hash. `facts::consume_once()`. `@external_fact(source: "chain-a", adapter_profile: "sxcp-chain-a-v4")`.
-
-**Current:** No fact system. extern_call is the only cross-contract mechanism.
-
-### 12. Structs and Enums (HIGH)
-**Spec:** User-defined structs, enums with variants, tuples, pattern matching (`match` expressions).
-
-**Current:** No user-defined types. Only primitives and map/set.
-
-### 13. Module System (MEDIUM)
-**Spec:** `module treasury.risk;`, `use authority::{AuthorityEnvelope, Capability};`, imports.
-
-**Current:** No module system. Single-file contracts only.
-
-### 14. Event System (MEDIUM)
-**Spec:** `emit EventName(args)`, declared events, `@effects(emit: [EventName])`.
-
-**Current:** No events. Print (0xF0) is the only output.
-
-### 15. Error Types (MEDIUM)
-**Spec:** `-> Result<T, ErrorType>`, `fail expr` statement, `@fails(ErrorType1, ErrorType2)`.
-
-**Current:** Revert (0x33) with no typed errors. Functions return bool or u256.
-
-### 16. Formal Verification (HIGH — per spec)
+### 2. Formal Verification (HIGH — future)
 **Spec:** Proof-certificate production, vacuity/coverage analysis, independent proof checking, `spec` blocks with `requires`/`ensures`/`modifies`/`fails`/`assume`.
+**Current:** `@requires` and `@ensures` are compile-time documentation only. No proof generation or checking.
 
-**Current:** No formal verification. `requires_state`/`modifies` are metadata only.
+### 3. Module System (MEDIUM)
+**Spec:** `module treasury.risk;`, `use authority::{AuthorityEnvelope, Capability};`, imports.
+**Current:** No module system. Single-file contracts only. Cross-contract via ExternCall within workspace.
 
-### 17. Resource Bounds (MEDIUM)
-**Spec:** `@bounded(execution_units: 240_000, storage_writes: 4, events: 2)`. Meters cover CPU, memory, storage, crypto, AI, events, state growth.
+### 4. Event System (MEDIUM)
+**Spec:** `emit EventName(args)`, declared events, `@effects(emit: [EventName])`.
+**Current:** No typed events. Print (0xF0) is the only output mechanism.
 
-**Current:** Step limit only. No declarative resource bounds.
+### 5. Parameterized Types (HIGH)
+**Spec:** `UInt<N>`, `Int<N>`, `Bytes<N>`, `Fixed<M,N>`, `Tensor<E,Shape>`, `Result<T,E>`, `Option<T>`, `Capability<S>`.
+**Current:** Fixed-size `Bytes<N>` is supported as an alias. No general parameterized types. `Option<T>` is partially supported via OptionNone (0xA4) opcode. No `Result<T,E>`.
 
-### 18. Upgrade Pattern (LOW — future)
+### 6. UMA Identity (MEDIUM)
+**Spec:** Authority is UMA-based — identity is not raw key material. Key rotation doesn't change identity.
+**Current:** AuthorityEnvelope identity field exists (32 bytes) but is not UMA-resolved. The `caller` builtin returns a raw address. Identity is effectively key-derived.
+
+### 7. Compile-Time Effect Enforcement (HIGH)
+**Spec:** Compile fails when inference finds undeclared effects or callee effects exceed caller scope.
+**Current:** `@effects` attributes are parsed and recorded in IR analysis warnings, but compilation does not fail on undeclared effects.
+
+### 8. Compile-Time Linear Type Enforcement (HIGH)
+**Spec:** Copying or dropping a linear value is a compile-time error.
+**Current:** Asset<T> linearity is enforced at runtime (deactivation on transfer/burn) but not at compile time. A linear value can be silently dropped in the compiler.
+
+### 9. Layer 3 Verification (HIGH)
+**Spec:** Pre-deployment manifest signature verification.
+**Current:** Layer 1 (structural) and Layer 2 (stack safety) are implemented. Layer 3 (ML-DSA-87 manifest signature verification) is designed but not implemented.
+
+### 10. Verified Facts / Cross-Chain (MEDIUM — depends on SXCP)
+**Spec:** `VerifiedFact<T>` with nullifier, proof_ref, scope_hash. `facts::consume_once()`. `@external_fact`.
+**Current:** No fact system. ExternCall is the only cross-contract mechanism.
+
+### 11. Upgrade Pattern (LOW — future)
 **Spec:** `@upgrade(from: N, to: N+1, migration: fn, preserves: [invariants])`.
-
 **Current:** Not implemented. No upgrade mechanism.
 
-### 19. Domain Separation (HIGH)
-**Spec:** Versioned domain tags for all crypto: `SYNQ/AUTH/v1`, `SYNQ/FACT/v1`, `SYNQ/ARTIFACT/v1`, `AIVM/MODEL/v1`, etc.
+### 12. Canonical Source Hashing (MEDIUM)
+**Spec:** Two conforming parsers must produce the same canonical AST hash.
+**Current:** No canonical hashing. No reproducible-build attestation beyond bytecode signatures.
 
-**Current:** EIP-712 domain exists but is not generalized to all cryptographic operations.
+### 13. Generalized Domain Separation (MEDIUM)
+**Spec:** Versioned domain tags for all crypto: `SYNQ/AUTH/v1`, `SYNQ/FACT/v1`, `SYNQ/ARTIFACT/v1`, etc.
+**Current:** EIP-712 domain exists (SYNQ-CALL-v3, etc.) but is not generalized to all cryptographic operations beyond deploy/call/govern/attest.
 
-### 20. Canonical Source Hashing (MEDIUM)
-**Spec:** Two conforming parsers must produce the same canonical AST hash. LF line endings, pinned identifier profile.
+### 14. Resource Bounds (MEDIUM)
+**Spec:** `@bounded(execution_units: 240_000, storage_writes: 4, events: 2)`. Meters for CPU, memory, storage, crypto, AI, events, state growth.
+**Current:** `@bounded(n)` is documentation-only. Step limit is the only runtime meter. No per-resource meters.
 
-**Current:** No canonical hashing. No reproducible-build attestation.
+### 15. IR Serialization for SQB (LOW)
+**Spec:** IR section in SQB artifact contains serialized IR module.
+**Current:** IR dump is a text string in the compile response and IDE. Not serialized into the SQB IR section in a structured format.
 
 ---
 
 ## What Aligns Well
 
-Our current implementation got these right per the spec:
-- **Determinism** — sorted dispatch tables, strict UTF-8, no lossy normalization
-- **PQC crypto** — real implementations, not stubs; Aegis-governed profiles
-- **Transaction atomicity** — snapshot/restore on Revert
+The following are correctly implemented per spec:
+
+- **Determinism** — sorted dispatch tables, sorted state vars, strict UTF-8, no HashMap iteration in codegen
+- **PQC crypto** — all six algorithms use real implementations, no stubs
+- **AEG1 wire protocol** — bounded, framed, deterministic dispatch (ACTS-15)
+- **Transaction atomicity** — snapshot/restore on revert
 - **Step/gas limits** — execution is bounded
 - **U256** — full-width via ruint, no truncation
-- **External calls** — extern_call pattern is architecturally sound (though spec wraps it in authority context)
-- **Persistent compiler key** — aligns with Option B from the CTO review
-- **EIP-712 auth** — ecrecover-based, nonce-gated
+- **External calls** — ExternCall pattern is architecturally sound
+- **ML-DSA-87 account domain** — correctly separated from ML-DSA-65 consensus
+- **Domain separation** — four V3 domain tags prevent cross-domain replay
+- **Bech32 addressing** — syna/sync/synw, tsynq retired
+- **SQB artifact** — hash-bound, ML-DSA-87 signed, ACTS-VM compliant
+- **Bytecode verification** — L1 + L2 implemented
+- **SSA IR** — full optimization pipeline, primary compilation path
+- **Attribute system** — 10 attributes, compile-time + runtime enforcement for authority
+- **Named errors** — enum-variant reverts with structured codes
+- **Structs/enums** — field access, field assignment, algebraic variants
+- **Wallet integration** — three-tier, EIP-6963, EIP-712 V3
 
 ---
 
-## Suggested Priority Order (If Aligning to Spec)
+## Priority Order for Remaining Work
 
-1. **Attribute grammar** — add `@`-prefixed attributes to the PEG grammar
-2. **Type system expansion** — `UInt<N>`, `Bytes<N>`, `Result<T,E>`, `Option<T>`
-3. **Authority model** — replace `caller` with `AuthorityEnvelope<S>` (even as a stub)
-4. **Effect declarations** — enforce `@effects` at compile time
-5. **Structs and enums** — user-defined types with pattern matching
-6. **Event system** — `emit` keyword, declared events
-7. **Error types** — `Result<T,E>`, `fail` statement
-8. **SSA IR** — intermediate representation between AST and bytecode
-9. **Bytecode verifier** — pre-deployment validation
-10. **Deployment artifact** — `.sqb` envelope format
-11. **Module system** — `module`, `use`, imports
-12. **AIVM layer** — execution orchestration above SynQ-VM
-13. **AI integration** — model registry, inference receipts (later phase)
-14. **Verified facts** — SCETP/SXCP fact consumption (later phase)
-15. **Formal verification** — proof certificates, spec blocks (later phase)
+1. Layer 3 verification (manifest signature) — completes bytecode provenance
+2. Compile-time effect enforcement — close the effect system gap
+3. Compile-time linear type enforcement — close the linear types gap
+4. Event system — emit, declared events, @effects(emit)
+5. UMA identity — replace raw key with identity resolution
+6. Module system — module, use, imports
+7. Parameterized types — Result<T,E>, Option<T>, Bytes<N> generalization
+8. Generalized domain separation — all crypto operations
+9. Resource bounds — per-resource meters
+10. IR serialization — structured IR in SQB
+11. Verified facts / SXCP — cross-chain
+12. AIVM layer — node-side execution platform
+13. Formal verification — proof certificates
+14. Upgrade pattern — contract migration
+
+---
+
+End of Gap Analysis (2 August 2026)

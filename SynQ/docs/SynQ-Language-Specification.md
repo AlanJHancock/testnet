@@ -1,10 +1,10 @@
-# SynQ Language Specification v0.2
+# SynQ Language Specification v0.3
 
 ---
 
 ## 1. Introduction
 
-SynQ is a post-quantum smart contract language for the Synergy Network. It provides first-class support for NIST-standardized PQC algorithms (ML-KEM, ML-DSA, FN-DSA) through the AEG1 wire protocol, a declarative attribute system for function-level execution guards, linear asset tracking, named errors, and a typed SSA IR.
+SynQ is a post-quantum smart contract language for the Synergy Network Testnet-v3. It provides first-class support for NIST-standardized PQC algorithms (ML-KEM, ML-DSA, FN-DSA) through the AEG1 wire protocol, a declarative attribute system for function-level execution guards, linear asset tracking, named errors, structs and enums, and a typed SSA IR as the primary compilation path.
 
 ---
 
@@ -16,7 +16,7 @@ SynQ is a post-quantum smart contract language for the Synergy Network. It provi
 |------|-------------|
 | `i32` | 32-bit signed integer |
 | `u128` | 128-bit unsigned integer |
-| `u256` | 256-bit unsigned integer |
+| `u256` | 256-bit unsigned integer (full-width, no truncation) |
 | `bool` | Boolean |
 | `bytes` | Variable-length byte array |
 | `string` | UTF-8 string |
@@ -37,9 +37,10 @@ SynQ is a post-quantum smart contract language for the Synergy Network. It provi
 
 | Type | Description |
 |------|-------------|
-| `struct` | Named field collection (e.g., `struct Point { x: u256; y: u256 }`) |
-| `enum` | C-style or algebraic variants (e.g., `enum Color { Red, Green, Blue }`) |
+| `struct` | Named field collection with field access and assignment |
+| `enum` | C-style or algebraic variants with payloads |
 | `Asset<T>` | Linear resource — create, transfer, burn |
+| `Tuple` | Heterogeneous collection (structs and enum payloads compile to tuples) |
 
 ### 2.4 NIST/FIPS PQC Naming
 
@@ -55,24 +56,24 @@ SynQ is a post-quantum smart contract language for the Synergy Network. It provi
 
 SynQ supports declarative attributes for function-level execution guards and state modification metadata.
 
-| Attribute | Description |
-|-----------|-------------|
-| `@public` | No authority required — callable by anyone |
-| `@authority(Scope)` | Requires authority envelope matching scope hash |
-| `@governance(Scope)` | Requires governance authorization for scope |
-| `@effects(v1, v2, ...)` | Declares state variables modified |
-| `@requires(expr)` | Precondition (compile-time documentation) |
-| `@ensures(expr)` | Postcondition (compile-time documentation) |
-| `@fails(ErrorType)` | Declares named error type for revert |
-| `@bounded(n)` | Loop bound declaration |
-| `@manifest` | Include in V3 manifest ABI |
-| `@ai` | AI-optimized hint metadata |
+| Attribute | Description | Enforcement |
+|-----------|-------------|-------------|
+| `@public` | No authority required — callable by anyone | Compile-time + runtime |
+| `@authority(Scope)` | Requires authority envelope matching scope hash | Compile-time + runtime |
+| `@governance(Scope)` | Requires governance authorization for scope | Compile-time + runtime |
+| `@effects(v1, v2, ...)` | Declares state variables modified | Compile-time documentation |
+| `@requires(expr)` | Precondition | Compile-time documentation |
+| `@ensures(expr)` | Postcondition | Compile-time documentation |
+| `@fails(ErrorType)` | Declares named error type for revert | Compile-time + runtime |
+| `@bounded(n)` | Loop bound declaration | Compile-time documentation |
+| `@manifest` | Include in V3 manifest ABI | Compile-time |
+| `@ai` | AI-optimized hint metadata | Reserved (future) |
 
 **Scope hash computation:**
 - Authority: SHA3-256(`SYNQ-AUTHORITY-SCOPE-v1:` + scope_name)
 - Governance: SHA3-256(`SYNQ-GOVERNANCE-SCOPE-v1:` + scope_name)
 
-**Backward compatibility:** Legacy `as caller` syntax is retained alongside the attribute-based model.
+**Backward compatibility:** Legacy `as caller` syntax is retained alongside the attribute-based model. Both `-> T as caller` and `as caller -> T` orderings are supported.
 
 ---
 
@@ -137,20 +138,30 @@ contract Vault {
 
 **Bytecode:** `RevertCode` (0x35) emits error_code (enum variant index, 4B LE) + msg_len (4B LE) + message.
 
+**Dynamic reverts:** `RevertCodeDyn` (0x36) supports runtime argument evaluation:
+```synq
+revert VaultError::InsufficientBalance(balance);
+```
+The runtime value (e.g., current balance) is evaluated and included in the error message via ToString (0x9F).
+
 **Server response:** `error_code` (u32) and `error_name` (string) fields distinguish named errors from string-based `require()` failures.
 
 **Syntax variants:**
 - `revert VaultError::InsufficientBalance;` — qualified (compile-time checked)
 - `revert InsufficientBalance;` — bare (searches all enum defs)
+- `revert VaultError::InsufficientBalance(arg);` — qualified with runtime arg
 
 ---
 
-## 6. Struct Field Assignment
+## 6. Structs and Enums
+
+### 6.1 Struct Definition and Field Access
 
 ```synq
+struct Point { x: u256; y: u256 }
+
 contract Example {
   state { origin: Point }
-  struct Point { x: u256; y: u256 }
 
   @public
   function setOrigin(x: u256, y: u256) -> bool {
@@ -162,6 +173,15 @@ contract Example {
 ```
 
 **Codegen:** `Push addr → Load → gen_expression(value) → Push field_idx → TupleSet → Push addr → Store`
+
+### 6.2 Enums (C-style and Algebraic)
+
+```synq
+enum Color { Red, Green, Blue }                    // C-style
+enum Result { Ok(u256), Err(string) }              // Algebraic with payload
+```
+
+Enum variants are resolved to sequential integer tags. Algebraic variants carry payloads compiled as Tuple values.
 
 ---
 
@@ -176,6 +196,8 @@ All contract calls and source commits use EIP-712 typed data signing:
 | Domain name | `SynQ · <Contract> · synergy-testnet-v3` |
 
 **ContractCall struct:** `{ callSignature, sessionId, nonce, domainTag }`
+
+The domain tag is embedded in the AuthorityEnvelope reserved field (bytes 88–104).
 
 ---
 
@@ -192,17 +214,56 @@ All contract calls and source commits use EIP-712 typed data signing:
 | NamedErrorDemo | Named error reverts with enum variants |
 | StructFieldTest | Struct field assignment (TupleSet opcode) |
 | StructEnumDemo | Struct field access + enum variant comparison |
+| StackFailDemo | Educational contract demonstrating verification layers |
 
 ---
 
 ## 9. Compiler Pipeline
 
+### 9.1 Primary Path: SSA IR Backend
+
 ```
-Source → Parser (pest grammar) → AST → IR Builder → SSA Module → Analyzer → Codegen → QVM Bytecode
+Source → Parser (pest grammar) → AST → Semantic Analysis → IR Builder → SSA Module
+    → Optimization Passes (phi insertion, DCE, constant folding, copy propagation)
+    → IR Analysis → Lowering to QVM Bytecode → Verification (L1 + L2)
+    → Compiler Attestation (ML-DSA-87)
 ```
 
-**IR output:** Full SSA instruction dump available via `ir_dump` field in compile response, showing per-function block-by-block instructions with value IDs, types, and CFG predecessors.
+The `compile_ir()` function is the entry point. On IR failure, it automatically falls back to direct codegen.
+
+### 9.2 Fallback Path: Direct Codegen
+
+```
+Source → Parser → AST → Semantic Analysis → CodeGenerator::generate() → QVM Bytecode
+```
+
+### 9.3 Determinism
+
+- State variables sorted by address before IR construction
+- Dispatch tables sorted alphabetically by function name
+- Strict UTF-8 validation on all identifiers
+- No HashMap iteration in code generation paths
 
 ---
 
-End of SynQ Language Spec v0.2
+## 10. Compilation Response
+
+The `/compile` endpoint returns:
+
+| Field | Description |
+|-------|-------------|
+| `success` | Boolean |
+| `bytecode` | Hex-encoded QVM bytecode |
+| `contract_name` | Extracted contract name |
+| `state_vars` | Array of [name, address] pairs |
+| `functions` | Array of function names |
+| `abi` | Function signatures and parameter types |
+| `manifest` | V3 manifest (ML-DSA-87 signed) |
+| `ir_dump` | Full SSA IR instruction listing |
+| `warnings` | IR analysis + verification results |
+| `verification` | Layer 1 + Layer 2 results, instruction count, code size |
+| `signature_sidecar` | ML-DSA-87 compiler attestation |
+
+---
+
+End of SynQ Language Spec v0.3
