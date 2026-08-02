@@ -3677,6 +3677,17 @@
     out.innerHTML = '<span class="dim">Resetting all VM sessions...</span>';
     // Reset cumulative gas counter
     window._gasUsed = 0;
+    // Update gas badge to reflect reset
+    var _gb = document.getElementById('gasBadge');
+    if (_gb && window._gasBudget) {
+      _gb.innerHTML = '\u26fd GAS: 0 / ' + (window._gasBudget >= 1e6 ? (window._gasBudget/1e6).toFixed(1) + 'M' : String(window._gasBudget));
+      _gb.className = 'gas-badge active';
+      _gb.style.color = '';
+      _gb.style.borderColor = '';
+      _gb.title = 'GAS BUDGET\nGas Used: 0\nGas Remaining: ' + window._gasBudget.toLocaleString();
+    }
+    var _gb2 = document.getElementById('gasBadge2');
+    if (_gb2 && _gb) { _gb2.innerHTML = _gb.innerHTML; _gb2.className = _gb.className; _gb2.title = _gb.title; }
 
     // ── Reset every contract in the workspace, not just the active one ──────
     // This ensures all contracts (e.g. SimpleToken) start with clean state
