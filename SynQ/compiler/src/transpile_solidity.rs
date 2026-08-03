@@ -10,7 +10,68 @@
 // maps directly to Solidity.
 
 use std::fmt::Write;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use crate::ast::*;
+
+
+// ── Type inference context ───────────────────────────────────────────────────
+// Tracks variable types per-function for Solidity type inference.
+// SynQ infers types at compile time; the transpiler needs them to emit
+// correct Solidity (bool vs uint256, int32 vs uint256, string vs bytes).
+
+thread_local! {
+    static TYPE_CTX: RefCell<HashMap<String, Type>> = RefCell::new(HashMap::new());
+}
+
+fn set_type(name: &str, ty: Type) {
+    TYPE_CTX.with(|ctx| ctx.borrow_mut().insert(name.to_string(), ty));
+}
+
+fn get_type(name: &str) -> Option<Type> {
+    TYPE_CTX.with(|ctx| ctx.borrow().get(name).cloned())
+}
+
+/// Infer the SynQ type of an expression, given the current type context.
+fn infer_expr_type(expr: &Expression) -> Type {
+    match expr {
+        Expression::BinaryOp(l, op, _) => match op {
+            BinaryOperator::Eq | BinaryOperator::Ne | BinaryOperator::Lt
+            | BinaryOperator::Le | BinaryOperator::Gt | BinaryOperator::Ge
+            | BinaryOperator::And | BinaryOperator::Or => Type::Bool,
+            BinaryOperator::Add => {
+                let lt = infer_expr_type(l);
+                if matches!(lt, Type::Str) { Type::Str } else { lt }
+            }
+            _ => infer_expr_type(l),
+        },
+        Expression::UnaryOp(op, val) => match op {
+            UnaryOperator::Not => Type::Bool,
+            UnaryOperator::Neg => infer_expr_type(val),
+        },
+        Expression::Literal(lit) => match lit {
+            Literal::String(_) => Type::Str,
+            Literal::Bool(_) => Type::Bool,
+            Literal::Number(_) | Literal::BigNumber(_) => Type::UInt256,
+            Literal::Hex(_) => Type::Bytes,
+        },
+        Expression::Identifier(name) => get_type(name).unwrap_or(Type::UInt256),
+        Expression::Call(name, _) => match name.as_str() {
+            "str_concat" => Type::Str,
+            "str_eq" => Type::Bool,
+            "str_len" => Type::UInt256,
+            _ => {
+                // Check if it's a known function returning a struct
+                // For now, return UInt256 (most functions return uint256/bool)
+                Type::UInt256
+            }
+        },
+        Expression::Caller => Type::Address,
+        Expression::FieldAccess { object, .. } => infer_expr_type(object),
+        Expression::StructLiteral { type_name, .. } => Type::Named(type_name.clone()),
+        _ => Type::UInt256,
+    }
+}
 
 /// Transpile a parsed SynQ contract AST to Solidity source.
 pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
@@ -145,7 +206,7 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
         if let ContractPart::Function(f) = part {
             if !first_func { writeln!(out).unwrap(); }
             first_func = false;
-            transpile_function(&mut out, f);
+            transpile_function(&mut out, f, contract);
         }
     }
 
@@ -153,7 +214,21 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
     out
 }
 
-fn transpile_function(out: &mut String, f: &FunctionDefinition) {
+fn transpile_function(out: &mut String, f: &FunctionDefinition, contract: &ContractDefinition) {
+    // Build type context: state vars + function params
+    TYPE_CTX.with(|ctx| ctx.borrow_mut().clear());
+    for part in &contract.parts {
+        if let ContractPart::StateVariable(sv) = part {
+            set_type(&sv.name, sv.ty.clone());
+        }
+    }
+    for p in &f.params {
+        set_type(&p.name, p.ty.clone());
+    }
+    // Store return type for return casting
+    if let Some(ret_ty) = &f.returns {
+        set_type("__return_type__", ret_ty.clone());
+    }
     let vis = if f.is_public { "public" } else { "internal" };
 
     // Map attributes to Solidity modifiers/comments
@@ -261,7 +336,16 @@ fn transpile_statement(out: &mut String, stmt: &Statement, indent: usize) {
             writeln!(out, "{}revert {}::{}({});", pad, enum_name, error, a.join(", ")).unwrap();
         }
         Statement::Assignment(name, expr) => {
-            writeln!(out, "{}{} = {};", pad, name, transpile_expr(expr)).unwrap();
+            let target_ty = get_type(name);
+            let expr_ty = infer_expr_type(expr);
+            let val_str = transpile_expr(expr);
+            // Cast if assigning bool to uint256 or vice versa
+            let cast_val = match (&target_ty, &expr_ty) {
+                (Some(Type::UInt256), Type::Bool) => format!("({} ? uint256(1) : uint256(0))", val_str),
+                (Some(Type::Bool), Type::UInt256) => format!("({} != 0)", val_str),
+                _ => val_str,
+            };
+            writeln!(out, "{}{} = {};", pad, name, cast_val).unwrap();
         }
         Statement::FieldAssignment { object, field, value } => {
             writeln!(out, "{}{}.{} = {};", pad, object, field, transpile_expr(value)).unwrap();
@@ -274,20 +358,20 @@ fn transpile_statement(out: &mut String, stmt: &Statement, indent: usize) {
             writeln!(out, "{}{}.{}({});", pad, set, method, transpile_expr(value)).unwrap();
         }
         Statement::Let { name, ty, value } => {
-            // Infer type from explicit annotation or from the expression
-            let (ty_str, is_struct) = if let Some(t) = ty {
-                let needs_memory = matches!(t, Type::Named(_) | Type::Str | Type::Bytes);
-                (ty_to_sol(t), needs_memory)
+            let (ty_str, needs_memory) = if let Some(t) = ty {
+                let mem = matches!(t, Type::Named(_) | Type::Str | Type::Bytes);
+                (ty_to_sol(t), mem)
             } else {
-                // Infer from expression
-                match value {
-                    Expression::StructLiteral { type_name, .. } => {
-                        (type_name.clone(), true)
-                    }
-                    _ => ("uint256".to_string(), false)
-                }
+                // Infer from expression using type context
+                let inferred = infer_expr_type(value);
+                set_type(name, inferred.clone());
+                let mem = matches!(inferred, Type::Named(_) | Type::Str | Type::Bytes);
+                (ty_to_sol(&inferred), mem)
             };
-            if is_struct {
+            if !ty.is_some() {
+                // Register inferred type for later statements
+            }
+            if needs_memory {
                 writeln!(out, "{}{} memory {} = {};", pad, ty_str, name, transpile_expr(value)).unwrap();
             } else {
                 writeln!(out, "{}{} {} = {};", pad, ty_str, name, transpile_expr(value)).unwrap();
@@ -301,7 +385,15 @@ fn transpile_statement(out: &mut String, stmt: &Statement, indent: usize) {
             writeln!(out, "{}return;", pad).unwrap();
         }
         Statement::Return(Some(expr)) => {
-            writeln!(out, "{}return {};", pad, transpile_expr(expr)).unwrap();
+            let val_str = transpile_expr(expr);
+            let expr_ty = infer_expr_type(expr);
+            let ret_ty = get_type("__return_type__");
+            // Only cast bool→uint256 when function returns uint256
+            let cast_val = match (&ret_ty, &expr_ty) {
+                (Some(Type::UInt256), Type::Bool) => format!("({} ? uint256(1) : uint256(0))", val_str),
+                _ => val_str,
+            };
+            writeln!(out, "{}return {};", pad, cast_val).unwrap();
         }
         Statement::ExternCall { contract, function, args } => {
             let a: Vec<String> = args.iter().map(transpile_expr).collect();
@@ -358,7 +450,20 @@ fn transpile_expr(expr: &Expression) -> String {
         Expression::Literal(lit) => literal_to_sol(lit),
         Expression::Identifier(name) => name.clone(),
         Expression::BinaryOp(l, op, r) => {
-            format!("({} {} {})", transpile_expr(l), binop_to_sol(op), transpile_expr(r))
+            let ls = transpile_expr(l);
+            let rs = transpile_expr(r);
+            match op {
+                BinaryOperator::Add => {
+                    // String concatenation: a + b → string.concat(a, b)
+                    let lt = infer_expr_type(l);
+                    if matches!(lt, Type::Str) {
+                        format!("string.concat({}, {})", ls, rs)
+                    } else {
+                        format!("({} + {})", ls, rs)
+                    }
+                }
+                _ => format!("({} {} {})", ls, binop_to_sol(op), rs),
+            }
         }
         Expression::UnaryOp(op, val) => {
             format!("{}{}", unop_to_sol(op), transpile_expr(val))
