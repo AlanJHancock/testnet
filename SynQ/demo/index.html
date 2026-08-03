@@ -6306,7 +6306,7 @@ var LOOP_LINES = [
 
         // Set global state — same as what compile does
         currentBytecode = hexCode;
-        currentSqb = btoa(String.fromCharCode.apply(null, bytes));
+        currentSqb = bytesToBase64(bytes);
         currentContractName = contractName;
         currentContractAddress = null; // will be derived by server
         currentStateVars = stateVars;
@@ -6367,6 +6367,17 @@ var LOOP_LINES = [
         setStatus('SQB upload failed: ' + e.message, 'error');
       }
     }
+    // Safe base64 encoding for large byte arrays (avoids call stack overflow with apply)
+    function bytesToBase64(bytes) {
+      var CHUNK = 8192;
+      var binary = "";
+      for (var i = 0; i < bytes.length; i += CHUNK) {
+        var slice = bytes.subarray(i, Math.min(i + CHUNK, bytes.length));
+        binary += String.fromCharCode.apply(null, slice);
+      }
+      return btoa(binary);
+    }
+
     async function decompileSqb(input) {
       var file = input.files[0];
       if (!file) return;
@@ -6379,7 +6390,7 @@ var LOOP_LINES = [
         var bytes = new Uint8Array(buf);
         console.log('[DECOMPILE] Loaded ' + file.name + ' (' + bytes.length + ' bytes)');
 
-        var sqbB64 = btoa(String.fromCharCode.apply(null, bytes));
+        var sqbB64 = bytesToBase64(bytes);
 
         var resp = await fetch(SYNQ_SERVER + '/decompile', {
           method: 'POST',
