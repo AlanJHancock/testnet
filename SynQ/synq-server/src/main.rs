@@ -626,6 +626,13 @@ fn parse_arg_typed(v: &serde_json::Value, ty_hint: &str) -> Result<Value, String
                     Err(_) => Err(format!("Invalid hex bytes: {}", &hex_str[..hex_str.len().min(40)])),
                 };
             }
+            // If the type hint indicates a tuple type, the value must contain commas
+            if ty_hint.starts_with('(') && ty_hint.ends_with(')') && !s.contains(',') {
+                return Err(format!(
+                    "Expected tuple value {} but got single value '{}'.                      Use comma-separated values, e.g. '1, 2' for {}",
+                    ty_hint, s, ty_hint
+                ));
+            }
             if s.starts_with('-') {
                 if let Ok(i) = s.parse::<i64>() {
                     return Ok(if i >= i32::MIN as i64 { Value::I32(i as i32) } else { Value::I64(i) });
