@@ -645,12 +645,46 @@ fn parse_arg_typed(v: &serde_json::Value, ty_hint: &str) -> Result<Value, String
                     Err(_) => Err(format!("Invalid hex address: {}", s)),
                 };
             }
+            // Check if this looks like a comma-separated tuple value
+            // e.g. "10, 20" for a Point struct parameter
+            if s.contains(',') && !s.starts_with("0x") {
+                let mut elems: Vec<Value> = Vec::new();
+                for part in s.split(',') {
+                    let part = part.trim();
+                    if part.is_empty() { continue; }
+                    match part.parse::<i64>() {
+                        Ok(i) if i >= 0 && i <= i32::MAX as i64 => elems.push(Value::I32(i as i32)),
+                        Ok(i) if i < 0 => elems.push(Value::I32(i as i32)),
+                        Ok(i) => elems.push(Value::U128(i as u128)),
+                        Err(_) => {
+                            match part.parse::<u128>() {
+                                Ok(u) => elems.push(Value::U128(u)),
+                                Err(_) => {
+                                    // Not numeric — break out and fall through to string
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if elems.len() >= 2 {
+                    return Ok(Value::Tuple(elems));
+                }
+            }
             // Try U256 for large decimal literals
             match s.parse::<U256>() {
                 Ok(v)  => Ok(Value::U256(v)),
                 // Non-numeric, non-hex → treat as UTF-8 string (str param)
                 Err(_) => Ok(Value::Bytes(s.as_bytes().to_vec())),
             }
+        }
+        // Array → Tuple (for struct/tuple params like Point, Rect)
+        serde_json::Value::Array(arr) => {
+            let mut elems: Vec<Value> = Vec::with_capacity(arr.len());
+            for v in arr.iter() {
+                elems.push(parse_arg_typed(v, "")?);
+            }
+            Ok(Value::Tuple(elems))
         }
         other => Err(format!("Expected number or string, got {}", other)),
     }
@@ -671,6 +705,18 @@ struct CompileRequest {
 struct ParamMeta {
     name: String,
     ty:   String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct StructFieldMeta {
+    name: String,
+    ty:   String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct StructDefMeta {
+    name:   String,
+    fields: Vec<StructFieldMeta>,
 }
 #[derive(serde::Serialize, Clone)]
 struct FunctionMeta {
@@ -706,6 +752,8 @@ struct CompileResponse {
     ir_dump:            Vec<String>,
     /// SQB binary artifact (base64-encoded) — canonical hash-bound format
     sqb:               Option<String>,
+    /// Struct definitions (name → fields) for IDE tuple arg expansion
+    struct_defs:       Vec<StructDefMeta>,
 }
 
 /// V3 artifact manifest — matches the Testnet-v3 schema-v2 manifest structure.
@@ -826,6 +874,7 @@ async fn compile_handler(
             manifest:           None,
             ir_dump:            vec![],
             sqb:               None,
+            struct_defs:       vec![],
         }));
     }
     if req.source.len() > MAX_SOURCE_BYTES {
@@ -838,6 +887,7 @@ async fn compile_handler(
             manifest:           None,
             ir_dump:            vec![],
             sqb:               None,
+            struct_defs:       vec![],
         }));
     }
 
@@ -872,6 +922,7 @@ async fn compile_handler(
             manifest:           None,
             ir_dump:            vec![],
             sqb:               None,
+            struct_defs:       vec![],
         })),
     };
 
@@ -944,6 +995,7 @@ async fn compile_handler(
             manifest:           None,
             ir_dump:            vec![],
             sqb:               None,
+            struct_defs:       vec![],
         })),
     };
     let bytecode = compile_result.bytecode;
@@ -998,6 +1050,7 @@ async fn compile_handler(
             manifest:           None,
             ir_dump:            vec![],
             sqb:               None,
+            struct_defs:       vec![],
                 })),
             };
             json!({
@@ -1021,6 +1074,7 @@ async fn compile_handler(
                     manifest:           None,
                     ir_dump:            vec![],
             sqb:               None,
+            struct_defs:       vec![],
                 })),
             };
             let sig = match pqc.sign_message(&keypair.private_key, &bytecode, SIGNING_ALGORITHM) {
@@ -1032,6 +1086,7 @@ async fn compile_handler(
             manifest:           None,
             ir_dump:            vec![],
             sqb:               None,
+            struct_defs:       vec![],
                 })),
             };
             json!({
@@ -1073,6 +1128,25 @@ async fn compile_handler(
             _ => None,
         })
         .unwrap_or_default();
+
+    // Collect struct definitions for IDE tuple arg expansion
+    let struct_defs_meta: Vec<StructDefMeta> = {
+        let parsed = synq_compiler::parser::parse(&req.source);
+        match parsed {
+            Ok(units) => units.iter().filter_map(|u| {
+                if let synq_compiler::ast::SourceUnit::Struct(s) = u {
+                    Some(StructDefMeta {
+                        name:   s.name.clone(),
+                        fields: s.fields.iter().map(|f| StructFieldMeta {
+                            name: f.name.clone(),
+                            ty:   type_name(&f.ty),
+                        }).collect(),
+                    })
+                } else { None }
+            }).collect(),
+            Err(_) => vec![],
+        }
+    };
 
     // Clone state_vars for manifest use (it gets moved into CompileResponse)
     let manifest_state_vars = state_vars.clone();
@@ -1144,6 +1218,7 @@ async fn compile_handler(
             manifest:           None,
             ir_dump:            vec![],
             sqb:               None,
+            struct_defs:       vec![],
                         }));
                 }
             }
@@ -1605,6 +1680,7 @@ async fn compile_handler(
                 }
             }
         },
+        struct_defs:       struct_defs_meta,
     }))
 }
 
@@ -1916,6 +1992,7 @@ async fn sign_source_handler(
             manifest:           None,
             ir_dump:            vec![],
             sqb:               None,
+            struct_defs:       vec![],
             }))
         };
     }
@@ -1959,6 +2036,7 @@ async fn sign_source_handler(
             manifest:           None,
             ir_dump:            vec![],
             sqb:               None,
+            struct_defs:       vec![],
         })),
     };
     let contract_name: Option<String> = ast.iter().find_map(|unit| match unit {
@@ -2039,6 +2117,7 @@ async fn sign_source_handler(
             manifest:           None,
             ir_dump:            vec![],
             sqb:               None,
+            struct_defs:       vec![],
         })),
     };
     let bytecode = wasm_compile.bytecode;
@@ -2157,6 +2236,7 @@ async fn sign_source_handler(
             manifest:           None,
             ir_dump:            vec![],
             sqb:               None,
+            struct_defs:       vec![],
     }))
 }
 
@@ -3555,6 +3635,28 @@ async fn session_state_handler(
                 let arr: Vec<serde_json::Value> = s.iter()
                     .map(|k| { let h = hex_encode(k); let s = h.trim_start_matches('0'); json!(format!("0x{}", if s.is_empty() { "0" } else { s })) })
                     .collect();
+                json!(arr)
+            }
+            Some(Value::Tuple(elems)) => {
+                // Serialize struct/tuple state vars — recurse into elements
+                let arr: Vec<serde_json::Value> = elems.iter().map(|e| {
+                    match e {
+                        Value::I32(v)   => json!(v),
+                        Value::U128(v)  => json!(v.to_string()),
+                        Value::U256(v)  => json!(v.to_string()),
+                        Value::Bool(b)  => json!(b),
+                        Value::Str(s)   => json!(format!("0x{}", hex::encode(s.as_bytes()))),
+                        Value::Bytes(b) => json!(format!("0x{}", hex::encode(b))),
+                        Value::Tuple(inner) => json!(inner.iter().map(|i| match i {
+                            Value::I32(v)   => json!(v),
+                            Value::U128(v)  => json!(v.to_string()),
+                            Value::U256(v)  => json!(v.to_string()),
+                            Value::Bool(b)  => json!(b),
+                            _               => json!(null),
+                        }).collect::<Vec<_>>()),
+                        _ => json!(null),
+                    }
+                }).collect();
                 json!(arr)
             }
             None => json!(0),
