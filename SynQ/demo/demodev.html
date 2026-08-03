@@ -6086,18 +6086,18 @@ var LOOP_LINES = [
     }
     window.decompileSqb = decompileSqb;
 
-    // Synchronized scroll: SSA pane is master, others follow
+    // Synchronized scroll: Original SynQ pane is master, others follow
     (function() {
-      var ssaEl = document.getElementById('decompileSSA');
       var origEl = document.getElementById('decompileOriginal');
+      var ssaEl = document.getElementById('decompileSSA');
       var solEl = document.getElementById('decompileSolidity');
       var syncing = false;
-      if (ssaEl) {
-        ssaEl.addEventListener('scroll', function() {
+      if (origEl) {
+        origEl.addEventListener('scroll', function() {
           if (syncing) return;
           syncing = true;
-          if (origEl) origEl.scrollTop = ssaEl.scrollTop;
-          if (solEl) solEl.scrollTop = ssaEl.scrollTop;
+          if (ssaEl) ssaEl.scrollTop = origEl.scrollTop;
+          if (solEl) solEl.scrollTop = origEl.scrollTop;
           syncing = false;
         });
       }
