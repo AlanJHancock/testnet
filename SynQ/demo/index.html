@@ -237,28 +237,6 @@
 </style>
   <script type="module" src="/demo/wasm/synq-wasm-loader.js"></script>
   
-  <!-- Decompile comparison window — persistent, side-by-side -->
-  <div class="decompile-window" id="decompileWindow">
-    <div class="decompile-header">
-      <span class="decompile-title">SQB Decompile</span>
-      <span class="decompile-contract" id="decompileContractName"></span>
-    </div>
-    <div class="decompile-body">
-      <div class="decompile-pane">
-        <div class="decompile-pane-header original">Original SynQ</div>
-        <div class="decompile-pane-content original" id="decompileOriginal">— Compile and deploy to see decompile output —</div>
-      </div>
-      <div class="decompile-pane">
-        <div class="decompile-pane-header ssa">Decompiled SSA</div>
-        <div class="decompile-pane-content ssa" id="decompileSSA">—</div>
-      </div>
-      <div class="decompile-pane" id="solidityPane" style="display:none">
-        <div class="decompile-pane-header solidity">Solidity</div>
-        <div class="decompile-pane-content solidity" id="decompileSolidity">—</div>
-      </div>
-    </div>
-  </div>
-
 <style>html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -715,6 +693,28 @@
 <div class="footer">
   Powered by <a href="https://synergy-network.io" target="_blank">Synergy Network</a>
   &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1
+</div>
+
+<!-- Decompile comparison window — persistent, side-by-side, below main IDE -->
+<div class="decompile-window" id="decompileWindow">
+  <div class="decompile-header">
+    <span class="decompile-title">SQB Decompile</span>
+    <span class="decompile-contract" id="decompileContractName"></span>
+  </div>
+  <div class="decompile-body">
+    <div class="decompile-pane">
+      <div class="decompile-pane-header original">Original SynQ</div>
+      <div class="decompile-pane-content original" id="decompileOriginal">— Compile and deploy to see decompile output —</div>
+    </div>
+    <div class="decompile-pane">
+      <div class="decompile-pane-header ssa">Decompiled SSA</div>
+      <div class="decompile-pane-content ssa" id="decompileSSA">—</div>
+    </div>
+    <div class="decompile-pane" id="solidityPane" style="display:none">
+      <div class="decompile-pane-header solidity">Solidity</div>
+      <div class="decompile-pane-content solidity" id="decompileSolidity">—</div>
+    </div>
+  </div>
 </div>
 
 <script>
