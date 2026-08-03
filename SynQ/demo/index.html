@@ -112,8 +112,20 @@
   .bytecode-display { background: rgba(3,7,15,0.9); border: 1px solid rgba(0,206,209,0.15); border-radius: 8px; padding: 14px 16px; font-family: ui-monospace, monospace; font-size: 11.5px; line-height: 19px; color: #a5f3fc; white-space: pre; overflow-x: auto; max-height: 400px; overflow-y: auto; }
   .compile-split { display: flex; gap: 12px; }
   .compile-col { flex: 1; min-width: 0; }
-  .ir-display { background: rgba(3,7,15,0.9); border: 1px solid rgba(168,85,247,0.18); border-radius: 8px; padding: 14px 16px; font-family: ui-monospace, monospace; font-size: 11px; line-height: 18px; color: #c4b5fd; white-space: pre; overflow-x: auto; max-height: 400px; overflow-y: auto; }
+  .ir-display { background: rgba(3,7,15,0.9); border: 1px solid rgba(168,85,247,0.18); border-radius: 8px; padding: 14px 16px; font-family: ui-monospace, monospace; font-size: 11px; line-height: 19px; color: #c4b5fd; white-space: pre; overflow-x: auto; max-height: 450px; overflow-y: auto; }
   .ir-empty { color: rgba(255,255,255,0.25); font-style: italic; font-size: 11px; }
+  .ir-fn-header { color: #a78bfa; font-weight: 600; }
+  .ir-block-label { color: #22d3ee; font-weight: 600; }
+  .ir-phi { color: #fb923c; font-weight: 500; }
+  .ir-val { color: #c4b5fd; }
+  .ir-op { color: #60a5fa; }
+  .ir-term { color: #4ade80; font-weight: 500; }
+  .ir-comment { color: rgba(255,255,255,0.3); font-style: italic; }
+  .ir-keyword { color: #a78bfa; font-weight: 600; }
+  .ir-state-var { color: #f472b6; }
+  .ir-addr { color: rgba(255,255,255,0.25); }
+  .ir-module-name { color: #fbbf24; font-weight: 600; }
+  .ir-stats { color: rgba(34,211,238,0.5); font-size: 10px; }
   .col-header { font-size: 0.72rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 6px; }
   .col-header.ir { color: rgba(168,85,247,0.6); }
   .col-header.bc { color: rgba(0,206,209,0.5); }
@@ -2135,45 +2147,54 @@
 
       // Populate SSA IR display from compile warnings
       var irEl = document.getElementById('irDisplay');
+      function escHtmlS(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+      function highlightIRLine(line) {
+        if (/^\s*$/.test(line)) return '';
+        if (/^\s*\/\//.test(line)) return '<span class="ir-comment">' + escHtmlS(line) + '</span>';
+        if (/^module\s+/.test(line)) return '<span class="ir-keyword">module</span> <span class="ir-module-name">' + escHtmlS(line.replace(/^module\s+/, '')) + '</span>';
+        if (/^\s*fn\s+/.test(line)) return '<span class="ir-fn-header"><span class="ir-keyword">fn</span> ' + escHtmlS(line.replace(/^\s*fn\s+/, '')) + '</span>';
+        if (/^\s*}\s*$/.test(line)) return '<span class="ir-keyword">' + escHtmlS(line) + '</span>';
+        var html = '';
+        var rem = line;
+        var bm = rem.match(/^(\s*)(block_\d+):\{/);
+        if (bm) { html += bm[1] + '<span class="ir-block-label">' + bm[2] + ':</span>{'; rem = rem.substring(bm[0].length); }
+        var vm = rem.match(/^(\s*)(v\d+):\s*(\S+)\s*=\s*/);
+        if (vm) {
+          var isPhi = rem.indexOf('Phi(') !== -1;
+          html += vm[1] + '<span class="' + (isPhi ? 'ir-phi' : 'ir-val') + '">' + vm[2] + '</span>: <span class="ir-op">' + vm[3] + '</span> = ';
+          rem = rem.substring(vm[0].length);
+        }
+        var terms = ['Branch', 'Jump', 'Return', 'Revert'];
+        var isTerm = false;
+        for (var t = 0; t < terms.length; t++) { if (rem.indexOf(terms[t]) !== -1) { isTerm = true; break; } }
+        if (isTerm) { html += '<span class="ir-term">' + escHtmlS(rem) + '</span>'; }
+        else {
+          var am = rem.match(/^(\s*)(\d+)\s*=\s*/);
+          if (am) { html += am[1] + am[2] + ' = '; rem = rem.substring(am[0].length); }
+          var om = rem.match(/^(\w+)\(/);
+          if (om) { html += '<span class="ir-op">' + om[1] + '</span>(' + escHtmlS(rem.substring(om[1].length+1)); }
+          else if (!vm) { html += '<span class="ir-val">' + escHtmlS(rem) + '</span>'; }
+          else { html += escHtmlS(rem); }
+        }
+        html = html.replace(/@ addr=(\d+)/g, '<span class="ir-addr">@ addr=$1</span>');
+        html = html.replace(/"([a-zA-Z_][a-zA-Z0-9_]*)"/g, function(m, n) { return n.startsWith('__') ? m : '"<span class="ir-state-var">' + n + '</span>"'; });
+        return html;
+      }
       function renderIR(warningsList, irDump) {
         if (!irEl) return;
         var irWarnings = (warningsList || []).filter(function(w) { return w.indexOf('[IR]') === 0; });
-        
-        // If we have full IR dump from server, show that
         if (irDump && irDump.length > 0) {
-          var lines = [];
-          lines.push('SSA IR (Static Single Assignment) — Intermediate Representation');
-          lines.push('Full Instruction Dump');
-          lines.push('============================================');
-          lines.push('');
-          irDump.forEach(function(fnIR) {
-            lines.push(fnIR.trim());
-            lines.push('');
-          });
-          // Append summary stats below the full dump
+          var h = '';
+          irDump.forEach(function(fnIR) { fnIR.split('\n').forEach(function(l) { h += highlightIRLine(l) + '\n'; }); });
           if (irWarnings.length > 0) {
-            lines.push('--------------------------------------------');
-            lines.push('Summary');
-            lines.push('--------------------------------------------');
-            irWarnings.forEach(function(w) {
-              lines.push('  ' + w.replace(/^\[IR\]\s*/, ''));
-            });
+            h += '\n<span class="ir-comment">─── Summary ───</span>\n';
+            irWarnings.forEach(function(w) { h += '<span class="ir-stats">' + escHtmlS(w.replace(/^\[IR\]\s*/, '')) + '</span>\n'; });
           }
-          irEl.textContent = lines.join('\n');
-          irEl.style.color = '#c4b5fd';
+          irEl.innerHTML = h;
         } else if (irWarnings.length > 0) {
-          // Fallback: stats only (WASM path without server IR dump)
-          var lines = [];
-          lines.push('SSA IR (Static Single Assignment) — Intermediate Representation');
-          lines.push('Analysis (summary only)');
-          lines.push('============================================');
-          lines.push('');
-          irWarnings.forEach(function(w) {
-            var text = w.replace(/^\[IR\]\s*/, '');
-            lines.push('  ' + text);
-          });
-          irEl.textContent = lines.join('\n');
-          irEl.style.color = '#c4b5fd';
+          var h = '<span class="ir-comment">SSA IR — Analysis (summary only)</span>\n\n';
+          irWarnings.forEach(function(w) { h += '<span class="ir-stats">' + escHtmlS(w.replace(/^\[IR\]\s*/, '')) + '</span>\n'; });
+          irEl.innerHTML = h;
         } else {
           irEl.innerHTML = '<span class="ir-empty">No IR analysis available</span>';
         }
@@ -2184,7 +2205,6 @@
         if (irWarnings.length > 0 || irDump) {
           renderIR(data.warnings, irDump);
         } else {
-          // WASM compile succeeded but no IR — fetch from server
           irEl.innerHTML = '<span class="ir-empty">Fetching IR analysis from server...</span>';
           fetch(COMPILE_URL, {
             method: 'POST',
