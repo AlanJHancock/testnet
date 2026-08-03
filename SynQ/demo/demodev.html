@@ -5528,7 +5528,7 @@ var LOOP_LINES = [
       '    }',
       '',
       '    @public',
-      '    function setCorner(p: Point) -> bool {',
+      '    function setCorner(p: (u256, u256)) -> bool {',
       '        corner = p;',
       '        return true;',
       '    }',
@@ -5550,7 +5550,7 @@ var LOOP_LINES = [
     updateLineNums();
     clearResults();
     syncCompileBtn();
-    setStatus('StructValue loaded — Compile, Deploy, then call init(). Try getCornerX(), getBoxOriginX(), setCornerFromMake(10,20), moveCorner(100,200).', 'info');
+    setStatus('StructValue loaded — Compile, Deploy, then call init(). Try setCorner(10,20), getCornerX(), getBoxOriginX(), moveCorner(100,200).', 'info');
   }
   window.loadStructValue = loadStructValue;
 
