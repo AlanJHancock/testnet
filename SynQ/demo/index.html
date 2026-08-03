@@ -138,7 +138,7 @@
   .results-section { margin-top: 20px; display: none; }
   .results-section.show { display: block; }
   .results-title { font-size: 0.78rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: rgba(255,255,255,0.4); margin-bottom: 10px; }
-  .bytecode-display { background: rgba(3,7,15,0.9); border: 1px solid rgba(0,206,209,0.15); border-radius: 8px; padding: 14px 16px; font-family: ui-monospace, monospace; font-size: 11.5px; line-height: 19px; color: #a5f3fc; white-space: pre; overflow-x: auto; max-height: 400px; overflow-y: auto; }
+  .bytecode-display { background: rgba(3,7,15,0.9); border: 1px solid rgba(0,206,209,0.15); border-radius: 8px; padding: 14px 16px; font-family: ui-monospace, monospace; font-size: 11.5px; line-height: 19px; color: #a5f3fc; white-space: pre; overflow-x: auto; max-height: 450px; overflow-y: auto; }
   .compile-split { display: flex; gap: 12px; }
   .compile-col { flex: 1; min-width: 0; }
   .ir-display { background: rgba(3,7,15,0.9); border: 1px solid rgba(168,85,247,0.18); border-radius: 8px; padding: 14px 16px; font-family: ui-monospace, monospace; font-size: 11px; line-height: 19px; color: #c4b5fd; white-space: pre; overflow-x: auto; max-height: 450px; overflow-y: auto; }
@@ -376,7 +376,7 @@
   .results-section { margin-top: 20px; display: none; }
   .results-section.show { display: block; }
   .results-title { font-size: 0.78rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: rgba(255,255,255,0.4); margin-bottom: 10px; }
-  .bytecode-display { background: rgba(3,7,15,0.9); border: 1px solid rgba(0,206,209,0.15); border-radius: 8px; padding: 14px 16px; font-family: ui-monospace, monospace; font-size: 11.5px; line-height: 19px; color: #a5f3fc; white-space: pre; overflow-x: auto; max-height: 400px; overflow-y: auto; }
+  .bytecode-display { background: rgba(3,7,15,0.9); border: 1px solid rgba(0,206,209,0.15); border-radius: 8px; padding: 14px 16px; font-family: ui-monospace, monospace; font-size: 11.5px; line-height: 19px; color: #a5f3fc; white-space: pre; overflow-x: auto; max-height: 450px; overflow-y: auto; }
   .compile-split { display: flex; gap: 12px; }
   .compile-col { flex: 1; min-width: 0; }
   .ir-display { background: rgba(3,7,15,0.9); border: 1px solid rgba(168,85,247,0.18); border-radius: 8px; padding: 14px 16px; font-family: ui-monospace, monospace; font-size: 11px; line-height: 19px; color: #c4b5fd; white-space: pre; overflow-x: auto; max-height: 450px; overflow-y: auto; }
@@ -6098,6 +6098,21 @@ var LOOP_LINES = [
           syncing = true;
           if (ssaEl) ssaEl.scrollTop = origEl.scrollTop;
           if (solEl) solEl.scrollTop = origEl.scrollTop;
+          syncing = false;
+        });
+      }
+    })();
+
+    // Compilation Results: IR display is scroll master, bytecode follows
+    (function() {
+      var irEl = document.getElementById('irDisplay');
+      var bcEl = document.getElementById('bytecodeDisplay');
+      var syncing = false;
+      if (irEl) {
+        irEl.addEventListener('scroll', function() {
+          if (syncing) return;
+          syncing = true;
+          if (bcEl) bcEl.scrollTop = irEl.scrollTop;
           syncing = false;
         });
       }
