@@ -54,16 +54,16 @@
   .addr-popup .legend-item { display: flex; align-items: flex-start; gap: 6px; margin: 4px 0; }
   /* Decompile comparison window — persistent, no close */
   .decompile-window {
-    display: none; margin: 0 auto 24px; max-width: 1400px; background: rgba(8,12,20,0.95);
+    display: none; margin: 0 auto 24px; max-width: 980px; background: rgba(8,12,20,0.95);
     border: 1px solid rgba(168,85,247,0.2); border-radius: 12px; overflow: hidden;
   }
   .decompile-window.show { display: block; }
   .decompile-header {
-    display: flex; align-items: center; justify-content: space-between; padding: 12px 18px;
+    display: flex; align-items: center; gap: 10px; padding: 12px 18px;
     border-bottom: 1px solid rgba(255,255,255,0.06);
   }
   .decompile-title { font-size: 0.82rem; font-weight: 600; color: #a78bfa; }
-  .decompile-contract { font-size: 0.72rem; color: rgba(255,255,255,0.4); }
+  .decompile-contract { font-size: 0.72rem; color: rgba(168,139,250,0.6); font-weight: 500; }
   .decompile-body { display: flex; gap: 1px; background: rgba(255,255,255,0.04); }
   .decompile-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: rgba(3,7,15,0.92); min-width: 0; }
   .decompile-pane-header {
@@ -293,16 +293,16 @@
   .addr-popup .legend-item { display: flex; align-items: flex-start; gap: 6px; margin: 4px 0; }
   /* Decompile comparison window — persistent, no close */
   .decompile-window {
-    display: none; margin: 0 auto 24px; max-width: 1400px; background: rgba(8,12,20,0.95);
+    display: none; margin: 0 auto 24px; max-width: 980px; background: rgba(8,12,20,0.95);
     border: 1px solid rgba(168,85,247,0.2); border-radius: 12px; overflow: hidden;
   }
   .decompile-window.show { display: block; }
   .decompile-header {
-    display: flex; align-items: center; justify-content: space-between; padding: 12px 18px;
+    display: flex; align-items: center; gap: 10px; padding: 12px 18px;
     border-bottom: 1px solid rgba(255,255,255,0.06);
   }
   .decompile-title { font-size: 0.82rem; font-weight: 600; color: #a78bfa; }
-  .decompile-contract { font-size: 0.72rem; color: rgba(255,255,255,0.4); }
+  .decompile-contract { font-size: 0.72rem; color: rgba(168,139,250,0.6); font-weight: 500; }
   .decompile-body { display: flex; gap: 1px; background: rgba(255,255,255,0.04); }
   .decompile-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: rgba(3,7,15,0.92); min-width: 0; }
   .decompile-pane-header {
@@ -6266,7 +6266,7 @@ var LOOP_LINES = [
           solPane.style.display = 'none';
         }
 
-        document.getElementById('decompileContractName').textContent = result.contract_name || 'Unknown';
+        document.getElementById('decompileContractName').textContent = '— ' + file.name;
 
         // Show window (stays open)
         document.getElementById('decompileWindow').classList.add('show');

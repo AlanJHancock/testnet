@@ -66,7 +66,7 @@ fn infer_expr_type(expr: &Expression) -> Type {
                 Type::UInt256
             }
         },
-        Expression::Caller => Type::Address,
+        Expression::Caller => Type::UInt256,
         Expression::FieldAccess { object, .. } => infer_expr_type(object),
         Expression::StructLiteral { type_name, .. } => Type::Named(type_name.clone()),
         _ => Type::UInt256,
@@ -174,7 +174,7 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
     for part in &contract.parts {
         if let ContractPart::StateVariable(sv) = part {
             let vis = if sv.is_public { "public" } else { "internal" };
-            writeln!(out, "    {} {} {};", ty_to_sol(&sv.ty), vis, sv.name).unwrap();
+            writeln!(out, "    {} {} {};", ty_to_sol(&sv.ty), vis, sol_identifier(&sv.name)).unwrap();
             has_state = true;
         }
     }
@@ -271,9 +271,9 @@ fn transpile_function(out: &mut String, f: &FunctionDefinition, contract: &Contr
             let ty_str = ty_to_sol(&p.ty);
             let needs_memory = matches!(p.ty, Type::Named(_) | Type::Str | Type::Bytes);
             if needs_memory {
-                format!("{} memory {}", ty_str, p.name)
+                format!("{} memory {}", ty_str, sol_identifier(&p.name))
             } else {
-                format!("{} {}", ty_str, p.name)
+                format!("{} {}", ty_str, sol_identifier(&p.name))
             }
         }).collect();
 
@@ -340,12 +340,16 @@ fn transpile_statement(out: &mut String, stmt: &Statement, indent: usize) {
             let expr_ty = infer_expr_type(expr);
             let val_str = transpile_expr(expr);
             // Cast if assigning bool to uint256 or vice versa
-            let cast_val = match (&target_ty, &expr_ty) {
+            let cast_val = match (&target_ty.as_ref().map(resolve_type_alias), &expr_ty) {
                 (Some(Type::UInt256), Type::Bool) => format!("({} ? uint256(1) : uint256(0))", val_str),
-                (Some(Type::Bool), Type::UInt256) => format!("({} != 0)", val_str),
+                (Some(Type::Address), Type::UInt256) => format!("address(uint160({}))", val_str),
+                (Some(Type::Bytes), Type::UInt256) => format!("bytes20(uint160({}))", val_str),
+                (Some(Type::BytesN(n)), Type::UInt256) => format!("bytes{}(uint160({}))", n, val_str),
+                (Some(Type::Hash32), Type::UInt256) => format!("bytes32(uint256({}))", val_str),
                 _ => val_str,
             };
-            writeln!(out, "{}{} = {};", pad, name, cast_val).unwrap();
+            let cast_val = simplify_redundant_casts(&cast_val);
+            writeln!(out, "{}{} = {};", pad, sol_identifier(name), cast_val).unwrap();
         }
         Statement::FieldAssignment { object, field, value } => {
             writeln!(out, "{}{}.{} = {};", pad, object, field, transpile_expr(value)).unwrap();
@@ -372,9 +376,9 @@ fn transpile_statement(out: &mut String, stmt: &Statement, indent: usize) {
                 // Register inferred type for later statements
             }
             if needs_memory {
-                writeln!(out, "{}{} memory {} = {};", pad, ty_str, name, transpile_expr(value)).unwrap();
+                writeln!(out, "{}{} memory {} = {};", pad, ty_str, sol_identifier(name), transpile_expr(value)).unwrap();
             } else {
-                writeln!(out, "{}{} {} = {};", pad, ty_str, name, transpile_expr(value)).unwrap();
+                writeln!(out, "{}{} {} = {};", pad, ty_str, sol_identifier(name), transpile_expr(value)).unwrap();
             }
         }
         Statement::LetDestructure { names, value } => {
@@ -387,12 +391,18 @@ fn transpile_statement(out: &mut String, stmt: &Statement, indent: usize) {
         Statement::Return(Some(expr)) => {
             let val_str = transpile_expr(expr);
             let expr_ty = infer_expr_type(expr);
+            let expr_ty = resolve_type_alias(&expr_ty);
             let ret_ty = get_type("__return_type__");
             // Only cast bool→uint256 when function returns uint256
-            let cast_val = match (&ret_ty, &expr_ty) {
+            let cast_val = match (&ret_ty.as_ref().map(resolve_type_alias), &expr_ty) {
                 (Some(Type::UInt256), Type::Bool) => format!("({} ? uint256(1) : uint256(0))", val_str),
+                (Some(Type::UInt256), Type::Address) => format!("uint256(uint160({}))", val_str),
+                (Some(Type::UInt256), Type::BytesN(_)) => format!("uint256(uint160({}))", val_str),
+                (Some(Type::UInt256), Type::Hash32) => format!("uint256({})", val_str),
+                (Some(Type::UInt256), Type::Bytes) => format!("uint256(uint160({}))", val_str),
                 _ => val_str,
             };
+            let cast_val = simplify_redundant_casts(&cast_val);
             writeln!(out, "{}return {};", pad, cast_val).unwrap();
         }
         Statement::ExternCall { contract, function, args } => {
@@ -432,23 +442,32 @@ fn transpile_expr(expr: &Expression) -> String {
             let a: Vec<String> = args.iter().map(transpile_expr).collect();
             // Map SynQ builtins to Solidity equivalents
             match name.as_str() {
-                "to_syna" => format!("address({})", transpile_expr(&args[0])),
-                "from_syna" => format!("uint256(uint160({}))", transpile_expr(&args[0])),
-                "contract_address" => format!("address(this)"),
+
                 "str_len" => format!("bytes({}).length", transpile_expr(&args[0])),
                 "str_concat" => format!("string.concat({})", a.join(", ")),
                 "str_eq" => format!("(keccak256(bytes({})) == keccak256(bytes({})))", transpile_expr(&args[0]), transpile_expr(&args[1])),
                 "asset_create" | "asset_transfer" | "asset_burn" | "asset_balance" | "asset_owner" =>
                     format!("/* SXCP asset bridge: {}({}) */", name, a.join(", ")),
-                "aegis_call" | "aegis_verify" | "aegis_decaps" =>
-                    format!("/* SXCP PQC bridge: {}({}) */", name, a.join(", ")),
-                "ai_verify_proof" | "ai_infer" =>
-                    format!("/* SXCP AI bridge: {}({}) */", name, a.join(", ")),
+                "dilithium_verify" | "falcon_verify" | "sphincs_verify" |
+                "aegis_verify" | "ai_verify_proof" =>
+                    format!("false /* SXCP bridge stub: {} */", name),
+                "kyber_decaps" | "kyber_encaps" =>
+                    format!("bytes(new bytes(0)) /* SXCP bridge stub: {} */", name),
+                "aegis_call" | "aegis_decaps" |
+                "authority_envelope" | "authority_require" | "authority_identity" |
+                "ai_infer" |
+                "asset_create" | "asset_transfer" | "asset_burn" |
+                "asset_balance" | "asset_owner" =>
+                    format!("uint256(0) /* SXCP bridge stub: {} */", name),
+                "to_syna" | "contract_address" =>
+                    format!("new string(0) /* SXCP Bech32 bridge stub: {} */", name),
+                "from_syna" =>
+                    format!("uint256(0) /* SXCP Bech32 bridge stub: from_syna */"),
                 _ => format!("{}({})", name, a.join(", ")),
             }
         }
         Expression::Literal(lit) => literal_to_sol(lit),
-        Expression::Identifier(name) => name.clone(),
+        Expression::Identifier(name) => sol_identifier(name),
         Expression::BinaryOp(l, op, r) => {
             let ls = transpile_expr(l);
             let rs = transpile_expr(r);
@@ -470,7 +489,7 @@ fn transpile_expr(expr: &Expression) -> String {
         }
         Expression::Caller => "uint256(uint160(msg.sender))".to_string(),
         Expression::MapIndex(map, key) => {
-            format!("{}[{}]", map, transpile_expr(key))
+            format!("{}[{}]", sol_identifier(map), transpile_expr(key))
         }
         Expression::MapMethod { map, method, args } => {
             let a: Vec<String> = args.iter().map(transpile_expr).collect();
@@ -569,6 +588,81 @@ fn binop_to_sol(op: &BinaryOperator) -> &'static str {
 
 fn unop_to_sol(op: &UnaryOperator) -> &'static str {
     match op { UnaryOperator::Neg => "-", UnaryOperator::Not => "!" }
+}
+
+/// Resolve SynQ type aliases to their underlying Solidity type.
+fn resolve_type_alias(ty: &Type) -> Type {
+    match ty {
+        Type::UMAIdentity => Type::Address,
+        Type::Height => Type::UInt256,
+        _ => ty.clone(),
+    }
+}
+
+/// Strip redundant nested Solidity casts produced when an expression already
+/// contains a cast that the assignment/return cast wraps again.
+/// e.g. bytes20(uint160(uint256(uint160(msg.sender)))) -> bytes20(uint160(msg.sender))
+fn simplify_redundant_casts(s: &str) -> String {
+    // Strip T1(T2(T1(T2(X)))) -> T1(T2(X)) for known cast patterns.
+    const PATTERNS: &[(&str, &str)] = &[
+        ("bytes20(uint160(uint256(uint160(", "bytes20(uint160("),
+        ("uint256(uint160(bytes20(uint160(", "uint256(uint160("),
+        ("uint256(uint160(uint256(uint160(", "uint256(uint160("),
+        ("bytes32(uint256(bytes32(uint256(", "bytes32(uint256("),
+        ("address(uint160(uint256(uint160(", "address(uint160("),
+    ];
+    let mut out = s.to_string();
+    for _ in 0..3 {
+        let before = out.clone();
+        for (pat, repl) in PATTERNS {
+            if let Some(idx) = out.find(pat) {
+                let after = &out[idx + pat.len()..];
+                // Find the inner expression content (up to first unmatched ')')
+                let mut depth = 0i32;
+                let mut content_end = 0;
+                for (i, c) in after.char_indices() {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => {
+                            if depth == 0 {
+                                content_end = i;
+                                break;
+                            }
+                            depth -= 1;
+                        }
+                        _ => {}
+                    }
+                }
+                if content_end > 0 {
+                    let inner = &after[..content_end];
+                    // Original: pat + inner + "))))" + suffix (4 closes from pattern)
+                    // New: repl + inner + "))" + suffix (2 closes from replacement)
+                    let suffix = &after[content_end + 4..];
+                    out = format!("{}{}{})){}", &out[..idx], repl, inner, suffix);
+                }
+            }
+        }
+        if out == before { break; }
+    }
+    out
+}
+
+
+/// Rename SynQ identifiers that conflict with Solidity reserved words.
+fn sol_identifier(name: &str) -> String {
+    match name {
+        "msg" => "msg_".to_string(),      // msg is a global in Solidity
+        "this" => "this_".to_string(),     // this is a keyword
+        "block" => "block_".to_string(),   // block is a global
+        "tx" => "tx_".to_string(),         // tx is a global
+        "revert" => "revert_".to_string(), // revert is a keyword
+        "require" => "require_".to_string(),
+        "assert" => "assert_".to_string(),
+        "emit" => "emit_".to_string(),
+        "new" => "new_".to_string(),
+        "delete" => "delete_".to_string(),
+        _ => name.to_string(),
+    }
 }
 
 fn literal_to_sol(lit: &Literal) -> String {
