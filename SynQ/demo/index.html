@@ -690,12 +690,7 @@
 </div>
 </div>
 
-<div class="footer">
-  Powered by <a href="https://synergy-network.io" target="_blank">Synergy Network</a>
-  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1
-</div>
-
-<!-- Decompile comparison window — persistent, side-by-side, below main IDE -->
+<!-- Decompile comparison window — persistent, side-by-side, above footer -->
 <div class="decompile-window" id="decompileWindow">
   <div class="decompile-header">
     <span class="decompile-title">SQB Decompile</span>
@@ -715,6 +710,11 @@
       <div class="decompile-pane-content solidity" id="decompileSolidity">—</div>
     </div>
   </div>
+</div>
+
+<div class="footer">
+  Powered by <a href="https://synergy-network.io" target="_blank">Synergy Network</a>
+  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1
 </div>
 
 <script>
@@ -2612,7 +2612,7 @@
             var scErr = (scData.errors || ['Source signing failed'])[0];
             // Non-fatal: we still have the compile result from WASM/server step
             renderAttestPanel(currentSidecar);
-            setStatus('Compiled OK · source signing error: ' + scErr, 'warning');
+            setStatus('Compiled OK ▶ ' + (currentContractName || 'contract') + ' · source signing error: ' + scErr, 'warning');
             console.warn('[SynQ Rev-2] sign-source error:', scErr);
           }
 

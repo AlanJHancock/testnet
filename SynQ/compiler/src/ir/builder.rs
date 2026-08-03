@@ -795,6 +795,18 @@ impl<'a> BuildContext<'a> {
                         });
                         Ok(self.push_value(IrOp::AegisCall(arg_vals), IrType::Bytes))
                     }
+                    "authority_envelope" => {
+                        Ok(self.push_value(IrOp::LoadAuthority, IrType::Bytes))
+                    }
+                    "authority_require" => {
+                        // (envelope: Bytes, scope_hash: Bytes) -> Bool
+                        // scope_hash is pushed last (popped first) — but IR handles arg order
+                        Ok(self.push_value(IrOp::AuthRequire(arg_vals[0], "scope".into()), IrType::Bool))
+                    }
+                    "authority_identity" => {
+                        // (envelope: Bytes) -> U256 (UMA identity)
+                        Ok(self.push_value(IrOp::AuthIdentity(arg_vals[0]), IrType::U256))
+                    }
                     "str_len" => {
                         Ok(self.push_value(IrOp::StrLen(arg_vals[0]), IrType::I32))
                     }
