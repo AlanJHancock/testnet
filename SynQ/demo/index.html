@@ -3103,6 +3103,30 @@
     return null;
   }
 
+  // Parse a tuple type string like "(u256, u256)" into element types
+  // Returns array of type strings ['u256','u256'] or null if not a tuple
+  function parseTupleType(typeStr) {
+    if (!typeStr || typeStr[0] !== '(' || typeStr[typeStr.length-1] !== ')') return null;
+    var inner = typeStr.slice(1, -1);
+    // Split on commas (handle nested parens for nested tuples)
+    var parts = [];
+    var depth = 0, cur = '';
+    for (var i = 0; i < inner.length; i++) {
+      var c = inner[i];
+      if (c === '(' ) depth++;
+      if (c === ')') depth--;
+      if (c === ',' && depth === 0) { parts.push(cur.trim()); cur = ''; }
+      else cur += c;
+    }
+    if (cur.trim()) parts.push(cur.trim());
+    return parts.length >= 2 ? parts : null;
+  }
+
+  // Check if a param type is a struct or tuple (needs sub-field expansion)
+  function isExpandableType(typeStr) {
+    return lookupStructDef(typeStr) || parseTupleType(typeStr);
+  }
+
   function selectFunction(idx) {
     selectedFunc = parsedFunctions[idx];
 
@@ -3142,8 +3166,9 @@
         lbl.innerHTML = pName + (paramTypeHint
           ? ' <span style="font-size:0.65rem;color:#888;font-weight:400;">(' + paramTypeHint + ')</span>'
           : '');
-        // Check if param is a struct type — render sub-field inputs
+        // Check if param is a struct or tuple type — render sub-field inputs
         var _structDef = lookupStructDef(_pRawType);
+        var _tupleTypes = parseTupleType(_pRawType);
         if (_structDef && _structDef.fields && _structDef.fields.length > 0) {
           var subFields = _structDef.fields;
           var subGroup = document.createElement('div');
@@ -3157,6 +3182,31 @@
             sfInput.id = 'param_' + p + '_sub_' + sf;
             sfInput.value = '0';
             sfInput.placeholder = subFields[sf].ty || 'u256';
+            sfInput.style.cssText = 'width:100%;background:rgba(3,7,15,0.8);border:1px solid rgba(0,206,209,0.2);border-radius:6px;color:#f2f5ff;font-family:ui-monospace,monospace;font-size:0.82rem;padding:6px 10px;outline:none;';
+            sfInput.addEventListener('focus', function(){ this.style.borderColor='rgba(0,206,209,0.6)'; });
+            sfInput.addEventListener('blur', function(){ this.style.borderColor='rgba(0,206,209,0.2)'; });
+            var sfDiv = document.createElement('div');
+            sfDiv.style.flex = '1';
+            sfDiv.appendChild(sfLabel);
+            sfDiv.appendChild(sfInput);
+            subGroup.appendChild(sfDiv);
+          }
+          paramsContainer.appendChild(subGroup);
+          continue;
+        }
+        // Tuple type like (u256, u256) — render sub-field inputs by arity
+        if (_tupleTypes) {
+          var subGroup = document.createElement('div');
+          subGroup.style.cssText = 'display:flex;gap:6px;margin-top:2px;';
+          for (var sf = 0; sf < _tupleTypes.length; sf++) {
+            var sfLabel = document.createElement('label');
+            sfLabel.style.cssText = 'font-size:0.65rem;color:rgba(255,255,255,0.45);font-family:ui-monospace,monospace;';
+            sfLabel.textContent = '_' + sf;
+            var sfInput = document.createElement('input');
+            sfInput.type = 'text';
+            sfInput.id = 'param_' + p + '_sub_' + sf;
+            sfInput.value = '0';
+            sfInput.placeholder = _tupleTypes[sf] || 'u256';
             sfInput.style.cssText = 'width:100%;background:rgba(3,7,15,0.8);border:1px solid rgba(0,206,209,0.2);border-radius:6px;color:#f2f5ff;font-family:ui-monospace,monospace;font-size:0.82rem;padding:6px 10px;outline:none;';
             sfInput.addEventListener('focus', function(){ this.style.borderColor='rgba(0,206,209,0.6)'; });
             sfInput.addEventListener('blur', function(){ this.style.borderColor='rgba(0,206,209,0.2)'; });
@@ -3349,12 +3399,22 @@
     var args = [];
     var argError = null;
     for (var p = 0; p < selectedFunc.paramCount; p++) {
-      // Struct params: collect sub-field values as comma-separated string
+      // Struct/tuple params: collect sub-field values as comma-separated string
       var _pType = (selectedFunc.paramTypes && selectedFunc.paramTypes[p]) || '';
       var _structDef2 = lookupStructDef(_pType);
+      var _tupleTypes2 = parseTupleType(_pType);
       if (_structDef2 && _structDef2.fields && _structDef2.fields.length > 0) {
         var subVals = [];
         for (var sf = 0; sf < _structDef2.fields.length; sf++) {
+          var subEl = document.getElementById('param_' + p + '_sub_' + sf);
+          subVals.push(subEl ? subEl.value.trim() : '0');
+        }
+        runArgs.push(subVals.join(', '));
+        continue;
+      }
+      if (_tupleTypes2) {
+        var subVals = [];
+        for (var sf = 0; sf < _tupleTypes2.length; sf++) {
           var subEl = document.getElementById('param_' + p + '_sub_' + sf);
           subVals.push(subEl ? subEl.value.trim() : '0');
         }
@@ -3366,8 +3426,8 @@
       var paramIsBytes = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'bytes';
       var raw = el ? (paramIsStr || paramIsBytes ? el.value : el.value.trim()) : '';
       if (!paramIsStr && !paramIsBytes && raw === '') {
-        // Struct params use sub-field inputs — skip validation here
-        if (lookupStructDef((selectedFunc.paramTypes && selectedFunc.paramTypes[p]) || '')) break;
+        // Struct/tuple params use sub-field inputs — skip validation here
+        if (isExpandableType((selectedFunc.paramTypes && selectedFunc.paramTypes[p]) || '')) break;
         argError = selectedFunc.paramNames && selectedFunc.paramNames[p]
           ? 'Enter a value for "' + selectedFunc.paramNames[p] + '"'
           : 'Enter a value for parameter ' + p;
