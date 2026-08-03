@@ -589,7 +589,17 @@ impl QuantumVM {
                 // Clean up any dangling call frames from this invocation
                 self.call_stack.clear();
                 self.stack.clear();
-                Err(e)
+                // Wrap the error with the function name for easier debugging
+                match e {
+                    VMError::RuntimeError(msg) => Err(VMError::RuntimeError(
+                        format!("{}: {}", name, msg)
+                    )),
+                    VMError::Reverted(msg) => Err(VMError::Reverted(
+                        format!("{}: {}", name, msg)
+                    )),
+                    // Pass through structured errors (StepLimitExceeded, etc.)
+                    other => Err(other),
+                }
             }
         }
     }
