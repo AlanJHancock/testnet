@@ -795,6 +795,15 @@ impl<'a> BuildContext<'a> {
                         });
                         Ok(self.push_value(IrOp::AegisCall(arg_vals), IrType::Bytes))
                     }
+                    "str_len" => {
+                        Ok(self.push_value(IrOp::StrLen(arg_vals[0]), IrType::I32))
+                    }
+                    "str_concat" => {
+                        Ok(self.push_value(IrOp::StrConcat(arg_vals[0], arg_vals[1]), IrType::Str))
+                    }
+                    "str_eq" => {
+                        Ok(self.push_value(IrOp::StrEq(arg_vals[0], arg_vals[1]), IrType::Bool))
+                    }
                     _ => {
                         // User-defined function call — resolve return type
                         let ret_ty = self.function_return_types.get(name)

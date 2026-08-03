@@ -2033,7 +2033,7 @@ async fn sign_source_handler(
             success: false, bytecode: None, signature_sidecar: None,
             state_vars: vec![], contract_name: None, contract_address: None,
             extern_contracts: vec![],
-            errors: vec![format!("Codegen error: {}", e)], warnings: compile_warnings,
+            errors: vec![format!("Compilation error: {}", e)], warnings: compile_warnings,
             functions:        Vec::new(),
             state_var_types:  std::collections::HashMap::new(),
             manifest:           None,
@@ -3631,7 +3631,7 @@ async fn bench_compile_handler(
             success: false, parse_ns,
             codegen_ns: t1.elapsed().as_nanos() as u64,
             total_ns: t0.elapsed().as_nanos() as u64,
-            bytecode_bytes: 0, error: Some(format!("Codegen error: {}", e)),
+            bytecode_bytes: 0, error: Some(format!("Compilation error: {}", e)),
 
         }),
     };
