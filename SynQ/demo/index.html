@@ -1,4 +1,4 @@
-<!-- SynQ IDE v2026.08.03.9 — tuple param expansion + @effects guard -->
+<!-- SynQ IDE v2026.08.04.1 — tuple param expansion + @effects guard -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -721,7 +721,7 @@
 
 <div class="footer">
   Powered by <a href="https://synergy-network.io" target="_blank">Synergy Network</a>
-  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.03.9</span>
+  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.04.1</span>
 </div>
 
 <script>
@@ -2126,16 +2126,27 @@
     bar.textContent = msg; bar.className = 'status-bar show ' + type;
   }
 
+  // ── Filename badges for Editor + Results panels ──────────────────────────
+  function setEditorBadges(name) {
+    var _eb = document.getElementById('editorContractBadge');
+    var _rb = document.getElementById('resultsContractBadge');
+    if (_eb) { _eb.textContent = name ? name + '.synq' : ''; _eb.style.display = name ? 'inline-block' : 'none'; }
+    if (_rb) { _rb.textContent = name ? name + '.sqb' : ''; _rb.style.display = name ? 'inline' : 'none'; }
+  }
+  window.setEditorBadges = setEditorBadges;
+
   function loadDemo() {
     evictWorkspaceContractByName('SimpleToken');
     document.getElementById('editor').value = DEMO_LINES.join('\n');
     updateLineNums(); clearResults(); syncCompileBtn();
+    setEditorBadges('SimpleToken');
     setStatus('Step 2 of 2 — Compile SimpleToken, then Deploy into the same workspace.', 'info');
   }
 
   function loadBlank() {
     document.getElementById('editor').value = BLANK_LINES.join('\n');
     updateLineNums(); clearResults(); syncCompileBtn();
+    setEditorBadges(null);
     setStatus('Blank template loaded — edit the contract name and functions, then Compile and Deploy.', 'info');
   }
 
@@ -2163,6 +2174,7 @@
       // Extract contract name from source for a friendly status message
       var match = src.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
       var name  = match ? match[1] : file.name;
+      setEditorBadges(name);
       setStatus('Loaded “' + name + '” from ' + file.name + ' — review, then Compile and Deploy.', 'info');
     };
     reader.onerror = function() {
@@ -2200,6 +2212,7 @@
     evictWorkspaceContractByName('TokenVault');
     document.getElementById('editor').value = VAULT_LINES.join('\n');
     updateLineNums(); clearResults(); syncCompileBtn();
+    setEditorBadges('TokenVault');
     setStatus('Step 1 of 2 — Compile TokenVault, then Deploy. Then load SimpleToken for step 2.', 'info');
   }
   function loadComprehensive() {
@@ -2209,6 +2222,7 @@
     updateLineNums();
     clearResults();
     syncCompileBtn();
+    setEditorBadges('ComprehensiveToken');
     setStatus('ComprehensiveToken loaded — connect wallet, Compile, Deploy, then call init() (signs with your raw EVM address as caller identity)', 'info');
   }
 
@@ -5470,6 +5484,7 @@ var LOOP_LINES = [
     updateLineNums();
     clearResults();
     syncCompileBtn();
+    setEditorBadges('TypeTestContract');
     setStatus('TypeTestContract loaded — Compile, Deploy, then call init() to begin testing all types and operators.', 'info');
   }
   window.loadTypeTest = loadTypeTest;
@@ -5507,6 +5522,7 @@ var LOOP_LINES = [
     updateLineNums();
     clearResults();
     syncCompileBtn();
+    setEditorBadges('LoopDemo');
     setStatus('LoopDemo loaded. Call init() before runIterations(). Try factorial(5), sumRange(1,100), countEven(10), sqrtFloor(16), power(2,10).', 'info');
   }
   window.loadLoopDemo = loadLoopDemo;
@@ -5619,6 +5635,7 @@ var LOOP_LINES = [
     updateLineNums();
     clearResults();
     syncCompileBtn();
+    setEditorBadges('V3Types');
     setStatus('V3Types loaded — Compile, Deploy, then call init() (sign with wallet). Try deriveContractAddr(42, 0, 4660) and getOwnerSyna() after init.', 'info');
   }
   window.loadV3Demo = loadV3Demo;
@@ -5715,6 +5732,7 @@ var LOOP_LINES = [
     updateLineNums();
     clearResults();
     syncCompileBtn();
+    setEditorBadges('StructValue');
     setStatus('StructValue loaded — Compile, Deploy, then call init(). Try setCorner(10,20), getCornerX(), getBoxOriginX(), moveCorner(100,200).', 'info');
   }
   window.loadStructValue = loadStructValue;
@@ -5774,6 +5792,7 @@ var LOOP_LINES = [
     updateLineNums();
     clearResults();
     syncCompileBtn();
+    setEditorBadges('NamedError');
     setStatus('NamedError loaded — Compile, Deploy, then call init(). Try withdraw(42) to see runtime arg in error, failOverflow() for multi-arg, or failUnauthorized() for no-arg.', 'info');
   }
   window.loadNamedError = loadNamedError;
@@ -5828,6 +5847,7 @@ var LOOP_LINES = [
     updateLineNums();
     clearResults();
     syncCompileBtn();
+    setEditorBadges('AssetDemo');
     setStatus('AssetDemo loaded — Compile, Deploy, then call init(). Try createAsset(1000), checkOwner(1), transferAsset(1, 42), burnAsset(2).', 'info');
   }
   window.loadAssetDemo = loadAssetDemo;
@@ -5903,6 +5923,7 @@ var LOOP_LINES = [
     updateLineNums();
     clearResults();
     syncCompileBtn();
+    setEditorBadges('StructField');
     setStatus('StructField loaded — Compile, Deploy, then call init(). Try setOrigin(42, 99), getOriginX(), getOrigin(), moveX(10), swapCoordinates().', 'info');
   }
   window.loadStructField = loadStructField;
@@ -5912,6 +5933,7 @@ var LOOP_LINES = [
     evictWorkspaceContractByName('PQCDemo');
     document.getElementById('editor').value = PQC_DEMO_LINES.join('\n');
     updateLineNums(); clearResults(); syncCompileBtn();
+    setEditorBadges('PQCDemo');
     // Fetch a fresh ML-DSA-65 test vector from the server
     fetch('/synq/pqc/test-vector')
       .then(function(r) { return r.json(); })
@@ -6035,6 +6057,7 @@ var LOOP_LINES = [
     currentExternContracts = [];
     stateSnapshot = {};
     deployedContracts = {};
+    setEditorBadges('StackFailDemo');
     setStatus('StackFailDemo loaded — Compile to see the ✅ VERIFY badge. Each function uses balanced stack operations that Layer 2 verifies.', 'info');
   }
   window.loadStackFailDemo = loadStackFailDemo;
