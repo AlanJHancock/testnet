@@ -1,4 +1,4 @@
-<!-- SynQ IDE v2026.08.04.2 — tuple param expansion + @effects guard -->
+<!-- SynQ IDE v2026.08.04.3 — tuple param expansion + @effects guard -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -721,7 +721,7 @@
 
 <div class="footer">
   Powered by <a href="https://synergy-network.io" target="_blank">Synergy Network</a>
-  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.04.2</span>
+  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.04.3</span>
 </div>
 
 <script>
@@ -2881,18 +2881,19 @@
             '</button>' +
           '</div>' +
 
-          // ── Author — truncated by default, click to reveal full address ──
-          // Only the EVM address has meaningful operational-security sensitivity
-          // (wallet identity attribution). Everything else is public verifier data.
+          // ── Two-column layout ──────────────────────────────────────────────
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px;">' +
+
+          // ── LEFT COLUMN: Author, Source hash, Bytecode hash, Contract, Issued
+          '<div>' +
           (function() {
             var short = scAuthor.length >= 10
-              ? scAuthor.slice(0,6) + '…' + scAuthor.slice(-4)
+              ? scAuthor.slice(0,6) + '\u2026' + scAuthor.slice(-4)
               : scAuthor;
             var revealId = 'scAuthorReveal_' + Date.now();
             return '<div class="attest-row">' +
               '<span class="attest-key">Author</span>' +
               '<span id="' + revealId + '">' +
-                // ── Masked state (default) ─────────────────────────────────
                 '<span class="sc-author-masked" ' +
                   'onclick="' +
                     'var el=document.getElementById(\'' + revealId + '\');' +
@@ -2904,10 +2905,9 @@
                   '<span style="margin-left:6px;font-size:9px;color:rgba(255,255,255,0.3);' +
                     'border:1px solid rgba(255,255,255,0.15);border-radius:3px;' +
                     'padding:1px 5px;vertical-align:middle;">' +
-                    'reveal ↓' +
+                    'reveal \u2193' +
                   '</span>' +
                 '</span>' +
-                // ── Revealed state (hidden until clicked) ─────────────────
                 '<span class="sc-author-full" style="display:none;">' +
                   '<span style="font-family:monospace;font-size:11px;' +
                     'word-break:break-all;letter-spacing:.3px;">' + scAuthor + '</span>' +
@@ -2919,26 +2919,27 @@
                     'style="margin-left:6px;font-size:9px;color:rgba(255,255,255,0.3);' +
                       'border:1px solid rgba(255,255,255,0.15);border-radius:3px;' +
                       'padding:1px 5px;vertical-align:middle;cursor:pointer;">' +
-                    'hide ↑' +
+                    'hide \u2191' +
                   '</span>' +
                 '</span>' +
               '</span>' +
             '</div>';
           })() +
-
-          // ── Source hash — truncated, full in tooltip ──────────────────────
           row('Source\u202fhash',   trunc(scSrcHash,  20), 'attest-val', scSrcHash) +
           row('Bytecode\u202fhash', trunc(scBcHash,   20), 'attest-val', scBcHash) +
           row('Contract',           scCname) +
           row('Issued',             scIssuedAt) +
+          '</div>' +
 
-          // ── Nonce — KMAC128 tag, truncated, full in tooltip ───────────────
+          // ── RIGHT COLUMN: Nonce, Trust model, PQC key ID, PQC algorithm
+          '<div>' +
           row('Nonce\u202f(KMAC128)', trunc(scNonce, 14), 'attest-val pqc', scNonce) +
-
           row('Trust\u202fmodel', scTrust,  'attest-val pqc') +
           row('PQC\u202fkey\u202fID', scKeyId !== '\u2014' ? trunc(scKeyId, 16) : '\u2014', 'attest-val pqc', scKeyId) +
           row('PQC\u202falgorithm', scAlgo, 'attest-val pqc') +
+          '</div>' +
 
+          '</div>' +
         '</div>';
     }
 
