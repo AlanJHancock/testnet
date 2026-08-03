@@ -1,4 +1,4 @@
-<!-- SynQ IDE v2026.08.04.5 — tuple param expansion + @effects guard -->
+<!-- SynQ IDE v2026.08.04.6 — tuple param expansion + @effects guard -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -633,7 +633,9 @@
       <button onclick="document.getElementById('sqbFileInput').click()" style="font-size:12px;padding:5px 14px;background:rgba(26,60,107,0.2);border:1px solid rgba(80,140,220,0.5);color:rgba(140,180,240,0.9);border-radius:6px;cursor:pointer;" title="Upload a saved .sqb artifact and deploy directly">&#x2B06;&#xFE0F; Upload .sqb</button>
       <button onclick="document.getElementById('sqbDecompileInput').click()" style="font-size:12px;padding:5px 14px;background:rgba(92,45,107,0.2);border:1px solid rgba(140,80,160,0.5);color:rgba(200,160,220,0.9);border-radius:6px;cursor:pointer;" title="Decompile an .sqb artifact — reads SIR1 IR and reconstructs pseudo-SynQ source">&#x1F50D; Decompile .sqb</button>
       <button onclick="downloadSig()" style="font-size:12px;padding:5px 14px;background:rgba(147,51,234,0.15);border:1px solid rgba(147,51,234,0.5);color:rgba(200,150,255,0.9);border-radius:6px;cursor:pointer;">Download .sig.json</button>
+      <button onclick="runDiffTests()" id="diffTestBtn" style="font-size:12px;padding:5px 14px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.4);color:rgba(134,239,172,0.9);border-radius:6px;cursor:pointer;" title="Run all contracts through SynQ → QVM + SynQ → Solidity → EVM pipeline">&#x2697;️ Run Diff Tests</button>
       <span class="hash-badge" id="hashBadge"></span>
+      <div id="diffTestResults" style="display:none;width:100%;margin-top:10px;padding:10px;background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.08);border-radius:8px;font-family:ui-monospace,monospace;font-size:0.72rem;color:rgba(255,255,255,0.7);"></div>
     </div>
   </div>
 </div>
@@ -721,7 +723,7 @@
 
 <div class="footer">
   Powered by <a href="https://synergy-network.io" target="_blank">Synergy Network</a>
-  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.04.5</span>
+  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.04.6</span>
 </div>
 
 <script>
@@ -739,6 +741,7 @@
 
   var COMPILE_URL       = 'https://hanksweb.co.uk/synq/compile';
   var VERIFY_SOL_URL    = 'https://hanksweb.co.uk/synq/verify-sol';
+  var DIFF_TEST_URL     = 'https://hanksweb.co.uk/synq/diff-test';
   var SYNQ_SERVER        = 'https://hanksweb.co.uk/synq';
   var SIGN_SOURCE_URL   = 'https://hanksweb.co.uk/synq/compile/sign-source';
   var SOURCE_NONCE_URL  = 'https://hanksweb.co.uk/synq/source-nonce';
@@ -2943,6 +2946,124 @@
     document.getElementById('attestRows').innerHTML = rows;
     document.getElementById('attestPanel').classList.add('show');
   }
+
+  // ── Differential Test Suite ────────────────────────────────────────────────────────────────────────
+  // Collects all IDE contracts, sends to /diff-test, displays pass/fail summary.
+  function collectAllContracts() {
+    var contracts = [];
+    var knownArrays = [
+      ['SimpleToken', 'DEMO_LINES'],
+      ['TokenVault', 'VAULT_LINES'],
+      ['ComprehensiveToken', 'CT_LINES'],
+      ['LoopDemo', 'LOOP_LINES'],
+      ['PQCDemo', 'PQC_DEMO_LINES'],
+      ['TypeTestContract', 'TT_LINES'],
+      ['V3Types', 'V3_LINES'],
+      ['Blank', 'BLANK_LINES'],
+    ];
+    for (var i = 0; i < knownArrays.length; i++) {
+      var name = knownArrays[i][0];
+      var arr = window[knownArrays[i][1]];
+      if (arr && arr.join) {
+        contracts.push({ name: name, source: arr.join('\n') });
+      }
+    }
+    // StructValue, NamedError, StackFailDemo are inline in their load functions
+    // Extract from editor by loading each, but we can't do that synchronously.
+    // Instead, parse them from the function source.
+    return contracts;
+  }
+
+  async function runDiffTests() {
+    var btn = document.getElementById('diffTestBtn');
+    var resultsDiv = document.getElementById('diffTestResults');
+    if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner" style="width:12px;height:12px;"></span> Running...'; }
+    if (resultsDiv) { resultsDiv.style.display = 'block'; resultsDiv.innerHTML = '<span style="color:rgba(255,255,255,0.4);">Running differential tests...</span>'; }
+
+    var contracts = collectAllContracts();
+    // Also add any inline contracts by extracting their sources from the load functions
+    var inlineNames = ['StructValue', 'NamedError', 'StackFailDemo'];
+    for (var j = 0; j < inlineNames.length; j++) {
+      var fnName = 'load' + inlineNames[j];
+      if (typeof window[fnName] === 'function') {
+        // Save current editor state
+        var savedSrc = document.getElementById('editor').value;
+        try {
+          window[fnName]();
+          var src = document.getElementById('editor').value;
+          if (src && src.trim()) contracts.push({ name: inlineNames[j], source: src });
+          // Restore editor
+          document.getElementById('editor').value = savedSrc;
+        } catch(e) {
+          document.getElementById('editor').value = savedSrc;
+        }
+      }
+    }
+
+    if (contracts.length === 0) {
+      if (resultsDiv) resultsDiv.innerHTML = '<span style="color:rgba(255,90,90,0.8);">No contracts found to test.</span>';
+      if (btn) { btn.disabled = false; btn.innerHTML = '\u2697\ufe0f Run Diff Tests'; }
+      return;
+    }
+
+    try {
+      var res = await fetch(DIFF_TEST_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contracts: contracts })
+      });
+      var data = await res.json();
+
+      var html = '';
+      html += '<div style="margin-bottom:8px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:rgba(255,255,255,0.5);font-size:0.68rem;">';
+      html += 'Differential Test Results — ' + data.passed + '/' + data.total + ' passed';
+      if (data.failed > 0) html += ' <span style="color:rgba(255,90,90,0.8);">(' + data.failed + ' failed)</span>';
+      html += '</div>';
+
+      html += '<table style="width:100%;border-collapse:collapse;">';
+      html += '<thead><tr style="border-bottom:1px solid rgba(255,255,255,0.1);color:rgba(255,255,255,0.4);font-size:0.65rem;text-transform:uppercase;letter-spacing:.5px;">';
+      html += '<th style="text-align:left;padding:3px 6px;">Contract</th>';
+      html += '<th style="text-align:center;padding:3px 6px;">SynQ</th>';
+      html += '<th style="text-align:center;padding:3px 6px;">Sol</th>';
+      html += '<th style="text-align:center;padding:3px 6px;">EVM</th>';
+      html += '<th style="text-align:right;padding:3px 6px;">QVM B</th>';
+      html += '<th style="text-align:right;padding:3px 6px;">EVM B</th>';
+      html += '<th style="text-align:left;padding:3px 6px;">Errors</th>';
+      html += '</tr></thead><tbody>';
+
+      for (var k = 0; k < data.results.length; k++) {
+        var r = data.results[k];
+        var rowColor = r.evm_compile ? 'rgba(34,197,94,0.04)' : 'rgba(239,68,68,0.04)';
+        html += '<tr style="background:' + rowColor + ';">';
+        html += '<td style="padding:3px 6px;color:rgba(255,255,255,0.8);">' + r.name + '</td>';
+        html += '<td style="text-align:center;padding:3px 6px;">' + (r.synq_compile ? '\u2705' : '\u274c') + '</td>';
+        html += '<td style="text-align:center;padding:3px 6px;">' + (r.solidity_gen ? '\u2705' : '\u274c') + '</td>';
+        html += '<td style="text-align:center;padding:3px 6px;">' + (r.evm_compile ? '\u2705' : '\u274c') + '</td>';
+        html += '<td style="text-align:right;padding:3px 6px;color:rgba(255,255,255,0.5);">' + (r.qvm_bytecode_size || '—') + '</td>';
+        html += '<td style="text-align:right;padding:3px 6px;color:rgba(255,255,255,0.5);">' + (r.evm_bytecode_size || '—') + '</td>';
+        var errStr = '';
+        if (r.errors && r.errors.length > 0) {
+          errStr = r.errors.map(function(e) { return e.substring(0, 60); }).join('; ');
+        } else if (r.warnings && r.warnings.length > 0) {
+          errStr = '<span style="color:rgba(251,191,36,0.6);">' + r.warnings.length + ' warning(s)</span>';
+        }
+        html += '<td style="padding:3px 6px;font-size:0.65rem;color:rgba(255,90,90,0.7);">' + errStr + '</td>';
+        html += '</tr>';
+      }
+      html += '</tbody></table>';
+
+      if (data.forge_version) {
+        html += '<div style="margin-top:6px;font-size:0.6rem;color:rgba(255,255,255,0.3);">' + data.forge_version + '</div>';
+      }
+
+      resultsDiv.innerHTML = html;
+    } catch(e) {
+      if (resultsDiv) resultsDiv.innerHTML = '<span style="color:rgba(255,90,90,0.8);">Failed: ' + e.message + '</span>';
+    }
+
+    if (btn) { btn.disabled = false; btn.innerHTML = '\u2697\ufe0f Run Diff Tests'; }
+  }
+  window.runDiffTests = runDiffTests;
 
   /* ── Downloads ───────────────────────────────────────────────────────────── */
   function downloadQvm() {

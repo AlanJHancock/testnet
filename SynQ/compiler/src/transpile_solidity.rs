@@ -11,7 +11,7 @@
 
 use std::fmt::Write;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::ast::*;
 
 
@@ -74,6 +74,43 @@ fn infer_expr_type(expr: &Expression) -> Type {
 }
 
 /// Transpile a parsed SynQ contract AST to Solidity source.
+/// Detect which state variables are used as sets (have .add/.remove/.contains calls).
+fn detect_set_vars(contract: &ContractDefinition) -> HashSet<String> {
+    let mut vars = HashSet::new();
+    for part in &contract.parts {
+        if let ContractPart::Function(f) = part {
+            scan_block_for_sets(&f.body, &mut vars);
+        }
+    }
+    vars
+}
+
+fn scan_block_for_sets(block: &Block, vars: &mut HashSet<String>) {
+    for stmt in &block.statements {
+        match stmt {
+            Statement::SetOp { set, .. } => { vars.insert(set.clone()); }
+            Statement::Expression(expr) => { scan_expr_for_sets(expr, vars); }
+            Statement::If { then_block, else_block, .. } => {
+                scan_block_for_sets(then_block, vars);
+                if let Some(eb) = else_block { scan_block_for_sets(eb, vars); }
+            }
+            Statement::While { body, .. } => scan_block_for_sets(body, vars),
+            Statement::Return(e) => { if let Some(e) = e { scan_expr_for_sets(e, vars); } }
+            _ => {}
+        }
+    }
+}
+
+fn scan_expr_for_sets(expr: &Expression, vars: &mut HashSet<String>) {
+    match expr {
+        Expression::SetMethod { set, .. } => { vars.insert(set.clone()); }
+        Expression::BinaryOp(l, _, r) => { scan_expr_for_sets(l, vars); scan_expr_for_sets(r, vars); }
+        Expression::Call(_, args) => { for a in args { scan_expr_for_sets(a, vars); } }
+        Expression::MapIndex(_, k) => scan_expr_for_sets(k, vars),
+        _ => {}
+    }
+}
+
 pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
     // Find the contract definition
     let contract = units.iter().find_map(|u| {
@@ -170,11 +207,21 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
     writeln!(out).unwrap();
 
     // State variables
+    let set_vars = detect_set_vars(contract);
     let mut has_state = false;
     for part in &contract.parts {
         if let ContractPart::StateVariable(sv) = part {
             let vis = if sv.is_public { "public" } else { "internal" };
-            writeln!(out, "    {} {} {};", ty_to_sol(&sv.ty), vis, sol_identifier(&sv.name)).unwrap();
+            let ty_str = if set_vars.contains(&sv.name) {
+                if let Type::Array(inner) = &sv.ty {
+                    format!("mapping({} => bool)", ty_to_sol(inner))
+                } else {
+                    ty_to_sol(&sv.ty)
+                }
+            } else {
+                ty_to_sol(&sv.ty)
+            };
+            writeln!(out, "    {} {} {};", ty_str, vis, sol_identifier(&sv.name)).unwrap();
             has_state = true;
         }
     }
@@ -286,7 +333,22 @@ fn transpile_function(out: &mut String, f: &FunctionDefinition, contract: &Contr
                 format!(" returns ({})", ty_str)
             }
         }
-        None => String::new(),
+        None => {
+            // Infer return type from return statements if any exist
+            let inferred = infer_function_return_type(&f.body);
+            match inferred {
+                Some(ty) => {
+                    let ty_str = ty_to_sol(&ty);
+                    set_type("__return_type__", ty.clone());
+                    if matches!(ty, Type::Named(_) | Type::Str | Type::Bytes) {
+                        format!(" returns ({} memory)", ty_str)
+                    } else {
+                        format!(" returns ({})", ty_str)
+                    }
+                }
+                None => String::new(),
+            }
+        }
     };
 
     let mut sig = format!("    function {}({}) {}{}", f.name, params.join(", "), vis, returns);
@@ -307,7 +369,72 @@ fn transpile_function(out: &mut String, f: &FunctionDefinition, contract: &Contr
     }
 
     transpile_block(out, &f.body, 2);
+
+    // If function declares returns but has no actual return statement
+    // (e.g. all returns are via extern_call comments), add a default return
+    if f.returns.is_some() || infer_function_return_type(&f.body).is_some() {
+        if !block_has_return(&f.body) {
+            let ret_ty = f.returns.clone().or_else(|| infer_function_return_type(&f.body));
+            let default_val = match &ret_ty {
+                Some(Type::Bool) => "false",
+                Some(Type::UInt256) | Some(Type::UInt128) => "0",
+                Some(Type::Int32) | Some(Type::Int256) => "0",
+                Some(Type::Address) => "address(0)",
+                _ => "0",
+            };
+            writeln!(out, "        return {};", default_val).unwrap();
+        }
+    }
+
     writeln!(out, "    }}").unwrap();
+}
+
+/// Infer the return type of a function by examining its return statements.
+fn infer_function_return_type(block: &Block) -> Option<Type> {
+    for stmt in &block.statements {
+        match stmt {
+            Statement::Return(Some(expr)) => {
+                return Some(infer_expr_type(expr));
+            }
+            Statement::If { then_block, else_block, .. } => {
+                if let Some(ty) = infer_function_return_type(then_block) {
+                    return Some(ty);
+                }
+                if let Some(eb) = else_block {
+                    if let Some(ty) = infer_function_return_type(eb) {
+                        return Some(ty);
+                    }
+                }
+            }
+            Statement::While { body, .. } => {
+                if let Some(ty) = infer_function_return_type(body) {
+                    return Some(ty);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Check if a block has any actual return statement (not just extern_call comments).
+fn block_has_return(block: &Block) -> bool {
+    for stmt in &block.statements {
+        match stmt {
+            Statement::Return(_) => return true,
+            Statement::If { then_block, else_block, .. } => {
+                if block_has_return(then_block) { return true; }
+                if let Some(eb) = else_block {
+                    if block_has_return(eb) { return true; }
+                }
+            }
+            Statement::While { body, .. } => {
+                if block_has_return(body) { return true; }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn transpile_block(out: &mut String, block: &Block, indent: usize) {
@@ -358,8 +485,11 @@ fn transpile_statement(out: &mut String, stmt: &Statement, indent: usize) {
             writeln!(out, "{}{}[{}] = {};", pad, map, transpile_expr(key), transpile_expr(value)).unwrap();
         }
         Statement::SetOp { set, op, value } => {
-            let method = match op { SetOpKind::Add => "add", SetOpKind::Remove => "remove" };
-            writeln!(out, "{}{}.{}({});", pad, set, method, transpile_expr(value)).unwrap();
+            let val_str = transpile_expr(value);
+            match op {
+                SetOpKind::Add => writeln!(out, "{}{}[{}] = true;", pad, set, val_str).unwrap(),
+                SetOpKind::Remove => writeln!(out, "{}{}[{}] = false;", pad, set, val_str).unwrap(),
+            }
         }
         Statement::Let { name, ty, value } => {
             let (ty_str, needs_memory) = if let Some(t) = ty {
@@ -503,9 +633,9 @@ fn transpile_expr(expr: &Expression) -> String {
         Expression::SetMethod { set, method, args } => {
             let a: Vec<String> = args.iter().map(transpile_expr).collect();
             match method.as_str() {
-                "contains" => format!("{}Map[{}]", set, a.join(", ")),
+                "contains" => format!("{}[{}]", set, a.join(", ")),
                 "len" => format!("/* {}.len() — use counter */", set),
-                _ => format!("{}.{}({})", set, method, a.join(", ")),
+                _ => format!("{}[{}]", set, a.join(", ")),
             }
         }
         Expression::Tuple(exprs) => {

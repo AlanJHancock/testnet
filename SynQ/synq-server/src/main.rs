@@ -1855,6 +1855,208 @@ solc_version = "0.8.20"
     }
 }
 
+
+// ── POST /diff-test ─────────────────────────────────────────────────────────────────────────
+//
+// Differential test suite: runs all provided SynQ contracts through the full
+// SynQ → QVM bytecode + SynQ → Solidity → EVM (forge) pipeline.
+// Returns per-contract pass/fail with bytecode sizes and errors.
+
+#[derive(serde::Deserialize)]
+struct DiffTestRequest {
+    contracts: Vec<DiffTestContract>,
+}
+
+#[derive(serde::Deserialize)]
+struct DiffTestContract {
+    name:   String,
+    source: String,
+}
+
+#[derive(serde::Serialize)]
+struct DiffTestResult {
+    name:            String,
+    synq_compile:    bool,
+    solidity_gen:    bool,
+    evm_compile:     bool,
+    qvm_bytecode_size:  Option<usize>,
+    evm_bytecode_size:  Option<usize>,
+    warnings:        Vec<String>,
+    errors:          Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct DiffTestResponse {
+    total:      usize,
+    passed:     usize,
+    failed:     usize,
+    results:    Vec<DiffTestResult>,
+    forge_version: Option<String>,
+}
+
+async fn diff_test_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+    Json(req): Json<DiffTestRequest>,
+) -> (StatusCode, RespJson<DiffTestResponse>) {
+    use std::process::Command;
+    use std::fs;
+
+    if let Err(wait) = check_rate_limit(&state.rate_limiter, addr.ip()) {
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(DiffTestResponse {
+            total: 0, passed: 0, failed: 0, results: vec![], forge_version: None,
+        }));
+    }
+
+    // Get forge version once
+    let forge_bin = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()) + "/.foundry/bin/forge";
+    let forge_ver = Command::new(&forge_bin).arg("--version").output()
+        .ok().and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.lines().next().unwrap_or("unknown").to_string());
+
+    let mut results = Vec::new();
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+
+    for contract in &req.contracts {
+        let mut r = DiffTestResult {
+            name: contract.name.clone(),
+            synq_compile: false,
+            solidity_gen: false,
+            evm_compile: false,
+            qvm_bytecode_size: None,
+            evm_bytecode_size: None,
+            warnings: vec![],
+            errors: vec![],
+        };
+
+        // Step 1: Compile SynQ -> QVM bytecode (inline IR backend)
+        let compile_out = match synq_compiler::compile_ir(&contract.source) {
+            Ok(c) => c,
+            Err(e) => {
+                r.errors.push(format!("SynQ IR compile error: {}", e));
+                failed += 1;
+                results.push(r);
+                continue;
+            }
+        };
+
+        r.synq_compile = true;
+        r.qvm_bytecode_size = Some(compile_out.bytecode.len());
+
+        // Step 2: Transpile to Solidity
+        let ast_for_sol = match synq_compiler::parser::parse(&contract.source) {
+            Ok(a) => a,
+            Err(e) => {
+                r.errors.push(format!("Solidity transpile parse error: {}", e));
+                failed += 1;
+                results.push(r);
+                continue;
+            }
+        };
+        let solidity = synq_compiler::transpile_solidity::transpile_to_solidity(&ast_for_sol);
+        if solidity.is_empty() {
+            r.errors.push("No Solidity generated".to_string());
+            failed += 1;
+            results.push(r);
+            continue;
+        }
+        r.solidity_gen = true;
+
+        // Step 3: Verify Solidity → EVM with forge
+        let temp_dir = format!("/tmp/synq-diff-{}-{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis(),
+            contract.name.chars().filter(|c| c.is_alphanumeric()).collect::<String>());
+
+        let src_dir = format!("{}/src", temp_dir);
+        if fs::create_dir_all(&src_dir).is_err() {
+            r.errors.push("Failed to create temp dir".to_string());
+            failed += 1;
+            results.push(r);
+            continue;
+        }
+
+        let foundry_toml = r#"[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.20"
+"#;
+        let _ = fs::write(format!("{}/foundry.toml", temp_dir), foundry_toml);
+        let sol_path = format!("{}/Contract.sol", src_dir);
+        let _ = fs::write(&sol_path, &solidity);
+
+        let output = Command::new(&forge_bin)
+            .arg("build")
+            .current_dir(&temp_dir)
+            .output();
+
+        match output {
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if out.status.success() {
+                    r.evm_compile = true;
+
+                    // Extract EVM bytecode size
+                    let out_dir = format!("{}/out", temp_dir);
+                    if let Ok(entries) = fs::read_dir(&out_dir) {
+                        for entry in entries.flatten() {
+                            if let Ok(sol_entries) = fs::read_dir(entry.path()) {
+                                for sol_entry in sol_entries.flatten() {
+                                    let jp = sol_entry.path();
+                                    if jp.extension().map(|e| e == "json").unwrap_or(false) {
+                                        if let Ok(js) = fs::read_to_string(&jp) {
+                                            if let Ok(jv) = serde_json::from_str::<serde_json::Value>(&js) {
+                                                if let Some(bc) = jv.get("bytecode")
+                                                    .and_then(|b| b.get("object"))
+                                                    .and_then(|o| o.as_str()) {
+                                                    r.evm_bytecode_size = Some(bc.len() / 2);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Collect warnings
+                    for line in stderr.lines() {
+                        if line.starts_with("Warning") || line.contains("Warning (") {
+                            r.warnings.push(line.to_string());
+                        }
+                    }
+
+                    passed += 1;
+                } else {
+                    for line in stderr.lines() {
+                        if line.starts_with("Error") || line.contains("Error (") {
+                            r.errors.push(line.to_string());
+                        }
+                    }
+                    if r.errors.is_empty() {
+                        r.errors.push(stderr.to_string());
+                    }
+                    failed += 1;
+                }
+            }
+            Err(e) => {
+                r.errors.push(format!("forge execution failed: {}", e));
+                failed += 1;
+            }
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+        results.push(r);
+    }
+
+    let total = results.len();
+    (StatusCode::OK, RespJson(DiffTestResponse {
+        total, passed, failed, results, forge_version: forge_ver,
+    }))
+}
+
+
 // ── POST /decompile ─────────────────────────────────────────────────────────────────────────────
 //
 // Decompiles an SQB artifact's SIR1 IR section into pseudo-SynQ source.
@@ -4053,6 +4255,7 @@ async fn main() {
         .route("/debug/ecrecover",   post(debug_ecrecover_handler))
         .route("/bench-compile",      post(bench_compile_handler))
         .route("/compile-wasm",     post(wasm_compiler::compile_wasm_handler))
+        .route("/diff-test",          post(diff_test_handler))
         .route("/decompile",         post(decompile_handler))
         .route("/verify-sol",        post(verify_sol_handler))
         .with_state(store.clone())

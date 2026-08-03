@@ -582,7 +582,7 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
                                     map: map_name.clone(), method: field_or_method, args
                                 };
                             }
-                            "add" | "remove" => expr = Expression::SetMethod {
+                            "add" | "remove" | "contains" => expr = Expression::SetMethod {
                                 set: map_name.clone(), method: field_or_method, args
                             },
                             _ => expr = Expression::MapMethod {
