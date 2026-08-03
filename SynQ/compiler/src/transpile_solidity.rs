@@ -13,7 +13,15 @@ use std::fmt::Write;
 use crate::ast::*;
 
 /// Transpile a parsed SynQ contract AST to Solidity source.
-pub fn transpile_to_solidity(contract: &ContractDefinition) -> String {
+pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
+    // Find the contract definition
+    let contract = units.iter().find_map(|u| {
+        if let SourceUnit::Contract(c) = u { Some(c) } else { None }
+    });
+    let contract = match contract {
+        Some(c) => c,
+        None => return String::new(),
+    };
     let mut out = String::new();
 
     // Header
@@ -31,6 +39,22 @@ pub fn transpile_to_solidity(contract: &ContractDefinition) -> String {
     writeln!(out, "// SPDX-License-Identifier: MIT").unwrap();
     writeln!(out, "pragma solidity ^0.8.20;").unwrap();
     writeln!(out).unwrap();
+
+    // Struct definitions (top-level)
+    for unit in units {
+        if let SourceUnit::Struct(sd) = unit {
+            writeln!(out, "struct {} {{", sd.name).unwrap();
+            for field in &sd.fields {
+                let mut ty_str = ty_to_sol(&field.ty);
+                // Struct types need "memory" for local vars, but not in struct definitions
+                // Just use the type name directly
+                if ty_str.contains(" memory") { ty_str = ty_str.replace(" memory", ""); }
+                writeln!(out, "    {} {};", ty_str, field.name).unwrap();
+            }
+            writeln!(out, "}}").unwrap();
+            writeln!(out).unwrap();
+        }
+    }
 
     // Enums
     for ed in &contract.enums {
@@ -52,7 +76,13 @@ pub fn transpile_to_solidity(contract: &ContractDefinition) -> String {
     // Events
     for ev in &contract.event_defs {
         let params: Vec<String> = ev.params.iter()
-            .map(|p| format!("{}{} {}", ty_to_sol(&p.ty), if p.is_indexed { " indexed" } else { "" }, p.name))
+            .map(|p| {
+                let ty_str = ty_to_sol(&p.ty);
+                // Events use "memory" for reference types
+                let needs_memory = matches!(p.ty, Type::Named(_) | Type::Str | Type::Bytes);
+                let mem = if needs_memory { " memory" } else { "" };
+                format!("{}{}{} {}", ty_str, mem, if p.is_indexed { " indexed" } else { "" }, p.name)
+            })
             .collect();
         writeln!(out, "event {}({});", ev.name, params.join(", ")).unwrap();
     }
@@ -61,7 +91,15 @@ pub fn transpile_to_solidity(contract: &ContractDefinition) -> String {
     // Named errors
     for err in &contract.error_defs {
         let params: Vec<String> = err.params.iter()
-            .map(|p| format!("{} {}", ty_to_sol(&p.ty), p.name)).collect();
+            .map(|p| {
+                let ty_str = ty_to_sol(&p.ty);
+                let needs_memory = matches!(p.ty, Type::Named(_) | Type::Str | Type::Bytes);
+                if needs_memory {
+                    format!("{} memory {}", ty_str, p.name)
+                } else {
+                    format!("{} {}", ty_str, p.name)
+                }
+            }).collect();
         writeln!(out, "error {}({});", err.name, params.join(", ")).unwrap();
     }
     if !contract.error_defs.is_empty() { writeln!(out).unwrap(); }
@@ -75,7 +113,7 @@ pub fn transpile_to_solidity(contract: &ContractDefinition) -> String {
     for part in &contract.parts {
         if let ContractPart::StateVariable(sv) = part {
             let vis = if sv.is_public { "public" } else { "internal" };
-            writeln!(out, "    {} {} {};", vis, ty_to_sol(&sv.ty), sv.name).unwrap();
+            writeln!(out, "    {} {} {};", ty_to_sol(&sv.ty), vis, sv.name).unwrap();
             has_state = true;
         }
     }
@@ -85,7 +123,15 @@ pub fn transpile_to_solidity(contract: &ContractDefinition) -> String {
     for part in &contract.parts {
         if let ContractPart::Constructor(c) = part {
             let params: Vec<String> = c.params.iter()
-                .map(|p| format!("{} {}", ty_to_sol(&p.ty), p.name)).collect();
+                .map(|p| {
+                    let ty_str = ty_to_sol(&p.ty);
+                    let needs_memory = matches!(p.ty, Type::Named(_) | Type::Str | Type::Bytes);
+                    if needs_memory {
+                        format!("{} memory {}", ty_str, p.name)
+                    } else {
+                        format!("{} {}", ty_str, p.name)
+                    }
+                }).collect();
             writeln!(out, "    constructor({}) {{", params.join(", ")).unwrap();
             transpile_block(&mut out, &c.body, 2);
             writeln!(out, "    }}").unwrap();
@@ -146,10 +192,25 @@ fn transpile_function(out: &mut String, f: &FunctionDefinition) {
     }
 
     let params: Vec<String> = f.params.iter()
-        .map(|p| format!("{} {}", ty_to_sol(&p.ty), p.name)).collect();
+        .map(|p| {
+            let ty_str = ty_to_sol(&p.ty);
+            let needs_memory = matches!(p.ty, Type::Named(_) | Type::Str | Type::Bytes);
+            if needs_memory {
+                format!("{} memory {}", ty_str, p.name)
+            } else {
+                format!("{} {}", ty_str, p.name)
+            }
+        }).collect();
 
     let returns = match &f.returns {
-        Some(ty) => format!(" returns ({})", ty_to_sol(ty)),
+        Some(ty) => {
+            let ty_str = ty_to_sol(ty);
+            if matches!(ty, Type::Named(_) | Type::Str | Type::Bytes) {
+                format!(" returns ({} memory)", ty_str)
+            } else {
+                format!(" returns ({})", ty_str)
+            }
+        }
         None => String::new(),
     };
 
@@ -213,8 +274,24 @@ fn transpile_statement(out: &mut String, stmt: &Statement, indent: usize) {
             writeln!(out, "{}{}.{}({});", pad, set, method, transpile_expr(value)).unwrap();
         }
         Statement::Let { name, ty, value } => {
-            let ty_str = ty.as_ref().map(ty_to_sol).unwrap_or_else(|| "uint256".to_string());
-            writeln!(out, "{}{} {} = {};", pad, ty_str, name, transpile_expr(value)).unwrap();
+            // Infer type from explicit annotation or from the expression
+            let (ty_str, is_struct) = if let Some(t) = ty {
+                let needs_memory = matches!(t, Type::Named(_) | Type::Str | Type::Bytes);
+                (ty_to_sol(t), needs_memory)
+            } else {
+                // Infer from expression
+                match value {
+                    Expression::StructLiteral { type_name, .. } => {
+                        (type_name.clone(), true)
+                    }
+                    _ => ("uint256".to_string(), false)
+                }
+            };
+            if is_struct {
+                writeln!(out, "{}{} memory {} = {};", pad, ty_str, name, transpile_expr(value)).unwrap();
+            } else {
+                writeln!(out, "{}{} {} = {};", pad, ty_str, name, transpile_expr(value)).unwrap();
+            }
         }
         Statement::LetDestructure { names, value } => {
             let vars: Vec<String> = names.iter().map(|n| format!("var {}", n)).collect();
@@ -267,6 +344,8 @@ fn transpile_expr(expr: &Expression) -> String {
                 "from_syna" => format!("uint256(uint160({}))", transpile_expr(&args[0])),
                 "contract_address" => format!("address(this)"),
                 "str_len" => format!("bytes({}).length", transpile_expr(&args[0])),
+                "str_concat" => format!("string.concat({})", a.join(", ")),
+                "str_eq" => format!("(keccak256(bytes({})) == keccak256(bytes({})))", transpile_expr(&args[0]), transpile_expr(&args[1])),
                 "asset_create" | "asset_transfer" | "asset_burn" | "asset_balance" | "asset_owner" =>
                     format!("/* SXCP asset bridge: {}({}) */", name, a.join(", ")),
                 "aegis_call" | "aegis_verify" | "aegis_decaps" =>
@@ -284,7 +363,7 @@ fn transpile_expr(expr: &Expression) -> String {
         Expression::UnaryOp(op, val) => {
             format!("{}{}", unop_to_sol(op), transpile_expr(val))
         }
-        Expression::Caller => "msg.sender".to_string(),
+        Expression::Caller => "uint256(uint160(msg.sender))".to_string(),
         Expression::MapIndex(map, key) => {
             format!("{}[{}]", map, transpile_expr(key))
         }
@@ -325,7 +404,7 @@ fn transpile_expr(expr: &Expression) -> String {
         Expression::StructLiteral { type_name, fields } => {
             let fs: Vec<String> = fields.iter()
                 .map(|(n, v)| format!("{}: {}", n, transpile_expr(v))).collect();
-            format!("{}({})", type_name, fs.join(", "))
+            format!("{}({{{}}})", type_name, fs.join(", "))
         }
     }
 }
@@ -345,8 +424,8 @@ fn ty_to_sol(ty: &Type) -> String {
         Type::Int64 => "int64".into(),
         Type::Int128 => "int128".into(),
         Type::Int256 => "int256".into(),
-        Type::Bytes => "bytes memory".into(),
-        Type::Str => "string memory".into(),
+        Type::Bytes => "bytes".into(),
+        Type::Str => "string".into(),
         Type::Address => "address".into(),
         Type::Mapping(k, v) => format!("mapping({} => {})", ty_to_sol(k), ty_to_sol(v)),
         Type::Array(t) => format!("{}[]", ty_to_sol(t)),

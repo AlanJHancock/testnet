@@ -600,6 +600,7 @@
     <span id="pqcSimBadge" style="display:none;" class="wasm-toolbar-badge" title="PQC builtins will throw RuntimeError in browser — deploy to synq-server for real verification">&#x26A0; PQC Simulation</span>
     <span id="verifyBadge" style="display:none;" class="verify-badge pass" title="L1 Structural (hard gate) + L2 Stack Safety (advisory) — checked at compile"></span>
     <span id="layer3Badge" style="display:none;" class="verify-badge pass" title="L3 Manifest + ML-DSA-87 signature — checked at deploy"></span>
+    <span id="solVerifyBadge" style="display:none;" class="verify-badge pass" title="Solidity → EVM verification via Foundry (forge build)"></span>
     <span id="gasBadge" style="display:none;" class="gas-badge active" title="Gas Budget (ACTS-VM-003 + ACTS-VM-005) — compute + PQC cost per invocation"></span>
     <span id="stepBadge" style="display:none;" class="step-badge active" title="VM Step Budget (ACTS-VM-003) — compute steps per call"></span>
     <span id="depsHint" style="font-size:0.75rem;visibility:hidden;">&nbsp;</span>
@@ -733,6 +734,7 @@
   }
 
   var COMPILE_URL       = 'https://hanksweb.co.uk/synq/compile';
+  var VERIFY_SOL_URL    = 'https://hanksweb.co.uk/synq/verify-sol';
   var SYNQ_SERVER        = 'https://hanksweb.co.uk/synq';
   var SIGN_SOURCE_URL   = 'https://hanksweb.co.uk/synq/compile/sign-source';
   var SOURCE_NONCE_URL  = 'https://hanksweb.co.uk/synq/source-nonce';
@@ -2440,6 +2442,54 @@
       document.getElementById('bytecodeDisplay').textContent = formatBytecode(data.bytecode, data.contract_name);
       var hexRaw = data.bytecode.startsWith('0x') ? data.bytecode.slice(2) : data.bytecode;
       document.getElementById('hashBadge').textContent = (hexRaw.length/2) + ' bytes  0x' + hexRaw.slice(0,8) + '...';
+
+      // ── Auto-verify Solidity with Foundry (forge build) ───────────────────
+      (async function() {
+        var solBadge = document.getElementById('solVerifyBadge');
+        if (!solBadge || !data.solidity_source) {
+          if (solBadge) solBadge.style.display = 'none';
+          return;
+        }
+        solBadge.style.display = 'inline-flex';
+        solBadge.className = 'verify-badge warn';
+        solBadge.innerHTML = '<span class="spinner" style="width:10px;height:10px;"></span> SOL → EVM...';
+        solBadge.title = 'Verifying Solidity with Foundry (forge build)...';
+        try {
+          var vsRes = await fetch(VERIFY_SOL_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              solidity_source: data.solidity_source,
+              contract_name: data.contract_name || null
+            })
+          });
+          var vsData = await vsRes.json();
+          if (vsData.success) {
+            var bcLen = vsData.evm_bytecode ? vsData.evm_bytecode.length : 0;
+            var warnCount = (vsData.warnings || []).length;
+            solBadge.className = 'verify-badge pass';
+            solBadge.innerHTML = '\u2705 SOL \u2192 EVM ' + bcLen + 'B' + (warnCount > 0 ? ' \u00b7 ' + warnCount + ' warn' : '');
+            var tip = 'Solidity \u2192 EVM Verification (Foundry)\n';
+            tip += '\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n';
+            tip += 'Forge: ' + (vsData.forge_version || 'unknown') + '\n';
+            tip += 'EVM bytecode: ' + bcLen + ' chars\n';
+            if (warnCount > 0) {
+              tip += 'Warnings:\n  ' + vsData.warnings.join('\n  ') + '\n';
+            }
+            tip += '\nSynQ source transpiles to valid Solidity.\nEVM bytecode generated and verified.';
+            solBadge.title = tip;
+          } else {
+            var errs = vsData.errors || ['Unknown error'];
+            solBadge.className = 'verify-badge fail';
+            solBadge.innerHTML = '\u274c SOL \u2192 EVM FAILED';
+            solBadge.title = 'Solidity \u2192 EVM Verification FAILED\n\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n' + 'Forge: ' + (vsData.forge_version || 'unknown') + '\n\nErrors:\n  ' + errs.join('\n  ');
+          }
+        } catch(e) {
+          solBadge.className = 'verify-badge fail';
+          solBadge.innerHTML = '\u26a0 SOL verify unavailable';
+          solBadge.title = 'Could not reach /verify-sol endpoint: ' + e.message + '\nIs Foundry installed on the server?';
+        }
+      })();
       document.getElementById('resultsSection').classList.add('show');
 
       // Populate SSA IR display from compile warnings

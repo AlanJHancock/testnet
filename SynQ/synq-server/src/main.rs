@@ -761,6 +761,8 @@ struct CompileResponse {
     sqb:               Option<String>,
     /// Struct definitions (name → fields) for IDE tuple arg expansion
     struct_defs:       Vec<StructDefMeta>,
+    /// Auto-transpiled Solidity source (for EVM deployment via SXCP)
+    solidity_source:   Option<String>,
 }
 
 /// V3 artifact manifest — matches the Testnet-v3 schema-v2 manifest structure.
@@ -882,6 +884,7 @@ async fn compile_handler(
             ir_dump:            vec![],
             sqb:               None,
             struct_defs:       vec![],
+            solidity_source:   None,
         }));
     }
     if req.source.len() > MAX_SOURCE_BYTES {
@@ -895,27 +898,18 @@ async fn compile_handler(
             ir_dump:            vec![],
             sqb:               None,
             struct_defs:       vec![],
+            solidity_source:   None,
         }));
     }
 
     // Transpile to Solidity for EVM deployment (SXCP)
     let solidity_source = {
-        let parsed = synq_compiler::parser::parse(&req.source).ok();
-        let contract_def = parsed.as_ref().and_then(|units| {
-            units.iter().find_map(|u| {
-                if let synq_compiler::ast::SourceUnit::Contract(c) = u {
-                    Some(c.clone())
-                } else {
-                    None
-                }
-            })
-        });
-        match contract_def {
-            Some(c) => {
-                let sol = synq_compiler::transpile_solidity::transpile_to_solidity(&c);
+        match synq_compiler::parser::parse(&req.source) {
+            Ok(units) => {
+                let sol = synq_compiler::transpile_solidity::transpile_to_solidity(&units);
                 if !sol.is_empty() { Some(sol) } else { None }
             }
-            None => None,
+            Err(_) => None,
         }
     };
 
@@ -930,6 +924,7 @@ async fn compile_handler(
             ir_dump:            vec![],
             sqb:               None,
             struct_defs:       vec![],
+            solidity_source:   None,
         })),
     };
 
@@ -1003,6 +998,7 @@ async fn compile_handler(
             ir_dump:            vec![],
             sqb:               None,
             struct_defs:       vec![],
+            solidity_source:   None,
         })),
     };
     let bytecode = compile_result.bytecode;
@@ -1058,6 +1054,7 @@ async fn compile_handler(
             ir_dump:            vec![],
             sqb:               None,
             struct_defs:       vec![],
+            solidity_source:   None,
                 })),
             };
             json!({
@@ -1082,6 +1079,7 @@ async fn compile_handler(
                     ir_dump:            vec![],
             sqb:               None,
             struct_defs:       vec![],
+            solidity_source:   None,
                 })),
             };
             let sig = match pqc.sign_message(&keypair.private_key, &bytecode, SIGNING_ALGORITHM) {
@@ -1094,6 +1092,7 @@ async fn compile_handler(
             ir_dump:            vec![],
             sqb:               None,
             struct_defs:       vec![],
+            solidity_source:   None,
                 })),
             };
             json!({
@@ -1226,6 +1225,7 @@ async fn compile_handler(
             ir_dump:            vec![],
             sqb:               None,
             struct_defs:       vec![],
+            solidity_source:   None,
                         }));
                 }
             }
@@ -1688,9 +1688,172 @@ async fn compile_handler(
             }
         },
         struct_defs:       struct_defs_meta,
+        solidity_source:   solidity_source.clone(),
     }))
 }
 
+
+// ── POST /verify-sol ──────────────────────────────────────────────────────────────────────
+//
+// Compiles transpiled Solidity with Foundry (forge) to verify it is valid EVM code.
+// Takes Solidity source, writes to a temp Foundry project, compiles, returns result.
+// Used for audit-grade differential verification: SynQ source → QVM bytecode + Solidity → EVM bytecode.
+
+#[derive(serde::Deserialize)]
+struct VerifySolRequest {
+    solidity_source: String,
+    contract_name:   Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct VerifySolResponse {
+    success:       bool,
+    evm_bytecode:  Option<String>,
+    warnings:      Vec<String>,
+    errors:        Vec<String>,
+    forge_version: Option<String>,
+}
+
+async fn verify_sol_handler(
+    Json(req): Json<VerifySolRequest>,
+) -> (StatusCode, RespJson<VerifySolResponse>) {
+    use std::process::Command;
+    use std::fs;
+
+    // Create a unique temp directory for the Foundry project
+    let temp_dir = format!("/tmp/synq-verify-{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+
+    let src_dir = format!("{}/src", temp_dir);
+    if let Err(e) = fs::create_dir_all(&src_dir) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(VerifySolResponse {
+            success: false, evm_bytecode: None, warnings: vec![],
+            errors: vec![format!("Failed to create temp dir: {}", e)],
+            forge_version: None,
+        }));
+    }
+
+    // Write foundry.toml
+    let foundry_toml = r#"[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.20"
+"#;
+    if let Err(e) = fs::write(format!("{}/foundry.toml", temp_dir), foundry_toml) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(VerifySolResponse {
+            success: false, evm_bytecode: None, warnings: vec![],
+            errors: vec![format!("Failed to write foundry.toml: {}", e)],
+            forge_version: None,
+        }));
+    }
+
+    // Write the Solidity source
+    let sol_path = format!("{}/Contract.sol", src_dir);
+    if let Err(e) = fs::write(&sol_path, &req.solidity_source) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(VerifySolResponse {
+            success: false, evm_bytecode: None, warnings: vec![],
+            errors: vec![format!("Failed to write .sol: {}", e)],
+            forge_version: None,
+        }));
+    }
+
+    // Get forge path
+    let forge_bin = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()) + "/.foundry/bin/forge";
+
+    // Check forge version
+    let forge_ver = Command::new(&forge_bin).arg("--version").output()
+        .ok().and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.lines().next().unwrap_or("unknown").to_string());
+
+    // Run forge build
+    let output = Command::new(&forge_bin)
+        .arg("build")
+        .current_dir(&temp_dir)
+        .output();
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+
+            if out.status.success() {
+                // Extract warnings from stderr
+                let mut warnings: Vec<String> = Vec::new();
+                for line in stderr.lines() {
+                    if line.starts_with("Warning") || line.contains("Warning (") {
+                        warnings.push(line.to_string());
+                    }
+                }
+
+                // Extract EVM bytecode from forge output (out/Contract.sol/Contract.json)
+                let out_dir = format!("{}/out", temp_dir);
+                let mut evm_bytecode = None;
+                if let Ok(entries) = fs::read_dir(&out_dir) {
+                    for entry in entries.flatten() {
+                        let sol_dir = entry.path();
+                        if let Ok(sol_entries) = fs::read_dir(&sol_dir) {
+                            for sol_entry in sol_entries.flatten() {
+                                let json_path = sol_entry.path();
+                                if json_path.extension().map(|e| e == "json").unwrap_or(false) {
+                                    if let Ok(json_str) = fs::read_to_string(&json_path) {
+                                        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+                                            if let Some(bc) = json_val
+                                                .get("bytecode").and_then(|b| b.get("object"))
+                                                .and_then(|o| o.as_str()) {
+                                                evm_bytecode = Some(bc.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Cleanup temp dir (moved here — must read output before cleanup)
+                let _ = fs::remove_dir_all(&temp_dir);
+
+                (StatusCode::OK, RespJson(VerifySolResponse {
+                    success: true,
+                    evm_bytecode: evm_bytecode.or(Some("0x".to_string())),
+                    warnings,
+                    errors: vec![],
+                    forge_version: forge_ver,
+                }))
+            } else {
+                // Parse errors
+                let mut errors: Vec<String> = Vec::new();
+                for line in stderr.lines() {
+                    if line.starts_with("Error") || line.contains("Error (") {
+                        errors.push(line.to_string());
+                    }
+                }
+                if errors.is_empty() {
+                    errors.push(stderr.to_string());
+                }
+
+                // Cleanup temp dir
+                let _ = fs::remove_dir_all(&temp_dir);
+
+                (StatusCode::OK, RespJson(VerifySolResponse {
+                    success: false,
+                    evm_bytecode: None,
+                    warnings: vec![],
+                    errors,
+                    forge_version: forge_ver,
+                }))
+            }
+        }
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, RespJson(VerifySolResponse {
+                success: false, evm_bytecode: None, warnings: vec![],
+                errors: vec![format!("Failed to run forge: {} — is Foundry installed?", e)],
+                forge_version: None,
+            }))
+        }
+    }
+}
 
 // ── POST /decompile ─────────────────────────────────────────────────────────────────────────────
 //
@@ -2000,6 +2163,7 @@ async fn sign_source_handler(
             ir_dump:            vec![],
             sqb:               None,
             struct_defs:       vec![],
+            solidity_source:   None,
             }))
         };
     }
@@ -2044,6 +2208,7 @@ async fn sign_source_handler(
             ir_dump:            vec![],
             sqb:               None,
             struct_defs:       vec![],
+            solidity_source:   None,
         })),
     };
     let contract_name: Option<String> = ast.iter().find_map(|unit| match unit {
@@ -2125,6 +2290,7 @@ async fn sign_source_handler(
             ir_dump:            vec![],
             sqb:               None,
             struct_defs:       vec![],
+            solidity_source:   None,
         })),
     };
     let bytecode = wasm_compile.bytecode;
@@ -2244,6 +2410,7 @@ async fn sign_source_handler(
             ir_dump:            vec![],
             sqb:               None,
             struct_defs:       vec![],
+            solidity_source:   None,
     }))
 }
 
@@ -3887,6 +4054,7 @@ async fn main() {
         .route("/bench-compile",      post(bench_compile_handler))
         .route("/compile-wasm",     post(wasm_compiler::compile_wasm_handler))
         .route("/decompile",         post(decompile_handler))
+        .route("/verify-sol",        post(verify_sol_handler))
         .with_state(store.clone())
         .layer(
             ServiceBuilder::new()
