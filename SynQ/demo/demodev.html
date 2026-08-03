@@ -1,4 +1,4 @@
-<!-- SynQ IDE v2026.08.03.7 — tuple param expansion + @effects guard -->
+<!-- SynQ IDE v2026.08.03.8 — tuple param expansion + @effects guard -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -540,6 +540,7 @@
   <div class="card-title">
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
     Contract Editor
+    <span id="editorContractBadge" style="font-size:0.72rem;font-family:ui-monospace,monospace;background:rgba(0,206,209,0.12);border:1px solid rgba(0,206,209,0.3);color:#00ced1;border-radius:10px;padding:2px 10px;letter-spacing:0.04em;text-transform:none;display:none;"></span>
   </div>
   <div class="editor-wrap">
     <div class="line-nums" id="lineNums">1</div>
@@ -612,7 +613,7 @@
 
   <!-- Compilation results — split: IR (left) + Bytecode (right) -->
   <div class="results-section" id="resultsSection">
-    <div class="results-title">Compilation Results</div>
+    <div class="results-title">Compilation Results <span id="resultsContractBadge" style="text-transform:none;color:#00ced1;font-weight:700;font-family:ui-monospace,monospace;font-size:0.72rem;display:none;margin-left:6px;"></span></div>
     <div class="compile-split">
       <div class="compile-col">
         <div class="col-header ir">SSA IR — Static Single Assignment · Intermediate Representation</div>
@@ -720,7 +721,7 @@
 
 <div class="footer">
   Powered by <a href="https://synergy-network.io" target="_blank">Synergy Network</a>
-  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.03.7</span>
+  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.03.8</span>
 </div>
 
 <script>
@@ -2086,6 +2087,10 @@
       sessionId = null;
     }
     currentBytecode = null; currentSidecar = null; currentContractName = null; currentContractAddress = null; currentManifest = null; currentSqb = null;
+        var _eb2 = document.getElementById('editorContractBadge');
+        var _rb2 = document.getElementById('resultsContractBadge');
+        if (_eb2) { _eb2.style.display = 'none'; }
+        if (_rb2) { _rb2.style.display = 'none'; }
     (function() {
       var mode = document.getElementById('sigMode');
       var note = document.getElementById('sigNote');
@@ -5217,6 +5222,10 @@ var LOOP_LINES = [
     // Update the contract name badge in the Execute Contract card
     var _cnb = document.getElementById('contractNameBadge');
     if (_cnb) { _cnb.textContent = currentContractName || ''; _cnb.style.display = currentContractName ? 'inline' : 'none'; }
+    var _eb = document.getElementById('editorContractBadge');
+    if (_eb) { _eb.textContent = currentContractName || ''; _eb.style.display = currentContractName ? 'inline-block' : 'none'; }
+    var _rb = document.getElementById('resultsContractBadge');
+    if (_rb) { _rb.textContent = currentContractName ? '— ' + currentContractName + '.sqb' : ''; _rb.style.display = currentContractName ? 'inline' : 'none'; }
 
     parsedFunctions = parseDispatchTable(currentBytecode);
 
