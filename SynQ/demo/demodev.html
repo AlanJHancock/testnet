@@ -3098,8 +3098,9 @@
   // Look up struct definition by type name
   function lookupStructDef(typeName) {
     if (!compileStructDefs || !typeName) return null;
+    var _tn = typeName.toLowerCase();
     for (var i = 0; i < compileStructDefs.length; i++) {
-      if (compileStructDefs[i].name === typeName) return compileStructDefs[i];
+      if (compileStructDefs[i].name.toLowerCase() === _tn) return compileStructDefs[i];
     }
     return null;
   }
@@ -5172,7 +5173,7 @@ var LOOP_LINES = [
             m[1].split(',').forEach(function(part, i) {
               var kv = part.trim().split(/\s*:\s*/);
               fn.paramNames[i] = fn.paramNames[i] || (kv[0] ? kv[0].trim() : ('p' + i));
-              fn.paramTypes[i] = kv[1] ? kv[1].trim().split(/[\s<{(]/)[0].toLowerCase() : 'u256';
+              fn.paramTypes[i] = kv[1] ? kv[1].trim().split(/[\s<{(]/)[0] : 'u256';
             });
           }
           fn.returnType = null;
