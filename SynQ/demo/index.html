@@ -2951,27 +2951,26 @@
   // Collects all IDE contracts, sends to /diff-test, displays pass/fail summary.
   function collectAllContracts() {
     var contracts = [];
-    var knownArrays = [
-      ['SimpleToken', 'DEMO_LINES'],
-      ['TokenVault', 'VAULT_LINES'],
-      ['ComprehensiveToken', 'CT_LINES'],
-      ['LoopDemo', 'LOOP_LINES'],
-      ['PQCDemo', 'PQC_DEMO_LINES'],
-      ['TypeTestContract', 'TT_LINES'],
-      ['V3Types', 'V3_LINES'],
-      ['Blank', 'BLANK_LINES'],
-      ['StructValue', 'STRUCT_VALUE_LINES'],
-      ['NamedError', 'NAMED_ERROR_LINES'],
-      ['StackFailDemo', 'STACK_FAIL_LINES'],
+    var known = [
+      ['SimpleToken', DEMO_LINES],
+      ['TokenVault', VAULT_LINES],
+      ['ComprehensiveToken', CT_LINES],
+      ['LoopDemo', LOOP_LINES],
+      ['PQCDemo', PQC_DEMO_LINES],
+      ['TypeTestContract', TT_LINES],
+      ['V3Types', V3_LINES],
+      ['Blank', BLANK_LINES],
+      ['StructValue', STRUCT_VALUE_LINES],
+      ['NamedError', NAMED_ERROR_LINES],
+      ['StackFailDemo', STACK_FAIL_LINES],
     ];
-    for (var i = 0; i < knownArrays.length; i++) {
-      var name = knownArrays[i][0];
-      var arr = window[knownArrays[i][1]];
+    for (var i = 0; i < known.length; i++) {
+      var name = known[i][0];
+      var arr = known[i][1];
       if (arr && arr.join) {
         contracts.push({ name: name, source: arr.join('\n') });
       }
     }
-    // StructValue, NamedError, StackFailDemo are now in global arrays too
     return contracts;
   }
 
