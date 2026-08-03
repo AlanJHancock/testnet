@@ -6086,6 +6086,23 @@ var LOOP_LINES = [
     }
     window.decompileSqb = decompileSqb;
 
+    // Synchronized scroll: SSA pane is master, others follow
+    (function() {
+      var ssaEl = document.getElementById('decompileSSA');
+      var origEl = document.getElementById('decompileOriginal');
+      var solEl = document.getElementById('decompileSolidity');
+      var syncing = false;
+      if (ssaEl) {
+        ssaEl.addEventListener('scroll', function() {
+          if (syncing) return;
+          syncing = true;
+          if (origEl) origEl.scrollTop = ssaEl.scrollTop;
+          if (solEl) solEl.scrollTop = ssaEl.scrollTop;
+          syncing = false;
+        });
+      }
+    })();
+
     window.uploadSqb = uploadSqb;
 
 })();
