@@ -1,4 +1,4 @@
-<!-- SynQ IDE v2026.08.04.3 — tuple param expansion + @effects guard -->
+<!-- SynQ IDE v2026.08.04.4 — tuple param expansion + @effects guard -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -721,7 +721,7 @@
 
 <div class="footer">
   Powered by <a href="https://synergy-network.io" target="_blank">Synergy Network</a>
-  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.04.3</span>
+  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.04.4</span>
 </div>
 
 <script>
@@ -2828,7 +2828,7 @@
       return '<div class="attest-row"><span class="attest-key">' + key + '</span>' +
              '<span class="' + cls + '"' + t + '>' + val + '</span></div>';
     }
-    var rows =
+    var baseRows =
       row('Mode',          modeLabel) +
       row('Bytecode hash', hashTxt || '\u2014') +
       row('EVM address',   evmAddrTxt, evmAddrCls) +
@@ -2845,6 +2845,7 @@
     // from the DOM.  The full data remains in currentSidecar and is included
     // verbatim when the user downloads contract.sig.json.
     var sc = sidecar.source_commit || null;
+    var scSectionHtml = '';
     if (sc) {
       var scAuthor   = hexUp(sc.author       || '') || '\u2014';
       var scSrcHash  = hexUp(sc.source_hash  || '') || '\u2014';
@@ -2859,9 +2860,8 @@
       var scSpec   = sc.signing_spec  || 'SourceCommitV3';
       var scAlgo   = sc.pqc_algorithm || 'ML-DSA-65';
 
-      rows +=
-        '<div id="scSection" style="margin-top:10px;padding-top:10px;' +
-          'border-top:1px solid rgba(255,255,255,0.08);">' +
+      scSectionHtml +=
+        '<div id="scSection">' +
 
           // ── Section header + inline dismiss button (after title) ─────────────
           '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">' +
@@ -2881,11 +2881,7 @@
             '</button>' +
           '</div>' +
 
-          // ── Two-column layout ──────────────────────────────────────────────
-          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 16px;">' +
-
-          // ── LEFT COLUMN: Author, Source hash, Bytecode hash, Contract, Issued
-          '<div>' +
+          // ── Author — truncated by default, click to reveal full address ──
           (function() {
             var short = scAuthor.length >= 10
               ? scAuthor.slice(0,6) + '\u2026' + scAuthor.slice(-4)
@@ -2925,23 +2921,24 @@
               '</span>' +
             '</div>';
           })() +
+
           row('Source\u202fhash',   trunc(scSrcHash,  20), 'attest-val', scSrcHash) +
           row('Bytecode\u202fhash', trunc(scBcHash,   20), 'attest-val', scBcHash) +
           row('Contract',           scCname) +
           row('Issued',             scIssuedAt) +
-          '</div>' +
-
-          // ── RIGHT COLUMN: Nonce, Trust model, PQC key ID, PQC algorithm
-          '<div>' +
           row('Nonce\u202f(KMAC128)', trunc(scNonce, 14), 'attest-val pqc', scNonce) +
           row('Trust\u202fmodel', scTrust,  'attest-val pqc') +
           row('PQC\u202fkey\u202fID', scKeyId !== '\u2014' ? trunc(scKeyId, 16) : '\u2014', 'attest-val pqc', scKeyId) +
           row('PQC\u202falgorithm', scAlgo, 'attest-val pqc') +
-          '</div>' +
 
-          '</div>' +
         '</div>';
     }
+
+    // ── Assemble two-column layout: base rows left, SourceCommit right ──
+    var rows = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:0 20px;align-items:start;">' +
+      '<div>' + baseRows + '</div>' +
+      '<div>' + scSectionHtml + '</div>' +
+      '</div>';
 
     document.getElementById('attestRows').innerHTML = rows;
     document.getElementById('attestPanel').classList.add('show');
