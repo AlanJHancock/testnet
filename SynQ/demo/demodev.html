@@ -1,4 +1,4 @@
-<!-- SynQ IDE v2026.08.03.2 — tuple param expansion + @effects guard -->
+<!-- SynQ IDE v2026.08.03.3 — tuple param expansion + @effects guard -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -54,12 +54,12 @@
   .addr-popup .legend-item { display: flex; align-items: flex-start; gap: 6px; margin: 4px 0; }
   /* Decompile comparison window — persistent, no close */
   .decompile-window {
-    display: none; margin: 0 auto 24px; max-width: 1400px; background: rgba(8,12,20,0.95);
+    display: none; margin: 0 auto 24px; max-width: 980px; background: rgba(8,12,20,0.95);
     border: 1px solid rgba(168,85,247,0.2); border-radius: 12px; overflow: hidden;
   }
   .decompile-window.show { display: block; }
   .decompile-header {
-    display: flex; align-items: center; justify-content: space-between; padding: 12px 18px;
+    display: flex; align-items: center; justify-content: flex-start; gap: 10px; padding: 12px 18px;
     border-bottom: 1px solid rgba(255,255,255,0.06);
   }
   .decompile-title { font-size: 0.82rem; font-weight: 600; color: #a78bfa; }
@@ -293,12 +293,12 @@
   .addr-popup .legend-item { display: flex; align-items: flex-start; gap: 6px; margin: 4px 0; }
   /* Decompile comparison window — persistent, no close */
   .decompile-window {
-    display: none; margin: 0 auto 24px; max-width: 1400px; background: rgba(8,12,20,0.95);
+    display: none; margin: 0 auto 24px; max-width: 980px; background: rgba(8,12,20,0.95);
     border: 1px solid rgba(168,85,247,0.2); border-radius: 12px; overflow: hidden;
   }
   .decompile-window.show { display: block; }
   .decompile-header {
-    display: flex; align-items: center; justify-content: space-between; padding: 12px 18px;
+    display: flex; align-items: center; justify-content: flex-start; gap: 10px; padding: 12px 18px;
     border-bottom: 1px solid rgba(255,255,255,0.06);
   }
   .decompile-title { font-size: 0.82rem; font-weight: 600; color: #a78bfa; }
@@ -717,7 +717,7 @@
 
 <div class="footer">
   Powered by <a href="https://synergy-network.io" target="_blank">Synergy Network</a>
-  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.03.2</span>
+  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.03.3</span>
 </div>
 
 <script>
@@ -6266,7 +6266,7 @@ var LOOP_LINES = [
           solPane.style.display = 'none';
         }
 
-        document.getElementById('decompileContractName').textContent = result.contract_name || 'Unknown';
+        document.getElementById('decompileContractName').textContent = '— ' + file.name + (result.contract_name && result.contract_name !== file.name.replace(/\.sqb$/, '') ? '  (' + result.contract_name + ')' : '');
 
         // Show window (stays open)
         document.getElementById('decompileWindow').classList.add('show');
