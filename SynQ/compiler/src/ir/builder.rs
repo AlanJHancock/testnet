@@ -29,6 +29,7 @@ pub struct IrBuilder {
     enum_defs: HashMap<String, EnumDefinition>,
     /// Event definitions
     event_defs: Vec<EventDefinition>,
+    error_defs: Vec<ErrorDefinition>,
     /// Next state variable address
     next_state_addr: u32,
     /// Extern call targets collected during building
@@ -44,6 +45,7 @@ impl IrBuilder {
             struct_defs: HashMap::new(),
             enum_defs: HashMap::new(),
             event_defs: Vec::new(),
+    error_defs: Vec::new(),
             next_state_addr: 0,
             extern_contracts: Vec::new(),
             function_return_types: HashMap::new(),
@@ -57,6 +59,14 @@ impl IrBuilder {
         for unit in units {
             match unit {
                 SourceUnit::Contract(c) => {
+                    // Collect enums defined inside the contract body
+                    for e in &c.enums {
+                        self.enum_defs.insert(e.name.clone(), e.clone());
+                    }
+                    // Collect named error definitions
+                    for err in &c.error_defs {
+                        self.error_defs.push(err.clone());
+                    }
                     for part in &c.parts {
                         match part {
                             ContractPart::StateVariable(sv) => {
@@ -85,6 +95,7 @@ impl IrBuilder {
                 SourceUnit::Enum(e) => {
                     self.enum_defs.insert(e.name.clone(), e.clone());
                 }
+
                 _ => {}
             }
         }

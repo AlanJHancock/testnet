@@ -74,6 +74,42 @@ fn infer_expr_type(expr: &Expression) -> Type {
 }
 
 /// Transpile a parsed SynQ contract AST to Solidity source.
+/// Collect (enum_name, variant_name, arg_count) tuples from all revert EnumName::VariantName(args) statements.
+fn collect_revert_enum_errors(contract: &ContractDefinition) -> Vec<(String, String, usize)> {
+    let mut errors = Vec::new();
+    let mut seen = HashSet::new();
+    for part in &contract.parts {
+        if let ContractPart::Function(f) = part {
+            scan_block_for_revert_enums(&f.body, &mut errors, &mut seen);
+        }
+    }
+    errors
+}
+
+fn scan_block_for_revert_enums(
+    block: &Block,
+    errors: &mut Vec<(String, String, usize)>,
+    seen: &mut HashSet<(String, String, usize)>,
+) {
+    for stmt in &block.statements {
+        match stmt {
+            Statement::RevertEnum { enum_name, error, args } => {
+                let key = (enum_name.clone(), error.clone(), args.len());
+                if !seen.contains(&key) {
+                    seen.insert(key.clone());
+                    errors.push(key);
+                }
+            }
+            Statement::If { then_block, else_block, .. } => {
+                scan_block_for_revert_enums(then_block, errors, seen);
+                if let Some(eb) = else_block { scan_block_for_revert_enums(eb, errors, seen); }
+            }
+            Statement::While { body, .. } => scan_block_for_revert_enums(body, errors, seen),
+            _ => {}
+        }
+    }
+}
+
 /// Detect which state variables are used as sets (have .add/.remove/.contains calls).
 fn detect_set_vars(contract: &ContractDefinition) -> HashSet<String> {
     let mut vars = HashSet::new();
@@ -157,12 +193,13 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
     // Enums
     for ed in &contract.enums {
         writeln!(out, "enum {} {{", ed.name).unwrap();
-        for variant in &ed.variants {
+        for (i, variant) in ed.variants.iter().enumerate() {
+            let comma = if i + 1 < ed.variants.len() { "," } else { "" };
             if variant.fields.is_empty() {
-                writeln!(out, "    {},", variant.name).unwrap();
+                writeln!(out, "    {}{}", variant.name, comma).unwrap();
             } else {
                 // Algebraic enums don't exist in Solidity — emit as comment + plain enum
-                writeln!(out, "    {}, // SynQ algebraic variant — fields: {:?}", variant.name,
+                writeln!(out, "    {}{} // SynQ algebraic variant — fields: {:?}", variant.name, comma,
                     variant.fields.iter().map(|f| format!("{}: {:?}", f.name, f.ty)).collect::<Vec<_>>()
                 ).unwrap();
             }
@@ -170,6 +207,19 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
         writeln!(out, "}}").unwrap();
         writeln!(out).unwrap();
     }
+
+    // Custom error declarations for enum-based reverts
+    // Scan all functions for revert EnumName::VariantName(args) and generate matching Solidity errors
+    let revert_errors = collect_revert_enum_errors(contract);
+    for (enum_name, variant_name, arg_count) in &revert_errors {
+        let args: Vec<String> = (0..*arg_count).map(|_| "uint256".to_string()).collect();
+        if *arg_count == 0 {
+            writeln!(out, "error {}_{}();", enum_name, variant_name).unwrap();
+        } else {
+            writeln!(out, "error {}_{}({});", enum_name, variant_name, args.join(", ")).unwrap();
+        }
+    }
+    if !revert_errors.is_empty() { writeln!(out).unwrap(); }
 
     // Events
     for ev in &contract.event_defs {
@@ -460,7 +510,9 @@ fn transpile_statement(out: &mut String, stmt: &Statement, indent: usize) {
         }
         Statement::RevertEnum { enum_name, error, args } => {
             let a: Vec<String> = args.iter().map(transpile_expr).collect();
-            writeln!(out, "{}revert {}::{}({});", pad, enum_name, error, a.join(", ")).unwrap();
+            // SynQ enum-based revert -> Solidity custom error
+            // revert EnumName::VariantName(args) -> revert EnumName_VariantName(args)
+            writeln!(out, "{}revert {}_{}({});", pad, enum_name, error, a.join(", ")).unwrap();
         }
         Statement::Assignment(name, expr) => {
             let target_ty = get_type(name);
