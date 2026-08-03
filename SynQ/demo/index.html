@@ -2277,6 +2277,8 @@
                   data.functions = _xdat.functions;
                 // SQB artifact from server — WASM path doesn't produce one
                 if (_xdat.sqb) data.sqb = _xdat.sqb;
+                // Struct defs from server — WASM doesn't produce these
+                if (_xdat.struct_defs) data.struct_defs = _xdat.struct_defs;
                 // Also pick up IR dump and manifest from server
                 if (_xdat.ir_dump) data.ir_dump = _xdat.ir_dump;
                 if (_xdat.manifest) data.manifest = _xdat.manifest;
@@ -3170,6 +3172,7 @@
           : '');
         // Check if param is a struct or tuple type — render sub-field inputs
         var _structDef = lookupStructDef(_pRawType);
+        
         var _tupleTypes = parseTupleType(_pRawType);
         if (_structDef && _structDef.fields && _structDef.fields.length > 0) {
           var subFields = _structDef.fields;
