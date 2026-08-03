@@ -5981,7 +5981,7 @@ var LOOP_LINES = [
   // ── StructValue ──────────────────────────────────────────────────────────
   function loadStructValue() {
     evictWorkspaceContractByName('StructValue');
-    const var src = STRUCT_VALUE_LINES.join('\n');
+        var src = STRUCT_VALUE_LINES.join('\n');
     document.getElementById('editor').value = src;
     updateLineNums();
     clearResults();
@@ -5994,7 +5994,7 @@ var LOOP_LINES = [
   // ── NamedError (RevertCode 0x35) ─────────────────────────────────────────
   function loadNamedError() {
     evictWorkspaceContractByName('NamedError');
-    const var src = NAMED_ERROR_LINES.join('\n');
+        var src = NAMED_ERROR_LINES.join('\n');
     document.getElementById('editor').value = src;
     updateLineNums();
     clearResults();
@@ -6154,7 +6154,7 @@ var LOOP_LINES = [
 
   function loadStackFailDemo() {
     evictWorkspaceContractByName('StackFailDemo');
-    var var src = STACK_FAIL_LINES.join('\n');
+        var src = STACK_FAIL_LINES.join('\n');
 
     document.getElementById('editor').value = src;
     updateLineNums();
