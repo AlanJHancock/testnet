@@ -4009,7 +4009,32 @@
       return '{' + pairs.join(', ') + (keys.length > 3 ? ', \u2026' : '') + '}';
     }
 
-    if (Array.isArray(v)) return '[' + v.length + ' items]';
+    // Struct / tuple — expand array with field names if we have a struct def
+    if (Array.isArray(v)) {
+      var _structDef = null;
+      if (_declType) _structDef = lookupStructDef(_declType);
+      if (_structDef && _structDef.fields) {
+        var _parts = v.slice(0, _structDef.fields.length).map(function(fv, i) {
+          var _fn = _structDef.fields[i] ? _structDef.fields[i].name : 'f' + i;
+          var _ft = _structDef.fields[i] ? _structDef.fields[i].ty : '';
+          // Recursively expand nested struct arrays
+          if (Array.isArray(fv) && _ft) {
+            var _nestedDef = lookupStructDef(_ft);
+            if (_nestedDef && _nestedDef.fields) {
+              var _inner = fv.slice(0, _nestedDef.fields.length).map(function(iv, j) {
+                return _nestedDef.fields[j].name + ':' + iv;
+              });
+              return _fn + ':(' + _inner.join(', ') + ')';
+            }
+            return _fn + ':[' + fv.join(', ') + ']';
+          }
+          return _fn + ':' + fv;
+        });
+        return _structDef.name + '{' + _parts.join(', ') + '}';
+      }
+      // Anonymous tuple — show values with indices
+      return '[' + v.map(function(x) { return String(x); }).join(', ') + ']';
+    }
 
     var s = String(v);
     if (/^\d+$/.test(name)) return 'slot[' + name + '] = ' + s;
