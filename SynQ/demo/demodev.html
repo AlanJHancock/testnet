@@ -1,4 +1,4 @@
-<!-- SynQ IDE v2026.08.03.8 — tuple param expansion + @effects guard -->
+<!-- SynQ IDE v2026.08.03.9 — tuple param expansion + @effects guard -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -721,7 +721,7 @@
 
 <div class="footer">
   Powered by <a href="https://synergy-network.io" target="_blank">Synergy Network</a>
-  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.03.8</span>
+  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.03.9</span>
 </div>
 
 <script>
@@ -5223,9 +5223,9 @@ var LOOP_LINES = [
     var _cnb = document.getElementById('contractNameBadge');
     if (_cnb) { _cnb.textContent = currentContractName || ''; _cnb.style.display = currentContractName ? 'inline' : 'none'; }
     var _eb = document.getElementById('editorContractBadge');
-    if (_eb) { _eb.textContent = currentContractName || ''; _eb.style.display = currentContractName ? 'inline-block' : 'none'; }
+    if (_eb) { _eb.textContent = currentContractName ? currentContractName + '.synq' : ''; _eb.style.display = currentContractName ? 'inline-block' : 'none'; }
     var _rb = document.getElementById('resultsContractBadge');
-    if (_rb) { _rb.textContent = currentContractName ? '— ' + currentContractName + '.sqb' : ''; _rb.style.display = currentContractName ? 'inline' : 'none'; }
+    if (_rb) { _rb.textContent = currentContractName ? currentContractName + '.sqb' : ''; _rb.style.display = currentContractName ? 'inline' : 'none'; }
 
     parsedFunctions = parseDispatchTable(currentBytecode);
 
