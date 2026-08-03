@@ -51,6 +51,53 @@
   .addr-popup .addr-source { color: #6b7280; font-style: italic; font-size: 0.68rem; margin: 2px 0 8px; }
   .addr-popup hr { border: none; border-top: 1px solid #1f2937; margin: 12px 0; }
   .addr-popup .legend-item { display: flex; align-items: flex-start; gap: 6px; margin: 4px 0; }
+  /* Decompile comparison overlay */
+  .decompile-overlay {
+    display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.7); z-index: 10000; align-items: center; justify-content: center;
+  }
+  .decompile-overlay.show { display: flex; }
+  .decompile-modal {
+    background: rgba(8,12,20,0.98); border: 1px solid rgba(168,85,247,0.25); border-radius: 12px;
+    width: 92%; max-width: 1200px; height: 85%; display: flex; flex-direction: column; overflow: hidden;
+  }
+  .decompile-header {
+    display: flex; align-items: center; justify-content: space-between; padding: 14px 20px;
+    border-bottom: 1px solid rgba(255,255,255,0.06); flex-shrink: 0;
+  }
+  .decompile-title { font-size: 0.85rem; font-weight: 600; color: #a78bfa; }
+  .decompile-close {
+    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px;
+    color: rgba(255,255,255,0.5); cursor: pointer; padding: 4px 10px; font-size: 0.75rem;
+  }
+  .decompile-close:hover { background: rgba(255,255,255,0.12); color: rgba(255,255,255,0.8); }
+  .decompile-tabs { display: flex; gap: 2px; padding: 0 20px; border-bottom: 1px solid rgba(255,255,255,0.06); flex-shrink: 0; }
+  .decompile-tab {
+    padding: 8px 16px; font-size: 0.72rem; font-weight: 500; cursor: pointer; border: none;
+    background: none; color: rgba(255,255,255,0.35); border-bottom: 2px solid transparent;
+    transition: all 0.15s;
+  }
+  .decompile-tab:hover { color: rgba(255,255,255,0.55); }
+  .decompile-tab.active { color: #c4b5fd; border-bottom-color: #a78bfa; }
+  .decompile-tab .tab-badge {
+    display: inline-block; margin-left: 4px; padding: 1px 5px; border-radius: 3px; font-size: 0.6rem;
+    background: rgba(168,85,247,0.15); color: rgba(168,85,247,0.6);
+  }
+  .decompile-body { flex: 1; display: flex; gap: 1px; background: rgba(255,255,255,0.04); overflow: hidden; }
+  .decompile-pane { flex: 1; display: none; flex-direction: column; overflow: hidden; background: rgba(3,7,15,0.95); }
+  .decompile-pane.active { display: flex; }
+  .decompile-pane-header {
+    padding: 6px 14px; font-size: 0.62rem; font-weight: 600; letter-spacing: 0.08em;
+    text-transform: uppercase; color: rgba(255,255,255,0.3); border-bottom: 1px solid rgba(255,255,255,0.04);
+    flex-shrink: 0;
+  }
+  .decompile-pane-content {
+    flex: 1; overflow: auto; padding: 12px 16px; font-family: ui-monospace, monospace;
+    font-size: 11px; line-height: 19px; white-space: pre; color: #c4b5fd;
+  }
+  .decompile-pane-content.original { color: #6ee7b7; }
+  .decompile-pane-content.ssa { color: #c4b5fd; }
+  .decompile-pane-content.solidity { color: #fbbf24; }
   .addr-popup .legend-item code { font-size: 0.68rem; min-width: 48px; color: #9ca3af; }
   .addr-popup .legend-item span { font-size: 0.72rem; color: #6b7280; }
   .addr-popup .close-btn { display: block; margin: 16px auto 0; padding: 6px 24px; background: rgba(124,58,237,0.2); border: 1px solid rgba(124,58,237,0.4); border-radius: 8px; color: #a78bfa; font-size: 0.78rem; cursor: pointer; }
@@ -207,7 +254,37 @@
   .ws-new-btn:hover { background: rgba(0,206,209,0.12); }
 </style>
   <script type="module" src="/demo/wasm/synq-wasm-loader.js"></script>
-  <script>
+  
+  <!-- Decompile comparison overlay -->
+  <div class="decompile-overlay" id="decompileOverlay" onclick="if(event.target===this)closeDecompile()">
+    <div class="decompile-modal">
+      <div class="decompile-header">
+        <span class="decompile-title" id="decompileTitle">SQB Decompile</span>
+        <button class="decompile-close" onclick="closeDecompile()">&#x2715; Close</button>
+      </div>
+      <div class="decompile-tabs">
+        <button class="decompile-tab active" data-tab="original" onclick="switchDecompileTab('original')">Original SynQ <span class="tab-badge" id="origBadge"></span></button>
+        <button class="decompile-tab" data-tab="ssa" onclick="switchDecompileTab('ssa')">Decompiled SSA <span class="tab-badge" id="ssaBadge"></span></button>
+        <button class="decompile-tab" data-tab="solidity" onclick="switchDecompileTab('solidity')" style="display:none">Solidity <span class="tab-badge" id="solBadge"></span></button>
+      </div>
+      <div class="decompile-body">
+        <div class="decompile-pane active" data-pane="original">
+          <div class="decompile-pane-header">Original SynQ source (from SQB SOURCE section)</div>
+          <div class="decompile-pane-content original" id="decompileOriginal">—</div>
+        </div>
+        <div class="decompile-pane" data-pane="ssa">
+          <div class="decompile-pane-header">Decompiled SSA pseudo-SynQ (from SIR1 IR section)</div>
+          <div class="decompile-pane-content ssa" id="decompileSSA">—</div>
+        </div>
+        <div class="decompile-pane" data-pane="solidity">
+          <div class="decompile-pane-header">Solidity source (for EVM deployment via SXCP)</div>
+          <div class="decompile-pane-content solidity" id="decompileSolidity">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
     // Show WASM badge in toolbar once the module is ready (no compile needed)
     document.addEventListener("DOMContentLoaded", function() {
       // Load TokenVault as the default contract — it is the primary entry point.
@@ -5728,6 +5805,21 @@ var LOOP_LINES = [
         setStatus('SQB upload failed: ' + e.message, 'error');
       }
     }
+    // Decompile comparison state
+    var decompileData = null;
+
+    function switchDecompileTab(tab) {
+      document.querySelectorAll('.decompile-tab').forEach(function(t) { t.classList.remove('active'); });
+      document.querySelectorAll('.decompile-pane').forEach(function(p) { p.classList.remove('active'); });
+      document.querySelector('.decompile-tab[data-tab="' + tab + '"]').classList.add('active');
+      document.querySelector('.decompile-pane[data-pane="' + tab + '"]').classList.add('active');
+    }
+
+    function closeDecompile() {
+      var overlay = document.getElementById('decompileOverlay');
+      if (overlay) overlay.classList.remove('show');
+    }
+
     async function decompileSqb(input) {
       var file = input.files[0];
       if (!file) return;
@@ -5754,63 +5846,35 @@ var LOOP_LINES = [
           return;
         }
 
-        // Build combined output with all available sources
-        var combinedSource = '';
         var hasOriginal = result.original_source && result.original_source.length > 0;
         var hasSolidity = result.solidity_source && result.solidity_source.length > 0;
 
-        combinedSource += '// ═════════════════════════════════════════════════════════════════\n';
-        combinedSource += '//  SQB DECOMPILE REPORT\n';
-        combinedSource += '//  Contract: ' + result.contract_name + '\n';
-        combinedSource += '//  ═════════════════════════════════════════════════════════════════\n';
-        combinedSource += '//\n';
-        if (hasOriginal) {
-          combinedSource += '//  Section 1: Original SynQ source (from SQB SOURCE section)\n';
-        }
-        combinedSource += '//  Section ' + (hasOriginal ? '2' : '1') + ': Decompiled SSA pseudo-SynQ (from SIR1 IR section)\n';
+        // Populate overlay panes
+        document.getElementById('decompileOriginal').textContent = hasOriginal ? result.original_source : '— No original source in SQB —';
+        document.getElementById('decompileSSA').textContent = result.source || '— No SSA IR in SQB —';
+        
+        var solPane = document.getElementById('decompileSolidity');
+        var solTab = document.querySelector('.decompile-tab[data-tab="solidity"]');
         if (hasSolidity) {
-          combinedSource += '//  Section ' + (hasOriginal ? '3' : '2') + ': Solidity source (from SQB SOLIDITY_SOURCE section, for EVM/SXCP)\n';
-        }
-        combinedSource += '//\n';
-        combinedSource += '//  All sections are cryptographically authenticated by the SQB\n';
-        combinedSource += '//  ML-DSA-87 signature. The Solidity was auto-transpiled from the\n';
-        combinedSource += '//  same SynQ AST that produced the QVM bytecode.\n';
-        combinedSource += '// ═════════════════════════════════════════════════════════════════\n\n';
-
-        var sectionNum = 1;
-
-        // Section 1: Original source
-        if (hasOriginal) {
-          combinedSource += '// ── SECTION ' + sectionNum + ': ORIGINAL SYNQ SOURCE (from SQB) ──────\n';
-          var origLines = result.original_source.split('\n');
-          for (var i = 0; i < origLines.length; i++) {
-            combinedSource += '// ' + (i+1).toString().padStart(3, ' ') + ' | ' + origLines[i] + '\n';
-          }
-          combinedSource += '// ────────────────────────────────────────────────────────────\n\n';
-          sectionNum++;
+          solPane.textContent = result.solidity_source;
+          if (solTab) solTab.style.display = '';
+        } else {
+          solPane.textContent = '— No Solidity source in SQB —';
+          if (solTab) solTab.style.display = 'none';
         }
 
-        // Section 2: Decompiled SSA
-        combinedSource += '// ── SECTION ' + sectionNum + ': DECOMPILED SSA PSEUDO-SYNQ (from SIR1 IR) ──\n';
-        combinedSource += result.source;
-        combinedSource += '\n// ────────────────────────────────────────────────────────────\n\n';
-        sectionNum++;
+        // Update tab badges with char counts
+        document.getElementById('origBadge').textContent = hasOriginal ? result.original_source.length + ' chars' : '';
+        document.getElementById('ssaBadge').textContent = result.source ? result.source.length + ' chars' : '';
+        document.getElementById('solBadge').textContent = hasSolidity ? result.solidity_source.length + ' chars' : '';
 
-        // Section 3: Solidity
-        if (hasSolidity) {
-          combinedSource += '// ── SECTION ' + sectionNum + ': SOLIDITY SOURCE (for EVM deployment via SXCP) ──\n';
-          combinedSource += result.solidity_source;
-          combinedSource += '\n// ────────────────────────────────────────────────────────────\n';
-        }
+        // Update title
+        document.getElementById('decompileTitle').textContent = 'SQB Decompile — ' + (result.contract_name || 'Unknown');
 
-        // Put combined output into the editor
-        var editor = document.getElementById('codeEditor');
-        if (editor) {
-          editor.value = combinedSource;
-          if (typeof onCodeInput === 'function') onCodeInput();
-        }
+        // Show overlay
+        document.getElementById('decompileOverlay').classList.add('show');
 
-        // Update contract name
+        // Update contract name display (don't overwrite editor)
         if (result.contract_name) {
           currentContractName = result.contract_name;
           var cn = document.getElementById('contractName');
@@ -5820,10 +5884,11 @@ var LOOP_LINES = [
         var statusMsg = 'Decompiled ' + result.contract_name + ' — SSA: ' + result.source.length + ' chars';
         if (hasOriginal) statusMsg += ', original: ' + result.original_source.length + ' chars';
         if (hasSolidity) statusMsg += ', Solidity: ' + result.solidity_source.length + ' chars';
+        statusMsg += ' — click tabs to compare';
         setStatus(statusMsg, 'success');
 
-        console.log('[DECOMPILE] Success: ' + result.contract_name + 
-          ', decompiled=' + result.source.length + 
+        console.log('[DECOMPILE] Success: ' + result.contract_name +
+          ', decompiled=' + result.source.length +
           ', original=' + (hasOriginal ? result.original_source.length : 'none') +
           ', solidity=' + (hasSolidity ? result.solidity_source.length : 'none'));
       } catch(e) {
