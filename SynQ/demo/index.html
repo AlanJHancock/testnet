@@ -1,4 +1,4 @@
-<!-- SynQ IDE v2026.08.04.1 — tuple param expansion + @effects guard -->
+<!-- SynQ IDE v2026.08.04.2 — tuple param expansion + @effects guard -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -721,7 +721,7 @@
 
 <div class="footer">
   Powered by <a href="https://synergy-network.io" target="_blank">Synergy Network</a>
-  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.04.1</span>
+  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.04.2</span>
 </div>
 
 <script>
@@ -2424,6 +2424,7 @@
       currentStateVarTypes    = data.state_var_types   || {};
       currentFnReturnTypes    = (data.functions || []).reduce(function(m,f){ if(f.return_type) m[f.name]=f.return_type; return m; }, {});
       currentContractName    = data.contract_name     || null;
+      setEditorBadges(currentContractName);
       currentExternContracts = data.extern_contracts  || [];
       currentContractAddress = data.contract_address  || null;
       compileFunctions       = data.functions         || [];
