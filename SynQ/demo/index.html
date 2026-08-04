@@ -3813,8 +3813,40 @@
         var nonceData = await nonceRes.json();
         if (!nonceData.nonce) {
           var nonceErr = nonceData.error || 'unknown';
-          var nonceMsg = (nonceErr.toLowerCase().indexOf('not found') !== -1 || nonceErr.toLowerCase().indexOf('expired') !== -1)
-            ? 'Session expired or not found — click <strong>Deploy</strong> to start a new session, then run again.'
+          var _isExpired = (nonceErr.toLowerCase().indexOf('not found') !== -1 || nonceErr.toLowerCase().indexOf('expired') !== -1);
+          if (_isExpired && !window._autoRedeploying) {
+            // Session was wiped (server restart) — auto-redeploy and retry
+            window._autoRedeploying = true;
+            var _savedFuncName = selectedFunc ? selectedFunc.name : null;
+            var _savedArgs = args.slice();
+            setVMOutput('<span class="warn">Session expired — auto-redeploying...</span>');
+            try {
+              await initVMPanel();
+              if (sessionId && _savedFuncName) {
+                // Restore function selection — initVMPanel resets it
+                var _idx = -1;
+                for (var _i = 0; _i < parsedFunctions.length; _i++) {
+                  if (parsedFunctions[_i].name === _savedFuncName) { _idx = _i; break; }
+                }
+                if (_idx >= 0) {
+                  selectFunction(_idx);
+                  // Restore arg input values
+                  var _inputs = document.getElementById('paramsGrid').querySelectorAll('input, textarea');
+                  for (var _a = 0; _a < _savedArgs.length && _a < _inputs.length; _a++) {
+                    _inputs[_a].value = _savedArgs[_a];
+                  }
+                  // Re-read args from the restored inputs
+                  args = _savedArgs;
+                  window._autoRedeploying = false;
+                  setVMOutput('<span class="ok">Session restored — retrying ' + _savedFuncName + '...</span>');
+                  return runFunction();
+                }
+              }
+            } catch (e) { /* fall through to error */ }
+            window._autoRedeploying = false;
+          }
+          var nonceMsg = _isExpired
+            ? 'Session expired — auto-redeploy failed. Click <strong>Deploy</strong> manually, then run again.'
             : 'Failed to obtain call nonce: ' + nonceErr;
           setVMOutput('<span class="err">' + nonceMsg + '</span>');
           btn.disabled = false; btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Run Function';
