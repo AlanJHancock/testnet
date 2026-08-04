@@ -1,0 +1,46 @@
+pragma synq ^0.9;
+
+contract NamedError {
+  state {
+    initialised: bool;
+    balance: u256;
+  }
+
+  enum VaultError { InsufficientBalance, Unauthorized, InvalidAmount, Overflow }
+
+  @public
+  function init() as caller -> bool {
+    initialised = true;
+    balance = 100;
+    return true;
+  }
+
+  @public
+  function failInsufficient() as caller -> bool {
+    revert VaultError::InsufficientBalance(balance);
+  }
+
+  @public
+  function withdraw(amount: u256) as caller -> bool {
+    if (amount > balance) {
+      revert VaultError::InsufficientBalance(amount);
+    }
+    balance = balance - amount;
+    return true;
+  }
+
+  @public
+  function failUnauthorized() as caller -> bool {
+    revert VaultError::Unauthorized;
+  }
+
+  @public
+  function failInvalid() as caller -> bool {
+    revert VaultError::InvalidAmount(0);
+  }
+
+  @public
+  function failOverflow() as caller -> bool {
+    revert VaultError::Overflow(balance, 100);
+  }
+}

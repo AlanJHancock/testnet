@@ -1,0 +1,176 @@
+pragma synq ^0.9;
+
+// TypeTestContract — exercises every data type and operator in SynQ.
+// Deploy, call init(), then run any function in any order.
+contract TypeTestContract {
+
+  // ── State — one of every supported type ───────────────────────────────────
+  state {
+    u_val:      u256;
+    i_val:      i32;
+    b_val:      bool;
+    s_val:      str;
+    admin:      u256;
+    ready:      bool;
+    labelled:   bool;
+    op_count:   u256;
+    balances:   map<u256, u256>;
+    registered: set<u256>;
+  }
+
+  // ── Init ───────────────────────────────────────────────────────────────────
+  function init() -> bool as caller {
+    if (ready) { return false; }
+    admin    = caller;
+    u_val    = 100;
+    i_val    = -42;
+    b_val    = true;
+    s_val    = "hello";
+    ready    = true;
+    labelled = false;
+    op_count = 0;
+    return true;
+  }
+
+  // ── u256 arithmetic (+  -  *  /  %) ───────────────────────────────────────
+  function testArithmetic(a: u256, b: u256) -> u256 as caller {
+    require(ready, "not initialised");
+    require(b > 0, "b must be > 0");
+    let sum  = a + b;
+    let diff = sum - b;
+    let prod = a * b;
+    let quot = prod / b;
+    let rem  = prod % (b + 1);
+    u_val    = quot + rem;
+    op_count = op_count + 1;
+    return u_val;
+  }
+
+  // ── i32 signed arithmetic ──────────────────────────────────────────────────
+  function testSigned(x: i32, y: i32) -> i32 as caller {
+    require(ready, "not initialised");
+    let s = x + y;
+    let d = x - y;
+    let p = x * y;
+    i_val    = s + d + p;
+    op_count = op_count + 1;
+    return i_val;
+  }
+
+  // ── Comparison operators (==  !=  <  <=  >  >=) ───────────────────────────
+  function testCompare(a: u256, b: u256) -> bool as caller {
+    require(ready, "not initialised");
+    let eq = (a == b);
+    let ne = (a != b);
+    let lt = (a < b);
+    let le = (a <= b);
+    let gt = (a > b);
+    let ge = (a >= b);
+    let ok = (eq == !ne);
+    b_val    = ok;
+    op_count = op_count + 1;
+    return ok;
+  }
+
+  // ── Boolean operators (&&  ||  !) ─────────────────────────────────────────
+  function testBool(p: bool, q: bool) -> bool as caller {
+    require(ready, "not initialised");
+    let and_r = p && q;
+    let or_r  = p || q;
+    let not_p = !p;
+    let xor_r = (p || q) && !(p && q);
+    b_val    = xor_r;
+    op_count = op_count + 1;
+    return and_r;
+  }
+
+  // ── String operations (concat + strLen) ───────────────────────────────────
+  function testString(a: str, b: str) -> str as caller {
+    require(ready, "not initialised");
+    let cat = a + b;
+    let len = str_len(cat);
+    require(len > 0, "empty result");
+    s_val    = cat;
+    op_count = op_count + 1;
+    return cat;
+  }
+
+  function setLabel(label: str) -> bool as caller {
+    require(ready, "not initialised");
+    require(!labelled, "label already set");
+    s_val    = label;
+    labelled = true;
+    return true;
+  }
+
+  // ── Map operations ─────────────────────────────────────────────────────────
+  function testMapSet(key: u256, val: u256) -> bool as caller {
+    require(ready, "not initialised");
+    require(key > 0, "key must be > 0");
+    balances[key] = val;
+    op_count = op_count + 1;
+    return true;
+  }
+
+  function testMapGet(key: u256) -> u256 {
+    return balances[key];
+  }
+
+  function testMapUpdate(key: u256, delta: u256) -> u256 as caller {
+    require(ready, "not initialised");
+    balances[key] = balances[key] + delta;
+    op_count = op_count + 1;
+    return balances[key];
+  }
+
+  // ── Set operations ─────────────────────────────────────────────────────────
+  function testSetAdd(addr: u256) -> bool as caller {
+    require(ready, "not initialised");
+    require(addr > 0, "invalid address");
+    registered.add(addr);
+    op_count = op_count + 1;
+    return true;
+  }
+
+  function testSetContains(addr: u256) -> bool {
+    return registered.contains(addr);
+  }
+
+  function testSetRemove(addr: u256) -> bool as caller {
+    require(ready, "not initialised");
+    registered.remove(addr);
+    op_count = op_count + 1;
+    return true;
+  }
+
+  // ── require guard paths ───────────────────────────────────────────────────
+  function testRequirePass(x: u256) -> u256 as caller {
+    require(ready,   "not initialised");
+    require(x > 0,   "x must be > 0");
+    require(x < 1000000, "x too large");
+    op_count = op_count + 1;
+    return x * 2;
+  }
+
+  function testRequireFail() as caller {
+    require(ready, "not initialised");
+    require(false, "intentional revert");
+  }
+
+  // ── Admin-gated function ───────────────────────────────────────────────────
+  function adminOnly() -> u256 as caller {
+    require(ready, "not initialised");
+    require(caller == admin, "not admin");
+    op_count = op_count + 1;
+    return op_count;
+  }
+
+  // ── Read-only getters ──────────────────────────────────────────────────────
+  function getUVal()    -> u256 { return u_val;    }
+  function getIVal()    -> i32  { return i_val;    }
+  function getBVal()    -> bool { return b_val;    }
+  function getSVal()    -> str  { return s_val;    }
+  function getOpCount() -> u256 { return op_count; }
+  function getAdmin()   -> u256 { return admin;    }
+  function isReady()    -> bool { return ready;    }
+}

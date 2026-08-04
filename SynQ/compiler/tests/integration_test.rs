@@ -1,4 +1,4 @@
-use synq_compiler::{codegen::CodeGenerator, parser};
+use synq_compiler::parser;
 use quantumvm::{CallContext, QuantumVM, Value};
 
 const SIMPLE_CONTRACT_WITH_FUNCTION_PARAMS: &str = r#"

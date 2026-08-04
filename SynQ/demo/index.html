@@ -571,6 +571,16 @@
       </svg>
       Save File
     </button>
+    <button class="btn btn-secondary" onclick="saveToServer()"
+            title="Save contract source back to the server (contracts/ directory)"
+            style="display:flex;align-items:center;gap:4px;padding:4px 10px;flex-shrink:0;background:rgba(46,160,67,0.15);border:1px solid rgba(46,160,67,0.4);color:rgba(80,200,120,0.9);">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           style="flex-shrink:0;opacity:0.85;">
+        <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+        <polyline points="15 13 12 16 9 13"/><line x1="12" y1="16" x2="12" y2="4"/>
+      </svg>
+      Save to Server
+    </button>
     <span style="font-size:0.8rem;font-weight:600;color:rgba(255,255,255,0.4);padding:0 2px;">|</span>
     <button class="btn btn-secondary" onclick="loadBlank()" title="Blank starter contract">New</button>
     <button class="btn btn-secondary" onclick="loadVault()" title="Step 1 — TokenVault (uses extern_call)">TokenVault</button>
@@ -2138,16 +2148,70 @@
   }
   window.setEditorBadges = setEditorBadges;
 
+
+  // ── Contract source cache (loaded from server files) ─────────────────────
+  var contractCache = {};
+  var contractList = [
+    'SimpleToken', 'TokenVault', 'ComprehensiveToken', 'LoopDemo',
+    'PQCDemo', 'TypeTestContract', 'V3Types', 'Blank',
+    'StructValue', 'NamedError', 'StackFailDemo', 'AssetDemo', 'StructField'
+  ];
+
+  function getContractSource(name) {
+    return contractCache[name] || '';
+  }
+
+  async function preloadContracts() {
+    // 1. Load shared template contracts from static files
+    var fetches = contractList.map(function(name) {
+      return fetch('contracts/' + name + '.synq')
+        .then(function(r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.text();
+        })
+        .then(function(src) {
+          contractCache[name] = src;
+        })
+        .catch(function(e) {
+          console.error('Failed to load ' + name + '.synq:', e);
+          contractCache[name] = '';
+        });
+    });
+    await Promise.all(fetches);
+
+    // 2. If wallet is connected, overlay user's saved versions
+    var wallet = getWalletId ? getWalletId() : null;
+    if (wallet) {
+      try {
+        var userNames = await loadUserContractList();
+        var userFetches = userNames.map(function(name) {
+          return loadContractFromServer(name).then(function(src) {
+            if (src) console.log('[CONTRACTS] Loaded user-saved ' + name + '.synq');
+          });
+        });
+        await Promise.all(userFetches);
+      } catch (e) {
+        console.error('[CONTRACTS] Failed to load user contracts:', e);
+      }
+    }
+
+    console.log('[CONTRACTS] Preloaded', Object.keys(contractCache).length, 'contracts');
+  }
+
+  window.getContractSource = getContractSource;
+  window.preloadContracts = preloadContracts;
+
+
   function loadDemo() {
     evictWorkspaceContractByName('SimpleToken');
-    document.getElementById('editor').value = DEMO_LINES.join('\n');
+    document.getElementById('editor').value = getContractSource('SimpleToken');
     updateLineNums(); clearResults(); syncCompileBtn();
     setEditorBadges('SimpleToken');
     setStatus('Step 2 of 2 — Compile SimpleToken, then Deploy into the same workspace.', 'info');
   }
 
   function loadBlank() {
-    document.getElementById('editor').value = BLANK_LINES.join('\n');
+    document.getElementById('editor').value = getContractSource('Blank');
     updateLineNums(); clearResults(); syncCompileBtn();
     setEditorBadges(null);
     setStatus('Blank template loaded — edit the contract name and functions, then Compile and Deploy.', 'info');
@@ -2210,17 +2274,108 @@
   }
   window.saveToFile = saveToFile;
 
+  // ── Save contract source back to the server (per-wallet) ────────────────
+  var SAVE_CONTRACT_URL  = 'https://hanksweb.co.uk/synq/save-contract';
+  var LOAD_CONTRACT_URL  = 'https://hanksweb.co.uk/synq/load-contract';
+  var LIST_USER_CONTRACTS_URL = 'https://hanksweb.co.uk/synq/list-user-contracts';
+  var _saveServerInFlight = false;
+  var userContractNames = {};  // names of contracts saved by this wallet
+
+  function getWalletId() {
+    // Prefer the V3 Bech32 syna address, fall back to EVM hex
+    if (walletSyna) return walletSyna;
+    if (walletAddress) return walletAddress;
+    return null;
+  }
+
+  async function saveToServer() {
+    if (_saveServerInFlight) return;
+    var wallet = getWalletId();
+    if (!wallet) {
+      setStatus('No wallet connected — generate or import a key first.', 'error');
+      return;
+    }
+    var src = (typeof getCode === 'function' ? getCode() : null)
+              || document.getElementById('editor').value || '';
+    if (!src.trim()) {
+      setStatus('Nothing to save — editor is empty.', 'error');
+      return;
+    }
+    // Derive contract name from source
+    var match = src.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
+    var name = match ? match[1] : (currentContractName || 'Untitled');
+    _saveServerInFlight = true;
+    setStatus('Saving ' + name + '.synq to server for ' + wallet.slice(0, 12) + '...', 'info');
+    try {
+      var res = await fetch(SAVE_CONTRACT_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name, source: src, wallet: wallet })
+      });
+      var data = await res.json();
+      if (data.success) {
+        contractCache[name] = src;
+        userContractNames[name] = true;
+        var scope = data.is_user_save ? ' (your workspace)' : ' (shared)';
+        setStatus('Saved ' + name + '.synq to server' + scope + ' — ' + src.length + ' bytes.', 'info');
+      } else {
+        setStatus('Save failed: ' + (data.error || 'unknown error'), 'error');
+      }
+    } catch (e) {
+      setStatus('Save failed: ' + e.message, 'error');
+    } finally {
+      _saveServerInFlight = false;
+    }
+  }
+  window.saveToServer = saveToServer;
+
+  // Load a contract from the server, preferring the user's saved version.
+  async function loadContractFromServer(name) {
+    var wallet = getWalletId();
+    if (!wallet) return null;
+    try {
+      var url = LOAD_CONTRACT_URL + '?wallet=' + encodeURIComponent(wallet) + '&name=' + encodeURIComponent(name);
+      var res = await fetch(url);
+      if (!res.ok) return null;
+      var data = await res.json();
+      if (data.success && data.source) {
+        contractCache[name] = data.source;
+        if (data.is_user_save) userContractNames[name] = true;
+        return data.source;
+      }
+    } catch (e) { /* fall through to shared cache */ }
+    return null;
+  }
+  window.loadContractFromServer = loadContractFromServer;
+
+  // List contracts saved by this wallet (in addition to shared templates).
+  async function loadUserContractList() {
+    var wallet = getWalletId();
+    if (!wallet) return [];
+    try {
+      var res = await fetch(LIST_USER_CONTRACTS_URL + '?wallet=' + encodeURIComponent(wallet));
+      if (!res.ok) return [];
+      var data = await res.json();
+      if (data.success && data.contracts) {
+        data.contracts.forEach(function(c) { userContractNames[c.name] = true; });
+        return data.contracts.map(function(c) { return c.name; });
+      }
+    } catch (e) { /* ignore */ }
+    return [];
+  }
+  window.loadUserContractList = loadUserContractList;
+
 
   function loadVault() {
     evictWorkspaceContractByName('TokenVault');
-    document.getElementById('editor').value = VAULT_LINES.join('\n');
+    document.getElementById('editor').value = getContractSource('TokenVault');
     updateLineNums(); clearResults(); syncCompileBtn();
     setEditorBadges('TokenVault');
     setStatus('Step 1 of 2 — Compile TokenVault, then Deploy. Then load SimpleToken for step 2.', 'info');
   }
   function loadComprehensive() {
     if (typeof clearState === 'function') clearState();
-    document.getElementById('editor').value = CT_LINES.join('\n');
+    document.getElementById('editor').value = getContractSource('ComprehensiveToken');
     if (typeof initEditor === 'function') initEditor();
     updateLineNums();
     clearResults();
@@ -2949,137 +3104,30 @@
 
   // ── Differential Test Suite ────────────────────────────────────────────────────────────────────────
   // Collects all IDE contracts, sends to /diff-test, displays pass/fail summary.
-  var ASSET_DEMO_LINES = [
-      'pragma synq ^0.9;',
-      '',
-      'contract AssetDemo {',
-      '  state {',
-      '    initialised: bool;',
-      '  }',
-      '',
-      '  @public',
-      '  function init() as caller -> bool {',
-      '    initialised = true;',
-      '    return true;',
-      '  }',
-      '',
-      '  @public',
-      '  function createAsset(value: u256) as caller -> u256 {',
-      '    let id = asset_create("SNRG", value);',
-      '    return id;',
-      '  }',
-      '',
-      '  @public',
-      '  function transferAsset(asset_id: u256, to: u256) as caller -> u256 {',
-      '    let new_id = asset_transfer(asset_id, to);',
-      '    return new_id;',
-      '  }',
-      '',
-      '  @public',
-      '  function burnAsset(asset_id: u256) as caller -> u256 {',
-      '    let value = asset_burn(asset_id);',
-      '    return value;',
-      '  }',
-      '',
-      '  @public',
-      '  function checkBalance(asset_id: u256) as caller -> u256 {',
-      '    return asset_balance(asset_id);',
-      '  }',
-      '',
-      '  @public',
-      '  function checkOwner(asset_id: u256) as caller -> u256 {',
-      '    return asset_owner(asset_id);',
-      '  }',
-      '}',
-    ];
 
-  var STRUCT_FIELD_LINES = [
-      'pragma synq ^0.9;',
-      '',
-      'struct Point {',
-      '  x: u256;',
-      '  y: u256;',
-      '}',
-      '',
-      'contract StructField {',
-      '  state {',
-      '    origin: Point;',
-      '    initialised: bool;',
-      '  }',
-      '',
-      '  @public',
-      '  function init() as caller -> bool {',
-      '    origin = Point { x: 0, y: 0 };',
-      '    initialised = true;',
-      '    return true;',
-      '  }',
-      '',
-      '  @public',
-      '  function setOrigin(x: u256, y: u256) as caller -> bool {',
-      '    origin.x = x;',
-      '    origin.y = y;',
-      '    return true;',
-      '  }',
-      '',
-      '  @public',
-      '  function getOriginX() as caller -> u256 {',
-      '    return origin.x;',
-      '  }',
-      '',
-      '  @public',
-      '  function getOriginY() as caller -> u256 {',
-      '    return origin.y;',
-      '  }',
-      '',
-      '  @public',
-      '  function moveX(dx: u256) as caller -> bool {',
-      '    origin.x = origin.x + dx;',
-      '    return true;',
-      '  }',
-      '',
-      '  @public',
-      '  function swapCoordinates() as caller -> bool {',
-      '    let temp: u256 = origin.x;',
-      '    origin.x = origin.y;',
-      '    origin.y = temp;',
-      '    return true;',
-      '  }',
-      '',
-      '  @public',
-      '  function getOrigin() as caller -> (u256, u256) {',
-      '    return (origin.x, origin.y);',
-      '  }',
-      '',
-      '  @public',
-      '  function getOriginSum() as caller -> u256 {',
-      '    let (x, y) = getOrigin();',
-      '    return x + y;',
-      '  }',
-      '}',
-    ];
 
   function collectAllContracts() {
     var contracts = [];
     var known = [
-      ['SimpleToken', DEMO_LINES],
-      ['TokenVault', VAULT_LINES],
-      ['ComprehensiveToken', CT_LINES],
-      ['LoopDemo', LOOP_LINES],
-      ['PQCDemo', PQC_DEMO_LINES],
-      ['TypeTestContract', TT_LINES],
-      ['V3Types', V3_LINES],
-      ['Blank', BLANK_LINES],
-      ['StructValue', STRUCT_VALUE_LINES],
-      ['NamedError', NAMED_ERROR_LINES],
-      ['StackFailDemo', STACK_FAIL_LINES],
-      ['AssetDemo', ASSET_DEMO_LINES],
-      ['StructField', STRUCT_FIELD_LINES],
+      ['SimpleToken'],
+      ['TokenVault'],
+      ['ComprehensiveToken'],
+      ['LoopDemo'],
+      ['PQCDemo'],
+      ['TypeTestContract'],
+      ['V3Types'],
+      ['Blank'],
+      ['StructValue'],
+      ['NamedError'],
+      ['StackFailDemo'],
+      ['AssetDemo'],
+      ['StructField'],
     ];
     for (var i = 0; i < known.length; i++) {
       var name = known[i][0];
-      var arr = known[i][1];
-      if (arr && arr.join) {
-        contracts.push({ name: name, source: arr.join('\n') });
+      var src = getContractSource(name);
+      if (src) {
+        contracts.push({ name: name, source: src });
       }
     }
     return contracts;
@@ -4612,772 +4660,29 @@
     }
   }
 
-  var VAULT_LINES = [
-    'pragma synq ^0.9;',
-    '',
-    '// TokenVault -- primary entry point.  Mints/burns SimpleToken via extern_call.',
-    '// IMPORTANT: TokenVault tracks totalIn/totalOut (mint/burn flow) but cannot',
-    '// see direct SimpleToken transfers. Calling transfer() on SimpleToken moves',
-    '// tokens without TokenVault knowing. withdraw() pre-checks the actual balance',
-    '// via extern_call balanceOf() to catch this and give a clear error.',
-    '// Deploy this first, then deploy SimpleToken into the same workspace.',
-    'contract TokenVault {',
-    '',
-    '  vaultOwner: UInt256;',
-    '  active:     UInt256;',
-    '  totalIn:    UInt256;',
-    '  totalOut:   UInt256;',
-    '',
-    '  // Initialise the vault -- caller becomes vault owner.',
-    '  function init() -> bool as caller {',
-    '    if (active == 1) { return false; }',
-    '    vaultOwner = caller;',
-    '    active     = 1;',
-    '    return true;',
-    '  }',
-    '',
-    '  // Deposit: mint `amount` tokens into SimpleToken on behalf of the vault.',
-    '  function deposit(amount: UInt256) -> UInt256 as caller {',
-    '    require(active == 1, "TokenVault.deposit: vault not active");',
-    '    require(amount \u003E 0, "TokenVault.deposit: amount must be \u003E 0");',
-    '    extern_call("SimpleToken", "mint", caller, amount);',
-    '    totalIn = totalIn + amount;',
-    '    return totalIn;',
-    '  }',
-    '',
-    '  // Withdraw: burn `amount` tokens from SimpleToken.',
-    '  function withdraw(amount: UInt256) as caller requires cap::Withdrawer {',
-    '    require(active == 1, "TokenVault.withdraw: vault not active");',
-    '    require(caller == vaultOwner, "TokenVault.withdraw: caller is not vault owner");',
-    '    require(amount \u003E 0, "TokenVault.withdraw: amount must be \u003E 0");',
-    '    require(totalIn \u003E= totalOut + amount, "TokenVault.withdraw: amount exceeds available balance");',
-    '    // Pre-check: verify the caller actually holds enough SimpleToken balance.',
-    '    // Direct transfers on SimpleToken can drain the balance without TokenVault knowing.',
-    '    extern_call("SimpleToken", "checkBalance", caller, amount);',
-    '    extern_call("SimpleToken", "burn", caller, amount);',
-    '    totalOut = totalOut + amount;',
-    '    return totalOut;',
-    '  }',
-    '',
-    '  // Returns vault-tracked net inflow (totalIn - totalOut). Returns 0 if totalOut \u003E totalIn.',
-    '  function netFlow() {',
-    '    require(totalIn \u003E= totalOut, "TokenVault.netFlow: totalOut exceeds totalIn");',
-    '    return totalIn - totalOut;',
-    '  }',
-    '',
-    '  function getTotalIn()  { return totalIn; }',
-    '  function getTotalOut() { return totalOut; }',
-    '',
-    '  // balance() -- vault-side net (totalIn - totalOut).',
-    '  // How much is available to withdraw from the vault (totalIn - totalOut).',
-    '// This is NOT the same as your SimpleToken balance — it is the vault\'s net flow.',
-    '// Your actual token balance is shown by SimpleToken.balanceOf(), or call tokenBalance() below.',
-    '  function available() -> u256 {',
-    '    require(totalIn \u003E= totalOut, "totalOut exceeds totalIn");',
-    '    return totalIn - totalOut;',
-    '  }',
-    '',
-    '  // Returns your ACTUAL SimpleToken balance via extern_call.',
-    '  // This is the real token count — different from available() which tracks vault flow.',
-    '  function tokenBalance() -> u256 as caller {',
-    '    extern_call("SimpleToken", "balanceOf", caller);',
-    '  }',
-    '',
-    '  // assertSync() -- cross-contract invariant check.',
-    '  // Calls SimpleToken.assertBalance(totalIn - totalOut).',
-    '  // Reverts if the two contracts have drifted out of sync.',
-    '  function assertSync() -> bool as caller {',
-    '    require(totalIn \u003E= totalOut, "assertSync: totalOut exceeds totalIn");',
-    '    extern_call("SimpleToken", "assertBalance", totalIn - totalOut);',
-    '    return true;',
-    '  }',
-    '}'
-  ];
-
-
-    var TT_LINES = [
-    'pragma synq ^0.9;',
-    '',
-    '// TypeTestContract — exercises every data type and operator in SynQ.',
-    '// Deploy, call init(), then run any function in any order.',
-    'contract TypeTestContract {',
-    '',
-    '  // ── State — one of every supported type ───────────────────────────────────',
-    '  state {',
-    '    u_val:      u256;',
-    '    i_val:      i32;',
-    '    b_val:      bool;',
-    '    s_val:      str;',
-    '    admin:      u256;',
-    '    ready:      bool;',
-    '    labelled:   bool;',
-    '    op_count:   u256;',
-    '    balances:   map\u003Cu256, u256\u003E;',
-    '    registered: set\u003Cu256\u003E;',
-    '  }',
-    '',
-    '  // ── Init ───────────────────────────────────────────────────────────────────',
-    '  function init() -> bool as caller {',
-    '    if (ready) { return false; }',
-    '    admin    = caller;',
-    '    u_val    = 100;',
-    '    i_val    = -42;',
-    '    b_val    = true;',
-    '    s_val    = "hello";',
-    '    ready    = true;',
-    '    labelled = false;',
-    '    op_count = 0;',
-    '    return true;',
-    '  }',
-    '',
-    '  // ── u256 arithmetic (+  -  *  /  %) ───────────────────────────────────────',
-    '  function testArithmetic(a: u256, b: u256) -\u003E u256 as caller {',
-    '    require(ready, "not initialised");',
-    '    require(b \u003E 0, "b must be \u003E 0");',
-    '    let sum  = a + b;',
-    '    let diff = sum - b;',
-    '    let prod = a * b;',
-    '    let quot = prod / b;',
-    '    let rem  = prod % (b + 1);',
-    '    u_val    = quot + rem;',
-    '    op_count = op_count + 1;',
-    '    return u_val;',
-    '  }',
-    '',
-    '  // ── i32 signed arithmetic ──────────────────────────────────────────────────',
-    '  function testSigned(x: i32, y: i32) -\u003E i32 as caller {',
-    '    require(ready, "not initialised");',
-    '    let s = x + y;',
-    '    let d = x - y;',
-    '    let p = x * y;',
-    '    i_val    = s + d + p;',
-    '    op_count = op_count + 1;',
-    '    return i_val;',
-    '  }',
-    '',
-    '  // ── Comparison operators (==  !=  \u003C  \u003C=  \u003E  \u003E=) ───────────────────────────',
-    '  function testCompare(a: u256, b: u256) -\u003E bool as caller {',
-    '    require(ready, "not initialised");',
-    '    let eq = (a == b);',
-    '    let ne = (a != b);',
-    '    let lt = (a \u003C b);',
-    '    let le = (a \u003C= b);',
-    '    let gt = (a \u003E b);',
-    '    let ge = (a \u003E= b);',
-    '    let ok = (eq == !ne);',
-    '    b_val    = ok;',
-    '    op_count = op_count + 1;',
-    '    return ok;',
-    '  }',
-    '',
-    '  // ── Boolean operators (&&  ||  !) ─────────────────────────────────────────',
-    '  function testBool(p: bool, q: bool) -\u003E bool as caller {',
-    '    require(ready, "not initialised");',
-    '    let and_r = p && q;',
-    '    let or_r  = p || q;',
-    '    let not_p = !p;',
-    '    let xor_r = (p || q) && !(p && q);',
-    '    b_val    = xor_r;',
-    '    op_count = op_count + 1;',
-    '    return and_r;',
-    '  }',
-    '',
-    '  // ── String operations (concat + strLen) ───────────────────────────────────',
-    '  function testString(a: str, b: str) -\u003E str as caller {',
-    '    require(ready, "not initialised");',
-    '    let cat = a + b;',
-    '    let len = str_len(cat);',
-    '    require(len \u003E 0, "empty result");',
-    '    s_val    = cat;',
-    '    op_count = op_count + 1;',
-    '    return cat;',
-    '  }',
-    '',
-    '  function setLabel(label: str) -> bool as caller {',
-    '    require(ready, "not initialised");',
-    '    require(!labelled, "label already set");',
-    '    s_val    = label;',
-    '    labelled = true;',
-    '    return true;',
-    '  }',
-    '',
-    '  // ── Map operations ─────────────────────────────────────────────────────────',
-    '  function testMapSet(key: u256, val: u256) -> bool as caller {',
-    '    require(ready, "not initialised");',
-    '    require(key \u003E 0, "key must be \u003E 0");',
-    '    balances[key] = val;',
-    '    op_count = op_count + 1;',
-    '    return true;',
-    '  }',
-    '',
-    '  function testMapGet(key: u256) -\u003E u256 {',
-    '    return balances[key];',
-    '  }',
-    '',
-    '  function testMapUpdate(key: u256, delta: u256) -> u256 as caller {',
-    '    require(ready, "not initialised");',
-    '    balances[key] = balances[key] + delta;',
-    '    op_count = op_count + 1;',
-    '    return balances[key];',
-    '  }',
-    '',
-    '  // ── Set operations ─────────────────────────────────────────────────────────',
-    '  function testSetAdd(addr: u256) -> bool as caller {',
-    '    require(ready, "not initialised");',
-    '    require(addr > 0, "invalid address");',
-    '    registered.add(addr);',
-    '    op_count = op_count + 1;',
-    '    return true;',
-    '  }',
-    '',
-    '  function testSetContains(addr: u256) -> bool {',
-    '    return registered.contains(addr);',
-    '  }',
-    '',
-    '  function testSetRemove(addr: u256) -> bool as caller {',
-    '    require(ready, "not initialised");',
-    '    registered.remove(addr);',
-    '    op_count = op_count + 1;',
-    '    return true;',
-    '  }',
-    '',
-    '  // ── require guard paths ───────────────────────────────────────────────────',
-    '  function testRequirePass(x: u256) -> u256 as caller {',
-    '    require(ready,   "not initialised");',
-    '    require(x > 0,   "x must be > 0");',
-    '    require(x < 1000000, "x too large");',
-    '    op_count = op_count + 1;',
-    '    return x * 2;',
-    '  }',
-    '',
-    '  function testRequireFail() as caller {',
-    '    require(ready, "not initialised");',
-    '    require(false, "intentional revert");',
-    '  }',
-    '',
-    '  // ── Admin-gated function ───────────────────────────────────────────────────',
-    '  function adminOnly() -> u256 as caller {',
-    '    require(ready, "not initialised");',
-    '    require(caller == admin, "not admin");',
-    '    op_count = op_count + 1;',
-    '    return op_count;',
-    '  }',
-    '',
-    '  // ── Read-only getters ──────────────────────────────────────────────────────',
-    '  function getUVal()    -> u256 { return u_val;    }',
-    '  function getIVal()    -> i32  { return i_val;    }',
-    '  function getBVal()    -> bool { return b_val;    }',
-    '  function getSVal()    -> str  { return s_val;    }',
-    '  function getOpCount() -> u256 { return op_count; }',
-    '  function getAdmin()   -> u256 { return admin;    }',
-    '  function isReady()    -> bool { return ready;    }',
-    '}',
-    '',
-  ];
 
 
 
 
-var LOOP_LINES = [
-  'pragma synq ^0.9;',
-  '',
-  'contract LoopDemo {',
-  '  state {',
-  '    accumulator: u256;',
-  '    iterationCount: u256;',
-  '    initialised: bool;',
-  '  }',
-  '',
-  '  // Idempotent init — call once before runIterations()',
-  '  function init() -> bool as caller {',
-  '    if (initialised) { return false; }',
-  '    accumulator = 0;',
-  '    iterationCount = 0;',
-  '    initialised = true;',
-  '    return true;',
-  '  }',
-  '',
-  '  // Classic while-loop: factorial(n) = n * (n-1) * ... * 1',
-  '  function factorial(n: u256) -> u256 {',
-  '    let result: u256 = 1;',
-  '    let i: u256 = 1;',
-  '    while (i <= n) {',
-  '      result = result * i;',
-  '      i = i + 1;',
-  '    }',
-  '    return result;',
-  '  }',
-  '',
-  '  // Sum all integers from start to end (inclusive)',
-  '  function sumRange(start: u256, end: u256) -> u256 {',
-  '    let total: u256 = 0;',
-  '    let i: u256 = start;',
-  '    while (i <= end) {',
-  '      total = total + i;',
-  '      i = i + 1;',
-  '    }',
-  '    return total;',
-  '  }',
-  '',
-  '  // Count even numbers up to n — skip odds with continue',
-  '  function countEven(n: u256) -> u256 {',
-  '    let count: u256 = 0;',
-  '    let i: u256 = 1;',
-  '    while (i <= n) {',
-  '      let remainder: u256 = i % 2;',
-  '      if (remainder != 0) {',
-  '        i = i + 1;',
-  '        continue;',
-  '      }',
-  '      count = count + 1;',
-  '      i = i + 1;',
-  '    }',
-  '    return count;',
-  '  }',
-  '',
-  '  // Integer square root via binary search — O(log n), overflow-safe',
-  '  function sqrtFloor(target: u256) -> u256 {',
-  '    if (target == 0) { return 0; }',
-  '    let lo: u256 = 1;',
-  '    let hi: u256 = target;',
-  '    let mid: u256 = 0;',
-  '    let result: u256 = 0;',
-  '    while (lo <= hi) {',
-  '      mid = lo + (hi - lo) / 2;',
-  '      if (mid <= target / mid) {',
-  '        result = mid;',
-  '        lo = mid + 1;',
-  '      } else {',
-  '        hi = mid - 1;',
-  '      }',
-  '    }',
-  '    return result;',
-  '  }',
-  '',
-  '  // Power via repeated multiplication',
-  '  function power(base: u256, exp: u256) -> u256 {',
-  '    let result: u256 = 1;',
-  '    let i: u256 = 0;',
-  '    while (i < exp) {',
-  '      result = result * base;',
-  '      i = i + 1;',
-  '    }',
-  '    return result;',
-  '  }',
-  '',
-  '  // State-accumulating loop — requires init() first',
-  '  function runIterations(n: u256) -> u256 as caller {',
-  '    require(initialised, "not initialised");',
-  '    let total: u256 = 0;',
-  '    let i: u256 = 0;',
-  '    while (i < n) {',
-  '      total = total + i;',
-  '      i = i + 1;',
-  '    }',
-  '    accumulator = accumulator + total;',
-  '    iterationCount = iterationCount + n;',
-  '    return total;',
-  '  }',
-  '}',
-];
-  var PQC_DEMO_LINES = [
-'// ═══ PQC DEMO ═══════════════════════════════════════════════════════════════',
-  '// PQCDemo — Post-Quantum Cryptography Verification Demo',
-  '// Demonstrates ML-DSA-65 (Dilithium3) signature verification',
-  '// using the legacy direct-call opcode (0x80).',
-  '// Also demonstrates ML-KEM-768 decapsulation (opcode 0x81).',
-  '//',
-  '// ACTS-15 §3: ML-DSA verify is a deterministic public operation.',
-  '//             ML-KEM decapsulate requires a secret key and is',
-  '//             rejected by the AEG1 deterministic dispatcher (0x8F).',
-  '//             The legacy opcodes (0x80-0x83) bypass AEG1 dispatch',
-  '//             and call the PQC shim directly.',
-  'contract PQCDemo {',
-  '  state {',
-  '    initialised: bool;',
-  '    pk: bytes;',
-  '    sig: bytes;',
-  '    msg: bytes;',
-  '  }',
-  '',
-  '  impl {',
-  '    @public',
-  '    function init() -> bool {',
-  '      if (initialised) { return false; }',
-  '      initialised = true;',
-  '      return true;',
-  '    }',
-  '',
-  '    // Store a public key for later verification',
-  '    @public',
-  '    function setPublicKey(key: bytes) -> bool {',
-  '      pk = key;',
-  '      return true;',
-  '    }',
-  '',
-  '    // Store a signature for later verification',
-  '    @public',
-  '    function setSignature(s: bytes) -> bool {',
-  '      sig = s;',
-  '      return true;',
-  '    }',
-  '',
-  '    // Store a message for later verification',
-  '    @public',
-  '    function setMessage(m: bytes) -> bool {',
-  '      msg = m;',
-  '      return true;',
-  '    }',
-  '',
-  '    // Verify stored signature using ML-DSA-65 (Dilithium3)',
-  '    // Returns true if signature is valid for stored message + stored key',
-  '    @public',
-  '    function verifyStored() -> bool {',
-  '      require(initialised, "not initialised");',
-  '      return dilithium_verify(msg, sig, pk);',
-  '    }',
-  '',
-  '    // Direct ML-DSA-65 verification — pass all three as arguments',
-  '    // Source order: (message, signature, public_key)',
-  '    @public',
-  '    function verifyMlDsa(message: bytes, signature: bytes, publicKey: bytes) -> bool {',
-  '      return dilithium_verify(message, signature, publicKey);',
-  '    }',
-  '',
-  '    // Direct FN-DSA-512 (Falcon) verification',
-  '    @public',
-  '    function verifyFnDsa(message: bytes, signature: bytes, publicKey: bytes) -> bool {',
-  '      return falcon_verify(message, signature, publicKey);',
-  '    }',
-  '',
-  '    // ML-KEM-768 decapsulation — requires ciphertext + secret key',
-  '    // NOTE: This uses the legacy opcode 0x81 which bypasses AEG1 dispatch.',
-  '    // The AEG1 deterministic dispatcher (0x8F) would reject this operation',
-  '    // per ACTS-15 §3 (requires secret key material).',
-  '    // Returns the shared secret as bytes.',
-  '    @public',
-  '    function decapsMlKem(ciphertext: bytes, secretKey: bytes) -> bytes {',
-  '      return kyber_decaps(ciphertext, secretKey);',
-  '    }',
-  '  }',
-  '}',
-];  /* ── Init ────────────────────────────────────────────────────────────────── */
-  (function init() {
-    document.getElementById('editor').value = VAULT_LINES.join('\n');
+
+
+/* ── Init ────────────────────────────────────────────────────────────────── */
+  (async function init() {
+    await preloadContracts();
+    document.getElementById(editor).value = getContractSource(TokenVault);
     updateLineNums();
     syncCompileBtn();
-    document.getElementById('editor').addEventListener('input', updateLineNums);
-    document.getElementById('editor').addEventListener('input', syncCompileBtn);
-    document.getElementById('editor').addEventListener('scroll', function() {
-      document.getElementById('lineNums').scrollTop = this.scrollTop;
+    document.getElementById(editor).addEventListener(input, updateLineNums);
+    document.getElementById(editor).addEventListener(input, syncCompileBtn);
+    document.getElementById(editor).addEventListener(scroll, function() {
+      document.getElementById(lineNums).scrollTop = this.scrollTop;
     });
   })();
 
   /* ── Expose globals for onclick attrs ────────────────────────────────────── */
   window.connectWallet  = connectWallet;
 
-  var DEMO_LINES = [
-    'pragma synq ^0.9;',
-    '',
-    '// SimpleToken — ERC-20-style token for the SynQ devnet demo.',
-    '// Deploy after TokenVault in the same workspace.',
-    'contract SimpleToken {',
-    '',
-    '  state {',
-    '    name:        str;',
-    '    symbol:      str;',
-    '    totalSupply:  u256;',
-    '    initialSupply: u256;',
-    '    owner:       u256;',
-    '    initialised: bool;',
-    '    balances:    map\u003Cu256, u256\u003E;',
-    '  }',
-    '',
-    '  function init(tokenName: str, tokenSymbol: str, supply: u256) -> bool as caller {',
-    '    if (initialised) { return false; }',
-    '    name        = tokenName;',
-    '    symbol      = tokenSymbol;',
-    '    totalSupply  = supply;',
-    '    initialSupply = supply;',
-    '    owner        = caller;',
-    '    balances[caller] = supply;',
-    '    initialised = true;',
-    '    return true;',
-    '  }',
-    '',
-    '  function mint(to: u256, amount: u256) -> bool as caller {',
-    '    require(initialised, "not initialised");',
-    '    require(caller == owner, "not owner");',
-    '    balances[to]  = balances[to] + amount;',
-    '    totalSupply   = totalSupply + amount;',
-    '    return true;',
-    '  }',
-    '',
-    '  function burn(from: u256, amount: u256) -> bool as caller {',
-    '    require(initialised, "not initialised");',
-    '    require(caller == owner, "not owner");',
-    '    require(balances[from] \u003E= amount, "insufficient balance");',
-    '    balances[from] = balances[from] - amount;',
-    '    totalSupply    = totalSupply - amount;',
-    '    return true;',
-    '  }',
-    '',
-    '  // WARNING: Direct transfers move tokens WITHOUT TokenVault knowing.',
-    '// If you use TokenVault.deposit/withdraw, avoid calling transfer() directly',
-    '// — it drains your balance and withdraw() will fail with insufficient balance.',
-    '  function transfer(to: u256, amount: u256) -> bool as caller {',
-    '    require(initialised, "not initialised");',
-    '    require(to != caller, "cannot transfer to self");',
-    '    require(balances[caller] \u003E= amount, "insufficient balance");',
-    '    balances[caller] = balances[caller] - amount;',
-    '    balances[to]     = balances[to] + amount;',
-    '    return true;',
-    '  }',
-    '',
-    '  function balanceOf(addr: u256) -\u003E u256 {',
-    '    return balances[addr];',
-    '  }',
-    '',
-    '  // Internal: called by TokenVault.withdraw() to verify balance before burn.',
-    '  function checkBalance(addr: u256, amount: u256) -> bool {',
-    '    require(balances[addr] >= amount, "insufficient token balance for vault withdrawal");',
-    '    return true;',
-    '  }',
-    '',
-    '  function getOwner() -\u003E u256 {',
-    '    return owner;',
-    '  }',
-    '',
-    '  function getTotalSupply() -\u003E u256 {',
-    '    return totalSupply;',
-    '  }',
-    '',
-    '  // ── Internal: called by TokenVault.assertSync() via extern_call ──',
-    '  // Do not call directly — use TokenVault.assertSync() instead.',
-    '  // Verifies: totalSupply - initialSupply == vault net flow (totalIn - totalOut).',
-    '  function assertBalance(expected: u256) -> bool {',
-    '    require(totalSupply - initialSupply == expected, "assertBalance: supply delta mismatch");',
-    '    return true;',
-    '  }',
-    '}',
-  ];
 
-  var CT_LINES = [
-    'pragma synq ^0.9;',
-    '',
-    '// ComprehensiveToken v2 — exercises bool, str, map\u003Cu256,bool\u003E, map\u003Cu256,str\u003E',
-    '// and the str_concat / str_len / str_eq builtins alongside the full ERC-20-style',
-    '// token surface.  All state-mutating functions require `as caller` (EIP-712 auth).',
-    '',
-    'contract ComprehensiveToken {',
-    '',
-    '  state {',
-    '    // ── Numeric state ──────────────────────────────────────────────────────',
-    '    total_supply:  u256;',
-    '    admin_count:   u256;',
-    '    version:       u256;',
-    '',
-    '    // ── Boolean state (Bool type) ──────────────────────────────────────────',
-    '    initialised:   bool;',
-    '    feat_pqc:      bool;',
-    '    debug_mode:    bool;',
-    '',
-    '    // ── String state (Str type) ────────────────────────────────────────────',
-    '    token_name:    str;',
-    '    token_symbol:  str;',
-    '',
-    '    // ── Role mappings (map\u003Cu256, bool\u003E) ────────────────────────────────────',
-    '    admin_role:    map\u003Cu256, bool\u003E;',
-    '    minter_role:   map\u003Cu256, bool\u003E;',
-    '    registered:    map\u003Cu256, bool\u003E;',
-    '',
-    '    // ── Balance mapping (map\u003Cu256, u256\u003E) ──────────────────────────────────',
-    '    balances:      map\u003Cu256, u256\u003E;',
-    '',
-    '    // ── Label mapping (map\u003Cu256, str\u003E) — optional per-address label ────────',
-    '    labels:        map\u003Cu256, str\u003E;',
-    '  }',
-    '',
-    '  impl {',
-    '',
-    '    // ── Bootstrap ──────────────────────────────────────────────────────────',
-    '    // Sign with your wallet — caller becomes the first admin.',
-    '    function init(name: str, symbol: str) -> bool as caller {',
-    '      if (initialised) { return false; }',
-    '      require(str_len(name) \u003E 0,     "init: name empty");',
-    '      require(str_len(symbol) \u003E 0,   "init: symbol empty");',
-    '      require(str_len(name) \u003C= 64,   "init: name too long");',
-    '      require(str_len(symbol) \u003C= 8,  "init: symbol too long");',
-    '',
-    '      admin_role[caller]  = true;',
-    '      registered[caller]  = true;',
-    '      admin_count         = 1;',
-    '      feat_pqc            = true;',
-    '      version             = 2;',
-    '      token_name          = name;',
-    '      token_symbol        = symbol;',
-    '      initialised         = true;',
-    '      debug_mode          = false;',
-    '      return true;',
-    '    }',
-    '',
-    '    // ── Admin management ───────────────────────────────────────────────────',
-    '    function grantAdmin(target: u256) -> bool as caller {',
-    '      require(admin_role[caller] == true, "grantAdmin: not admin");',
-    '      require(target \u003E 0,                 "grantAdmin: invalid address");',
-    '      if (admin_role[target] == false) {',
-    '        admin_count = admin_count + 1;',
-    '      }',
-    '      admin_role[target]  = true;',
-    '      registered[target]  = true;',
-    '      return true;',
-    '    }',
-    '',
-    '    function revokeAdmin(target: u256) -> bool as caller {',
-    '      require(admin_role[caller] == true, "revokeAdmin: not admin");',
-    '      require(target != caller,           "revokeAdmin: cannot revoke self");',
-    '      require(admin_count \u003E 1,            "revokeAdmin: cannot remove last admin");',
-    '      if (admin_role[target] == true) {',
-    '        admin_count = admin_count - 1;',
-    '      }',
-    '      admin_role[target] = false;',
-    '      return true;',
-    '    }',
-    '',
-    '    function grantMinter(target: u256) -> bool as caller {',
-    '      require(admin_role[caller] == true, "grantMinter: not admin");',
-    '      require(target \u003E 0,                 "grantMinter: invalid address");',
-    '      minter_role[target] = true;',
-    '      registered[target]  = true;',
-    '      return true;',
-    '    }',
-    '',
-    '    function revokeMinter(target: u256) -> bool as caller {',
-    '      require(admin_role[caller] == true, "revokeMinter: not admin");',
-    '      require(target != caller,           "revokeMinter: cannot revoke self");',
-    '      minter_role[target] = false;',
-    '      return true;',
-    '    }',
-    '',
-    '    // ── Registration ───────────────────────────────────────────────────────',
-    '    function register(target: u256) -> bool as caller {',
-    '      require(admin_role[caller] == true, "register: not admin");',
-    '      require(target \u003E 0,                 "register: invalid address");',
-    '      registered[target] = true;',
-    '      return true;',
-    '    }',
-    '',
-    '    function deregister(target: u256) -> bool as caller {',
-    '      require(admin_role[caller] == true,  "deregister: not admin");',
-    '      require(balances[target] == 0,       "deregister: target still holds tokens");',
-    '      registered[target] = false;',
-    '      return true;',
-    '    }',
-    '',
-    '    // ── Token metadata (admin only) ────────────────────────────────────────',
-    '    function setTokenName(name: str) -> bool as caller {',
-    '      require(admin_role[caller] == true, "setTokenName: not admin");',
-    '      require(str_len(name) \u003E 0,          "setTokenName: empty");',
-    '      require(str_len(name) \u003C= 64,        "setTokenName: too long");',
-    '      token_name = name;',
-    '      return true;',
-    '    }',
-    '',
-    '    function setTokenSymbol(symbol: str) -> bool as caller {',
-    '      require(admin_role[caller] == true, "setTokenSymbol: not admin");',
-    '      require(str_len(symbol) \u003E 0,        "setTokenSymbol: empty");',
-    '      require(str_len(symbol) \u003C= 8,       "setTokenSymbol: too long");',
-    '      token_symbol = symbol;',
-    '      return true;',
-    '    }',
-    '',
-    '    // ── Per-address labels (admin only) ────────────────────────────────────',
-    '    function setLabel(target: u256, label: str) -> bool as caller {',
-    '      require(admin_role[caller] == true, "setLabel: not admin");',
-    '      require(str_len(label) \u003C= 32,       "setLabel: label too long");',
-    '      labels[target] = label;',
-    '      return true;',
-    '    }',
-    '',
-    '    function getLabel(target: u256) -\u003E str { return labels[target]; }',
-    '',
-    '    // ── Minting ────────────────────────────────────────────────────────────',
-    '    function mint(to: u256, amount: u256) -> u256 as caller {',
-    '      require(minter_role[caller] == true || admin_role[caller] == true, "mint: not authorised");',
-    '      require(to \u003E 0,     "mint: invalid recipient");',
-    '      require(amount \u003E 0, "mint: zero amount");',
-    '      registered[to]  = true;',
-    '      total_supply    = total_supply + amount;',
-    '      balances[to]    = balances[to] + amount;',
-    '      return total_supply;',
-    '    }',
-    '',
-    '    // ── Transfers ──────────────────────────────────────────────────────────',
-    '    function transfer(to: u256, amount: u256) -> bool as caller {',
-    '      require(registered[caller] == true,   "transfer: sender not registered");',
-    '      require(registered[to] == true,       "transfer: recipient not registered");',
-    '      require(to \u003E 0,                       "transfer: invalid recipient");',
-    '      require(to != caller,                 "transfer: cannot transfer to self");',
-    '      require(balances[caller] \u003E= amount,   "transfer: insufficient balance");',
-    '      balances[caller] = balances[caller] - amount;',
-    '      balances[to]     = balances[to] + amount;',
-    '      return true;',
-    '    }',
-    '',
-    '    function burn(from: u256, amount: u256) -> u256 as caller {',
-    '      require(admin_role[caller] == true,  "burn: not admin");',
-    '      require(balances[from] \u003E= amount,    "burn: amount exceeds balance");',
-    '      balances[from] = balances[from] - amount;',
-    '      total_supply   = total_supply - amount;',
-    '      return total_supply;',
-    '    }',
-    '',
-    '    // ── Debug control (admin only) ─────────────────────────────────────────',
-    '    function setDebugMode(enabled: bool) -> bool as caller {',
-    '      require(admin_role[caller] == true, "setDebugMode: not admin");',
-    '      debug_mode = enabled;',
-    '      return true;',
-    '    }',
-    '',
-    '    // ── Diagnostics (gated on debug_mode) ─────────────────────────────────',
-    '    function whoAmI() -> u256 as caller {',
-    '      require(debug_mode == true, "whoAmI: debug mode not enabled");',
-    '      return caller;',
-    '    }',
-    '',
-    '    function amIRegistered() -\u003E bool as caller {',
-    '      require(debug_mode == true, "amIRegistered: debug mode not enabled");',
-    '      return registered[caller];',
-    '    }',
-    '',
-    '    // ── Identity helpers ───────────────────────────────────────────────────',
-    '    function amIAdmin() -\u003E bool as caller    { return admin_role[caller]; }',
-    '    function amIMinter() -\u003E bool as caller   { return minter_role[caller]; }',
-    '',
-    '    // ── Token info (str builtins) ──────────────────────────────────────────',
-    '    // Returns "Name: \u003Ctoken_name\u003E [\u003Ctoken_symbol\u003E]" as a single string.',
-    '    function tokenInfo() -\u003E str {',
-    '      return str_concat(str_concat(str_concat("Name: ", token_name), " ["), str_concat(token_symbol, "]"));',
-    '    }',
-    '',
-    '    // Check if a given string matches the token symbol exactly.',
-    '    function isSymbol(s: str) -\u003E bool { return str_eq(s, token_symbol); }',
-    '',
-    '    // ── Queries ────────────────────────────────────────────────────────────',
-    '    function isAdmin(who: u256)      -\u003E bool  { return admin_role[who]; }',
-    '    function isMinter(who: u256)     -\u003E bool  { return minter_role[who]; }',
-    '    function isRegistered(who: u256) -\u003E bool  { return registered[who]; }',
-    '    function balanceOf(who: u256)    -\u003E u256  { return balances[who]; }',
-    '    function totalSupply()           -\u003E u256  { return total_supply; }',
-    '    function tokenName()             -\u003E str   { return token_name; }',
-    '    function tokenSymbol()           -\u003E str   { return token_symbol; }',
-    '    function getVersion()            -\u003E u256  { return version; }',
-    '    function isInitialised()         -\u003E bool  { return initialised; }',
-    '    function isPQCEnabled()          -\u003E bool  { return feat_pqc; }',
-    '  }',
-    '}',
-    '',
-  ];
 
   window.loadBlank      = loadBlank;
   window.loadFromFile   = loadFromFile;
@@ -5725,7 +5030,7 @@ var LOOP_LINES = [
 
   function loadTypeTest() {
     evictWorkspaceContractByName('TypeTestContract');
-    document.getElementById('editor').value = TT_LINES.join('\n');
+    document.getElementById('editor').value = getContractSource('TypeTestContract');
     updateLineNums();
     clearResults();
     syncCompileBtn();
@@ -5734,271 +5039,12 @@ var LOOP_LINES = [
   }
   window.loadTypeTest = loadTypeTest;
   // ── Inline contract sources (extracted for diff tests without UI side effects) ──
-  var STRUCT_VALUE_LINES = [
-      'pragma synq ^0.9;',
-      '',
-      'struct Point {',
-      '    x: u256;',
-      '    y: u256;',
-      '}',
-      '',
-      'struct Rect {',
-      '    origin: Point;',
-      '    size: Point;',
-      '}',
-      '',
-      'contract StructValue {',
-      '    state {',
-      '        corner: Point;',
-      '        box_val: Rect;',
-      '        initialised: bool;',
-      '    }',
-      '',
-      '    @public',
-      '    function init() -> bool {',
-      '        corner = Point { x: 0, y: 0 };',
-      '        box_val = Rect { origin: Point { x: 1, y: 2 }, size: Point { x: 100, y: 200 } };',
-      '        initialised = true;',
-      '        return true;',
-      '    }',
-      '',
-      '    @public',
-      '    function translate(p: Point, dx: u256, dy: u256) -> Point {',
-      '        let result = Point { x: p.x + dx, y: p.y + dy };',
-      '        return result;',
-      '    }',
-      '',
-      '    @public',
-      '    function getCorner() -> Point {',
-      '        return corner;',
-      '    }',
-      '',
-      '    @public',
-      '    function makePoint(x: u256, y: u256) -> Point {',
-      '        return Point { x: x, y: y };',
-      '    }',
-      '',
-      '    @public',
-      '    function getCornerX() -> u256 {',
-      '        return getCorner().x;',
-      '    }',
-      '',
-      '    @public',
-      '    function getCornerY() -> u256 {',
-      '        return getCorner().y;',
-      '    }',
-      '',
-      '    @public',
-      '    function getBoxOriginX() -> u256 {',
-      '        return box_val.origin.x;',
-      '    }',
-      '',
-      '    @public',
-      '    function getBoxSizeY() -> u256 {',
-      '        return box_val.size.y;',
-      '    }',
-      '',
-      '    @public',
-      '    @effects(corner)',
-      '    function setCorner(p: Point) -> bool {',
-      '        require(initialised, "StructValue.setCorner: not initialised");',
-      '        corner = p;',
-      '        return true;',
-      '    }',
-      '',
-      '    @public',
-      '    function setCornerFromMake(x: u256, y: u256) -> bool {',
-      '        corner = makePoint(x, y);',
-      '        return true;',
-      '    }',
-      '',
-      '    @public',
-      '    function moveCorner(dx: u256, dy: u256) -> bool {',
-      '        corner = translate(corner, dx, dy);',
-      '        return true;',
-      '    }',
-      '}',
-    ];
-  var NAMED_ERROR_LINES = [
-      'pragma synq ^0.9;',
-      '',
-      'contract NamedError {',
-      '  state {',
-      '    initialised: bool;',
-      '    balance: u256;',
-      '  }',
-      '',
-      '  enum VaultError { InsufficientBalance, Unauthorized, InvalidAmount, Overflow }',
-      '',
-      '  @public',
-      '  function init() as caller -> bool {',
-      '    initialised = true;',
-      '    balance = 100;',
-      '    return true;',
-      '  }',
-      '',
-      '  @public',
-      '  function failInsufficient() as caller -> bool {',
-      '    revert VaultError::InsufficientBalance(balance);',
-      '  }',
-      '',
-      '  @public',
-      '  function withdraw(amount: u256) as caller -> bool {',
-      '    if (amount > balance) {',
-      '      revert VaultError::InsufficientBalance(amount);',
-      '    }',
-      '    balance = balance - amount;',
-      '    return true;',
-      '  }',
-      '',
-      '  @public',
-      '  function failUnauthorized() as caller -> bool {',
-      '    revert VaultError::Unauthorized;',
-      '  }',
-      '',
-      '  @public',
-      '  function failInvalid() as caller -> bool {',
-      '    revert VaultError::InvalidAmount(0);',
-      '  }',
-      '',
-      '  @public',
-      '  function failOverflow() as caller -> bool {',
-      '    revert VaultError::Overflow(balance, 100);',
-      '  }',
-      '}',
-    ];
-  var STACK_FAIL_LINES = [
-      'pragma synq ^0.9;',
-      '',
-      '// ═══════════════════════════════════════════════════════════════════════',
-      '// StackFailDemo — Bytecode Verification Education',
-      '// ═══════════════════════════════════════════════════════════════════════',
-      '//',
-      '// This contract demonstrates the bytecode verification system.',
-      '// When you click Compile, notice the green verify badge:',
-      '//',
-      '//   ✅ VERIFY: N insts · M calls · XB',
-      '//',
-      '// This means Layer 1 (structural) and Layer 2 (stack safety) both passed.',
-      '//',
-      '// The compiler always generates stack-safe bytecode, so valid SynQ',
-      '// source will never produce stack warnings. The verifier catches:',
-      '//',
-      '// Layer 1 (hard gate — rejects at session/new):',
-      '//   • Bad magic bytes or truncated header',
-      '//   • Unknown opcodes',
-      '//   • Truncated inline operands (e.g. Push with < 4 bytes)',
-      '//   • Jump/Call targets landing mid-instruction',
-      '//   • Jump/Call targets out of bounds',
-      '//',
-      '// Layer 2 (advisory warnings — logged but not blocking):',
-      '//',
-      '// Layer 3 (manifest + ML-DSA-87 signature verification):',
-      '//   • Artifact hash (SHA3-256 of bytecode) matches manifest',
-      '//   • Manifest signature verified against compiler public key',
-      '//   • Badge: \u2705 L3: MANIFEST SIGNED \u00b7 ML-DSA-87 \u00b7 <key_id>',
-      '//   • Only checked when manifest is passed to /session/new',
-      '//',
-      '//   • Stack underflow: opcode pops more than available',
-      '//     e.g. Add with only 1 item on stack (needs 2)',
-      '//     e.g. Store with only 1 item (needs addr + value)',
-      '//     e.g. MapSet with only 2 items (needs map_addr + key + value)',
-      '//   • Propagated across all code paths via CFG fixed-point analysis',
-      '//   • Dynamic opcodes (TuplePack/TupleUnpack) mark depth as unknown',
-      '//',
-      '// To see actual stack warnings, submit crafted bytecode directly',
-      '// to POST /session/new with SQB artifact or hand-built QVM bytecode.',
-      '//',
-      '// ═══════════════════════════════════════════════════════════════════════',
-      '',
-      'contract StackFailDemo {',
-      '  state {',
-      '    value: u256;',
-      '    initialised: bool;',
-      '  }',
-      '',
-      '  @public',
-      '  function init() as caller -> bool {',
-      '    value = 42;',
-      '    initialised = true;',
-      '    return true;',
-      '  }',
-      '',
-      '  // Stack-safe: Push + Push + Add + Store',
-      '  @public',
-      '  function addToValue(x: u256) as caller -> bool {',
-      '    value = value + x;',
-      '    return true;',
-      '  }',
-      '',
-      '  // Stack-safe: Push + Push + Sub + Store',
-      '  @public',
-      '  function subFromValue(x: u256) as caller -> bool {',
-      '    value = value - x;',
-      '    return true;',
-      '  }',
-      '',
-      '  // Stack-safe: multiple operations with balanced stack',
-      '  @public',
-      '  function complexStackOps(a: u256, b: u256) as caller -> u256 {',
-      '    let sum = a + b;',
-      '    let product = a * b;',
-      '    let result = sum + product;',
-      '    value = result;',
-      '    return result;',
-      '  }',
-      '',
-      '  // Stack-safe: conditional with balanced branches',
-      '  @public',
-      '  function clamp(min_val: u256, max_val: u256) as caller -> bool {',
-      '    if (value < min_val) {',
-      '      value = min_val;',
-      '    }',
-      '    if (value > max_val) {',
-      '      value = max_val;',
-      '    }',
-      '    return true;',
-      '  }',
-      '',
-      '  @public',
-      '  function getValue() as caller -> u256 {',
-      '    return value;',
-      '  }',
-      '}',
-      '',
-    ];
 
   // ── BLANK_LINES: minimal template for the "New" button ──
-  var BLANK_LINES = [
-    'pragma synq ^0.9;',
-    '',
-    'contract Blank {',
-    '  state {',
-    '    value: u256;',
-    '    initialised: bool;',
-    '  }',
-    '',
-    '  function init() -> bool as caller {',
-    '    if (initialised) { return false; }',
-    '    value = 0;',
-    '    initialised = true;',
-    '    return true;',
-    '  }',
-    '',
-    '  function setValue(v: u256) -> bool as caller {',
-    '    value = v;',
-    '    return true;',
-    '  }',
-    '',
-    '  function getValue() -> u256 {',
-    '    return value;',
-    '  }',
-    '}',
-  ];
 
   function loadLoopDemo() {
     evictWorkspaceContractByName('LoopDemo');
-    document.getElementById('editor').value = LOOP_LINES.join('\n');
+    document.getElementById('editor').value = getContractSource('LoopDemo');
     updateLineNums();
     clearResults();
     syncCompileBtn();
@@ -6008,110 +5054,10 @@ var LOOP_LINES = [
   window.loadLoopDemo = loadLoopDemo;
 
   // ── V3TYPES: new type aliases, attributes, authority, Bech32 builtins ──
-  var V3_LINES = [
-    'pragma synq ^0.9;',
-    '',
-    '// V3 Types Demo — new type aliases, attributes, authority model,',
-    '// and Bech32 address builtins for Testnet-v3 alignment.',
-    '',
-    'enum Role { Admin, Minter, User }',
-    '',
-    'contract V3Types {',
-    '  state {',
-    '    initialised: bool;',
-    '    owner: Bytes<20>;',
-    '    blockHeight: Height;',
-    '    sessionId: Hash32;',
-    '    umaId: UMAIdentity;',
-    '    storedValue: u256;',
-    '  }',
-    '',
-    '  // init: @public + @effects + as caller',
-    '  // Stores caller address and extracts UMA identity from authority envelope.',
-    '  @public',
-    '  @effects(initialised, owner, umaId)',
-    '  function init() as caller -> bool {',
-    '    if (initialised) { return false; }',
-    '    initialised = true;',
-    '    owner = caller;',
-    '    let env = authority_identity(authority_envelope());',
-    '    umaId = env;',
-    '    return true;',
-    '  }',
-    '',
-    '  // Returns owner address as syna... Bech32 string.',
-    '  @public',
-    '  function getOwnerSyna() -> str {',
-    '    return to_syna(owner);',
-    '  }',
-    '',
-    '  // Returns current caller as syna... Bech32 string.',
-    '  @public',
-    '  function getCallerSyna() as caller -> str {',
-    '    return to_syna(caller);',
-    '  }',
-    '',
-    '  // Returns the UMA identity stored during init.',
-    '  @public',
-    '  function getUmaId() -> u256 {',
-    '    return umaId;',
-    '  }',
-    '',
-    '  // Sets a session hash (Hash32 type alias).',
-    '  @public',
-    '  @effects(sessionId)',
-    '  function setSessionId(h: Hash32) as caller -> bool {',
-    '    sessionId = h;',
-    '    return true;',
-    '  }',
-    '',
-    '  @public',
-    '  function getSessionId() -> u256 {',
-    '    return sessionId;',
-    '  }',
-    '',
-    '  // @authority(AdminScope) — on devnet, server envelopes accept any scope.',
-    '  @authority(AdminScope)',
-    '  @effects(storedValue)',
-    '  function setValue(v: u256) as caller -> bool {',
-    '    storedValue = v;',
-    '    return true;',
-    '  }',
-    '',
-    '  @public',
-    '  function getValue() -> u256 {',
-    '    return storedValue;',
-    '  }',
-    '',
-    '  // Derives a sync... contract address via V3 Bech32.',
-    '  @public',
-    '  function deriveContractAddr(deployer: u256, nonce: u256, artifactHash: u256) -> str {',
-    '    return contract_address(deployer, nonce, artifactHash);',
-    '  }',
-    '',
-    '  // Decodes a syna... string back to a u256 address.',
-    '  @public',
-    '  function parseSyna(s: str) -> u256 {',
-    '    return from_syna(s);',
-    '  }',
-    '',
-    '  @public',
-    '  function getBlockHeight() -> u256 {',
-    '    return blockHeight;',
-    '  }',
-    '',
-    '  @public',
-    '  @effects(blockHeight)',
-    '  function setBlockHeight(h: Height) as caller -> bool {',
-    '    blockHeight = h;',
-    '    return true;',
-    '  }',
-    '}',
-  ];
 
   function loadV3Demo() {
     evictWorkspaceContractByName('V3Types');
-    document.getElementById('editor').value = V3_LINES.join('\n');
+    document.getElementById('editor').value = getContractSource('V3Types');
     updateLineNums();
     clearResults();
     syncCompileBtn();
@@ -6123,7 +5069,7 @@ var LOOP_LINES = [
   // ── StructValue ──────────────────────────────────────────────────────────
   function loadStructValue() {
     evictWorkspaceContractByName('StructValue');
-        var src = STRUCT_VALUE_LINES.join('\n');
+        var src = getContractSource('StructValue');
     document.getElementById('editor').value = src;
     updateLineNums();
     clearResults();
@@ -6136,7 +5082,7 @@ var LOOP_LINES = [
   // ── NamedError (RevertCode 0x35) ─────────────────────────────────────────
   function loadNamedError() {
     evictWorkspaceContractByName('NamedError');
-        var src = NAMED_ERROR_LINES.join('\n');
+        var src = getContractSource('NamedError');
     document.getElementById('editor').value = src;
     updateLineNums();
     clearResults();
@@ -6149,7 +5095,7 @@ var LOOP_LINES = [
   // ── AssetDemo (opcodes 0x57-0x5B) ─────────────────────────────────────────────
   function loadAssetDemo() {
     evictWorkspaceContractByName('AssetDemo');
-    const src = ASSET_DEMO_LINES.join('\n');
+    const src = ASSET_getContractSource('SimpleToken');
     document.getElementById('editor').value = src;
     updateLineNums();
     clearResults();
@@ -6162,7 +5108,7 @@ var LOOP_LINES = [
   // ── StructField (TupleSet 0xAB) ──────────────────────────────────────────
   function loadStructField() {
     evictWorkspaceContractByName('StructField');
-    const src = STRUCT_FIELD_LINES.join('\n');
+    const src = getContractSource('StructField');
     document.getElementById('editor').value = src;
     updateLineNums();
     clearResults();
@@ -6175,7 +5121,7 @@ var LOOP_LINES = [
   // ── StackFailDemo (verification education) ───────────────────────────────
   function loadPQCDemo() {
     evictWorkspaceContractByName('PQCDemo');
-    document.getElementById('editor').value = PQC_DEMO_LINES.join('\n');
+    document.getElementById('editor').value = PQC_getContractSource('SimpleToken');
     updateLineNums(); clearResults(); syncCompileBtn();
     setEditorBadges('PQCDemo');
     // Fetch a fresh ML-DSA-65 test vector from the server
@@ -6191,7 +5137,7 @@ var LOOP_LINES = [
 
   function loadStackFailDemo() {
     evictWorkspaceContractByName('StackFailDemo');
-        var src = STACK_FAIL_LINES.join('\n');
+        var src = getContractSource('StackFailDemo');
 
     document.getElementById('editor').value = src;
     updateLineNums();

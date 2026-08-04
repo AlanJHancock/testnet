@@ -1,0 +1,97 @@
+pragma synq ^0.9;
+
+// ═══════════════════════════════════════════════════════════════════════
+// StackFailDemo — Bytecode Verification Education
+// ═══════════════════════════════════════════════════════════════════════
+//
+// This contract demonstrates the bytecode verification system.
+// When you click Compile, notice the green verify badge:
+//
+//   ✅ VERIFY: N insts · M calls · XB
+//
+// This means Layer 1 (structural) and Layer 2 (stack safety) both passed.
+//
+// The compiler always generates stack-safe bytecode, so valid SynQ
+// source will never produce stack warnings. The verifier catches:
+//
+// Layer 1 (hard gate — rejects at session/new):
+//   • Bad magic bytes or truncated header
+//   • Unknown opcodes
+//   • Truncated inline operands (e.g. Push with < 4 bytes)
+//   • Jump/Call targets landing mid-instruction
+//   • Jump/Call targets out of bounds
+//
+// Layer 2 (advisory warnings — logged but not blocking):
+//
+// Layer 3 (manifest + ML-DSA-87 signature verification):
+//   • Artifact hash (SHA3-256 of bytecode) matches manifest
+//   • Manifest signature verified against compiler public key
+//   • Badge: ✅ L3: MANIFEST SIGNED · ML-DSA-87 · <key_id>
+//   • Only checked when manifest is passed to /session/new
+//
+//   • Stack underflow: opcode pops more than available
+//     e.g. Add with only 1 item on stack (needs 2)
+//     e.g. Store with only 1 item (needs addr + value)
+//     e.g. MapSet with only 2 items (needs map_addr + key + value)
+//   • Propagated across all code paths via CFG fixed-point analysis
+//   • Dynamic opcodes (TuplePack/TupleUnpack) mark depth as unknown
+//
+// To see actual stack warnings, submit crafted bytecode directly
+// to POST /session/new with SQB artifact or hand-built QVM bytecode.
+//
+// ═══════════════════════════════════════════════════════════════════════
+
+contract StackFailDemo {
+  state {
+    value: u256;
+    initialised: bool;
+  }
+
+  @public
+  function init() as caller -> bool {
+    value = 42;
+    initialised = true;
+    return true;
+  }
+
+  // Stack-safe: Push + Push + Add + Store
+  @public
+  function addToValue(x: u256) as caller -> bool {
+    value = value + x;
+    return true;
+  }
+
+  // Stack-safe: Push + Push + Sub + Store
+  @public
+  function subFromValue(x: u256) as caller -> bool {
+    value = value - x;
+    return true;
+  }
+
+  // Stack-safe: multiple operations with balanced stack
+  @public
+  function complexStackOps(a: u256, b: u256) as caller -> u256 {
+    let sum = a + b;
+    let product = a * b;
+    let result = sum + product;
+    value = result;
+    return result;
+  }
+
+  // Stack-safe: conditional with balanced branches
+  @public
+  function clamp(min_val: u256, max_val: u256) as caller -> bool {
+    if (value < min_val) {
+      value = min_val;
+    }
+    if (value > max_val) {
+      value = max_val;
+    }
+    return true;
+  }
+
+  @public
+  function getValue() as caller -> u256 {
+    return value;
+  }
+}

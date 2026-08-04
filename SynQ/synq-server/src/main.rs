@@ -4233,6 +4233,231 @@ async fn main() {
             .allow_origin(origin)
     };
 
+// ─── POST /save-contract ──────────────────────────────────────────────────────
+// Saves an edited contract source to the user's per-wallet directory.
+#[derive(serde::Deserialize)]
+struct SaveContractRequest {
+    name:   String,
+    source: String,
+    wallet: String,  // syna... Bech32 wallet address
+}
+#[derive(serde::Serialize)]
+struct SaveContractResponse {
+    success:      bool,
+    path:         Option<String>,
+    is_user_save: bool,
+    error:        Option<String>,
+}
+
+/// Validate a Bech32 syna address for filesystem safety.
+/// syna addresses are already bech32-safe (lowercase alphanumeric).
+fn validate_wallet_path(wallet: &str) -> Result<String, String> {
+    let w = wallet.trim();
+    if w.is_empty() || w.len() > 90 {
+        return Err("Wallet address must be 1-90 characters".into());
+    }
+    // Bech32 charset: alphanumeric only (syna addresses are like syna1...)
+    if !w.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Err("Wallet address contains invalid characters".into());
+    }
+    Ok(w.to_string())
+}
+
+/// Validate contract name for filesystem safety.
+fn validate_contract_name(name: &str) -> Result<String, String> {
+    let n = name.trim();
+    if n.is_empty() || n.len() > 64 {
+        return Err("Contract name must be 1-64 characters".into());
+    }
+    if !n.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+        return Err("Contract name may only contain letters, digits, _ and -".into());
+    }
+    Ok(n.to_string())
+}
+
+/// Resolve the base contracts directory.
+fn contracts_base_dir() -> String {
+    std::env::var("SYNQ_CONTRACTS_DIR")
+        .unwrap_or_else(|_| "/var/www/synq-demo/contracts".to_string())
+}
+
+async fn save_contract_handler(
+    State(_state): State<AppState>,
+    Json(req): Json<SaveContractRequest>,
+) -> (StatusCode, Json<SaveContractResponse>) {
+    let name = match validate_contract_name(&req.name) {
+        Ok(n) => n,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(SaveContractResponse {
+            success: false, path: None, is_user_save: false, error: Some(e),
+        })),
+    };
+    let wallet = match validate_wallet_path(&req.wallet) {
+        Ok(w) => w,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(SaveContractResponse {
+            success: false, path: None, is_user_save: false, error: Some(e),
+        })),
+    };
+    if req.source.len() > MAX_SOURCE_BYTES {
+        return (StatusCode::PAYLOAD_TOO_LARGE, Json(SaveContractResponse {
+            success: false, path: None, is_user_save: false,
+            error: Some(format!("Source too large: {} bytes (max {})", req.source.len(), MAX_SOURCE_BYTES)),
+        }));
+    }
+
+    // Write to per-user directory: contracts/{wallet}/{name}.synq
+    let base = contracts_base_dir();
+    let user_dir = format!("{}/{}", base, wallet);
+    let file_path = format!("{}/{}.synq", user_dir, name);
+
+    // Create user directory if needed
+    if let Err(e) = std::fs::create_dir_all(&user_dir) {
+        eprintln!("[save-contract] Failed to create dir {}: {}", user_dir, e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(SaveContractResponse {
+            success: false, path: None, is_user_save: false,
+            error: Some(format!("Failed to create user directory: {}", e)),
+        }));
+    }
+
+    match std::fs::write(&file_path, &req.source) {
+        Ok(_) => {
+            println!("[save-contract] Saved {}.synq ({} bytes) for wallet {}", name, req.source.len(), &wallet[..wallet.len().min(16)]);
+            (StatusCode::OK, Json(SaveContractResponse {
+                success: true,
+                path: Some(format!("contracts/{}/{}.synq", wallet, name)),
+                is_user_save: true,
+                error: None,
+            }))
+        }
+        Err(e) => {
+            eprintln!("[save-contract] Failed to save {}: {}", name, e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(SaveContractResponse {
+                success: false, path: None, is_user_save: false,
+                error: Some(format!("Failed to write file: {}", e)),
+            }))
+        }
+    }
+}
+
+// ─── GET /list-user-contracts?wallet=syna... ─────────────────────────────────
+// Lists contracts saved by a specific wallet user.
+#[derive(serde::Serialize)]
+struct UserContractInfo {
+    name:      String,
+    size:      usize,
+    modified:  String,
+}
+#[derive(serde::Serialize)]
+struct ListUserContractsResponse {
+    success:   bool,
+    contracts: Vec<UserContractInfo>,
+    error:     Option<String>,
+}
+
+async fn list_user_contracts_handler(
+    State(_state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<ListUserContractsResponse>) {
+    let wallet = match params.get("wallet") {
+        Some(w) => match validate_wallet_path(w) {
+            Ok(w) => w,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(ListUserContractsResponse {
+                success: false, contracts: vec![], error: Some(e),
+            })),
+        },
+        None => return (StatusCode::BAD_REQUEST, Json(ListUserContractsResponse {
+            success: false, contracts: vec![], error: Some("Missing wallet parameter".into()),
+        })),
+    };
+
+    let user_dir = format!("{}/{}", contracts_base_dir(), wallet);
+    let mut contracts = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(&user_dir) {
+        for entry in entries.flatten() {
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if fname.ends_with(".synq") {
+                let name = fname.trim_end_matches(".synq").to_string();
+                let size = entry.metadata().map(|m| m.len() as usize).unwrap_or(0);
+                let modified = entry.metadata()
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| format!("{}", d.as_secs()))
+                    .unwrap_or_default();
+                contracts.push(UserContractInfo { name, size, modified });
+            }
+        }
+    }
+
+    contracts.sort_by(|a, b| a.name.cmp(&b.name));
+    (StatusCode::OK, Json(ListUserContractsResponse {
+        success: true, contracts, error: None,
+    }))
+}
+
+// ─── GET /load-contract?wallet=syna...&name=ContractName ──────────────────────
+// Loads a user's saved contract, falling back to shared template.
+#[derive(serde::Serialize)]
+struct LoadContractResponse {
+    success:      bool,
+    source:       Option<String>,
+    is_user_save: bool,
+    error:        Option<String>,
+}
+
+async fn load_contract_handler(
+    State(_state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<LoadContractResponse>) {
+    let wallet = match params.get("wallet") {
+        Some(w) => match validate_wallet_path(w) {
+            Ok(w) => w,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(LoadContractResponse {
+                success: false, source: None, is_user_save: false, error: Some(e),
+            })),
+        },
+        None => return (StatusCode::BAD_REQUEST, Json(LoadContractResponse {
+            success: false, source: None, is_user_save: false,
+            error: Some("Missing wallet parameter".into()),
+        })),
+    };
+    let name = match params.get("name") {
+        Some(n) => match validate_contract_name(n) {
+            Ok(n) => n,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(LoadContractResponse {
+                success: false, source: None, is_user_save: false, error: Some(e),
+            })),
+        },
+        None => return (StatusCode::BAD_REQUEST, Json(LoadContractResponse {
+            success: false, source: None, is_user_save: false,
+            error: Some("Missing name parameter".into()),
+        })),
+    };
+
+    let base = contracts_base_dir();
+
+    // 1. Try user-specific version first
+    let user_path = format!("{}/{}/{}.synq", base, wallet, name);
+    if let Ok(src) = std::fs::read_to_string(&user_path) {
+        return (StatusCode::OK, Json(LoadContractResponse {
+            success: true, source: Some(src), is_user_save: true, error: None,
+        }));
+    }
+
+    // 2. Fall back to shared template
+    let shared_path = format!("{}/{}.synq", base, name);
+    if let Ok(src) = std::fs::read_to_string(&shared_path) {
+        return (StatusCode::OK, Json(LoadContractResponse {
+            success: true, source: Some(src), is_user_save: false, error: None,
+        }));
+    }
+
+    (StatusCode::NOT_FOUND, Json(LoadContractResponse {
+        success: false, source: None, is_user_save: false,
+        error: Some(format!("Contract '{}' not found", name)),
+    }))
+}
+
     let app = Router::new()
         .route("/health",            get(health))
         .route("/health/ready",      get(health_ready))
@@ -4258,6 +4483,9 @@ async fn main() {
         .route("/diff-test",          post(diff_test_handler))
         .route("/decompile",         post(decompile_handler))
         .route("/verify-sol",        post(verify_sol_handler))
+        .route("/save-contract",    post(save_contract_handler))
+        .route("/list-user-contracts", get(list_user_contracts_handler))
+        .route("/load-contract",       get(load_contract_handler))
         .with_state(store.clone())
         .layer(
             ServiceBuilder::new()

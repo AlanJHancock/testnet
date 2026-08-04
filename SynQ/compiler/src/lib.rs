@@ -2,7 +2,6 @@
 extern crate pest_derive;
 
 pub mod ast;
-pub mod codegen;
 pub mod ir;
 pub mod parser;
 pub mod pqc_integration;
@@ -27,125 +26,8 @@ pub struct CompileResult {
     pub ir_binary:        Vec<u8>,
 }
 
-/// Top-level compile entry point.
-/// Returns `Err(String)` for hard errors, `Ok(CompileResult)` with warnings for soft issues.
-pub fn compile(source: &str) -> Result<CompileResult, String> {
-    let mut warnings: Vec<String> = Vec::new();
-
-    // 1. Parse
-    let ast = parser::parse(source)?;
-
-    // 2. Semantic checks per contract
-    for unit in &ast {
-        if let SourceUnit::Contract(ref c) = unit {
-            check_undefined_refs(c, &mut warnings)?;
-            check_call_graph(c)?;
-        }
-    }
-
-    // 3a. PQC simulation warning — emitted on both server and WASM paths so
-    //     the developer sees it regardless of which compile route was used.
-    const PQC_BUILTINS: &[&str] = &[
-        "dilithium_verify", "falcon_verify", "sphincs_verify",
-        "kyber_encapsulate", "kyber_decapsulate", "kyber_decaps",
-        "falcon_sign", "mceliece_encapsulate", "mceliece_decapsulate",
-        "hqc_encapsulate", "hqc_decapsulate",
-    ];
-    'pqc_scan: for unit in &ast {
-        if let SourceUnit::Contract(ref c) = unit {
-            for part in &c.parts {
-                if let ContractPart::Function(f) = part {
-                    for stmt in &f.body.statements {
-                        let exprs: Vec<&Expression> = match stmt {
-                            Statement::Expression(e) => vec![e],
-                            Statement::Return(Some(e)) => vec![e],
-                            Statement::Assignment(_, e) => vec![e],
-                            Statement::Require(e, _) => vec![e],
-                            Statement::Let { value, .. } => vec![value],
-                    Statement::LetDestructure { value, .. } => vec![value.as_ref()],
-                            _ => vec![],
-                        };
-                        for expr in exprs {
-                            if let Expression::Call(name, _) = expr {
-                                if PQC_BUILTINS.contains(&name.as_str()) {
-                                    warnings.push(format!(
-                                        "PQC builtin '{}' executes via synq-server native VM only. \
-                                         In browser (WASM) mode it will throw a RuntimeError.",
-                                        name
-                                    ));
-                                    break 'pqc_scan;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. Codegen
-    let gen = codegen::CodeGenerator::new();
-    let (bytecode, state_vars) = gen.generate(&ast)?;
-
-    // Collect extern_call targets from AST — these are contracts this one depends on.
-    let mut extern_contracts: Vec<String> = Vec::new();
-    for unit in &ast {
-        if let SourceUnit::Contract(ref c) = unit {
-            for part in &c.parts {
-                if let crate::ast::ContractPart::Function(f) = part {
-                    for stmt in &f.body.statements {
-                        collect_extern_contracts_stmt(stmt, &mut extern_contracts);
-                    }
-                }
-            }
-        }
-    }
-
-    // 4. Build SSA IR (parallel to codegen — for analysis and future backend)
-    //    v7.0: Run optimization passes (phi insertion, DCE, constant folding)
-    let mut ir_dump: Vec<String> = Vec::new();
-    {
-        let mut ir_builder = ir::IrBuilder::new();
-        match ir_builder.build(&ast) {
-            Ok(mut ir_module) => {
-                // Run SSA optimization passes on each function
-                for func in &mut ir_module.functions {
-                    let pass_reports = ir::passes::run_passes(func);
-                    for report in &pass_reports {
-                        warnings.push(format!("[IR] fn {}: {}", func.name, report));
-                    }
-                }
-
-                let ir_report = ir::analyze(&mut ir_module);
-                if !ir_report.is_ok() {
-                    for err in &ir_report.errors {
-                        warnings.push(format!("[IR] {}", err));
-                    }
-                }
-                for stat in &ir_report.function_stats {
-                    warnings.push(format!(
-                        "[IR] fn {}: {} blocks, {} insts, {} reachable, {} effects, {} host_profiles, {} auth_checks, {} linear_creates, {} linear_consumes",
-                        stat.name, stat.block_count, stat.instruction_count,
-                        stat.reachable_blocks, stat.effects.len(),
-                        stat.host_profiles, stat.authority_checks,
-                        stat.linear_creates, stat.linear_consumes
-                    ));
-                }
-                // Dump full IR (includes contract name header)
-                ir_dump.push(ir_module.dump());
-            }
-            Err(e) => {
-                warnings.push(format!("[IR] build error: {}", e));
-            }
-        }
-    }
-
-    Ok(CompileResult { bytecode, state_vars, warnings, extern_contracts, ir_dump, ir_binary: vec![] })
-}
-
 /// Compile using the IR -> bytecode backend (v7.0 path).
 /// Builds SSA IR, runs optimization passes, and lowers to QVM bytecode.
-/// This is the alternative to the direct AST -> bytecode codegen path.
 pub fn compile_ir(source: &str) -> Result<CompileResult, String> {
     let mut warnings: Vec<String> = Vec::new();
 
@@ -296,6 +178,10 @@ const PQC_BUILTINS: &[&str] = &[
     "str_len", "str_concat", "str_eq",
     // Asset builtins
     "asset_create", "asset_transfer", "asset_burn", "asset_balance", "asset_owner",
+    // Map builtins
+    "map_get", "map_set",
+    // External call (expression context)
+    "extern_call",
 ];
 
 fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String>) -> Result<(), String> {
@@ -523,89 +409,6 @@ mod struct_tests {
 // Verifies that struct literals create Tuple values and field access extracts fields.
 
 use crate::parser::parse;
-use crate::codegen::CodeGenerator;
-
-#[test]
-fn test_struct_literal_and_field_access() {
-    let source = r#"pragma synq ^0.9;
-struct Point {
-    x: u256;
-    y: u256;
-}
-contract StructTest {
-    state {
-        p: Point;
-        initialised: bool;
-    }
-    impl {
-        @public
-        @effects(initialised, p)
-        function init() -> bool {
-            if (initialised) { return false; }
-            p = Point { x: 10, y: 20 };
-            initialised = true;
-            return true;
-        }
-        @public
-        function get_x() -> u256 {
-            return p.x;
-        }
-        @public
-        function get_y() -> u256 {
-            return p.y;
-        }
-    }
-}
-"#;
-    let ast = parse(source).expect("parse failed");
-    let (bytecode, _state_vars) = CodeGenerator::new().generate(&ast).expect("codegen failed");
-    
-    // Bytecode should contain TuplePack (0xA0) and TupleGet (0xA2) opcodes
-    let has_pack = bytecode.windows(1).any(|w| w[0] == 0xA0);
-    let has_get  = bytecode.windows(1).any(|w| w[0] == 0xA2);
-    assert!(has_pack, "bytecode should contain TuplePack (0xA0) for struct literal");
-    assert!(has_get,  "bytecode should contain TupleGet (0xA2) for field access");
-}
-
-#[test]
-fn test_struct_literal_bytecode_count() {
-    // Verify that a struct with 2 fields emits exactly one TuplePack with count=2
-    let source = r#"pragma synq ^0.9;
-struct Pair {
-    a: u256;
-    b: u256;
-}
-contract PairTest {
-    state {
-        pair: Pair;
-    }
-    impl {
-        @public
-        function set_pair(av: u256, bv: u256) -> bool {
-            pair = Pair { a: av, b: bv };
-            return true;
-        }
-        @public
-        function get_a() -> u256 {
-            return pair.a;
-        }
-    }
-}
-"#;
-    let ast = parse(source).expect("parse failed");
-    let (bytecode, _state_vars) = CodeGenerator::new().generate(&ast).expect("codegen failed");
-    
-    // Count TuplePack opcodes — should be 1 (in set_pair)
-    let pack_count = bytecode.windows(1).filter(|w| w[0] == 0xA0).count();
-    assert_eq!(pack_count, 1, "should have exactly 1 TuplePack for struct literal");
-    
-    // Count TupleGet opcodes — should be 1 (in get_a)
-    let get_count = bytecode.windows(1).filter(|w| w[0] == 0xA2).count();
-    assert_eq!(get_count, 1, "should have exactly 1 TupleGet for field access");
-}
-
-
-// ── IR → Bytecode Backend Tests ────────────────────────────────────────────
 
 #[test]
 fn test_ir_backend_simple_contract() {
@@ -736,35 +539,6 @@ contract LoopContract {
     assert!(code.contains(&(0x31)), "IR bytecode should contain JumpIf for while loop");
 }
 
-#[test]
-fn test_ir_backend_state_vars_match() {
-    let source = r#"pragma synq ^0.9;
-contract StateMatchContract {
-    state {
-        balance: u256;
-        owner: u256;
-    }
-    @public
-    function init() -> bool {
-        balance = 1000;
-        return true;
-    }
-}
-"#;
-    let result_codegen = compile(source).expect("codegen compile failed");
-    let result_ir = compile_ir(source).expect("IR compile failed");
-    
-    // State vars should match between both backends
-    assert_eq!(
-        result_codegen.state_vars.len(),
-        result_ir.state_vars.len(),
-        "state var count should match between codegen and IR backend"
-    );
-    for (cg_var, ir_var) in result_codegen.state_vars.iter().zip(result_ir.state_vars.iter()) {
-        assert_eq!(cg_var.0, ir_var.0, "state var name should match");
-        assert_eq!(cg_var.1, ir_var.1, "state var address should match for {}", cg_var.0);
-    }
-}
 
 #[test]
 fn test_ir_backend_struct_contract() {

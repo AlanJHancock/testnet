@@ -1,0 +1,24 @@
+pragma synq ^0.9;
+
+contract Blank {
+  state {
+    value: u256;
+    initialised: bool;
+  }
+
+  function init() -> bool as caller {
+    if (initialised) { return false; }
+    value = 0;
+    initialised = true;
+    return true;
+  }
+
+  function setValue(v: u256) -> bool as caller {
+    value = v;
+    return true;
+  }
+
+  function getValue() -> u256 {
+    return value;
+  }
+}

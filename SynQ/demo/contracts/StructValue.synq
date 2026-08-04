@@ -1,0 +1,83 @@
+pragma synq ^0.9;
+
+struct Point {
+    x: u256;
+    y: u256;
+}
+
+struct Rect {
+    origin: Point;
+    size: Point;
+}
+
+contract StructValue {
+    state {
+        corner: Point;
+        box_val: Rect;
+        initialised: bool;
+    }
+
+    @public
+    function init() -> bool {
+        corner = Point { x: 0, y: 0 };
+        box_val = Rect { origin: Point { x: 1, y: 2 }, size: Point { x: 100, y: 200 } };
+        initialised = true;
+        return true;
+    }
+
+    @public
+    function translate(p: Point, dx: u256, dy: u256) -> Point {
+        let result = Point { x: p.x + dx, y: p.y + dy };
+        return result;
+    }
+
+    @public
+    function getCorner() -> Point {
+        return corner;
+    }
+
+    @public
+    function makePoint(x: u256, y: u256) -> Point {
+        return Point { x: x, y: y };
+    }
+
+    @public
+    function getCornerX() -> u256 {
+        return getCorner().x;
+    }
+
+    @public
+    function getCornerY() -> u256 {
+        return getCorner().y;
+    }
+
+    @public
+    function getBoxOriginX() -> u256 {
+        return box_val.origin.x;
+    }
+
+    @public
+    function getBoxSizeY() -> u256 {
+        return box_val.size.y;
+    }
+
+    @public
+    @effects(corner)
+    function setCorner(p: Point) -> bool {
+        require(initialised, "StructValue.setCorner: not initialised");
+        corner = p;
+        return true;
+    }
+
+    @public
+    function setCornerFromMake(x: u256, y: u256) -> bool {
+        corner = makePoint(x, y);
+        return true;
+    }
+
+    @public
+    function moveCorner(dx: u256, dy: u256) -> bool {
+        corner = translate(corner, dx, dy);
+        return true;
+    }
+}

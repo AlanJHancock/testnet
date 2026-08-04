@@ -656,6 +656,35 @@ fn transpile_expr(expr: &Expression) -> String {
                     format!("new string(0) /* SXCP Bech32 bridge stub: {} */", name),
                 "from_syna" =>
                     format!("uint256(0) /* SXCP Bech32 bridge stub: from_syna */"),
+                "extern_call" => {
+                    // extern_call in expression context — comment for SXCP bridge
+                    let contract = match &args[0] {
+                        Expression::Literal(Literal::String(s)) => s.as_str(),
+                        _ => "unknown",
+                    };
+                    let function = match &args[1] {
+                        Expression::Literal(Literal::String(s)) => s.as_str(),
+                        _ => "unknown",
+                    };
+                    let call_args: Vec<String> = args[2..].iter().map(transpile_expr).collect();
+                    format!("uint256(0) /* extern_call {}.{}({}) — SXCP bridge */", contract, function, call_args.join(", "))
+                }
+                "map_get" => {
+                    // map_get(map_name, key) — transpile to map_name[key]
+                    let map_name = match &args[0] {
+                        Expression::Identifier(n) => n.clone(),
+                        _ => "unknown".to_string(),
+                    };
+                    format!("{}[{}]", map_name, transpile_expr(&args[1]))
+                }
+                "map_set" => {
+                    // map_set(map_name, key, value) — as expression statement, transpile inline
+                    let map_name = match &args[0] {
+                        Expression::Identifier(n) => n.clone(),
+                        _ => "unknown".to_string(),
+                    };
+                    format!("/* {}[{}] = {} */", map_name, transpile_expr(&args[1]), transpile_expr(&args[2]))
+                }
                 _ => format!("{}({})", name, a.join(", ")),
             }
         }

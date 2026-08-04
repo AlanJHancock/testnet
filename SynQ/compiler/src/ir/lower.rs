@@ -1,7 +1,7 @@
 // ── IR → Bytecode Lowering (Backend) ──────────────────────────────────────────
 //
 // Lowers the SSA IR to QVM stack bytecode. This is the v7.0 backend that
-// replaces the direct AST → bytecode codegen path.
+// IR → bytecode lowering (sole compilation path).
 //
 // Approach:
 //   • Slot-based: each SSA value gets a memory slot (address).
@@ -219,7 +219,7 @@ impl IrLowerer {
         Ok(())
     }
 
-    /// Emit authority/caller prologue (matching codegen behavior).
+    /// Emit authority/caller prologue .
     fn emit_authority_prologue(&mut self, func: &IrFunction) -> Result<(), String> {
         let has_attr_public = func.attributes.iter().any(|a| {
             matches!(a, crate::ast::Attribute::Public)
@@ -577,7 +577,7 @@ impl IrLowerer {
 
             // ── Function calls ──
             IrOp::Call(name, args) => {
-                // Store args to callee's param memory slots (matching direct codegen).
+                // Store args to callee's param memory slots .
                 // The VM Call opcode is a plain jump — no register-passing ABI.
                 let callee_func = module.functions.iter().find(|f| f.name == *name);
                 let callee_params = self.all_param_addrs.get(name);

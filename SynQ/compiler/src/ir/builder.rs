@@ -234,7 +234,7 @@ impl IrBuilder {
         if !ctx.current_block_terminated() {
             // Implicit return — if the function has a return type and the last
             // statement produced a value (e.g. extern_call), use it as the return value.
-            // This mirrors direct codegen which leaves the extern_call result on the stack.
+            // extern_call result stays on stack as implicit return value.
             let ret_val = if has_return_type { last_val } else { None };
             let ret_inst = if let Some(v) = ret_val {
                 let ret_ty = ret_type_clone.unwrap_or(IrType::U256);
@@ -826,6 +826,60 @@ impl<'a> BuildContext<'a> {
                     }
                     "str_eq" => {
                         Ok(self.push_value(IrOp::StrEq(arg_vals[0], arg_vals[1]), IrType::Bool))
+                    }
+                    "extern_call" => {
+                        // extern_call(contract, function, ...args) in expression context
+                        // Args[0] = contract name (string literal), Args[1] = function name (string literal)
+                        let contract = match &args[0] {
+                            Expression::Literal(Literal::String(s)) => s.clone(),
+                            _ => return Err("extern_call: contract name must be a string literal".into()),
+                        };
+                        let function = match &args[1] {
+                            Expression::Literal(Literal::String(s)) => s.clone(),
+                            _ => return Err("extern_call: function name must be a string literal".into()),
+                        };
+                        if !self.extern_contracts.contains(&contract) {
+                            self.extern_contracts.push(contract.clone());
+                        }
+                        let call_arg_vals: Vec<ValueId> = args[2..].iter()
+                            .map(|a| self.build_expression(a))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        let ret_ty = IrType::U256;
+                        let vid = self.push_value(
+                            IrOp::ExternCall(contract.clone(), function.clone(), call_arg_vals),
+                            ret_ty.clone(),
+                        );
+                        self.ir_fn.host_profiles.push(HostFnProfile {
+                            kind: HostFnKind::ExternCall,
+                            callee: format!("{}.{}", contract, function),
+                            arg_types: vec![],
+                            return_type: ret_ty,
+                        });
+                        Ok(vid)
+                    }
+                    "map_get" => {
+                        // map_get(map_name, key) — equivalent to map_name[key]
+                        let map_name = match &args[0] {
+                            Expression::Identifier(name) => name.clone(),
+                            _ => return Err("map_get: first argument must be a map identifier".into()),
+                        };
+                        let key_val = arg_vals[1];
+                        let (val_ty, _) = self.state_vars.get(&map_name)
+                            .map(|(t, a)| (t.clone(), *a))
+                            .unwrap_or((IrType::U256, 0));
+                        Ok(self.push_value(IrOp::MapGet(map_name, key_val), val_ty))
+                    }
+                    "map_set" => {
+                        // map_set(map_name, key, value) — equivalent to map_name[key] = value
+                        let map_name = match &args[0] {
+                            Expression::Identifier(name) => name.clone(),
+                            _ => return Err("map_set: first argument must be a map identifier".into()),
+                        };
+                        let key_val = arg_vals[1];
+                        let val_val = arg_vals[2];
+                        self.push_effect(IrOp::MapSet(map_name, key_val, val_val));
+                        // Return a dummy value (discarded by Statement::Expression)
+                        Ok(self.push_value(IrOp::Const(Literal::Number(0)), IrType::U256))
                     }
                     _ => {
                         // User-defined function call — resolve return type

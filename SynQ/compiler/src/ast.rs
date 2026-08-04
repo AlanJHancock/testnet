@@ -76,7 +76,7 @@ pub enum MetadataValue {
 
 // ── Roles ────────────────────────────────────────────────────────────────────
 /// `role Admin = cap::Minter + cap::Burner;`
-/// Desugars to `requires cap::Minter, cap::Burner` at codegen.
+/// Desugars to `requires cap::Minter, cap::Burner`.
 #[derive(Debug, PartialEq, Clone)]
 pub struct RoleDefinition {
     pub name: String,

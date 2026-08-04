@@ -1,0 +1,17 @@
+{
+  "contracts": {
+    "TokenVault": "TokenVault.synq",
+    "SimpleToken": "SimpleToken.synq",
+    "ComprehensiveToken": "ComprehensiveToken.synq",
+    "TypeTestContract": "TypeTestContract.synq",
+    "LoopDemo": "LoopDemo.synq",
+    "PQCDemo": "PQCDemo.synq",
+    "V3Types": "V3Types.synq",
+    "Blank": "Blank.synq",
+    "StructValue": "StructValue.synq",
+    "NamedError": "NamedError.synq",
+    "StackFailDemo": "StackFailDemo.synq",
+    "AssetDemo": "AssetDemo.synq",
+    "StructField": "StructField.synq"
+  }
+}
