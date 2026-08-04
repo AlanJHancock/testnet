@@ -6423,6 +6423,7 @@ var LOOP_LINES = [
 
         // Show window (stays open)
         document.getElementById('decompileWindow').classList.add('show');
+        document.getElementById('decompileWindow').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
         if (result.contract_name) {
           currentContractName = result.contract_name;
