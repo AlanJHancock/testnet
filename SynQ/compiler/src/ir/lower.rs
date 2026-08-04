@@ -749,8 +749,10 @@ impl IrLowerer {
                 self.asm.emit_op(OpCode::AssetCreate);
             }
             IrOp::AssetTransfer(id, owner) => {
-                load_val!(self, *owner);
+                // VM pops new_owner (top) then asset_id (below)
+                // so push asset_id first, then new_owner on top
                 load_val!(self, *id);
+                load_val!(self, *owner);
                 self.asm.emit_op(OpCode::AssetTransfer);
             }
             IrOp::AssetBurn(id) => {
