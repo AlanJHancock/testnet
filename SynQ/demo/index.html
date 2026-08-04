@@ -2415,8 +2415,9 @@
       setStatus('Cannot save — this is decompiled IR output, not valid SynQ source. Load the original contract instead.', 'error');
       return;
     }
-    // Derive filename from contract name in source
-    var match = src.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
+    // Derive filename from contract name in source — strip comments first
+    var _srcNoComments2 = src.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    var match = _srcNoComments2.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
     var name  = (match ? match[1] : (currentContractName || 'contract'));
     var filename = name + '.synq';
     var blob = new Blob([src], { type: 'text/plain' });
@@ -2465,8 +2466,10 @@
       setStatus('Cannot save — decompiled IR output is for audit inspection only, not for re-compilation. Load the original contract instead.', 'error');
       return;
     }
-    // Derive contract name from source
-    var match = src.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
+    // Derive contract name from source — strip comments first to avoid
+    // matching "contract <word>" inside comment text
+    var _srcNoComments = src.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    var match = _srcNoComments.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
     var name = match ? match[1] : (currentContractName || 'Untitled');
     _saveServerInFlight = true;
     setStatus('Saving ' + name + '.synq to server for ' + wallet.slice(0, 12) + '...', 'info');
@@ -2572,7 +2575,7 @@
     var btn = document.getElementById('compileBtn');
     var _previewSrc = (typeof getCode === 'function' ? getCode() : null)
                    || document.getElementById('editor').value || '';
-    var _previewName = (_previewSrc.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/) || [])[1] || '';
+    var _previewName = (_previewSrc.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '').match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/) || [])[1] || '';
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> Compiling' + (_previewName ? ' ' + _previewName : '') + '...';
     clearResults();
