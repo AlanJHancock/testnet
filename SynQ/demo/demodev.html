@@ -2192,10 +2192,11 @@
   }
 
   // ── Filename badges for Editor + Results panels ──────────────────────────
-  function setEditorBadges(name) {
+  function setEditorBadges(name, ext) {
     var _eb = document.getElementById('editorContractBadge');
     var _rb = document.getElementById('resultsContractBadge');
-    if (_eb) { _eb.textContent = name ? name + '.synq' : ''; _eb.style.display = name ? 'inline-block' : 'none'; }
+    var _ext = ext || 'synq';
+    if (_eb) { _eb.textContent = name ? name + '.' + _ext : ''; _eb.style.display = name ? 'inline-block' : 'none'; }
     if (_rb) { _rb.textContent = name ? name + '.sqb' : ''; _rb.style.display = name ? 'inline' : 'none'; }
   }
   window.setEditorBadges = setEditorBadges;
@@ -5024,8 +5025,9 @@
     // Update the contract name badge in the Execute Contract card
     var _cnb = document.getElementById('contractNameBadge');
     if (_cnb) { _cnb.textContent = currentContractName || ''; _cnb.style.display = currentContractName ? 'inline' : 'none'; }
+    var _ext = currentSqb ? 'sqb' : 'synq';
     var _eb = document.getElementById('editorContractBadge');
-    if (_eb) { _eb.textContent = currentContractName ? currentContractName + '.synq' : ''; _eb.style.display = currentContractName ? 'inline-block' : 'none'; }
+    if (_eb) { _eb.textContent = currentContractName ? currentContractName + '.' + _ext : ''; _eb.style.display = currentContractName ? 'inline-block' : 'none'; }
     var _rb = document.getElementById('resultsContractBadge');
     if (_rb) { _rb.textContent = currentContractName ? currentContractName + '.sqb' : ''; _rb.style.display = currentContractName ? 'inline' : 'none'; }
 
@@ -5547,6 +5549,12 @@
         currentManifest = manifestJson;
         currentSidecar = null;
 
+        // Show contract name badge in editor with .sqb extension
+        setEditorBadges(contractName, 'sqb');
+        // Also update the contractNameBadge in the Execute Contract card
+        var _cnbUpload = document.getElementById('contractNameBadge');
+        if (_cnbUpload) { _cnbUpload.textContent = contractName; _cnbUpload.style.display = 'inline'; }
+
         // Show bytecode in the display
         (function showBytecode() {
           var el = document.getElementById('bytecodeDisplay');
@@ -5587,6 +5595,9 @@
           deployBtn.disabled = false;
           deployBtn.textContent = 'Deploy \u25B6 ' + contractName;
         }
+
+        // Track as active contract for indicators
+        setActiveContract(contractName, null);
 
         // Show SQB download button (user can re-download the loaded artifact)
         var sb = document.getElementById('sqbDownloadBtn');
