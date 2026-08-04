@@ -379,6 +379,8 @@ fn transpile_function(out: &mut String, f: &FunctionDefinition, contract: &Contr
             let ty_str = ty_to_sol(ty);
             if matches!(ty, Type::Named(_) | Type::Str | Type::Bytes) {
                 format!(" returns ({} memory)", ty_str)
+            } else if matches!(ty, Type::Tuple(_)) {
+                format!(" returns {}", ty_str)
             } else {
                 format!(" returns ({})", ty_str)
             }
@@ -392,6 +394,8 @@ fn transpile_function(out: &mut String, f: &FunctionDefinition, contract: &Contr
                     set_type("__return_type__", ty.clone());
                     if matches!(ty, Type::Named(_) | Type::Str | Type::Bytes) {
                         format!(" returns ({} memory)", ty_str)
+                    } else if matches!(ty, Type::Tuple(_)) {
+                        format!(" returns {}", ty_str)
                     } else {
                         format!(" returns ({})", ty_str)
                     }
@@ -564,7 +568,16 @@ fn transpile_statement(out: &mut String, stmt: &Statement, indent: usize) {
             }
         }
         Statement::LetDestructure { names, value } => {
-            let vars: Vec<String> = names.iter().map(|n| format!("var {}", n)).collect();
+            // Infer tuple types from the RHS expression
+            let val_ty = infer_expr_type(value);
+            let val_ty = resolve_type_alias(&val_ty);
+            let type_strs: Vec<String> = match &val_ty {
+                Type::Tuple(ts) => ts.iter().map(ty_to_sol).collect(),
+                _ => names.iter().map(|_| ty_to_sol(&val_ty)).collect(),
+            };
+            let vars: Vec<String> = names.iter().enumerate()
+                .map(|(i, n)| format!("{} {}", type_strs.get(i).unwrap_or(&"uint256".to_string()), sol_identifier(n)))
+                .collect();
             writeln!(out, "{}({}) = {};", pad, vars.join(", "), transpile_expr(value)).unwrap();
         }
         Statement::Return(None) => {
@@ -628,8 +641,6 @@ fn transpile_expr(expr: &Expression) -> String {
                 "str_len" => format!("bytes({}).length", transpile_expr(&args[0])),
                 "str_concat" => format!("string.concat({})", a.join(", ")),
                 "str_eq" => format!("(keccak256(bytes({})) == keccak256(bytes({})))", transpile_expr(&args[0]), transpile_expr(&args[1])),
-                "asset_create" | "asset_transfer" | "asset_burn" | "asset_balance" | "asset_owner" =>
-                    format!("/* SXCP asset bridge: {}({}) */", name, a.join(", ")),
                 "dilithium_verify" | "falcon_verify" | "sphincs_verify" |
                 "aegis_verify" | "ai_verify_proof" =>
                     format!("false /* SXCP bridge stub: {} */", name),
