@@ -2389,11 +2389,29 @@
     };
     reader.readAsText(file);
   }
+  // ── Guard: detect decompiled IR output (not valid SynQ source) ──
+  function isDecompiledOutput(src) {
+    if (!src) return false;
+    var header = src.slice(0, 500);
+    if (header.indexOf('Decompiled from SIR1 IR') !== -1) return true;
+    if (header.indexOf('decompiled pseudo-source') !== -1) return true;
+    // IR block labels (bb0:, bb1:, etc.) are not valid SynQ syntax
+    if (/\bbb\d+\s*:/.test(src) && src.indexOf('goto bb') !== -1) return true;
+    // IR-style assignments: v0 = load, v1 = store, if v0 → bb1
+    if (/\bv\d+\s*=\s*(load|store|caller|authority_envelope|false|true)\b/.test(src) && src.indexOf('→ bb') !== -1) return true;
+    return false;
+  }
+  window.isDecompiledOutput = isDecompiledOutput;
+
   function saveToFile() {
     var src = (typeof getCode === 'function' ? getCode() : null)
               || document.getElementById('editor').value || '';
     if (!src.trim()) {
       setStatus('Nothing to save — editor is empty.', 'error');
+      return;
+    }
+    if (isDecompiledOutput(src)) {
+      setStatus('Cannot save — this is decompiled IR output, not valid SynQ source. Load the original contract instead.', 'error');
       return;
     }
     // Derive filename from contract name in source
@@ -2440,6 +2458,10 @@
               || document.getElementById('editor').value || '';
     if (!src.trim()) {
       setStatus('Nothing to save — editor is empty.', 'error');
+      return;
+    }
+    if (isDecompiledOutput(src)) {
+      setStatus('Cannot save — decompiled IR output is for audit inspection only, not for re-compilation. Load the original contract instead.', 'error');
       return;
     }
     // Derive contract name from source
