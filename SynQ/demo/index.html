@@ -2192,6 +2192,15 @@
   }
 
   // ── Filename badges for Editor + Results panels ──────────────────────────
+  // ── Utility: extract contract name from source (comment-safe) ──
+  function extractContractName(src) {
+    if (!src) return null;
+    var stripped = src.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    var m = stripped.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
+    return m ? m[1] : null;
+  }
+  window.extractContractName = extractContractName;
+
   function setEditorBadges(name, ext) {
     var _eb = document.getElementById('editorContractBadge');
     var _rb = document.getElementById('resultsContractBadge');
@@ -2380,8 +2389,7 @@
       clearResults();
       syncCompileBtn();
       // Extract contract name from source for a friendly status message
-      var match = src.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
-      var name  = match ? match[1] : file.name;
+      var name  = extractContractName(src) || file.name.replace(/\.\w+$/, '');
       setEditorBadges(name);
       setStatus('Loaded “' + name + '” from ' + file.name + ' — review, then Compile and Deploy.', 'info');
     };
@@ -2415,10 +2423,8 @@
       setStatus('Cannot save — this is decompiled IR output, not valid SynQ source. Load the original contract instead.', 'error');
       return;
     }
-    // Derive filename from contract name in source — strip comments first
-    var _srcNoComments2 = src.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
-    var match = _srcNoComments2.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
-    var name  = (match ? match[1] : (currentContractName || 'contract'));
+    // Derive filename from contract name in source (comment-safe)
+    var name  = extractContractName(src) || (currentContractName || 'contract');
     var filename = name + '.synq';
     var blob = new Blob([src], { type: 'text/plain' });
     var a = document.createElement('a');
@@ -2466,11 +2472,8 @@
       setStatus('Cannot save — decompiled IR output is for audit inspection only, not for re-compilation. Load the original contract instead.', 'error');
       return;
     }
-    // Derive contract name from source — strip comments first to avoid
-    // matching "contract <word>" inside comment text
-    var _srcNoComments = src.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
-    var match = _srcNoComments.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
-    var name = match ? match[1] : (currentContractName || 'Untitled');
+    // Derive contract name from source (comment-safe)
+    var name = extractContractName(src) || (currentContractName || 'Untitled');
     _saveServerInFlight = true;
     setStatus('Saving ' + name + '.synq to server for ' + wallet.slice(0, 12) + '...', 'info');
     try {
@@ -2532,8 +2535,8 @@
             if (btnName === c.name) return;
             var btnSrc = contractCache[btnName];
             if (btnSrc) {
-              var m = btnSrc.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
-              if (m && m[1] === c.name) userContractNames[btnName] = true;
+              var m = extractContractName(btnSrc);
+              if (m === c.name) userContractNames[btnName] = true;
             }
           });
         });
@@ -2575,7 +2578,7 @@
     var btn = document.getElementById('compileBtn');
     var _previewSrc = (typeof getCode === 'function' ? getCode() : null)
                    || document.getElementById('editor').value || '';
-    var _previewName = (_previewSrc.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '').match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/) || [])[1] || '';
+    var _previewName = extractContractName(_previewSrc) || '';
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span> Compiling' + (_previewName ? ' ' + _previewName : '') + '...';
     clearResults();
@@ -2594,10 +2597,10 @@
             data.signature_sidecar = null;
             // Derive contract_name + address client-side
             if (!data.contract_name) {
-              var _cm = source.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
+              var _cm = extractContractName(source);
               if (_cm) {
-                data.contract_name = _cm[1];
-                var _key  = 'SynQ:' + _cm[1];
+                data.contract_name = _cm;
+                var _key  = 'SynQ:' + _cm;
                 var _hash = window.keccak_256(_key);
                 data.contract_address = '0x' + _hash.slice(24);
               }
@@ -2965,8 +2968,7 @@
           //    verifyingContract = keccak256(contractName)[0..20]
           // verifyingContract = keccak256('SynQ:'+contractName)[12..] — matches server derivation
           // Extract contract name from source — must match server's AST extraction
-          var _srcCnMatch = source.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
-          var _cnForDomain = _srcCnMatch ? _srcCnMatch[1] : (currentContractName || 'unknown');
+          var _cnForDomain = extractContractName(source) || (currentContractName || 'unknown');
           var _vcBytes = window.keccak_256('SynQ:' + _cnForDomain); // 64-char hex
           var vcHex = '0x' + _vcBytes.slice(24); // last 20 bytes = [12..]
           var typedData = JSON.stringify({
@@ -4821,8 +4823,7 @@
     if (!btn || btn.disabled) return;
     var src = (typeof getCode === 'function' ? getCode() : null)
               || document.getElementById('editor').value || '';
-    var m = src.match(/^\s*contract\s+([A-Za-z_][A-Za-z0-9_]*)/m);
-    var editorName = m ? m[1] : null;
+    var editorName = extractContractName(src);
     btn.innerHTML = editorName ? 'Compile &#x25B6; ' + editorName : 'Compile';
 
     // Stale-deploy warning: editor has a different contract than what's deployed
