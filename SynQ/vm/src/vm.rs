@@ -2430,49 +2430,34 @@ contract BytecodeMatchLoop {
 }
 "#;
 
-        // Both should compile successfully
-        let result_codegen = synq_compiler::compile(source)
-            .expect("direct codegen should succeed");
+        // IR backend is the primary compilation path (v7.0)
         let result_ir = synq_compiler::compile_ir(source)
             .expect("IR compile should succeed");
-        assert!(!result_codegen.bytecode.is_empty(), "codegen bytecode empty");
         assert!(!result_ir.bytecode.is_empty(), "IR bytecode empty");
 
-        // Both should contain JumpIf (0x31) for the while loop
-        let cg_code = &result_codegen.bytecode[15..];
+        // Should contain JumpIf (0x31) for the while loop
         let ir_code = &result_ir.bytecode[15..];
-        assert!(cg_code.contains(&0x31), "codegen should have JumpIf for while loop");
         assert!(ir_code.contains(&0x31), "IR should have JumpIf for while loop");
 
-        // Execute both and compare results
-        let mut vm_cg = QuantumVM::new();
-        vm_cg.load_bytecode(&result_codegen.bytecode).expect("cg load");
+        // Execute IR-compiled bytecode
         let mut vm_ir = QuantumVM::new();
         vm_ir.load_bytecode(&result_ir.bytecode).expect("ir load");
 
-        // init() on both
-        let cg_init = vm_cg.call_function("init", &[]).expect("cg init");
+        // init()
         let ir_init = vm_ir.call_function("init", &[]).expect("ir init");
-        assert!(format!("{:?}", cg_init) == format!("{:?}", ir_init),
-            "init results differ: cg={:?} ir={:?}", cg_init, ir_init);
+        assert!(matches!(ir_init, Some(Value::Bool(true)) | Some(Value::I32(1))), "init should return true: {:?}", ir_init);
 
-        // loop_sum(5) on both — should accumulate sum=10, counter=5
+        // loop_sum(5) — should accumulate sum=10, counter=5
         let n = Value::U256(U256::from(5u32));
-        let cg_loop = vm_cg.call_function("loop_sum", &[n.clone()]).expect("cg loop_sum");
         let ir_loop = vm_ir.call_function("loop_sum", &[n.clone()]).expect("ir loop_sum");
-        assert!(format!("{:?}", cg_loop) == format!("{:?}", ir_loop),
-            "loop_sum results differ: cg={:?} ir={:?}", cg_loop, ir_loop);
 
-        // Verify state vars match
-        let cg_sum = vm_cg.call_function("get_sum", &[]).expect("cg get_sum");
+        // Verify state vars
         let ir_sum = vm_ir.call_function("get_sum", &[]).expect("ir get_sum");
-        assert!(format!("{:?}", cg_sum) == format!("{:?}", ir_sum),
-            "sum mismatch: cg={:?} ir={:?}", cg_sum, ir_sum);
-
-        let cg_ctr = vm_cg.call_function("get_counter", &[]).expect("cg get_counter");
         let ir_ctr = vm_ir.call_function("get_counter", &[]).expect("ir get_counter");
-        assert!(format!("{:?}", cg_ctr) == format!("{:?}", ir_ctr),
-            "counter mismatch: cg={:?} ir={:?}", cg_ctr, ir_ctr);
+        assert!(matches!(ir_sum, Some(Value::U256(ref v)) if *v == U256::from(10u32)) || matches!(ir_sum, Some(Value::I32(10))),
+            "sum mismatch: got {:?}", ir_sum);
+        assert!(matches!(ir_ctr, Some(Value::U256(ref v)) if *v == U256::from(5u32)) || matches!(ir_ctr, Some(Value::I32(5))),
+            "counter mismatch: got {:?}", ir_ctr);
     }
 
 

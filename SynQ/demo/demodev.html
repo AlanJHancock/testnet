@@ -582,19 +582,19 @@
       Save to Server
     </button>
     <span style="font-size:0.8rem;font-weight:600;color:rgba(255,255,255,0.4);padding:0 2px;">|</span>
-    <button class="btn btn-secondary" onclick="loadBlank()" title="Blank starter contract">New</button>
-    <button class="btn btn-secondary" onclick="loadVault()" title="Step 1 — TokenVault (uses extern_call)">TokenVault</button>
-    <button class="btn btn-secondary" onclick="loadDemo()" title="Step 2 — SimpleToken (deploy into same workspace)">SimpleToken</button>
-    <button class="btn btn-secondary" onclick="loadComprehensive()" title="Standalone role-based token — sign init() with wallet">ComprehensiveToken</button>
-    <button class="btn btn-secondary" onclick="loadTypeTest()" title="Type &amp; operator test contract — all primitives, map, set, require">TypeTestContract</button>
-    <button class="btn btn-secondary" onclick="loadLoopDemo()" title="Loop constructs — while, break, continue, let locals, state accumulation">LoopDemo</button>
-    <button class="btn btn-secondary" onclick="loadV3Demo()" title="V3 types — Bytes, Hash32, Height, UMAIdentity, @authority, syna/sync Bech32 builtins" style="border-color:rgba(16,185,129,0.4);color:rgba(110,231,183,0.9);">V3Types</button>
-    <button class="btn btn-secondary" onclick="loadStructValue()" title="Struct value semantics — pass/return structs, field access on call results, nested struct access" style="border-color:rgba(168,85,247,0.4);color:rgba(192,132,252,0.9);">StructValue</button>
-    <button class="btn btn-secondary" onclick="loadNamedError()" title="Named error revert — enum-based RevertCode (0x35) with structured error codes" style="border-color:rgba(239,68,68,0.4);color:rgba(248,113,113,0.9);">NamedError</button>
-    <button class="btn btn-secondary" onclick="loadAssetDemo()" title="Linear asset tracking — AssetCreate/Transfer/Burn/Balance/Owner (0x57-0x5B)" style="border-color:rgba(245,158,11,0.4);color:rgba(251,191,36,0.9);">AssetDemo</button>
-    <button class="btn btn-secondary" onclick="loadStructField()" title="TupleSet (0xAB) — struct field assignment via in-place tuple replacement" style="border-color:rgba(14,165,233,0.4);color:rgba(56,189,248,0.9);">StructField</button>
-    <button class="btn btn-secondary" onclick="loadStackFailDemo()" title="Stack safety + manifest verification demo — Layer 1+2+3 in action" style="border-color:rgba(239,68,68,0.4);color:rgba(252,165,165,0.9);">StackFailDemo</button>
-    <button class="btn btn-secondary" style="border-color:rgba(168,85,247,0.4);color:rgba(192,132,252,0.9);" onclick="loadPQCDemo()" title="PQC Demo — ML-DSA-65 verification, FN-DSA verify, ML-KEM decapsulation">PQCDemo</button>
+    <button class="btn btn-secondary" id="btn-Blank" onclick="loadBlank()" title="Blank starter contract">New</button>
+    <button class="btn btn-secondary" id="btn-TokenVault" onclick="loadVault()" title="Step 1 — TokenVault (uses extern_call)">TokenVault</button>
+    <button class="btn btn-secondary" id="btn-SimpleToken" onclick="loadDemo()" title="Step 2 — SimpleToken (deploy into same workspace)">SimpleToken</button>
+    <button class="btn btn-secondary" id="btn-ComprehensiveToken" onclick="loadComprehensive()" title="Standalone role-based token — sign init() with wallet">ComprehensiveToken</button>
+    <button class="btn btn-secondary" id="btn-TypeTestContract" onclick="loadTypeTest()" title="Type &amp; operator test contract — all primitives, map, set, require">TypeTestContract</button>
+    <button class="btn btn-secondary" id="btn-LoopDemo" onclick="loadLoopDemo()" title="Loop constructs — while, break, continue, let locals, state accumulation">LoopDemo</button>
+    <button class="btn btn-secondary" id="btn-V3Types" onclick="loadV3Demo()" title="V3 types — Bytes, Hash32, Height, UMAIdentity, @authority, syna/sync Bech32 builtins" style="border-color:rgba(16,185,129,0.4);color:rgba(110,231,183,0.9);">V3Types</button>
+    <button class="btn btn-secondary" id="btn-StructValue" onclick="loadStructValue()" title="Struct value semantics — pass/return structs, field access on call results, nested struct access" style="border-color:rgba(168,85,247,0.4);color:rgba(192,132,252,0.9);">StructValue</button>
+    <button class="btn btn-secondary" id="btn-NamedError" onclick="loadNamedError()" title="Named error revert — enum-based RevertCode (0x35) with structured error codes" style="border-color:rgba(239,68,68,0.4);color:rgba(248,113,113,0.9);">NamedError</button>
+    <button class="btn btn-secondary" id="btn-AssetDemo" onclick="loadAssetDemo()" title="Linear asset tracking — AssetCreate/Transfer/Burn/Balance/Owner (0x57-0x5B)" style="border-color:rgba(245,158,11,0.4);color:rgba(251,191,36,0.9);">AssetDemo</button>
+    <button class="btn btn-secondary" id="btn-StructField" onclick="loadStructField()" title="TupleSet (0xAB) — struct field assignment via in-place tuple replacement" style="border-color:rgba(14,165,233,0.4);color:rgba(56,189,248,0.9);">StructField</button>
+    <button class="btn btn-secondary" id="btn-StackFailDemo" onclick="loadStackFailDemo()" title="Stack safety + manifest verification demo — Layer 1+2+3 in action" style="border-color:rgba(239,68,68,0.4);color:rgba(252,165,165,0.9);">StackFailDemo</button>
+    <button class="btn btn-secondary" style="border-color:rgba(168,85,247,0.4);color:rgba(192,132,252,0.9);" id="btn-PQCDemo" onclick="loadPQCDemo()" title="PQC Demo — ML-DSA-65 verification, FN-DSA verify, ML-KEM decapsulation">PQCDemo</button>
         
   </div>
 
@@ -1362,6 +1362,32 @@
       if (currentBytecode && typeof populateFunctionPicker === 'function') {
         populateFunctionPicker();
       }
+      // Reload user-saved contracts and update button indicators now that wallet is connected
+      if (typeof _userContractsLoaded === 'undefined' || !_userContractsLoaded) {
+        _userContractsLoaded = true;
+        (async function() {
+          try {
+            var userNames = await loadUserContractList();
+            var userFetches = userNames.map(function(name) {
+              return loadContractFromServer(name).then(function(src) {
+                if (src) console.log('[CONTRACTS] Loaded user-saved ' + name + '.synq');
+              });
+            });
+            await Promise.all(userFetches);
+            // If current contract has a user-saved version, reload it in the editor
+            if (activeContractName && userContractNames[activeContractName]) {
+              var userSrc = contractCache[activeContractName];
+              if (userSrc) {
+                document.getElementById('editor').value = userSrc;
+                lastLoadedSource = userSrc;
+                if (typeof updateLineNums === 'function') updateLineNums();
+                if (typeof syncCompileBtn === 'function') syncCompileBtn();
+              }
+            }
+            updateAllContractIndicators();
+          } catch(e) { console.error('[CONTRACTS] Failed to load user contracts on wallet connect:', e); }
+        })();
+      }
     } else {
       dot.classList.remove('connected');
       label.textContent = 'No wallet connected';
@@ -2041,6 +2067,32 @@
       var runBtn = document.getElementById('runBtn');
       if (runBtn && currentBytecode) runBtn.disabled = false;
       if (currentBytecode && typeof populateFunctionPicker === 'function') populateFunctionPicker();
+      // Reload user-saved contracts and update button indicators now that wallet is connected
+      if (typeof _userContractsLoaded === 'undefined' || !_userContractsLoaded) {
+        _userContractsLoaded = true;
+        (async function() {
+          try {
+            var userNames = await loadUserContractList();
+            var userFetches = userNames.map(function(name) {
+              return loadContractFromServer(name).then(function(src) {
+                if (src) console.log('[CONTRACTS] Loaded user-saved ' + name + '.synq (wallet hook)');
+              });
+            });
+            await Promise.all(userFetches);
+            // If current contract has a user-saved version, reload it in the editor
+            if (activeContractName && userContractNames[activeContractName]) {
+              var userSrc = contractCache[activeContractName];
+              if (userSrc) {
+                document.getElementById('editor').value = userSrc;
+                lastLoadedSource = userSrc;
+                if (typeof updateLineNums === 'function') updateLineNums();
+                if (typeof syncCompileBtn === 'function') syncCompileBtn();
+              }
+            }
+            updateAllContractIndicators();
+          } catch(e) { console.error('[CONTRACTS] Failed to load user contracts on wallet connect:', e); }
+        })();
+      }
     } else {
       dot.classList.remove('connected');
       label.textContent = 'No wallet connected';
@@ -2157,6 +2209,93 @@
     'StructValue', 'NamedError', 'StackFailDemo', 'AssetDemo', 'StructField'
   ];
 
+  // ── Contract button indicators ──────────────────────────────────────────
+  // • (dot)  = user has a saved version on the server (per-wallet)
+  // * (asterisk) = currently modified in editor, not yet saved
+  var lastLoadedSource = '';   // source as loaded (for dirty tracking)
+  var activeContractName = '';  // which contract is currently in the editor
+
+  // Map button IDs to contract names (for looking up buttons)
+  var btnIdMap = {};
+  contractList.forEach(function(name) { btnIdMap[name] = 'btn-' + name; });
+
+  function getContractButton(name) {
+    return document.getElementById(btnIdMap[name] || ('btn-' + name));
+  }
+
+  function getButtonLabel(name) {
+    // Use stored data-label attribute (set once at init, never changes)
+    var btn = getContractButton(name);
+    if (!btn) return name;
+    return btn.getAttribute('data-label') || btn.textContent.trim() || name;
+  }
+
+  // Store original labels once on first call
+  function ensureButtonLabels() {
+    contractList.forEach(function(name) {
+      var btn = getContractButton(name);
+      if (btn && !btn.getAttribute('data-label')) {
+        btn.setAttribute('data-label', btn.textContent.trim());
+      }
+    });
+  }
+
+  function updateContractButtonIndicator(name) {
+    var btn = getContractButton(name);
+    if (!btn) return;
+    var label = getButtonLabel(name);
+    var html = '';
+    var hasSave = !!(userContractNames && userContractNames[name]);
+    var isDirty = false;
+    if (name === activeContractName && hasSave) {
+      var _cs = document.getElementById('editor').value || '';
+      console.log('[INDICATOR]', name, '| hasSave:', hasSave, '| dirty:', _cs !== lastLoadedSource, '| editorLen:', _cs.length, 'lastLoadedLen:', (lastLoadedSource||'').length);
+    }
+    // Green dot indicator: has a saved version on server
+    if (hasSave) {
+      html += '<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#22c55e;box-shadow:0 0 6px rgba(34,197,94,0.6);flex-shrink:0;" title="Saved version on server"></span> ';
+    }
+    html += label;
+    // Red asterisk: currently active and modified (dirty)
+    if (name === activeContractName) {
+      var currentSrc = (typeof getCode === 'function' ? getCode() : null)
+                       || document.getElementById('editor').value || '';
+      if (currentSrc && lastLoadedSource && currentSrc !== lastLoadedSource) {
+        isDirty = true;
+        html += ' <span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#ef4444;box-shadow:0 0 6px rgba(239,68,68,0.6);flex-shrink:0;" title="Modified — not yet saved"></span>';
+      }
+    }
+    btn.innerHTML = html;
+  }
+
+  function updateAllContractIndicators() {
+    contractList.forEach(function(name) { updateContractButtonIndicator(name); });
+  }
+
+  function setActiveContract(name, src) {
+    ensureButtonLabels();
+    activeContractName = name;
+    lastLoadedSource = src || '';
+    updateAllContractIndicators();
+  }
+
+  function markContractSaved(name) {
+    if (userContractNames) userContractNames[name] = true;
+    // Also mark the active contract button name (may differ from source contract name)
+    if (activeContractName && activeContractName !== name && userContractNames) {
+      userContractNames[activeContractName] = true;
+    }
+    // After save, editor content matches saved version
+    var currentSrc = (typeof getCode === 'function' ? getCode() : null)
+                     || document.getElementById('editor').value || '';
+    lastLoadedSource = currentSrc;
+    updateAllContractIndicators();
+  }
+
+  window.updateAllContractIndicators = updateAllContractIndicators;
+  window.setActiveContract = setActiveContract;
+  window.markContractSaved = markContractSaved;
+
   function getContractSource(name) {
     return contractCache[name] || '';
   }
@@ -2196,6 +2335,7 @@
     }
 
     console.log('[CONTRACTS] Preloaded', Object.keys(contractCache).length, 'contracts');
+    updateAllContractIndicators();
   }
 
   window.getContractSource = getContractSource;
@@ -2204,14 +2344,14 @@
 
   function loadDemo() {
     evictWorkspaceContractByName('SimpleToken');
-    document.getElementById('editor').value = getContractSource('SimpleToken');
+    var _src = getContractSource('SimpleToken'); document.getElementById('editor').value = _src; setActiveContract('SimpleToken', _src);
     updateLineNums(); clearResults(); syncCompileBtn();
     setEditorBadges('SimpleToken');
     setStatus('Step 2 of 2 — Compile SimpleToken, then Deploy into the same workspace.', 'info');
   }
 
   function loadBlank() {
-    document.getElementById('editor').value = getContractSource('Blank');
+    var _src = getContractSource('Blank'); document.getElementById('editor').value = _src; setActiveContract('Blank', _src);
     updateLineNums(); clearResults(); syncCompileBtn();
     setEditorBadges(null);
     setStatus('Blank template loaded — edit the contract name and functions, then Compile and Deploy.', 'info');
@@ -2279,6 +2419,7 @@
   var LOAD_CONTRACT_URL  = 'https://hanksweb.co.uk/synq/load-contract';
   var LIST_USER_CONTRACTS_URL = 'https://hanksweb.co.uk/synq/list-user-contracts';
   var _saveServerInFlight = false;
+  var _userContractsLoaded = false;
   var userContractNames = {};  // names of contracts saved by this wallet
 
   function getWalletId() {
@@ -2316,6 +2457,7 @@
       if (data.success) {
         contractCache[name] = src;
         userContractNames[name] = true;
+        markContractSaved(name);
         var scope = data.is_user_save ? ' (your workspace)' : ' (shared)';
         setStatus('Saved ' + name + '.synq to server' + scope + ' — ' + src.length + ' bytes.', 'info');
       } else {
@@ -2357,7 +2499,18 @@
       if (!res.ok) return [];
       var data = await res.json();
       if (data.success && data.contracts) {
-        data.contracts.forEach(function(c) { userContractNames[c.name] = true; });
+        data.contracts.forEach(function(c) {
+          userContractNames[c.name] = true;
+          // Also check if this matches a button/template name (e.g. PQCDemo loads source with contract SimpleToken)
+          contractList.forEach(function(btnName) {
+            if (btnName === c.name) return;
+            var btnSrc = contractCache[btnName];
+            if (btnSrc) {
+              var m = btnSrc.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
+              if (m && m[1] === c.name) userContractNames[btnName] = true;
+            }
+          });
+        });
         return data.contracts.map(function(c) { return c.name; });
       }
     } catch (e) { /* ignore */ }
@@ -2368,19 +2521,23 @@
 
   function loadVault() {
     evictWorkspaceContractByName('TokenVault');
-    document.getElementById('editor').value = getContractSource('TokenVault');
+    var _src = getContractSource('TokenVault');
+    document.getElementById('editor').value = _src;
     updateLineNums(); clearResults(); syncCompileBtn();
     setEditorBadges('TokenVault');
+    setActiveContract('TokenVault', _src);
     setStatus('Step 1 of 2 — Compile TokenVault, then Deploy. Then load SimpleToken for step 2.', 'info');
   }
   function loadComprehensive() {
     if (typeof clearState === 'function') clearState();
-    document.getElementById('editor').value = getContractSource('ComprehensiveToken');
+    var _src = getContractSource('ComprehensiveToken');
+    document.getElementById('editor').value = _src;
     if (typeof initEditor === 'function') initEditor();
     updateLineNums();
     clearResults();
     syncCompileBtn();
     setEditorBadges('ComprehensiveToken');
+    setActiveContract('ComprehensiveToken', document.getElementById('editor').value);
     setStatus('ComprehensiveToken loaded — connect wallet, Compile, Deploy, then call init() (signs with your raw EVM address as caller identity)', 'info');
   }
 
@@ -2781,7 +2938,9 @@
           // 3. EIP-712 SourceCommit typed data
           //    verifyingContract = keccak256(contractName)[0..20]
           // verifyingContract = keccak256('SynQ:'+contractName)[12..] — matches server derivation
-          var _cnForDomain = currentContractName || 'unknown';
+          // Extract contract name from source — must match server's AST extraction
+          var _srcCnMatch = source.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
+          var _cnForDomain = _srcCnMatch ? _srcCnMatch[1] : (currentContractName || 'unknown');
           var _vcBytes = window.keccak_256('SynQ:' + _cnForDomain); // 64-char hex
           var vcHex = '0x' + _vcBytes.slice(24); // last 20 bytes = [12..]
           var typedData = JSON.stringify({
@@ -2800,14 +2959,14 @@
             },
             primaryType: 'SourceCommit',
             domain: {
-              name:              'SynQ · ' + (currentContractName || 'unknown') + ' · synergy-testnet-v3',
+              name:              'SynQ · ' + _cnForDomain + ' · synergy-testnet-v3',
               version:           '1',
               chainId:           1266,
               verifyingContract: vcHex
             },
             message: {
               sourceHash:   sourceHashWith0x,
-              contractName: currentContractName || 'unknown',
+              contractName: _cnForDomain,
               nonce:        sourceNonce
             }
           });
@@ -4669,14 +4828,71 @@
 /* ── Init ────────────────────────────────────────────────────────────────── */
   (async function init() {
     await preloadContracts();
-    document.getElementById(editor).value = getContractSource(TokenVault);
+    var _initSrc = getContractSource('TokenVault'); document.getElementById('editor').value = _initSrc; setActiveContract('TokenVault', _initSrc);
     updateLineNums();
     syncCompileBtn();
-    document.getElementById(editor).addEventListener(input, updateLineNums);
-    document.getElementById(editor).addEventListener(input, syncCompileBtn);
-    document.getElementById(editor).addEventListener(scroll, function() {
-      document.getElementById(lineNums).scrollTop = this.scrollTop;
+    document.getElementById('editor').addEventListener('input', updateLineNums);
+    document.getElementById('editor').addEventListener('input', syncCompileBtn);
+    document.getElementById('editor').addEventListener('input', function() {
+      if (activeContractName) updateContractButtonIndicator(activeContractName);
     });
+    document.getElementById('editor').addEventListener('scroll', function() {
+      document.getElementById('lineNums').scrollTop = this.scrollTop;
+    });
+    // Fallback: check for wallet + user contracts after 3s (in case updateWalletUI hook misses)
+    setTimeout(async function() {
+      if (getWalletId() && !window._userContractsLoaded) {
+        window._userContractsLoaded = true;
+        try {
+          var userNames = await loadUserContractList();
+          console.log('[INDICATORS] 3s fallback: loaded', userNames.length, 'user contracts:', userNames);
+                    var userFetches = userNames.map(function(name) {
+            return loadContractFromServer(name);
+          });
+          await Promise.all(userFetches);
+          if (activeContractName && userContractNames[activeContractName]) {
+            var userSrc = contractCache[activeContractName];
+            if (userSrc) {
+              document.getElementById('editor').value = userSrc;
+              lastLoadedSource = userSrc;
+              updateLineNums();
+              syncCompileBtn();
+            }
+          }
+          updateAllContractIndicators();
+          console.log('[INDICATORS] 3s fallback: userContractNames =', Object.keys(userContractNames));
+                  } catch(e) { console.error('[INDICATORS] Fallback failed:', e); }
+      }
+    }, 3000);
+
+    // Safety-net polling: refresh indicators every 2s for first 30s, then every 10s
+    // This catches race conditions between async wallet init and indicator rendering
+    var _pollCount = 0;
+    var _pollInterval = setInterval(function() {
+      ensureButtonLabels();
+      updateAllContractIndicators();
+      _pollCount++;
+      if (_pollCount > 15) clearInterval(_pollInterval); // stop after ~30s of fast polling
+    }, _pollCount < 15 ? 2000 : 10000);
+    // Actually: fast poll 2s x 15 = 30s, then switch to slow
+    // Simplify: just poll every 2s for 30s
+    clearInterval(_pollInterval);
+    _pollCount = 0;
+    _pollInterval = setInterval(function() {
+      ensureButtonLabels();
+      updateAllContractIndicators();
+      _pollCount++;
+      if (_pollCount >= 15) { clearInterval(_pollInterval); _pollInterval = null; }
+    }, 2000);
+    // After fast polling stops, slow poll every 10s forever (catches late wallet connects)
+    setTimeout(function() {
+      if (!_pollInterval) {
+        setInterval(function() {
+          ensureButtonLabels();
+          updateAllContractIndicators();
+        }, 10000);
+      }
+    }, 35000);
   })();
 
   /* ── Expose globals for onclick attrs ────────────────────────────────────── */
@@ -5030,11 +5246,13 @@
 
   function loadTypeTest() {
     evictWorkspaceContractByName('TypeTestContract');
-    document.getElementById('editor').value = getContractSource('TypeTestContract');
+    var _src = getContractSource('TypeTestContract');
+    document.getElementById('editor').value = _src;
     updateLineNums();
     clearResults();
     syncCompileBtn();
     setEditorBadges('TypeTestContract');
+    setActiveContract('TypeTestContract', _src);
     setStatus('TypeTestContract loaded — Compile, Deploy, then call init() to begin testing all types and operators.', 'info');
   }
   window.loadTypeTest = loadTypeTest;
@@ -5049,6 +5267,7 @@
     clearResults();
     syncCompileBtn();
     setEditorBadges('LoopDemo');
+    setActiveContract('LoopDemo', document.getElementById('editor').value);
     setStatus('LoopDemo loaded. Call init() before runIterations(). Try factorial(5), sumRange(1,100), countEven(10), sqrtFloor(16), power(2,10).', 'info');
   }
   window.loadLoopDemo = loadLoopDemo;
@@ -5062,6 +5281,7 @@
     clearResults();
     syncCompileBtn();
     setEditorBadges('V3Types');
+    setActiveContract('V3Types', document.getElementById('editor').value);
     setStatus('V3Types loaded — Compile, Deploy, then call init() (sign with wallet). Try deriveContractAddr(42, 0, 4660) and getOwnerSyna() after init.', 'info');
   }
   window.loadV3Demo = loadV3Demo;
@@ -5075,6 +5295,7 @@
     clearResults();
     syncCompileBtn();
     setEditorBadges('StructValue');
+    setActiveContract('StructValue', document.getElementById('editor').value);
     setStatus('StructValue loaded — Compile, Deploy, then call init(). Try setCorner(10,20), getCornerX(), getBoxOriginX(), moveCorner(100,200).', 'info');
   }
   window.loadStructValue = loadStructValue;
@@ -5088,6 +5309,7 @@
     clearResults();
     syncCompileBtn();
     setEditorBadges('NamedError');
+    setActiveContract('NamedError', document.getElementById('editor').value);
     setStatus('NamedError loaded — Compile, Deploy, then call init(). Try withdraw(42) to see runtime arg in error, failOverflow() for multi-arg, or failUnauthorized() for no-arg.', 'info');
   }
   window.loadNamedError = loadNamedError;
@@ -5095,12 +5317,13 @@
   // ── AssetDemo (opcodes 0x57-0x5B) ─────────────────────────────────────────────
   function loadAssetDemo() {
     evictWorkspaceContractByName('AssetDemo');
-    const src = ASSET_getContractSource('SimpleToken');
+    const src = getContractSource('AssetDemo');
     document.getElementById('editor').value = src;
     updateLineNums();
     clearResults();
     syncCompileBtn();
     setEditorBadges('AssetDemo');
+    setActiveContract('AssetDemo', document.getElementById('editor').value);
     setStatus('AssetDemo loaded — Compile, Deploy, then call init(). Try createAsset(1000), checkOwner(1), transferAsset(1, 42), burnAsset(2).', 'info');
   }
   window.loadAssetDemo = loadAssetDemo;
@@ -5114,6 +5337,7 @@
     clearResults();
     syncCompileBtn();
     setEditorBadges('StructField');
+    setActiveContract('StructField', document.getElementById('editor').value);
     setStatus('StructField loaded — Compile, Deploy, then call init(). Try setOrigin(42, 99), getOriginX(), getOrigin(), moveX(10), swapCoordinates().', 'info');
   }
   window.loadStructField = loadStructField;
@@ -5121,9 +5345,10 @@
   // ── StackFailDemo (verification education) ───────────────────────────────
   function loadPQCDemo() {
     evictWorkspaceContractByName('PQCDemo');
-    document.getElementById('editor').value = PQC_getContractSource('SimpleToken');
+    document.getElementById('editor').value = getContractSource('PQCDemo');
     updateLineNums(); clearResults(); syncCompileBtn();
     setEditorBadges('PQCDemo');
+    setActiveContract('PQCDemo', document.getElementById('editor').value);
     // Fetch a fresh ML-DSA-65 test vector from the server
     fetch('/synq/pqc/test-vector')
       .then(function(r) { return r.json(); })
@@ -5149,6 +5374,7 @@
     stateSnapshot = {};
     deployedContracts = {};
     setEditorBadges('StackFailDemo');
+    setActiveContract('StackFailDemo', document.getElementById('editor').value);
     setStatus('StackFailDemo loaded — Compile to see the ✅ VERIFY badge. Each function uses balanced stack operations that Layer 2 verifies.', 'info');
   }
   window.loadStackFailDemo = loadStackFailDemo;

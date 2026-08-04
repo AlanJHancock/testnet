@@ -326,7 +326,7 @@ fn transpile_function(out: &mut String, f: &FunctionDefinition, contract: &Contr
     if let Some(ret_ty) = &f.returns {
         set_type("__return_type__", ret_ty.clone());
     }
-    let vis = if f.is_public { "public" } else { "internal" };
+    let vis = if f.is_public || f.requires_caller { "public" } else { "internal" };
 
     // Map attributes to Solidity modifiers/comments
     let mut modifiers = Vec::new();
@@ -444,7 +444,7 @@ fn transpile_function(out: &mut String, f: &FunctionDefinition, contract: &Contr
 }
 
 /// Infer the return type of a function by examining its return statements.
-fn infer_function_return_type(block: &Block) -> Option<Type> {
+pub fn infer_function_return_type(block: &Block) -> Option<Type> {
     for stmt in &block.statements {
         match stmt {
             Statement::Return(Some(expr)) => {
@@ -472,7 +472,7 @@ fn infer_function_return_type(block: &Block) -> Option<Type> {
 }
 
 /// Check if a block has any actual return statement (not just extern_call comments).
-fn block_has_return(block: &Block) -> bool {
+pub fn block_has_return(block: &Block) -> bool {
     for stmt in &block.statements {
         match stmt {
             Statement::Return(_) => return true,

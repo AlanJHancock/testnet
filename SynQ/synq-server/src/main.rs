@@ -1118,8 +1118,10 @@ async fn compile_handler(
                             name: p.name.clone(),
                             ty:   type_name(&p.ty),
                         }).collect(),
-                        has_return:     f.returns.is_some(),
-                        return_type:    f.returns.as_ref().map(type_name),
+                        has_return:     f.returns.is_some() ||
+                            synq_compiler::transpile_solidity::block_has_return(&f.body),
+                        return_type:    f.returns.as_ref().map(type_name)
+                            .or_else(|| synq_compiler::transpile_solidity::infer_function_return_type(&f.body).map(|t| type_name(&t))),
                         requires_state: f.requires_state.clone(),
                     governance_scope: f.attributes.iter().find_map(|a|
                         if let synq_compiler::ast::Attribute::Governance(scope) = a {

@@ -101,13 +101,9 @@ fn compile(path: &PathBuf) {
         }
     };
 
-    // Parse SynQ source
-    let ast = synq_compiler::parser::parse(&source).expect("Failed to parse source file");
-
-    // Generate bytecode
-    let codegen = synq_compiler::codegen::CodeGenerator::new();
-    let result = codegen.generate(&ast).expect("Failed to generate bytecode");
-    let bytecode = result.0; // (Vec<u8>, Vec<(String, u32)>) — take bytecode only
+    // Compile using the IR -> bytecode backend (v7.0 path)
+    let result = synq_compiler::compile_ir(&source).expect("Failed to compile source");
+    let bytecode = result.bytecode;
 
     // Real PQC signing over the compiled bytecode using a fresh, EPHEMERAL
     // ML-DSA-65 (FIPS 204) keypair generated for this compile only.
