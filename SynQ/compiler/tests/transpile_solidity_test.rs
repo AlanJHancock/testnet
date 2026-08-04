@@ -402,3 +402,4 @@ fn test_transpile_comprehensive_contract() {
     // Struct literal
     assert!(sol.contains("Point({x: 1, y: 2})"));
 }
+

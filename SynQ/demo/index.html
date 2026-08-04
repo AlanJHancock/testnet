@@ -6417,8 +6417,13 @@ var LOOP_LINES = [
     }
 
     async function decompileSqb(input) {
+      console.log('[DECOMPILE] decompileSqb called, input:', input);
       var file = input.files[0];
-      if (!file) return;
+      if (!file) {
+        console.log('[DECOMPILE] No file selected');
+        return;
+      }
+      console.log('[DECOMPILE] File:', file.name, 'size:', file.size);
       input.value = '';
 
       setStatus('Decompiling SQB artifact "' + file.name + '"...', 'info');
@@ -6429,13 +6434,17 @@ var LOOP_LINES = [
         console.log('[DECOMPILE] Loaded ' + file.name + ' (' + bytes.length + ' bytes)');
 
         var sqbB64 = bytesToBase64(bytes);
+        console.log('[DECOMPILE] Base64 encoded: ' + sqbB64.length + ' chars');
 
+        console.log('[DECOMPILE] Sending to ' + SYNQ_SERVER + '/decompile');
         var resp = await fetch(SYNQ_SERVER + '/decompile', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sqb: sqbB64 })
         });
+        console.log('[DECOMPILE] Response status:', resp.status, resp.statusText);
         var result = await resp.json();
+        console.log('[DECOMPILE] Response:', result.success, result.contract_name, result.error || '');
 
         if (!result.success) {
           setStatus('Decompile failed: ' + (result.error || 'unknown error'), 'error');
@@ -6444,43 +6453,84 @@ var LOOP_LINES = [
 
         var hasOriginal = result.original_source && result.original_source.length > 0;
         var hasSolidity = result.solidity_source && result.solidity_source.length > 0;
+        var decompiledSource = result.source || '— No SSA IR in SQB —';
 
         // Populate side-by-side panes
-        document.getElementById('decompileOriginal').textContent = hasOriginal ? result.original_source : '— No original source in SQB —';
-        document.getElementById('decompileSSA').textContent = result.source || '— No SSA IR in SQB —';
-
+        var origEl = document.getElementById('decompileOriginal');
+        var ssaEl = document.getElementById('decompileSSA');
+        var solEl = document.getElementById('decompileSolidity');
+        var winEl = document.getElementById('decompileWindow');
+        var nameEl = document.getElementById('decompileContractName');
         var solPane = document.getElementById('solidityPane');
-        if (hasSolidity) {
-          document.getElementById('decompileSolidity').textContent = result.solidity_source;
-          solPane.style.display = '';
-        } else {
-          solPane.style.display = 'none';
+        
+        console.log('[DECOMPILE] DOM elements found:', {
+          origEl: !!origEl, ssaEl: !!ssaEl, solEl: !!solEl,
+          winEl: !!winEl, nameEl: !!nameEl, solPane: !!solPane
+        });
+
+        if (origEl) origEl.textContent = hasOriginal ? result.original_source : '— No original source in SQB —';
+        if (ssaEl) ssaEl.textContent = decompiledSource;
+
+        if (solPane && solEl) {
+          if (hasSolidity) {
+            solEl.textContent = result.solidity_source;
+            solPane.style.display = '';
+          } else {
+            solPane.style.display = 'none';
+          }
         }
 
-        document.getElementById('decompileContractName').textContent = '— ' + file.name + (result.contract_name && result.contract_name !== file.name.replace(/\.sqb$/, '') ? '  (' + result.contract_name + ')' : '');
+        if (nameEl) {
+          nameEl.textContent = '— ' + file.name + (result.contract_name && result.contract_name !== file.name.replace(/\.sqb$/, '') ? '  (' + result.contract_name + ')' : '');
+        }
 
         // Show window (stays open)
-        document.getElementById('decompileWindow').classList.add('show');
-        document.getElementById('decompileWindow').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        if (winEl) {
+          winEl.classList.add('show');
+          winEl.style.display = 'block';
+          winEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          console.log('[DECOMPILE] Window shown, visible:', winEl.classList.contains('show'));
+        } else {
+          console.error('[DECOMPILE] decompileWindow element NOT FOUND!');
+        }
 
+        // Also load decompiled source into the editor for inspection
+        if (result.source) {
+          var editorEl = document.getElementById('editor');
+          if (editorEl) {
+            editorEl.value = decompiledSource;
+            updateLineNums();
+            console.log('[DECOMPILE] Source loaded into editor');
+          }
+        }
+
+        // Update contract name in the tab
         if (result.contract_name) {
           currentContractName = result.contract_name;
           var cn = document.getElementById('contractName');
           if (cn) cn.textContent = result.contract_name;
+          // Also update the editor tab label
+          var tab = document.querySelector('.editor-tab.active, .editor-tab');
+          if (tab) tab.textContent = result.contract_name + '.synq';
         }
 
-        var statusMsg = 'Decompiled ' + result.contract_name + ' — SSA: ' + result.source.length + ' chars';
+        var statusMsg = 'Decompiled ' + result.contract_name + ' — SSA: ' + (result.source || '').length + ' chars';
         if (hasOriginal) statusMsg += ', original: ' + result.original_source.length + ' chars';
         if (hasSolidity) statusMsg += ', Solidity: ' + result.solidity_source.length + ' chars';
         setStatus(statusMsg, 'success');
 
         console.log('[DECOMPILE] Success: ' + result.contract_name +
-          ', decompiled=' + result.source.length +
+          ', decompiled=' + (result.source || '').length +
           ', original=' + (hasOriginal ? result.original_source.length : 'none') +
           ', solidity=' + (hasSolidity ? result.solidity_source.length : 'none'));
       } catch(e) {
         console.error('[DECOMPILE] Failed:', e);
         setStatus('Decompile failed: ' + e.message, 'error');
+        // Also show error in the decompile window so user sees something
+        var ssaEl = document.getElementById('decompileSSA');
+        var winEl = document.getElementById('decompileWindow');
+        if (ssaEl) ssaEl.textContent = 'ERROR: ' + e.message + '\n\nStack: ' + (e.stack || '').substring(0, 500);
+        if (winEl) { winEl.classList.add('show'); winEl.style.display = 'block'; }
       }
     }
     window.decompileSqb = decompileSqb;
