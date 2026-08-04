@@ -544,6 +544,7 @@
   </div>
   <div class="editor-wrap">
     <div class="line-nums" id="lineNums">1</div>
+    <div id="sqbModeBanner" style="display:none;padding:6px 12px;background:rgba(26,60,107,0.15);border:1px solid rgba(80,140,220,0.3);border-radius:6px 6px 0 0;font-size:12px;color:rgba(140,180,240,0.9);margin-bottom:0;"></div>
     <textarea id="editor" spellcheck="false" autocomplete="off" autocorrect="off"></textarea>
   </div>
   <!-- Hidden file input -->
@@ -2207,6 +2208,13 @@
     var _ext = ext || 'synq';
     if (_eb) { _eb.textContent = name ? name + '.' + _ext : ''; _eb.style.display = name ? 'inline-block' : 'none'; }
     if (_rb) { _rb.textContent = name ? name + '.sqb' : ''; _rb.style.display = name ? 'inline' : 'none'; }
+    // Clear SQB mode when loading a source contract (not SQB)
+    if (_ext !== 'sqb') {
+      var _banner = document.getElementById('sqbModeBanner');
+      if (_banner) { _banner.style.display = 'none'; }
+      var _editor = document.getElementById('editor');
+      if (_editor) { _editor.readOnly = false; _editor.style.opacity = ''; }
+    }
   }
   window.setEditorBadges = setEditorBadges;
 
@@ -5558,6 +5566,40 @@
         // Also update the contractNameBadge in the Execute Contract card
         var _cnbUpload = document.getElementById('contractNameBadge');
         if (_cnbUpload) { _cnbUpload.textContent = contractName; _cnbUpload.style.display = 'inline'; }
+
+        // Update the editor to reflect the uploaded SQB artifact
+        var editorEl = document.getElementById('editor');
+        if (editorEl) {
+          // Check if SQB has an embedded SOURCE section (0x08)
+          var sqbSource = sections[0x08] ? new TextDecoder('utf-8').decode(sections[0x08]) : null;
+          if (sqbSource && sqbSource.length > 0) {
+            // Show the original source code in the editor (read-only feel)
+            editorEl.value = sqbSource;
+            editorEl.readOnly = true;
+            editorEl.style.opacity = '0.6';
+            editorEl.placeholder = '';
+          } else {
+            // No source section — show a read-only placeholder
+            editorEl.value = '';
+            editorEl.readOnly = true;
+            editorEl.style.opacity = '0.4';
+            editorEl.placeholder = 'SQB artifact loaded: ' + contractName + ' (' + bytes.length + ' bytes)\nNo source section embedded.\nClick Decompile .sqb to reconstruct pseudo-SynQ from IR.\nClick Deploy to deploy this artifact directly.';
+          }
+          updateLineNums();
+        }
+        // Show a visual indicator that editor is in SQB mode
+        var _sqbBanner = document.getElementById('sqbModeBanner');
+        if (_sqbBanner) {
+          _sqbBanner.textContent = '\u2B06\uFE0F SQB artifact loaded: ' + contractName + '.' + (sections[0x08] ? ' Source shown (read-only).' : ' No source section.');
+          _sqbBanner.style.display = 'block';
+        }
+        // Update compile button to reflect SQB mode
+        var _compBtn = document.getElementById('compileBtn');
+        if (_compBtn) {
+          _compBtn.innerHTML = 'Compile \u25B6 ' + contractName;
+          _compBtn.disabled = false;
+        }
+        syncCompileBtn();
 
         // Show bytecode in the display
         (function showBytecode() {
