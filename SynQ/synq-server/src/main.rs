@@ -2167,6 +2167,85 @@ struct EvmCallResponse {
     errors:     Vec<String>,
 }
 
+/// Convert a raw user-provided arg to the format cast expects,
+/// based on the Solidity parameter type extracted from the function signature.
+fn convert_evm_arg(raw: &str, sol_type: &str) -> String {
+    let sol_type = sol_type.trim();
+    let raw = raw.trim();
+
+    // Integer types -- cast handles decimal natively
+    if sol_type.starts_with("uint") || sol_type.starts_with("int") {
+        return raw.to_string();
+    }
+
+    // Boolean -- pass as-is
+    if sol_type == "bool" {
+        return raw.to_string();
+    }
+
+    // String -- pass as-is
+    if sol_type == "string" {
+        return raw.to_string();
+    }
+
+    // bytes32, bytesN -- convert to 0x-prefixed hex
+    if sol_type.starts_with("bytes") {
+        if raw.starts_with("0x") || raw.starts_with("0X") {
+            let hex = &raw[2..];
+            let target_bytes: usize = if sol_type == "bytes32" { 32 }
+                else if sol_type == "bytes" { 0 }
+                else if let Ok(n) = sol_type[5..].parse::<usize>() { n }
+                else { 32 };
+
+            if target_bytes > 0 {
+                let padded = format!("{:0>width$}", hex, width = target_bytes * 2);
+                return format!("0x{}", padded);
+            }
+            return format!("0x{}", hex);
+        } else {
+            // Try parsing as decimal integer, then convert to hex
+            if let Ok(val) = raw.parse::<u128>() {
+                let target_bytes: usize = if sol_type == "bytes32" { 32 }
+                    else if let Ok(n) = sol_type[5..].parse::<usize>() { n }
+                    else { 32 };
+                let hex = format!("{:0>width$x}", val, width = target_bytes * 2);
+                return format!("0x{}", hex);
+            }
+            // Treat as raw bytes string
+            let hex: String = raw.bytes().map(|b| format!("{:02x}", b)).collect();
+            return format!("0x{}", hex);
+        }
+    }
+
+    // address -- ensure 0x prefix
+    if sol_type == "address" {
+        if raw.starts_with("0x") || raw.starts_with("0X") {
+            return raw.to_string();
+        }
+        if let Ok(val) = raw.parse::<u128>() {
+            return format!("0x{:0>40x}", val);
+        }
+        return format!("0x{}", raw);
+    }
+
+    // Default -- pass as-is
+    raw.to_string()
+}
+
+/// Parse parameter types from a Solidity function signature like "setSessionId(bytes32)"
+fn parse_sig_param_types(sig: &str) -> Vec<String> {
+    if let Some(start) = sig.find("(") {
+        if let Some(end) = sig.rfind(")") {
+            if start < end {
+                let inner = &sig[start+1..end];
+                if inner.is_empty() { return vec![]; }
+                return inner.split(",").map(|s| s.trim().to_string()).collect();
+            }
+        }
+    }
+    vec![]
+}
+
 async fn evm_call_handler(
     Json(req): Json<EvmCallRequest>,
 ) -> (StatusCode, RespJson<EvmCallResponse>) {
@@ -2180,11 +2259,18 @@ async fn evm_call_handler(
     // cast expects: "funcName(types)" followed by args as separate CLI args
     let sig = req.function_signature.clone();
 
+    // Convert args based on parameter types from the signature
+    let param_types = parse_sig_param_types(&sig);
+    let converted_args: Vec<String> = req.args.iter().enumerate().map(|(i, raw)| {
+        let ptype = param_types.get(i).map(|s| s.as_str()).unwrap_or("");
+        convert_evm_arg(raw, ptype)
+    }).collect();
+
     if req.is_view {
         // Read-only call via `cast call`
         let mut cmd = Command::new(&cast_bin);
         cmd.arg("call").arg(&req.contract_address).arg(&sig);
-        for arg in &req.args {
+        for arg in &converted_args {
             cmd.arg(arg);
         }
         cmd.args(["--rpc-url", rpc_url]);
@@ -2228,7 +2314,7 @@ async fn evm_call_handler(
         // State-changing call via `cast send`
         let mut cmd = Command::new(&cast_bin);
         cmd.arg("send").arg(&req.contract_address).arg(&sig);
-        for arg in &req.args {
+        for arg in &converted_args {
             cmd.arg(arg);
         }
         cmd.args(["--rpc-url", rpc_url, "--private-key", anvil_pk]);
