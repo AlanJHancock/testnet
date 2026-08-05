@@ -620,12 +620,21 @@ fn parse_arg_typed(v: &serde_json::Value, ty_hint: &str) -> Result<Value, String
             }
             // If the caller declared this param as bytes, decode hex string to binary.
             // Accepts both "0x..." prefixed and bare hex strings.
+            // Falls back to decimal->bytes and raw UTF-8 bytes for non-hex input.
             if ty_hint == "bytes" {
                 let hex_str = if s.starts_with("0x") || s.starts_with("0X") { &s[2..] } else { s };
-                return match hex::decode(hex_str) {
-                    Ok(b)  => Ok(Value::Bytes(b)),
-                    Err(_) => Err(format!("Invalid hex bytes: {}", &hex_str[..hex_str.len().min(40)])),
-                };
+                if let Ok(b) = hex::decode(hex_str) {
+                    return Ok(Value::Bytes(b));
+                }
+                // Try parsing as decimal integer -> big-endian bytes
+                if let Ok(val) = s.parse::<u128>() {
+                    let bytes = val.to_be_bytes();
+                    let trimmed: Vec<u8> = bytes.iter().copied().skip_while(|&b| b == 0).collect();
+                    let result = if trimmed.is_empty() { vec![0u8] } else { trimmed };
+                    return Ok(Value::Bytes(result));
+                }
+                // Fall back to raw UTF-8 bytes
+                return Ok(Value::Bytes(s.as_bytes().to_vec()));
             }
             // If the type hint indicates a tuple type, the value must contain commas
             if ty_hint.starts_with('(') && ty_hint.ends_with(')') && !s.contains(',') {
