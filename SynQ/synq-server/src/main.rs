@@ -2417,10 +2417,41 @@ async fn evm_call_handler(
                 let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
                 let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 let combined = if stderr.is_empty() { stdout } else { stderr };
+
+                // Try cast call to get the actual revert reason
+                let mut call_cmd = Command::new(&cast_bin);
+                call_cmd.arg("call").arg(&req.contract_address).arg(&sig);
+                for arg in &converted_args {
+                    call_cmd.arg(arg);
+                }
+                call_cmd.args(["--rpc-url", rpc_url,
+                    "--from", "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"]);
+                let call_out = call_cmd.output();
+                let revert_reason = match call_out {
+                    Ok(co) if !co.status.success() => {
+                        let call_err = String::from_utf8_lossy(&co.stderr).trim().to_string();
+                        // Extract revert reason from cast error
+                        if let Some(pos) = call_err.find("revert: ") {
+                            Some(call_err[pos..].lines().next().unwrap_or("").to_string())
+                        } else if let Some(pos) = call_err.find("execution reverted") {
+                            Some("execution reverted".to_string())
+                        } else if !call_err.is_empty() {
+                            Some(call_err.lines().last().unwrap_or(&call_err).to_string())
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+
+                let mut errors = vec![combined];
+                if let Some(reason) = revert_reason {
+                    errors.push(format!("Revert reason: {}", reason));
+                }
                 (StatusCode::OK, RespJson(EvmCallResponse {
                     success: false, output: None, tx_hash: None,
                     gas_used: None, block_num: None,
-                    errors: vec![combined],
+                    errors,
                 }))
             }
             Err(e) => {

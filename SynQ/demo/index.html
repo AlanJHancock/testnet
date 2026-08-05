@@ -3812,7 +3812,23 @@
         }
       } else {
         var errs = data.errors || ['Unknown error'];
-        resultSpan.innerHTML = '<span style="color:#f87171;">' + errs[0].replace(/</g, '&lt;').slice(0, 80) + '</span>';
+        // Show the most useful error: prefer revert reason, then first error
+        var displayErr = errs[errs.length - 1] || errs[0];
+        // If the last error is just "Revert reason: execution reverted" without
+        // specifics, fall back to the first error which has the full message
+        if (displayErr.indexOf('Revert reason: execution reverted') === 0 &&
+            displayErr.indexOf(': ', 20) === -1) {
+          displayErr = errs[0];
+        }
+        // Extract revert reason from cast error if present
+        var revertMatch = displayErr.match(/execution reverted: ([^,"]+)/);
+        if (revertMatch) {
+          displayErr = 'Revert: ' + revertMatch[1];
+        } else if (displayErr.length > 120) {
+          // Truncate long errors but keep the meaningful part
+          displayErr = displayErr.slice(0, 120) + '...';
+        }
+        resultSpan.innerHTML = '<span style="color:#f87171;">' + displayErr.replace(/</g, '&lt;') + '</span>';
       }
     } catch(e) {
       resultSpan.innerHTML = '<span style="color:#f87171;">' + e.message.replace(/</g, '&lt;') + '</span>';
