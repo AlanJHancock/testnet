@@ -456,24 +456,55 @@ impl IrLowerer {
 
             // ── Binary operations ──
             IrOp::BinOp(op, a, b) => {
-                load_val!(self, *a);
-                load_val!(self, *b);
-                let opcode = match op {
-                    BinaryOperator::Add => OpCode::Add,
-                    BinaryOperator::Sub => OpCode::Sub,
-                    BinaryOperator::Mul => OpCode::Mul,
-                    BinaryOperator::Div => OpCode::Div,
-                    BinaryOperator::Mod => OpCode::Rem,
-                    BinaryOperator::Eq => OpCode::Eq,
-                    BinaryOperator::Ne => OpCode::Ne,
-                    BinaryOperator::Lt => OpCode::Lt,
-                    BinaryOperator::Le => OpCode::Le,
-                    BinaryOperator::Gt => OpCode::Gt,
-                    BinaryOperator::Ge => OpCode::Ge,
-                    BinaryOperator::And => return Err("logical And not a single opcode".into()),
-                    BinaryOperator::Or => return Err("logical Or not a single opcode".into()),
-                };
-                self.asm.emit_op(opcode);
+                match op {
+                    // Logical AND: (a != 0) * (b != 0)  → 1 only if both non-zero
+                    BinaryOperator::And => {
+                        load_val!(self, *a);
+                        self.asm.emit_op(OpCode::Push);
+                        self.asm.emit_i32(0);
+                        self.asm.emit_op(OpCode::Ne);
+                        load_val!(self, *b);
+                        self.asm.emit_op(OpCode::Push);
+                        self.asm.emit_i32(0);
+                        self.asm.emit_op(OpCode::Ne);
+                        self.asm.emit_op(OpCode::Mul);
+                    }
+                    // Logical OR: (a != 0) + (b != 0) > 0  → 1 if either non-zero
+                    BinaryOperator::Or => {
+                        load_val!(self, *a);
+                        self.asm.emit_op(OpCode::Push);
+                        self.asm.emit_i32(0);
+                        self.asm.emit_op(OpCode::Ne);
+                        load_val!(self, *b);
+                        self.asm.emit_op(OpCode::Push);
+                        self.asm.emit_i32(0);
+                        self.asm.emit_op(OpCode::Ne);
+                        self.asm.emit_op(OpCode::Add);
+                        self.asm.emit_op(OpCode::Push);
+                        self.asm.emit_i32(0);
+                        self.asm.emit_op(OpCode::Gt);
+                    }
+                    // Standard arithmetic / comparison ops
+                    _ => {
+                        load_val!(self, *a);
+                        load_val!(self, *b);
+                        let opcode = match op {
+                            BinaryOperator::Add => OpCode::Add,
+                            BinaryOperator::Sub => OpCode::Sub,
+                            BinaryOperator::Mul => OpCode::Mul,
+                            BinaryOperator::Div => OpCode::Div,
+                            BinaryOperator::Mod => OpCode::Rem,
+                            BinaryOperator::Eq => OpCode::Eq,
+                            BinaryOperator::Ne => OpCode::Ne,
+                            BinaryOperator::Lt => OpCode::Lt,
+                            BinaryOperator::Le => OpCode::Le,
+                            BinaryOperator::Gt => OpCode::Gt,
+                            BinaryOperator::Ge => OpCode::Ge,
+                            _ => unreachable!(),
+                        };
+                        self.asm.emit_op(opcode);
+                    }
+                }
             }
 
             // ── Unary operations ──

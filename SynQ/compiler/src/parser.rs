@@ -523,8 +523,8 @@ fn parse_statement(pair: Pair<Rule>) -> Statement {
 
 fn parse_expression(pair: Pair<Rule>) -> Expression {
     match pair.as_rule() {
-        Rule::expression | Rule::logical => parse_expression(pair.into_inner().next().unwrap()),
-        Rule::comparison | Rule::additive | Rule::multiplicative => {
+        Rule::expression => parse_expression(pair.into_inner().next().unwrap()),
+        Rule::logical | Rule::comparison | Rule::additive | Rule::multiplicative => {
             let mut inner = pair.into_inner();
             let mut left = parse_expression(inner.next().unwrap());
             while let Some(op_pair) = inner.next() {
@@ -699,6 +699,8 @@ fn parse_binop(pair: &Pair<Rule>) -> BinaryOperator {
         ">"  => BinaryOperator::Gt,
         ">=" => BinaryOperator::Ge,
         "%"  => BinaryOperator::Mod,
+        "||" => BinaryOperator::Or,
+        "&&" => BinaryOperator::And,
         _    => BinaryOperator::Add,
     }
 }

@@ -160,6 +160,8 @@ struct Session {
     /// AuthorityEnvelope and uses the GOVERNANCE domain tag.
     governance_scopes: std::collections::HashMap<String, String>,
     authority_scopes: std::collections::HashMap<String, String>,
+    /// Functions that use `as caller` — need non-zero caller on devnet
+    caller_fns: std::collections::HashSet<String>,
 }
 
 // ─── PR-G: Persistent compiler-attestation key ───────────────────────────────
@@ -751,6 +753,8 @@ struct FunctionMeta {
     authority_scope: Option<String>,
     /// Whether this function is view-only (no state modification)
     is_view: bool,
+    /// `as caller` — function uses authenticated caller address
+    requires_caller: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -824,6 +828,7 @@ struct ManifestFunction {
     governance_scope: Option<String>,
     authority_scope: Option<String>,
     effects: Vec<String>,
+    requires_caller: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1149,6 +1154,7 @@ async fn compile_handler(
                     ),
                     is_view:        synq_compiler::transpile_solidity::is_function_view(f, c),
                         modifies:       f.modifies.clone(),
+                    requires_caller: f.requires_caller,
                     }),
                     _ => None,
                 }).collect())
@@ -1288,6 +1294,7 @@ async fn compile_handler(
                                     governance_scope: gov_scope,
                                     authority_scope: auth_scope,
                                     effects,
+                                    requires_caller: f.requires_caller,
                                 });
                             }
                         }
@@ -1547,6 +1554,7 @@ async fn compile_handler(
                     "return_type": f.return_type,
                     "authority_scope": f.authority_scope,
                     "governance_scope": f.governance_scope,
+                    "requires_caller": f.requires_caller,
                 })).collect::<Vec<_>>(),
                 "state_vars": sqb_state_vars.iter().map(|(name, slot)| {
                     let ty = {
@@ -1627,6 +1635,7 @@ async fn compile_handler(
                     "return_type": f.return_type,
                     "authority_scope": f.authority_scope,
                     "governance_scope": f.governance_scope,
+                    "requires_caller": f.requires_caller,
                 })).collect::<Vec<_>>(),
                 "state_vars": sqb_state_vars.iter().map(|(name, slot)| {
                     let ty = {
@@ -4098,6 +4107,22 @@ async fn session_new_handler(
                 }
                 scopes
             },
+            caller_fns: {
+                let mut fns = std::collections::HashSet::new();
+                let resolved_manifest = sqb_manifest.as_ref().or(req.manifest.as_ref());
+                if let Some(ref manifest) = resolved_manifest {
+                    if let Some(funcs) = manifest.get("functions").and_then(|v| v.as_array()) {
+                        for f in funcs {
+                            if let Some(name) = f.get("name").and_then(|v| v.as_str()) {
+                                if f.get("requires_caller").and_then(|v| v.as_bool()) == Some(true) {
+                                    fns.insert(name.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                fns
+            },
         });
         // Register contract in workspace if workspace_id provided
         if let (Some(wid), Some(cname)) = (wid, cname) {
@@ -4479,7 +4504,8 @@ async fn session_run_handler(
     // so the "as caller" unauthenticated check passes.
     if effective_caller == [0u8; 20]
         && (session.authority_scopes.contains_key(&req.function)
-            || session.governance_scopes.contains_key(&req.function))
+            || session.governance_scopes.contains_key(&req.function)
+            || session.caller_fns.contains(&req.function))
     {
         // Use first 20 bytes of the devnet authority identity as caller
         use sha3::Digest;
