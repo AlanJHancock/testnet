@@ -467,10 +467,40 @@ fn transpile_function(out: &mut String, f: &FunctionDefinition, contract: &Contr
         }
     };
 
-    // Detect view: no @effects and no modifies = read-only function
+    // Detect view: a function is view iff it does NOT modify state.
+    // Check three signals: @effects attr, explicit modifies list, and
+    // actual assignments to state variables in the body (direct assignment,
+    // field assignment, map assignment, or set op).
     let has_effects = f.attributes.iter().any(|a| matches!(a, Attribute::Effects(_)));
     let has_modifies = !f.modifies.is_empty();
-    let is_view = !has_effects && !has_modifies && !f.requires_caller;
+    let state_var_names: std::collections::HashSet<String> = contract.parts.iter()
+        .filter_map(|p| if let ContractPart::StateVariable(sv) = p { Some(sv.name.clone()) } else { None })
+        .collect();
+    fn body_writes_state(block: &Block, state_vars: &std::collections::HashSet<String>) -> bool {
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(name, _) => {
+                    if state_vars.contains(name) { return true; }
+                }
+                Statement::FieldAssignment { .. } | Statement::MapAssignment { .. } | Statement::SetOp { .. } => {
+                    return true; // field/map/set writes always touch state
+                }
+                Statement::If { then_block, else_block, .. } => {
+                    if body_writes_state(then_block, state_vars) { return true; }
+                    if let Some(e) = else_block {
+                        if body_writes_state(e, state_vars) { return true; }
+                    }
+                }
+                Statement::While { body, .. } => {
+                    if body_writes_state(body, state_vars) { return true; }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+    let writes_state = body_writes_state(&f.body, &state_var_names);
+    let is_view = !has_effects && !has_modifies && !f.requires_caller && !writes_state;
 
     let view_modifier = if is_view { " view" } else { "" };
 

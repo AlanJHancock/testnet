@@ -3857,8 +3857,11 @@ async fn session_new_handler(
         // Extract manifest from SQB for L3 (if present)
         if let Some(manifest_str) = artifact.manifest_json() {
             if let Ok(mf) = serde_json::from_str::<serde_json::Value>(manifest_str) {
+                eprintln!("[SQB] Manifest extracted: {} functions", mf.get("functions").map(|f| f.as_array().map(|a| a.len()).unwrap_or(0)).unwrap_or(0));
                 sqb_manifest = Some(mf);
             }
+        } else {
+            eprintln!("[SQB] No manifest section in SQB artifact");
         }
 
         // Extract artifact root, signature, and sections hash for L3 verification
@@ -3999,7 +4002,8 @@ async fn session_new_handler(
             governance_scopes: {
                 let mut scopes = req.governance_scopes.unwrap_or_default();
                 if scopes.is_empty() {
-                    if let Some(ref manifest) = req.manifest {
+                    let resolved_manifest = sqb_manifest.as_ref().or(req.manifest.as_ref());
+                    if let Some(ref manifest) = resolved_manifest {
                         if let Some(fns) = manifest.get("functions").and_then(|v| v.as_array()) {
                             for f in fns {
                                 if let (Some(name), Some(scope)) = (
@@ -4019,7 +4023,10 @@ async fn session_new_handler(
             authority_scopes: {
                 let mut scopes = req.authority_scopes.unwrap_or_default();
                 if scopes.is_empty() {
-                    if let Some(ref manifest) = req.manifest {
+                    let resolved_manifest = sqb_manifest.as_ref().or(req.manifest.as_ref());
+                    eprintln!("[SESSION] authority_scopes: req.manifest={}, sqb_manifest={}, resolved={}",
+                        req.manifest.is_some(), sqb_manifest.is_some(), resolved_manifest.is_some());
+                    if let Some(ref manifest) = resolved_manifest {
                         if let Some(fns) = manifest.get("functions").and_then(|v| v.as_array()) {
                             for f in fns {
                                 if let (Some(name), Some(scope)) = (
