@@ -22,6 +22,14 @@ use crate::ast::*;
 
 thread_local! {
     static TYPE_CTX: RefCell<HashMap<String, Type>> = RefCell::new(HashMap::new());
+    static BUILTIN_FLAGS: RefCell<BuiltinFlags> = RefCell::new(BuiltinFlags::default());
+}
+
+#[derive(Default)]
+struct BuiltinFlags {
+    needs_to_syna: bool,
+    needs_from_syna: bool,
+    needs_contract_addr: bool,
 }
 
 fn set_type(name: &str, ty: Type) {
@@ -157,6 +165,9 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
         None => return String::new(),
     };
     let mut out = String::new();
+
+    // Reset builtin flags
+    BUILTIN_FLAGS.with(|f| *f.borrow_mut() = BuiltinFlags::default());
 
     // Header
     writeln!(out, "// ═════════════════════════════════════════════════════════════════").unwrap();
@@ -306,6 +317,57 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
             transpile_function(&mut out, f, contract);
         }
     }
+
+    // Emit helper functions for used builtins
+    BUILTIN_FLAGS.with(|flags| {
+        let f = flags.borrow();
+        if f.needs_to_syna {
+            writeln!(out, "").unwrap();
+            writeln!(out, "    // SynQ Bech32 builtin: to_syna — EVM approximation (hex string)").unwrap();
+            writeln!(out, "    function _toSyna(address addr) internal pure returns (string memory) {{").unwrap();
+            writeln!(out, "        bytes memory s = new bytes(42);").unwrap();
+            writeln!(out, "        s[0] = bytes1(uint8(0x30)); s[1] = bytes1(uint8(0x78));").unwrap();
+            writeln!(out, "        bytes16 hexChars = \"0123456789abcdef\";").unwrap();
+            writeln!(out, "        for (uint i = 0; i < 20; i++) {{").unwrap();
+            writeln!(out, "            uint8 b = uint8(bytes20(addr)[i]);").unwrap();
+            writeln!(out, "            s[2 + i*2] = hexChars[b >> 4];").unwrap();
+            writeln!(out, "            s[3 + i*2] = hexChars[b & 0x0f];").unwrap();
+            writeln!(out, "        }}").unwrap();
+            writeln!(out, "        return string(s);").unwrap();
+            writeln!(out, "    }}").unwrap();
+        }
+        if f.needs_from_syna {
+            writeln!(out, "").unwrap();
+            writeln!(out, "    // SynQ Bech32 builtin: from_syna — EVM approximation (parse hex string)").unwrap();
+            writeln!(out, "    function _fromSyna(string memory s) internal pure returns (uint256) {{").unwrap();
+            writeln!(out, "        bytes memory b = bytes(s);").unwrap();
+            writeln!(out, "        uint256 result = 0;").unwrap();
+            writeln!(out, "        uint256 start = 0;").unwrap();
+            writeln!(out, "        if (b.length >= 2 && b[0] == bytes1(uint8(0x30)) && (b[1] == bytes1(uint8(0x78)) || b[1] == bytes1(uint8(0x58)))) start = 2;").unwrap();
+            writeln!(out, "        for (uint i = start; i < b.length && i < 66; i++) {{").unwrap();
+            writeln!(out, "            uint8 c = uint8(b[i]);").unwrap();
+            writeln!(out, "            uint8 val;").unwrap();
+            writeln!(out, "            if (c >= 0x30 && c <= 0x39) val = c - 0x30;").unwrap();
+            writeln!(out, "            else if (c >= 0x61 && c <= 0x66) val = c - 0x61 + 10;").unwrap();
+            writeln!(out, "            else if (c >= 0x41 && c <= 0x46) val = c - 0x41 + 10;").unwrap();
+            writeln!(out, "            else break;").unwrap();
+            writeln!(out, "            result = result * 16 + val;").unwrap();
+            writeln!(out, "        }}").unwrap();
+            writeln!(out, "        return result;").unwrap();
+            writeln!(out, "    }}").unwrap();
+        }
+        if f.needs_contract_addr {
+            writeln!(out, "").unwrap();
+            writeln!(out, "    // SynQ Bech32 builtin: contract_address — EVM approximation (CREATE2-style)").unwrap();
+            writeln!(out, "    function _contractAddress(uint256 deployer, uint256 nonce, uint256 artifactHash) internal pure returns (string memory) {{").unwrap();
+            writeln!(out, "        bytes32 h = keccak256(abi.encodePacked(deployer, nonce, artifactHash));").unwrap();
+            writeln!(out, "        return _toSyna(address(uint160(uint256(h))));").unwrap();
+            writeln!(out, "    }}").unwrap();
+        }
+    });
+
+    // Reset flags for next compilation
+    BUILTIN_FLAGS.with(|f| *f.borrow_mut() = BuiltinFlags::default());
 
     writeln!(out, "}}").unwrap();
     out
@@ -654,15 +716,28 @@ fn transpile_expr(expr: &Expression) -> String {
                 "kyber_decaps" | "kyber_encaps" =>
                     format!("bytes(new bytes(0)) /* SXCP bridge stub: {} */", name),
                 "aegis_call" | "aegis_decaps" |
-                "authority_envelope" | "authority_require" | "authority_identity" |
+                "authority_envelope" | "authority_require" |
                 "ai_infer" |
                 "asset_create" | "asset_transfer" | "asset_burn" |
                 "asset_balance" | "asset_owner" =>
                     format!("uint256(0) /* SXCP bridge stub: {} */", name),
-                "to_syna" | "contract_address" =>
-                    format!("new string(0) /* SXCP Bech32 bridge stub: {} */", name),
-                "from_syna" =>
-                    format!("uint256(0) /* SXCP Bech32 bridge stub: from_syna */"),
+                "authority_identity" =>
+                    format!("uint256(uint160(msg.sender)) /* EVM approximation: authority_identity = msg.sender */"),
+                "to_syna" => {
+                    BUILTIN_FLAGS.with(|f| f.borrow_mut().needs_to_syna = true);
+                    format!("_toSyna(address(uint160({})))", transpile_expr(&args[0]))
+                }
+                "contract_address" => {
+                    BUILTIN_FLAGS.with(|f| f.borrow_mut().needs_contract_addr = true);
+                    format!("_contractAddress({}, {}, {})",
+                        transpile_expr(&args[0]),
+                        transpile_expr(&args[1]),
+                        transpile_expr(&args[2]))
+                },
+                "from_syna" => {
+                    BUILTIN_FLAGS.with(|f| f.borrow_mut().needs_from_syna = true);
+                    format!("_fromSyna({})", transpile_expr(&args[0]))
+                },
                 "extern_call" => {
                     // extern_call in expression context — comment for SXCP bridge
                     let contract = match &args[0] {
