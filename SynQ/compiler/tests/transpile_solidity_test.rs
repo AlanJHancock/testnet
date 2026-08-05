@@ -80,7 +80,7 @@ fn test_transpile_function_signatures() {
             }
         }
     "#);
-    assert!(sol.contains("function get() internal returns (uint256)"));
+    assert!(sol.contains("function get() internal view returns (uint256)"));
     assert!(sol.contains("function set(uint256 v) public returns (bool)"));
 }
 

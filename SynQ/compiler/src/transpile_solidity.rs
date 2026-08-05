@@ -405,7 +405,14 @@ fn transpile_function(out: &mut String, f: &FunctionDefinition, contract: &Contr
         }
     };
 
-    let mut sig = format!("    function {}({}) {}{}", f.name, params.join(", "), vis, returns);
+    // Detect view: no @effects and no modifies = read-only function
+    let has_effects = f.attributes.iter().any(|a| matches!(a, Attribute::Effects(_)));
+    let has_modifies = !f.modifies.is_empty();
+    let is_view = !has_effects && !has_modifies && !f.requires_caller;
+
+    let view_modifier = if is_view { " view" } else { "" };
+
+    let mut sig = format!("    function {}({}) {}{}{}", f.name, params.join(", "), vis, view_modifier, returns);
     if f.requires_caller {
         sig.push_str(" /* as caller */");
     }
