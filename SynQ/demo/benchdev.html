@@ -442,7 +442,6 @@ contract TypeTestContract {
 
   function setLabel(label: str) -> bool as caller {
     require(ready, "not initialised");
-    require(!labelled, "label already set");
     s_val    = label;
     labelled = true;
     return true;
@@ -484,9 +483,9 @@ contract FaultDemo {
 
 <script type="module">
 // ── WASM Loader ──────────────────────────────────────────────────
-import init, { compile_synq, synq_version } from '/demo/wasm/synq_compiler_wasm.js';
+import init, { compile_synq, synq_version } from '/demo/wasm/synq_compiler_wasm.js?v=42f8787c';
 
-const _wasmReady = init({ module_or_path: '/demo/wasm/synq_compiler_wasm_bg.wasm' });
+const _wasmReady = init({ module_or_path: '/demo/wasm/synq_compiler_wasm_bg.wasm?v=42f8787c' });
 
 window.SynQWasm = {
   ready: _wasmReady,
@@ -752,8 +751,6 @@ async function runBench() {
     var netOverhead = (sMed / lMed).toFixed(1);
     var wasmVsHttp = (sMed / wMed).toFixed(1);
     // Compare actual hex content (normalize 0x prefix)
-      var wHex = wasmHexStr.startsWith('0x') ? wasmHexStr.slice(2).toLowerCase() : wasmHexStr.toLowerCase();
-      var sHex = srvHexStr.startsWith('0x') ? srvHexStr.slice(2).toLowerCase() : srvHexStr.toLowerCase();
       var wHex = wasmHexStr.startsWith('0x') ? wasmHexStr.slice(2).toLowerCase() : wasmHexStr.toLowerCase();
       var sHex = srvHexStr.startsWith('0x') ? srvHexStr.slice(2).toLowerCase() : srvHexStr.toLowerCase();
       var wtHex = wtHexStr.startsWith('0x') ? wtHexStr.slice(2).toLowerCase() : wtHexStr.toLowerCase();

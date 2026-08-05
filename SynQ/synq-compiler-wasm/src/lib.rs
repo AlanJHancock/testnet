@@ -1,14 +1,12 @@
+// ── SynQ WASM Compiler — uses synq-compiler crate IR backend ──────────────────
+// v0.2: Uses compile_ir() from the compiler crate for bytecode consistency
+//       with the native server. Eliminates vendored compiler duplication.
 
-// ── Vendored SynQ compiler + VM source ────────────────────────────────────────
-#[macro_use]
-extern crate pest_derive;
+use wasm_bindgen::prelude::*;
+use synq_compiler::{self, ast::*, parser};
+use synq_compiler::ast::{SourceUnit, ContractPart, Statement, Expression, Type};
 
-mod compiler {
-    pub mod ast;
-    pub mod parser;
-    pub mod codegen;
-}
-
+// ── Vendored VM for browser-side execution (not used for compilation) ────────
 mod vm_inner {
     pub mod pqc_shims {
         pub mod dilithium {
@@ -37,21 +35,8 @@ mod vm_inner {
 // ── Types we re-export for external use ───────────────────────────────────────
 pub use vm_inner::QuantumVM;
 
-// ── compile() — exact copy from synq-compiler/src/lib.rs ─────────────────────
-use compiler::ast::*;
-use compiler::{parser, codegen};
-use std::collections::{HashMap, HashSet};
-
-/// Result of compiling a SynQ source file.
-#[derive(Debug)]
-pub struct CompileResult {
-    pub bytecode:          Vec<u8>,
-    pub state_vars:        Vec<(String, u32)>,
-    pub warnings:          Vec<String>,
-    /// Contract names called via extern_call, in first-appearance order, deduplicated.
-    pub extern_contracts:  Vec<String>,
-}
-
+// ── WASM CompileResult for the browser IDE ───────────────────────────────────
+// This wraps the compiler crate's CompileResult, adding IDE-specific metadata.
 
 /// Helper: convert AST Type to the string the IDE expects.
 fn type_name(ty: &Type) -> String {
@@ -70,37 +55,41 @@ fn type_name(ty: &Type) -> String {
     }
 }
 
-/// Top-level compile entry point.
-/// Returns `Err(String)` for hard errors, `Ok(CompileResult)` with warnings for soft issues.
-pub fn compile(source: &str) -> Result<CompileResult, String> {
-    let mut warnings: Vec<String> = Vec::new();
+/// Result of compiling a SynQ source file for the WASM IDE.
+#[derive(Debug)]
+struct WasmCompileResult {
+    pub bytecode:          Option<String>,
+    pub state_vars:        Vec<(String, u32)>,
+    pub warnings:          Vec<String>,
+    pub errors:            Vec<String>,
+    pub extern_contracts:  Vec<String>,
+}
 
-    // 1. Parse
-    let ast = parser::parse(source)?;
-
-    // 2. Semantic checks per contract
-    for unit in &ast {
-        if let SourceUnit::Contract(c) = unit {
-            check_undefined_refs(&c, &mut warnings)?;
-            check_call_graph(&c)?;
+/// Walk a statement and collect unique extern_call target contract names.
+fn wasm_collect_extern_contracts(stmt: &Statement, out: &mut Vec<String>) {
+    match stmt {
+        Statement::ExternCall { contract, .. } => {
+            if !out.contains(contract) { out.push(contract.clone()); }
         }
+        Statement::If { then_block, else_block, .. } => {
+            for s in &then_block.statements { wasm_collect_extern_contracts(s, out); }
+            if let Some(eb) = else_block {
+                for s in &eb.statements { wasm_collect_extern_contracts(s, out); }
+            }
+        }
+        _ => {}
     }
+}
 
-    // 3. Codegen
-    let gen = codegen::CodeGenerator::new();
-    let (bytecode, state_vars) = gen.generate(&ast)?;
-
-    // ── G3: PQC simulation warning ──────────────────────────────────────
-    // PQC builtins compile fine but the WASM VM cannot execute them —
-    // they throw RuntimeError at runtime. Warn the developer explicitly
-    // so they are not surprised when running in the browser IDE.
+/// Add PQC warnings for WASM mode (PQC builtins compile but throw at runtime).
+fn add_pqc_warnings(ast: &[SourceUnit], warnings: &mut Vec<String>) {
     const PQC_BUILTINS_WARN: &[&str] = &[
         "dilithium_verify", "falcon_verify", "sphincs_verify",
         "kyber_encapsulate", "kyber_decapsulate", "kyber_decaps",
         "falcon_sign", "mceliece_encapsulate", "mceliece_decapsulate",
         "hqc_encapsulate", "hqc_decapsulate",
     ];
-    'pqc_check: for unit in &ast {
+    'pqc_check: for unit in ast {
         if let SourceUnit::Contract(c) = unit {
             for part in &c.parts {
                 if let ContractPart::Function(f) = part {
@@ -111,7 +100,7 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
                             Statement::Assignment(_, e) => vec![e],
                             Statement::Require(e, _) => vec![e],
                             Statement::Let { value, .. } => vec![value],
-                    Statement::LetDestructure { value, .. } => vec![value.as_ref()],
+                            Statement::LetDestructure { value, .. } => vec![value.as_ref()],
                             _ => vec![],
                         };
                         for expr in exprs {
@@ -131,351 +120,61 @@ pub fn compile(source: &str) -> Result<CompileResult, String> {
             }
         }
     }
-
-    // Collect extern_call targets for tamper-detection cross-check with server.
-    let mut extern_contracts: Vec<String> = Vec::new();
-    for unit in &ast {
-        if let SourceUnit::Contract(c) = unit {
-            for part in &c.parts {
-                if let ContractPart::Function(f) = part {
-                    for stmt in &f.body.statements {
-                        wasm_collect_extern_contracts(stmt, &mut extern_contracts);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(CompileResult { bytecode, state_vars, warnings, extern_contracts })
 }
 
+// ── WASM-bindgen exports for browser IDE ─────────────────────────────────────
 
-
-/// Walk a statement and collect unique extern_call target contract names.
-fn wasm_collect_extern_contracts(stmt: &Statement, out: &mut Vec<String>) {
-    match stmt {
-        Statement::ExternCall { contract, .. } => {
-            if !out.contains(contract) { out.push(contract.clone()); }
-        }
-        Statement::If { then_block, else_block, .. } => {
-            for s in &then_block.statements { wasm_collect_extern_contracts(s, out); }
-            if let Some(eb) = else_block {
-                for s in &eb.statements { wasm_collect_extern_contracts(s, out); }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_identifiers(expr: &Expression, out: &mut Vec<String>) {
-    match expr {
-        Expression::Identifier(n) => out.push(n.clone()),
-        Expression::BinaryOp(l, _, r) => {
-            collect_identifiers(l, out);
-            collect_identifiers(r, out);
-        }
-        Expression::Call(_, args) => {
-            for a in args { collect_identifiers(a, out); }
-        }
-        Expression::FieldAccess { object, .. } => {
-            collect_identifiers(object, out);
-        }
-        Expression::StructLiteral { fields, .. } => {
-            for (_, v) in fields { collect_identifiers(v, out); }
-        }
-        Expression::MapIndex(map, key) => {
-            out.push(map.clone());
-            collect_identifiers(key, out);
-        }
-        Expression::MapMethod { map, args, .. } => {
-            out.push(map.clone());
-            for a in args { collect_identifiers(a, out); }
-        }
-        Expression::SetMethod { set, args, .. } => {
-            out.push(set.clone());
-            for a in args { collect_identifiers(a, out); }
-        }
-        Expression::UnaryOp(_, inner) => collect_identifiers(inner, out),
-        Expression::Tuple(exprs) => {
-            for e in exprs { collect_identifiers(e, out); }
-        }
-        Expression::Some(inner) => collect_identifiers(inner, out),
-        Expression::Ok(inner) => collect_identifiers(inner, out),
-        Expression::Err(inner) => collect_identifiers(inner, out),
-        _ => {}
-    }
-}
-
-fn collect_calls(expr: &Expression, out: &mut Vec<(String, usize)>) {
-    match expr {
-        Expression::Call(name, args) => {
-            out.push((name.clone(), args.len()));
-            for a in args { collect_calls(a, out); }
-        }
-        Expression::BinaryOp(l, _, r) => {
-            collect_calls(l, out);
-            collect_calls(r, out);
-        }
-        _ => {}
-    }
-}
-
-const PQC_BUILTINS: &[&str] = &[
-    "dilithium_verify", "falcon_verify", "sphincs_verify",
-    "kyber_encapsulate", "kyber_decapsulate", "kyber_decaps",
-    "falcon_sign", "mceliece_encapsulate", "mceliece_decapsulate",
-    "hqc_encapsulate", "hqc_decapsulate",
-    "str_len", "str_concat", "str_eq",
-    // Authority builtins (v7.0 authority model)
-    "authority_envelope", "authority_require", "authority_identity",
-    // Address builtins (V3 Bech32)
-    "to_syna", "from_syna", "contract_address",
-    // AEG1 builtins
-    "aegis_call", "aegis_verify", "aegis_decaps",
-];
-
-fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String>) -> Result<(), String> {
-    let state_names: HashSet<&str> = contract.parts.iter().filter_map(|p| {
-        if let ContractPart::StateVariable(sv) = p { Some(sv.name.as_str()) } else { None }
-    }).collect();
-
-    let fn_names: HashSet<&str> = contract.parts.iter().filter_map(|p| {
-        if let ContractPart::Function(f) = p { Some(f.name.as_str()) } else { None }
-    }).collect();
-
-    for part in &contract.parts {
-        if let ContractPart::Function(f) = part {
-            let param_names: HashSet<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
-            let mut let_names: HashSet<String> = HashSet::new();
-
-            let all_stmts: Vec<&Statement> = f.body.statements.iter().collect();
-            for stmt in all_stmts {
-                // Track let-bound variables for subsequent statement checks
-                if let Statement::Let { name, .. } = stmt {
-                    let_names.insert(name.clone());
-                } else if let Statement::LetDestructure { names, .. } = stmt {
-                    for n in names {
-                        let_names.insert(n.clone());
-                    }
-                }
-                let exprs: Vec<&Expression> = match stmt {
-                    Statement::Expression(e) => vec![e],
-                    Statement::Require(e, _) => vec![e],
-                    Statement::Assignment(_, e) => vec![e],
-                    Statement::Return(Some(e)) => vec![e],
-                    Statement::Return(None) => vec![],
-                    Statement::ExternCall { args, .. } => args.iter().collect(),
-                    Statement::Emit { args, .. } => args.iter().collect(),
-                    Statement::RevertNamed { args, .. } => args.iter().collect(),
-                    Statement::RevertEnum { args, .. } => args.iter().collect(),
-                    Statement::If { condition, then_block: _, else_block: _ } => vec![condition],
-                    Statement::Let { value, .. } => vec![value],
-                    Statement::LetDestructure { value, .. } => vec![value.as_ref()],
-                    Statement::MapAssignment { key, value, .. } => vec![key, value],
-                    Statement::FieldAssignment { value, .. } => vec![value],
-                    Statement::SetOp { value, .. } => vec![value],
-                    Statement::While { condition, .. } => vec![condition],
-                    Statement::Break | Statement::Continue => vec![],
-                };
-                for expr in exprs {
-                    // Check identifiers
-                    let mut idents = Vec::new();
-                    collect_identifiers(expr, &mut idents);
-                    for id in &idents {
-                        if !state_names.contains(id.as_str())
-                            && !param_names.contains(id.as_str())
-                            && !let_names.contains(id.as_str())
-                            && !PQC_BUILTINS.contains(&id.as_str())
-                        {
-                            return Err(format!(
-                                "undefined variable '{}' in function '{}' of contract '{}'",
-                                id, f.name, contract.name
-                            ));
-                        }
-                    }
-                    // Check calls
-                    let mut calls = Vec::new();
-                    collect_calls(expr, &mut calls);
-                    for (callee, _arg_count) in &calls {
-                        if !fn_names.contains(callee.as_str())
-                            && !PQC_BUILTINS.contains(&callee.as_str())
-                        {
-                            return Err(format!(
-                                "undefined function '{}' called in '{}' of contract '{}'",
-                                callee, f.name, contract.name
-                            ));
-                        }
-                    }
-                    // Warn on negative literal pattern (0 - N for UInt256)
-                    check_negative_literal(expr, &f.name, warnings);
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn check_negative_literal(expr: &Expression, fn_name: &str, warnings: &mut Vec<String>) {
-    if let Expression::BinaryOp(l, BinaryOperator::Sub, r) = expr {
-        if let Expression::Literal(Literal::Number(0)) = l.as_ref() {
-            if let Expression::Literal(Literal::Number(n)) = r.as_ref() {
-                warnings.push(format!(
-                    "negative literal (-{}) in function '{}': UInt256 has no sign; this will underflow at runtime",
-                    n, fn_name
-                ));
-            }
-        }
-    }
-    // Recurse
-    match expr {
-        Expression::BinaryOp(l, _, r) => {
-            check_negative_literal(l, fn_name, warnings);
-            check_negative_literal(r, fn_name, warnings);
-        }
-        Expression::Call(_, args) => {
-            for a in args { check_negative_literal(a, fn_name, warnings); }
-        }
-        _ => {}
-    }
-}
-
-// ─── Semantic check: call-graph cycle detection (max depth 8) ────────────────
-
-fn check_call_graph(contract: &ContractDefinition) -> Result<(), String> {
-    // Build adjacency: fn_name -> set of called fn names (contract-internal only)
-    let fn_names: HashSet<&str> = contract.parts.iter().filter_map(|p| {
-        if let ContractPart::Function(f) = p { Some(f.name.as_str()) } else { None }
-    }).collect();
-
-    let mut adj: HashMap<&str, Vec<String>> = HashMap::new();
-    for part in &contract.parts {
-        if let ContractPart::Function(f) = part {
-            let mut calls: Vec<(String, usize)> = Vec::new();
-            for stmt in &f.body.statements {
-                let exprs: Vec<&Expression> = match stmt {
-                    Statement::Expression(e) => vec![e],
-                    Statement::Require(e, _) => vec![e],
-                    Statement::Assignment(_, e) => vec![e],
-                    Statement::Return(Some(e)) => vec![e],
-                    Statement::Return(None) => vec![],
-                    Statement::ExternCall { args, .. } => args.iter().collect(),
-                    Statement::Emit { args, .. } => args.iter().collect(),
-                    Statement::RevertNamed { args, .. } => args.iter().collect(),
-                    Statement::RevertEnum { args, .. } => args.iter().collect(),
-                    Statement::If { condition, then_block: _, else_block: _ } => vec![condition],
-                    Statement::Let { value, .. } => vec![value],
-                    Statement::LetDestructure { value, .. } => vec![value.as_ref()],
-                    Statement::MapAssignment { key, value, .. } => vec![key, value],
-                    Statement::FieldAssignment { value, .. } => vec![value],
-                    Statement::SetOp { value, .. } => vec![value],
-                    Statement::While { condition, .. } => vec![condition],
-                    Statement::Break | Statement::Continue => vec![],
-                };
-                for expr in exprs { collect_calls(expr, &mut calls); }
-            }
-            let callees: Vec<String> = calls.iter()
-                .filter_map(|(name, _)| if fn_names.contains(name.as_str()) { Some(name.clone()) } else { None })
-                .collect();
-            adj.insert(f.name.as_str(), callees);
-        }
-    }
-
-    // DFS cycle + depth check from each function
-    for start in fn_names.iter() {
-        let mut path: Vec<&str> = Vec::new();
-        dfs_check(start, &adj, &mut path)?;
-    }
-    Ok(())
-}
-
-// Maximum static call-chain depth enforced at compile time.
-//
-// Rationale for 64:
-//   - Recursion (cycles) is banned entirely by the DFS cycle check above,
-//     independent of this limit.
-//   - This limit guards against pathologically deep *non-recursive* call chains
-//     that would exhaust the QVM's call stack at runtime.
-//   - Comparison with other runtimes:
-//       EVM (Ethereum)  1 024  — hard consensus rule, one frame per CALL opcode
-//       Solana BPF         64  — explicit VM-level call depth limit
-//       WASM (browsers) ~10k+  — bounded by host OS stack
-//       Move / Cairo        0  — recursion banned by type system (no limit needed)
-//   - 64 matches Solana BPF, a well-studied non-EVM smart-contract VM with
-//     similar resource-constraint goals to QVM.
-//   - The QVM does not yet have per-call stack frames (that work lands in PR-B).
-//     Once PR-B ships, the *runtime* will enforce its own depth limit naturally;
-//     this static check then becomes a fast-fail for obviously degenerate
-//     contracts rather than an absolute ceiling.
-//   - 8 (the previous value) was too conservative: a normal contract with
-//     init → validate → checkOwner → resolveAddress already consumes 4 hops,
-//     leaving only 4 hops of headroom for real business logic.
-const MAX_CALL_DEPTH: usize = 64;
-
-fn dfs_check<'a>(
-    node: &'a str,
-    adj: &'a HashMap<&'a str, Vec<String>>,
-    path: &mut Vec<&'a str>,
-) -> Result<(), String> {
-    if path.contains(&node) {
-        let cycle_start = path.iter().position(|&n| n == node).unwrap();
-        let cycle: Vec<&str> = path[cycle_start..].iter().copied().chain(std::iter::once(node)).collect();
-        return Err(format!("recursive call detected: {}", cycle.join(" -> ")));
-    }
-    if path.len() >= MAX_CALL_DEPTH {
-        return Err(format!("call chain exceeds maximum depth ({}) starting from '{}'", MAX_CALL_DEPTH, path[0]));
-    }
-    path.push(node);
-    if let Some(callees) = adj.get(node) {
-        for callee in callees {
-            dfs_check(callee.as_str(), adj, path)?;
-        }
-    }
-    path.pop();
-    Ok(())
-}
-
-// ── wasm-bindgen surface ──────────────────────────────────────────────────────
-use wasm_bindgen::prelude::*;
-use serde::Serialize;
-
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 struct WasmParamInfo {
     name: String,
-    ty:   String,
+    ty: String,
 }
 
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 struct WasmFunctionInfo {
-    name:        String,
-    params:      Vec<WasmParamInfo>,
+    name: String,
+    params: Vec<WasmParamInfo>,
     return_type: Option<String>,
-    argc:        usize,
+    argc: usize,
 }
 
-#[derive(Serialize)]
-struct WasmCompileResult {
-    success:           bool,
-    bytecode:          Option<String>,
-    state_vars:        Vec<(String, u32)>,
-    warnings:          Vec<String>,
-    errors:            Vec<String>,
-    /// Contract names this contract calls via extern_call.
-    extern_contracts:  Vec<String>,
-    /// Function metadata — param names, types, return types.
-    functions:         Vec<WasmFunctionInfo>,
-    /// Per-state-variable type names for IDE rendering.
-    state_var_types:   std::collections::HashMap<String, String>,
+#[derive(serde::Serialize)]
+struct WasmCompileResultJson {
+    success: bool,
+    bytecode: Option<String>,
+    state_vars: Vec<(String, u32)>,
+    warnings: Vec<String>,
+    errors: Vec<String>,
+    extern_contracts: Vec<String>,
+    functions: Vec<WasmFunctionInfo>,
+    state_var_types: std::collections::HashMap<String, String>,
 }
 
-/// Compile a SynQ source string in-browser. Returns JSON.
-/// Bytecode is lowercase hex. Call POST /synq/sign to attach ML-DSA-65 sidecar.
+/// Compile using the IR backend (same as native server) for bytecode consistency.
 #[wasm_bindgen]
 pub fn compile_synq(source: &str) -> String {
-    // Parse AST separately so we can extract metadata even when compile() succeeds
     let ast = parser::parse(source).unwrap_or_default();
-    let result = match compile(source) {
+
+    let result = match synq_compiler::compile_ir(source) {
         Ok(cr) => {
-            // Extract function metadata from the AST for the IDE
+            let mut warnings = cr.warnings.clone();
+            add_pqc_warnings(&ast, &mut warnings);
+
+            // Collect extern_call targets from AST (for IDE cross-check)
+            let mut extern_contracts: Vec<String> = Vec::new();
+            for unit in &ast {
+                if let SourceUnit::Contract(c) = unit {
+                    for part in &c.parts {
+                        if let ContractPart::Function(f) = part {
+                            for stmt in &f.body.statements {
+                                wasm_collect_extern_contracts(stmt, &mut extern_contracts);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Extract function metadata from AST for IDE
             let mut functions: Vec<WasmFunctionInfo> = Vec::new();
             let mut state_var_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
             for unit in &ast {
@@ -484,11 +183,11 @@ pub fn compile_synq(source: &str) -> String {
                         if let ContractPart::Function(f) = part {
                             let params: Vec<WasmParamInfo> = f.params.iter().map(|p| WasmParamInfo {
                                 name: p.name.clone(),
-                                ty:   type_name(&p.ty),
+                                ty: type_name(&p.ty),
                             }).collect();
                             let argc = params.len();
                             functions.push(WasmFunctionInfo {
-                                name:        f.name.clone(),
+                                name: f.name.clone(),
                                 params,
                                 return_type: f.returns.as_ref().map(|t| type_name(t)),
                                 argc,
@@ -500,93 +199,19 @@ pub fn compile_synq(source: &str) -> String {
                     }
                 }
             }
-            WasmCompileResult {
-                success:          true,
-                bytecode:         Some(hex::encode(&cr.bytecode)),
-                state_vars:       cr.state_vars,
-                warnings:         cr.warnings,
-                errors:           vec![],
-                extern_contracts: cr.extern_contracts,
-                functions,
-                state_var_types,
-            }
-        },
-        Err(e) => WasmCompileResult {
-            success:          false,
-            bytecode:         None,
-            state_vars:       vec![],
-            warnings:         vec![],
-            errors:           vec![e],
-            extern_contracts: vec![],
-            functions:        vec![],
-            state_var_types:  std::collections::HashMap::new(),
-        },
-    };
-    serde_json::to_string(&result)
-        .unwrap_or_else(|e| format!("{{\"success\":false,\"errors\":[\"serialisation error: {}\"]}}", e))
-}
 
-/// Compiler version string.
-#[wasm_bindgen]
-pub fn synq_version() -> String { "0.1.0-wasm".to_string() }
-
-
-// ── C-ABI export for server-side wasmtime execution ──────────────────────────
-// Bypasses wasm-bindgen entirely. Called via wasmtime on the server.
-// Convention: compile_synq_c(src_ptr, src_len, out_ptr, out_len) -> i32
-//   - Reads source string from (src_ptr, src_len) in WASM memory
-//   - Writes JSON result to (out_ptr, out_len) in WASM memory
-//   - Returns actual bytes written, or -1 on error
-#[no_mangle]
-pub unsafe extern "C" fn compile_synq_c(src_ptr: *const u8, src_len: usize, out_ptr: *mut u8, out_len: usize) -> i32 {
-    let source = match std::slice::from_raw_parts(src_ptr, src_len) {
-        s => match std::str::from_utf8(s) {
-            Ok(st) => st,
-            Err(_) => return -1,
-        }
-    };
-
-    // Call the same compile() function that wasm-bindgen uses
-    let result = match compile(source) {
-        Ok(cr) => {
-            // Extract function metadata (same as compile_synq)
-            let ast = parser::parse(source).unwrap_or_default();
-            let mut functions: Vec<WasmFunctionInfo> = Vec::new();
-            let mut state_var_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-            for unit in &ast {
-                if let SourceUnit::Contract(c) = unit {
-                    for part in &c.parts {
-                        if let ContractPart::Function(f) = part {
-                            let params: Vec<WasmParamInfo> = f.params.iter().map(|p| WasmParamInfo {
-                                name: p.name.clone(),
-                                ty: type_name(&p.ty),
-                            }).collect();
-                            functions.push(WasmFunctionInfo {
-                                name: f.name.clone(),
-                                params,
-                                return_type: f.returns.as_ref().map(type_name),
-                                argc: f.params.len(),
-                            });
-                        }
-                        if let ContractPart::StateVariable(sv) = part {
-                            state_var_types.insert(sv.name.clone(), type_name(&sv.ty));
-                        }
-                    }
-                }
-            }
-
-            WasmCompileResult {
+            WasmCompileResultJson {
                 success: true,
                 bytecode: Some(hex::encode(&cr.bytecode)),
                 state_vars: cr.state_vars,
-                warnings: cr.warnings,
+                warnings,
                 errors: vec![],
-                extern_contracts: cr.extern_contracts,
+                extern_contracts,
                 functions,
                 state_var_types,
             }
-        }
-        Err(e) => WasmCompileResult {
+        },
+        Err(e) => WasmCompileResultJson {
             success: false,
             bytecode: None,
             state_vars: vec![],
@@ -597,31 +222,53 @@ pub unsafe extern "C" fn compile_synq_c(src_ptr: *const u8, src_len: usize, out_
             state_var_types: std::collections::HashMap::new(),
         },
     };
+    serde_json::to_string(&result)
+        .unwrap_or_else(|e| format!("{{\"success\":false,\"errors\":[\"serialisation error: {}\"]}}", e))
+}
 
-    let json = serde_json::to_string(&result).unwrap_or_else(|e| {
-        format!("{{{{\"success\":false,\"errors\":[\"serialise: {}\"]}}}}", e)
-    });
+/// Compiler version string.
+#[wasm_bindgen]
+pub fn synq_version() -> String { "0.2.0-wasm".to_string() }
 
-    let json_bytes = json.as_bytes();
-    let written = json_bytes.len().min(out_len);
-    if written > 0 {
-        std::ptr::copy_nonoverlapping(json_bytes.as_ptr(), out_ptr, written);
+
+// ── C-ABI export for server-side wasmtime execution ──────────────────────────
+#[no_mangle]
+pub unsafe extern "C" fn compile_synq_c(src_ptr: *const u8, src_len: usize, out_ptr: *mut u8, out_len: usize) -> i32 {
+    let source = match std::slice::from_raw_parts(src_ptr, src_len) {
+        s => match std::str::from_utf8(s) {
+            Ok(st) => st,
+            Err(_) => return -1,
+        }
+    };
+
+    let result_json = compile_synq(source);
+    let result_bytes = result_json.as_bytes();
+    let written = result_bytes.len();
+    if written > out_len {
+        return -1;
     }
+    std::ptr::copy_nonoverlapping(result_bytes.as_ptr(), out_ptr, written);
     written as i32
 }
 
-/// Simple malloc for wasmtime callers — allocates `size` bytes, returns pointer.
-/// Uses a bump allocator from a static buffer.
-#[no_mangle]
-pub unsafe extern "C" fn synq_wasm_alloc(size: usize) -> *mut u8 {
-    // Simple static bump allocator
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static HEAP: AtomicUsize = AtomicUsize::new(0);
-    static mut HEAP_BASE: [u8; 4 * 1024 * 1024] = [0u8; 4 * 1024 * 1024]; // 4MB
+// ── Memory allocator for server-side wasmtime C-ABI calls ────────────────────
+// The server's wasm_compiler.rs calls synq_wasm_alloc(size) to get a pointer
+// into WASM linear memory, writes the source string there, then calls
+// compile_synq_c. We use Rust's global allocator (dlmalloc via wasm-bindgen)
+// to avoid corrupting heap metadata — a custom bump allocator at a fixed
+// offset would overwrite dlmalloc's free list.
 
-    let offset = HEAP.fetch_add(size, Ordering::SeqCst);
-    if offset + size > 4 * 1024 * 1024 {
-        return std::ptr::null_mut();
-    }
-    unsafe { HEAP_BASE.as_mut_ptr().add(offset) }
+use std::alloc::{alloc, Layout};
+
+#[no_mangle]
+pub unsafe extern "C" fn synq_wasm_alloc(size: i32) -> i32 {
+    if size <= 0 { return 0; }
+    let layout = match Layout::from_size_align(size as usize, 1) {
+        Ok(l) => l,
+        Err(_) => return 0,
+    };
+    let ptr = alloc(layout);
+    if ptr.is_null() { return 0; }
+    ptr as i32
 }
+

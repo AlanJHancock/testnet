@@ -710,6 +710,14 @@ impl<'a> BuildContext<'a> {
                 }
                 let lhs_val = self.build_expression(lhs)?;
                 let rhs_val = self.build_expression(rhs)?;
+
+                // Type-aware dispatch: string + string → StrConcat, not numeric Add
+                let lhs_ty = self.lookup_value_type(lhs_val);
+                let rhs_ty = self.lookup_value_type(rhs_val);
+                if matches!(op, BinaryOperator::Add) && lhs_ty == IrType::Str && rhs_ty == IrType::Str {
+                    return Ok(self.push_value(IrOp::StrConcat(lhs_val, rhs_val), IrType::Str));
+                }
+
                 let result_ty = match op {
                     BinaryOperator::Eq | BinaryOperator::Ne
                     | BinaryOperator::Lt | BinaryOperator::Le

@@ -266,9 +266,9 @@ impl IrLowerer {
                 self.asm.emit_raw(&bytes);
                 self.asm.emit_op(OpCode::AuthRequire);
                 self.asm.emit_op(OpCode::JumpIf);
-                let patch_to_revert = self.asm.emit_placeholder_u32();
-                self.asm.emit_op(OpCode::Jump);
                 let patch_to_body = self.asm.emit_placeholder_u32();
+                self.asm.emit_op(OpCode::Jump);
+                let patch_to_revert = self.asm.emit_placeholder_u32();
                 let revert_pos = self.asm.current_pos() as u32;
                 self.asm.patch_u32(patch_to_revert, revert_pos);
                 let msg = format!("{}: authority scope denied", func.name);
@@ -300,9 +300,9 @@ impl IrLowerer {
                 self.asm.emit_raw(&bytes);
                 self.asm.emit_op(OpCode::AuthRequire);
                 self.asm.emit_op(OpCode::JumpIf);
-                let patch_to_revert = self.asm.emit_placeholder_u32();
-                self.asm.emit_op(OpCode::Jump);
                 let patch_to_body = self.asm.emit_placeholder_u32();
+                self.asm.emit_op(OpCode::Jump);
+                let patch_to_revert = self.asm.emit_placeholder_u32();
                 let revert_pos = self.asm.current_pos() as u32;
                 self.asm.patch_u32(patch_to_revert, revert_pos);
                 let msg = format!("{}: governance scope denied", func.name);

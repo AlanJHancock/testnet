@@ -1,8 +1,9 @@
 [workspace]
+resolver = "2"
 
 [package]
 name = "synq-compiler-wasm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
@@ -15,11 +16,12 @@ serde        = { version = "1.0", features = ["derive"] }
 serde_json   = "1.0"
 hex          = "0.4"
 
-# Pure-Rust deps — same as compiler/vm use, no C linkage
-pest        = "2.7.7"
-pest_derive = "2.7.7"
-sha3        = "0.10"
-ruint       = "1"
+# Needed by the vendored VM (vm_inner)
+ruint        = "1"
+sha3         = "0.10"
+
+# Use the real compiler crate (WASM build — drops native PQC deps)
+synq-compiler = { package = "synq-compiler", path = "../compiler", default-features = false, features = ["wasm"] }
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-O3"]

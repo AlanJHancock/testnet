@@ -1,8 +1,7 @@
 /* @ts-self-types="./synq_compiler_wasm.d.ts" */
 
 /**
- * Compile a SynQ source string in-browser. Returns JSON.
- * Bytecode is lowercase hex. Call POST /synq/sign to attach ML-DSA-65 sidecar.
+ * Compile using the IR backend (same as native server) for bytecode consistency.
  * @param {string} source
  * @returns {string}
  */

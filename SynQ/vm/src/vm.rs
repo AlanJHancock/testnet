@@ -951,9 +951,7 @@ impl QuantumVM {
             }
 
             // ── PQC ────────────────────────────────────────────────────────
-#[cfg(feature = "native")]
             // ── Map operations ──────────────────────────────────────────────
-            // MapNew: reads inline name, initialises an empty Map at the named
             // state address and pushes that address (I32) as the handle.
             
             // ── AddrEncode (0x54): pop value → push syna... Bech32 string ──
@@ -1327,6 +1325,7 @@ OpCode::MapNew => {
             }
 
             // ── Legacy PQC opcodes (0x80-0x83): also charge fuel (ACTS-VM-005) ──
+            #[cfg(feature = "native")]
             OpCode::DilithiumVerify => {
                 let cost = AEGIS_MIN_COST;
                 let remaining = self.max_fuel.saturating_sub(self.fuel_used);
@@ -1340,6 +1339,7 @@ OpCode::MapNew => {
                 self.push(Value::Bool(result))?;
                 self.fuel_used += cost;
             }
+            #[cfg(feature = "native")]
             OpCode::KyberKeyExchange => {
                 let cost = AEGIS_MIN_COST;
                 let remaining = self.max_fuel.saturating_sub(self.fuel_used);
@@ -1353,6 +1353,7 @@ OpCode::MapNew => {
                 self.push(Value::Bytes(shared_secret))?;
                 self.fuel_used += cost;
             }
+            #[cfg(feature = "native")]
             OpCode::FalconVerify => {
                 let cost = AEGIS_MIN_COST;
                 let remaining = self.max_fuel.saturating_sub(self.fuel_used);
@@ -1366,6 +1367,7 @@ OpCode::MapNew => {
                 self.push(Value::Bool(result))?;
                 self.fuel_used += cost;
             }
+            #[cfg(feature = "native")]
             OpCode::SphincsVerify => {
                 let cost = AEGIS_MIN_COST;
                 let remaining = self.max_fuel.saturating_sub(self.fuel_used);
@@ -1385,6 +1387,7 @@ OpCode::MapNew => {
             // PQC shim, and pushes the response frame back.
             // This is the spec v7.0 aligned interface — replaces algorithm-
             // specific opcodes 0x80-0x83 for new contracts.
+            #[cfg(feature = "native")]
             OpCode::AegisCall => {
                 // ACTS-15 §3+§4: deterministic VM dispatcher with cost model
                 let frame = self.pop()?.as_bytes()?.to_vec();
@@ -1867,6 +1870,7 @@ mod authority_tests {
     }
 
     /// ACTS-VM-005: AegisCall must charge fuel based on the cost model.
+    #[cfg(feature = "native")]
     #[test]
     fn test_aegis_call_charges_fuel() {
         let req = aeg1::Aeg1Request {

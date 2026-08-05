@@ -97,7 +97,6 @@ contract TypeTestContract {
 
   function setLabel(label: str) -> bool as caller {
     require(ready, "not initialised");
-    require(!labelled, "label already set");
     s_val    = label;
     labelled = true;
     return true;

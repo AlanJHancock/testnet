@@ -1,4 +1,4 @@
-<!-- SynQ IDE v2026.08.04.6 — tuple param expansion + @effects guard -->
+<!-- SynQ IDE v2026.08.05.4 — tuple param expansion + @effects guard -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -583,19 +583,8 @@
       Save to Server
     </button>
     <span style="font-size:0.8rem;font-weight:600;color:rgba(255,255,255,0.4);padding:0 2px;">|</span>
-    <button class="btn btn-secondary" id="btn-Blank" onclick="loadBlank()" title="Blank starter contract">New</button>
-    <button class="btn btn-secondary" id="btn-TokenVault" onclick="loadVault()" title="Step 1 — TokenVault (uses extern_call)">TokenVault</button>
-    <button class="btn btn-secondary" id="btn-SimpleToken" onclick="loadDemo()" title="Step 2 — SimpleToken (deploy into same workspace)">SimpleToken</button>
-    <button class="btn btn-secondary" id="btn-ComprehensiveToken" onclick="loadComprehensive()" title="Standalone role-based token — sign init() with wallet">ComprehensiveToken</button>
-    <button class="btn btn-secondary" id="btn-TypeTestContract" onclick="loadTypeTest()" title="Type &amp; operator test contract — all primitives, map, set, require">TypeTestContract</button>
-    <button class="btn btn-secondary" id="btn-LoopDemo" onclick="loadLoopDemo()" title="Loop constructs — while, break, continue, let locals, state accumulation">LoopDemo</button>
-    <button class="btn btn-secondary" id="btn-V3Types" onclick="loadV3Demo()" title="V3 types — Bytes, Hash32, Height, UMAIdentity, @authority, syna/sync Bech32 builtins" style="border-color:rgba(16,185,129,0.4);color:rgba(110,231,183,0.9);">V3Types</button>
-    <button class="btn btn-secondary" id="btn-StructValue" onclick="loadStructValue()" title="Struct value semantics — pass/return structs, field access on call results, nested struct access" style="border-color:rgba(168,85,247,0.4);color:rgba(192,132,252,0.9);">StructValue</button>
-    <button class="btn btn-secondary" id="btn-NamedError" onclick="loadNamedError()" title="Named error revert — enum-based RevertCode (0x35) with structured error codes" style="border-color:rgba(239,68,68,0.4);color:rgba(248,113,113,0.9);">NamedError</button>
-    <button class="btn btn-secondary" id="btn-AssetDemo" onclick="loadAssetDemo()" title="Linear asset tracking — AssetCreate/Transfer/Burn/Balance/Owner (0x57-0x5B)" style="border-color:rgba(245,158,11,0.4);color:rgba(251,191,36,0.9);">AssetDemo</button>
-    <button class="btn btn-secondary" id="btn-StructField" onclick="loadStructField()" title="TupleSet (0xAB) — struct field assignment via in-place tuple replacement" style="border-color:rgba(14,165,233,0.4);color:rgba(56,189,248,0.9);">StructField</button>
-    <button class="btn btn-secondary" id="btn-StackFailDemo" onclick="loadStackFailDemo()" title="Stack safety + manifest verification demo — Layer 1+2+3 in action" style="border-color:rgba(239,68,68,0.4);color:rgba(252,165,165,0.9);">StackFailDemo</button>
-    <button class="btn btn-secondary" style="border-color:rgba(168,85,247,0.4);color:rgba(192,132,252,0.9);" id="btn-PQCDemo" onclick="loadPQCDemo()" title="PQC Demo — ML-DSA-65 verification, FN-DSA verify, ML-KEM decapsulation">PQCDemo</button>
+    <div id="contractButtons" style="display:inline-flex;gap:4px;flex-wrap:wrap;align-items:center;"></div>
+    <span id="contractButtonsLoading" style="font-size:0.75rem;color:rgba(255,255,255,0.3);padding:0 4px;">Loading contracts…</span>
         
   </div>
 
@@ -644,9 +633,12 @@
       <button onclick="document.getElementById('sqbFileInput').click()" style="font-size:12px;padding:5px 14px;background:rgba(26,60,107,0.2);border:1px solid rgba(80,140,220,0.5);color:rgba(140,180,240,0.9);border-radius:6px;cursor:pointer;" title="Upload a saved .sqb artifact and deploy directly">&#x2B06;&#xFE0F; Upload .sqb</button>
       <button onclick="document.getElementById('sqbDecompileInput').click()" style="font-size:12px;padding:5px 14px;background:rgba(92,45,107,0.2);border:1px solid rgba(140,80,160,0.5);color:rgba(200,160,220,0.9);border-radius:6px;cursor:pointer;" title="Decompile an .sqb artifact — reads SIR1 IR and reconstructs pseudo-SynQ source">&#x1F50D; Decompile .sqb</button>
       <button onclick="downloadSig()" style="font-size:12px;padding:5px 14px;background:rgba(147,51,234,0.15);border:1px solid rgba(147,51,234,0.5);color:rgba(200,150,255,0.9);border-radius:6px;cursor:pointer;">Download .sig.json</button>
+      <button onclick="deployToEvm()" id="deployEvmBtn" style="font-size:12px;padding:5px 14px;background:rgba(251,191,36,0.12);border:1px solid rgba(251,191,36,0.4);color:rgba(253,230,138,0.9);border-radius:6px;cursor:pointer;visibility:hidden;pointer-events:none;" title="Deploy the transpiled Solidity contract to a local Foundry Anvil EVM instance"><span style="font-family:monospace;">⟦EVM⟧</span> Deploy Solidity → EVM</button>
       <button onclick="runDiffTests()" id="diffTestBtn" style="font-size:12px;padding:5px 14px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.4);color:rgba(134,239,172,0.9);border-radius:6px;cursor:pointer;" title="Run all contracts through SynQ → QVM + SynQ → Solidity → EVM pipeline">&#x2697;️ Run Diff Tests</button>
       <span class="hash-badge" id="hashBadge"></span>
       <div id="diffTestResults" style="display:none;width:100%;margin-top:10px;padding:10px;background:rgba(0,0,0,0.25);border:1px solid rgba(255,255,255,0.08);border-radius:8px;font-family:ui-monospace,monospace;font-size:0.72rem;color:rgba(255,255,255,0.7);"></div>
+      <div id="evmDeployResult" style="display:none;width:100%;margin-top:10px;padding:12px;background:rgba(251,191,36,0.05);border:1px solid rgba(251,191,36,0.2);border-radius:8px;"></div>
+      <div id="evmCallPanel" style="display:none;width:100%;margin-top:10px;padding:14px;background:rgba(0,206,209,0.04);border:1px solid rgba(0,206,209,0.15);border-radius:8px;"></div>
     </div>
   </div>
 </div>
@@ -734,7 +726,7 @@
 
 <div class="footer">
   Powered by <a href="https://synergy-network.io" target="_blank">Synergy Network</a>
-  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.04.6</span>
+  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.05.4</span>
 </div>
 
 <script>
@@ -752,6 +744,8 @@
 
   var COMPILE_URL       = 'https://hanksweb.co.uk/synq/compile';
   var VERIFY_SOL_URL    = 'https://hanksweb.co.uk/synq/verify-sol';
+  var DEPLOY_EVM_URL    = 'https://hanksweb.co.uk/synq/deploy-evm';
+  var EVM_CALL_URL      = 'https://hanksweb.co.uk/synq/evm-call';
   var DIFF_TEST_URL     = 'https://hanksweb.co.uk/synq/diff-test';
   var SYNQ_SERVER        = 'https://hanksweb.co.uk/synq';
   var SIGN_SOURCE_URL   = 'https://hanksweb.co.uk/synq/compile/sign-source';
@@ -2221,11 +2215,8 @@
 
   // ── Contract source cache (loaded from server files) ─────────────────────
   var contractCache = {};
-  var contractList = [
-    'SimpleToken', 'TokenVault', 'ComprehensiveToken', 'LoopDemo',
-    'PQCDemo', 'TypeTestContract', 'V3Types', 'Blank',
-    'StructValue', 'NamedError', 'StackFailDemo', 'AssetDemo', 'StructField'
-  ];
+  var contractList = [];  // Populated dynamically from /synq/list-contracts
+  var contractMeta = {};   // name → { description, contract_name } from server
 
   // ── Contract button indicators ──────────────────────────────────────────
   // • (dot)  = user has a saved version on the server (per-wallet)
@@ -2318,8 +2309,114 @@
     return contractCache[name] || '';
   }
 
+  // Contract button style hints for known demo contracts
+  var contractStyles = {
+    'V3Types':       'border-color:rgba(16,185,129,0.4);color:rgba(110,231,183,0.9);',
+    'StructValue':   'border-color:rgba(168,85,247,0.4);color:rgba(192,132,252,0.9);',
+    'NamedError':    'border-color:rgba(239,68,68,0.4);color:rgba(248,113,113,0.9);',
+    'AssetDemo':     'border-color:rgba(245,158,11,0.4);color:rgba(251,191,36,0.9);',
+    'StructField':   'border-color:rgba(14,165,233,0.4);color:rgba(56,189,248,0.9);',
+    'StackFailDemo': 'border-color:rgba(239,68,68,0.4);color:rgba(252,165,165,0.9);',
+    'PQCDemo':       'border-color:rgba(168,85,247,0.4);color:rgba(192,132,252,0.9);',
+  };
+
+  // Contract-specific status messages
+  var contractStatus = {
+    'Blank':              'Blank template loaded — edit the contract name and functions, then Compile and Deploy.',
+    'TokenVault':         'Step 1 of 2 — Compile TokenVault, then Deploy. Uses extern_call to mint/burn SimpleToken.',
+    'SimpleToken':        'Step 2 of 2 — Compile SimpleToken, then Deploy into the same workspace.',
+    'ComprehensiveToken': 'ComprehensiveToken loaded — sign init() with wallet to activate.',
+    'TypeTestContract':   'TypeTestContract loaded — Compile, Deploy, then call init() to begin testing all types and operators.',
+    'LoopDemo':           'LoopDemo loaded. Call init() before runIterations(). Try factorial(5), sumRange(1,100), countEven(10), sqrtFloor(16), power(2,10).',
+    'V3Types':             'V3Types loaded — Compile, Deploy, then call init() (sign with wallet). Try deriveContractAddr(42, 0, 4660) and getOwnerSyna() after init.',
+    'StructValue':         'StructValue loaded — Compile, Deploy, then call init(). Try setCorner(10,20), getCornerX(), getBoxOriginX(), moveCorner(100,200).',
+    'NamedError':          'NamedError loaded — Compile, Deploy, then call init(). Try withdraw(42) to see runtime arg in error, failOverflow() for multi-arg, or failUnauthorized() for no-arg.',
+    'AssetDemo':           'AssetDemo loaded — Compile, Deploy, then call init(). Try createAsset(1000), checkOwner(1), transferAsset(1, 42), burnAsset(2).',
+    'StructField':         'StructField loaded — Compile, Deploy, then call init(). Try setOrigin(42, 99), getOriginX(), getOrigin(), moveX(10), swapCoordinates().',
+    'PQCDemo':             'PQCDemo loaded — Compile, Deploy. PQC verification runs server-side.',
+    'StackFailDemo':       'StackFailDemo loaded — Compile to see the VERIFY badge. Each function uses balanced stack operations that Layer 2 verifies.',
+  };
+
+  // Generic contract loader — replaces all individual load*() functions
+  function loadContract(name) {
+    evictWorkspaceContractByName(name);
+    var src = getContractSource(name);
+    document.getElementById('editor').value = src;
+    updateLineNums();
+    clearResults();
+    syncCompileBtn();
+    setEditorBadges(name);
+    setActiveContract(name, src);
+
+    // Contract-specific extras
+    if (name === 'PQCDemo') {
+      fetch('/synq/pqc/test-vector')
+        .then(function(r) { return r.json(); })
+        .then(function(tv) {
+          window._pqcTestVector = tv;
+          console.log('[PQC] Test vector loaded: ' + tv.algorithm + ' pk=' + tv.public_key_len + 'B sig=' + tv.signature_len + 'B');
+        })
+        .catch(function(e) { console.warn('[PQC] Could not fetch test vector:', e); });
+    }
+    if (name === 'StackFailDemo') {
+      currentBytecode = null;
+      currentExternContracts = [];
+      stateSnapshot = {};
+      deployedContracts = {};
+    }
+
+    var msg = contractStatus[name] || (name + ' loaded — Compile and Deploy to begin.');
+    setStatus(msg, 'info');
+  }
+  window.loadContract = loadContract;
+
+  // Fetch contract list from server and generate buttons dynamically
+  async function fetchContractList() {
+    try {
+      var res = await fetch('/synq/list-contracts');
+      var data = await res.json();
+      if (!data.success || !data.contracts) throw new Error('Bad response');
+
+      contractList = data.contracts.map(function(c) { return c.name; });
+      data.contracts.forEach(function(c) {
+        contractMeta[c.name] = c;
+      });
+
+      // Generate buttons
+      var container = document.getElementById('contractButtons');
+      var loading = document.getElementById('contractButtonsLoading');
+      if (loading) loading.style.display = 'none';
+      if (!container) { console.error('[CONTRACTS] No #contractButtons container'); return; }
+
+      container.innerHTML = '';
+      contractList.forEach(function(name) {
+        var meta = contractMeta[name] || {};
+        var desc = meta.description || '';
+        var btn = document.createElement('button');
+        btn.className = 'btn btn-secondary';
+        btn.id = 'btn-' + name;
+        btn.onclick = function() { loadContract(name); };
+        btn.title = desc || name;
+        btn.textContent = name === 'Blank' ? 'New' : name;
+        var style = contractStyles[name];
+        if (style) btn.setAttribute('style', style);
+        container.appendChild(btn);
+        btnIdMap[name] = 'btn-' + name;
+      });
+
+      console.log('[CONTRACTS] Loaded ' + contractList.length + ' contracts from server:', contractList.join(', '));
+    } catch(e) {
+      console.error('[CONTRACTS] Failed to fetch contract list:', e);
+      var loading = document.getElementById('contractButtonsLoading');
+      if (loading) loading.textContent = 'Failed to load contracts';
+    }
+  }
+
   async function preloadContracts() {
-    // 1. Load shared template contracts from static files
+    // 1. Fetch contract list and generate buttons
+    await fetchContractList();
+
+    // 2. Preload all contract sources from static files
     var fetches = contractList.map(function(name) {
       return fetch('contracts/' + name + '.synq')
         .then(function(r) {
@@ -2336,7 +2433,7 @@
     });
     await Promise.all(fetches);
 
-    // 2. If wallet is connected, overlay user's saved versions
+    // 3. If wallet is connected, overlay user's saved versions
     var wallet = getWalletId ? getWalletId() : null;
     if (wallet) {
       try {
@@ -2360,20 +2457,9 @@
   window.preloadContracts = preloadContracts;
 
 
-  function loadDemo() {
-    evictWorkspaceContractByName('SimpleToken');
-    var _src = getContractSource('SimpleToken'); document.getElementById('editor').value = _src; setActiveContract('SimpleToken', _src);
-    updateLineNums(); clearResults(); syncCompileBtn();
-    setEditorBadges('SimpleToken');
-    setStatus('Step 2 of 2 — Compile SimpleToken, then Deploy into the same workspace.', 'info');
-  }
+  function loadDemo() { loadContract('SimpleToken'); }
 
-  function loadBlank() {
-    var _src = getContractSource('Blank'); document.getElementById('editor').value = _src; setActiveContract('Blank', _src);
-    updateLineNums(); clearResults(); syncCompileBtn();
-    setEditorBadges(null);
-    setStatus('Blank template loaded — edit the contract name and functions, then Compile and Deploy.', 'info');
-  }
+  function loadBlank() { loadContract('Blank'); }
 
   function loadFromFile(input) {
     var file = input.files[0];
@@ -2556,27 +2642,8 @@
   window.loadUserContractList = loadUserContractList;
 
 
-  function loadVault() {
-    evictWorkspaceContractByName('TokenVault');
-    var _src = getContractSource('TokenVault');
-    document.getElementById('editor').value = _src;
-    updateLineNums(); clearResults(); syncCompileBtn();
-    setEditorBadges('TokenVault');
-    setActiveContract('TokenVault', _src);
-    setStatus('Step 1 of 2 — Compile TokenVault, then Deploy. Then load SimpleToken for step 2.', 'info');
-  }
-  function loadComprehensive() {
-    if (typeof clearState === 'function') clearState();
-    var _src = getContractSource('ComprehensiveToken');
-    document.getElementById('editor').value = _src;
-    if (typeof initEditor === 'function') initEditor();
-    updateLineNums();
-    clearResults();
-    syncCompileBtn();
-    setEditorBadges('ComprehensiveToken');
-    setActiveContract('ComprehensiveToken', document.getElementById('editor').value);
-    setStatus('ComprehensiveToken loaded — connect wallet, Compile, Deploy, then call init() (signs with your raw EVM address as caller identity)', 'info');
-  }
+  function loadVault() { loadContract('TokenVault'); }
+  function loadComprehensive() { loadContract('ComprehensiveToken'); }
 
 
   /* ── Compile ─────────────────────────────────────────────────────────────── */
@@ -2769,6 +2836,8 @@
 
       // ── Compile success — store state ──────────────────────────────────────
       currentBytecode        = data.bytecode;
+      window._lastSoliditySource = data.solidity_source || null;
+      window._lastCompiledContractName = data.contract_name || null;
       currentManifest         = data.manifest || null;
       currentSqb              = data.sqb || null;
       currentSidecar         = data.signature_sidecar || null;
@@ -2821,6 +2890,7 @@
       // ── Auto-verify Solidity with Foundry (forge build) ───────────────────
       (async function() {
         var solBadge = document.getElementById('solVerifyBadge');
+        var evmBtn = document.getElementById('deployEvmBtn');
         if (!solBadge || !data.solidity_source) {
           if (solBadge) solBadge.style.display = 'none';
           return;
@@ -2843,6 +2913,7 @@
             var bcLen = vsData.evm_bytecode ? vsData.evm_bytecode.length : 0;
             var warnCount = (vsData.warnings || []).length;
             solBadge.className = 'verify-badge pass';
+            if (evmBtn) { evmBtn.style.visibility = 'visible'; evmBtn.style.pointerEvents = 'auto'; }
             solBadge.innerHTML = '\u2705 SOL \u2192 EVM ' + bcLen + 'B' + (warnCount > 0 ? ' \u00b7 ' + warnCount + ' warn' : '');
             var tip = 'Solidity \u2192 EVM Verification (Foundry)\n';
             tip += '\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n';
@@ -2856,6 +2927,7 @@
           } else {
             var errs = vsData.errors || ['Unknown error'];
             solBadge.className = 'verify-badge fail';
+            if (evmBtn) { evmBtn.style.visibility = 'hidden'; evmBtn.style.pointerEvents = 'none'; }
             solBadge.innerHTML = '\u274c SOL \u2192 EVM FAILED';
             solBadge.title = 'Solidity \u2192 EVM Verification FAILED\n\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\n' + 'Forge: ' + (vsData.forge_version || 'unknown') + '\n\nErrors:\n  ' + errs.join('\n  ');
           }
@@ -3303,23 +3375,8 @@
 
   function collectAllContracts() {
     var contracts = [];
-    var known = [
-      ['SimpleToken'],
-      ['TokenVault'],
-      ['ComprehensiveToken'],
-      ['LoopDemo'],
-      ['PQCDemo'],
-      ['TypeTestContract'],
-      ['V3Types'],
-      ['Blank'],
-      ['StructValue'],
-      ['NamedError'],
-      ['StackFailDemo'],
-      ['AssetDemo'],
-      ['StructField'],
-    ];
-    for (var i = 0; i < known.length; i++) {
-      var name = known[i][0];
+    for (var i = 0; i < contractList.length; i++) {
+      var name = contractList[i];
       var src = getContractSource(name);
       if (src) {
         contracts.push({ name: name, source: src });
@@ -3399,6 +3456,374 @@
 
     if (btn) { btn.disabled = false; btn.innerHTML = '\u2697\ufe0f Run Diff Tests'; }
   }
+  // ── Deploy Solidity → EVM (Anvil) ────────────────────────────────────────
+  // Deploys the transpiled Solidity contract to a local Foundry Anvil EVM.
+  // This runs the EVM bytecode on a real Ethereum VM — NOT the QVM.
+  // Requires that the contract has been compiled first (solidity_source available).
+  async function deployToEvm() {
+    var btn = document.getElementById('deployEvmBtn');
+    if (btn) {
+      btn.innerHTML = '<span class="spinner" style="width:10px;height:10px;"></span> Deploying...';
+      btn.style.pointerEvents = 'none';
+    }
+
+    // Get the last compiled Solidity source
+    var solSource = window._lastSoliditySource || null;
+    var contractName = window._lastCompiledContractName || null;
+
+    if (!solSource) {
+      setStatus('No Solidity source available — compile a contract first', 'error');
+      if (btn) {
+        btn.innerHTML = '<span style="font-family:monospace;">⟦EVM⟧</span> Deploy Solidity → EVM';
+        btn.style.pointerEvents = 'auto';
+      }
+      return;
+    }
+
+    setStatus('Deploying Solidity contract to Anvil EVM...', 'info');
+
+    try {
+      var res = await fetch(DEPLOY_EVM_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          solidity_source: solSource,
+          contract_name: contractName
+        })
+      });
+      var data = await res.json();
+
+      if (data.success) {
+        var addr = data.contract_address || 'unknown';
+        var txHash = data.transaction_hash || 'unknown';
+        var block = data.block_number !== null ? data.block_number : '?';
+        var gas = data.gas_used !== null ? data.gas_used.toLocaleString() : '?';
+        var chainId = data.chain_id || 31337;
+        var rpcUrl = data.rpc_url || 'http://127.0.0.1:8546';
+        var bcLen = data.evm_bytecode ? Math.floor((data.evm_bytecode.length - 2) / 2) : 0;
+
+        setStatus('EVM deploy success — ' + addr.slice(0,10) + '... block #' + block + ' gas ' + gas, 'success');
+
+        // Show result panel
+        var panel = document.getElementById('evmDeployResult');
+        if (panel) {
+          panel.style.display = 'block';
+          panel.innerHTML =
+            '<div style="font-size:0.72rem;color:rgba(251,191,36,0.6);margin-bottom:6px;font-family:ui-monospace,monospace;">' +
+            '⟦ EVM DEPLOYMENT — ' + (window._lastCompiledContractName || 'Contract') + '.sol on Foundry Anvil ⟧</div>' +
+            '<div style="display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-family:ui-monospace,monospace;font-size:0.72rem;">' +
+            '<span style="color:rgba(255,255,255,0.4);">Contract:</span><code style="color:#fbbf24;">' + addr + '</code>' +
+            '<span style="color:rgba(255,255,255,0.4);">Tx hash:</span><code style="color:rgba(255,255,255,0.7);word-break:break-all;">' + txHash + '</code>' +
+            '<span style="color:rgba(255,255,255,0.4);">Block:</span><code style="color:rgba(255,255,255,0.7);">#' + block + '</code>' +
+            '<span style="color:rgba(255,255,255,0.4);">Gas used:</span><code style="color:rgba(255,255,255,0.7);">' + gas + '</code>' +
+            '<span style="color:rgba(255,255,255,0.4);">Chain ID:</span><code style="color:rgba(255,255,255,0.7);">' + chainId + '</code>' +
+            '<span style="color:rgba(255,255,255,0.4);">EVM bytecode:</span><code style="color:rgba(255,255,255,0.7);">' + bcLen + ' bytes</code>' +
+            '<span style="color:rgba(255,255,255,0.4);">RPC:</span><code style="color:rgba(255,255,255,0.7);">' + rpcUrl + '</code>' +
+            '<span style="color:rgba(255,255,255,0.4);">Forge:</span><code style="color:rgba(255,255,255,0.7);">' + (data.forge_version || 'unknown') + '</code>' +
+            '</div>' +
+            '<div style="margin-top:8px;font-size:0.68rem;color:rgba(255,255,255,0.25);font-style:italic;">' +
+            '⚠ This is the EVM (Solidity) contract running on Anvil — not the QVM (SynQ) contract. ' +
+            'The Solidity was auto-transpiled from SynQ source and deployed to a local Ethereum VM for differential testing.</div>';
+        }
+
+        // Store the deployed EVM address for the call panel
+        window._lastEvmAddress = addr;
+
+        // Populate the EVM call panel with functions from the Solidity source
+        populateEvmCallPanel(addr, window._lastSoliditySource, window._lastCompiledContractName);
+
+        if (btn) {
+          btn.innerHTML = '<span style="font-family:monospace;">⟦EVM⟧</span> ✓ Deployed: ' + addr.slice(0,8) + '...';
+          btn.style.background = 'rgba(34,197,94,0.12)';
+          btn.style.borderColor = 'rgba(34,197,94,0.4)';
+          btn.style.color = 'rgba(134,239,172,0.9)';
+          btn.style.pointerEvents = 'auto';
+        }
+      } else {
+        var errs = data.errors || ['Unknown error'];
+        setStatus('EVM deploy failed: ' + errs[0], 'error');
+        var panel = document.getElementById('evmDeployResult');
+        if (panel) {
+          panel.style.display = 'block';
+          panel.innerHTML = '<div style="color:#f87171;font-size:0.72rem;font-family:ui-monospace,monospace;">⟦ EVM DEPLOY FAILED ⟧<br>' +
+            errs.map(function(e){ return e.replace(/</g,'&lt;'); }).join('<br>') + '</div>';
+        }
+        // Hide the call panel on failure
+        var callPanel = document.getElementById('evmCallPanel');
+        if (callPanel) callPanel.style.display = 'none';
+
+        if (btn) {
+          btn.innerHTML = '<span style="font-family:monospace;">⟦EVM⟧</span> Deploy Solidity → EVM';
+          btn.style.pointerEvents = 'auto';
+        }
+      }
+    } catch(e) {
+      setStatus('EVM deploy error: ' + e.message, 'error');
+      var callPanel2 = document.getElementById('evmCallPanel');
+      if (callPanel2) callPanel2.style.display = 'none';
+      if (btn) {
+        btn.innerHTML = '<span style="font-family:monospace;">⟦EVM⟧</span> Deploy Solidity → EVM';
+        btn.style.pointerEvents = 'auto';
+      }
+    }
+  }
+  // ── EVM Call Panel: parse Solidity functions and show interactive UI ─────
+  // Parses the transpiled Solidity source for function signatures, then
+  // renders each function as a row with input fields and a Call/Send button.
+
+  function parseSolidityFunctions(solSource) {
+    var funcs = [];
+    if (!solSource) return funcs;
+
+    // Match: function name(params) visibility [view|pure] [returns (...)]
+    var lines = solSource.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim();
+      if (line.startsWith('//') || line.startsWith('*') || line.startsWith('/*')) continue;
+
+      var funcMatch = line.match(/function\s+(\w+)\s*\(([^)]*)\)\s*(public|external|internal|private)?\s*(view|pure)?\s*(?:returns\s*\(([^)]*)\))?/);
+      if (!funcMatch) continue;
+
+      var funcName = funcMatch[1];
+      var visibility = funcMatch[3] || 'public';
+      var paramsStr = funcMatch[2].trim();
+      var isView = !!funcMatch[4]; // view or pure
+      var returnsStr = funcMatch[5] ? funcMatch[5].trim() : '';
+
+      // Skip internal/private functions — can't be called externally
+      if (visibility === 'internal' || visibility === 'private') continue;
+
+      // Parse parameters
+      var params = [];
+      if (paramsStr) {
+        var paramParts = paramsStr.split(',').map(function(s){ return s.trim(); }).filter(function(s){ return s; });
+        for (var p of paramParts) {
+          var parts = p.split(/\s+/);
+          params.push({ type: parts[0], name: parts[1] || parts[0] });
+        }
+      }
+
+      // Parse return types
+      var returnTypes = [];
+      if (returnsStr) {
+        returnTypes = returnsStr.split(',').map(function(s){ return s.trim().split(/\s+/)[0]; });
+      }
+
+      var sigTypes = params.map(function(p){ return p.type; }).join(',');
+      var signature = funcName + '(' + sigTypes + ')';
+
+      funcs.push({
+        name: funcName,
+        params: params,
+        isView: isView,
+        returnTypes: returnTypes,
+        signature: signature
+      });
+    }
+    return funcs;
+  }
+
+  function decodeEvmHexOutput(hexStr, returnTypes) {
+    if (!hexStr || !hexStr.startsWith('0x')) return hexStr;
+
+    // Remove 0x prefix
+    var hex = hexStr.slice(2);
+    // Each 32-byte word is 64 hex chars
+    var words = [];
+    for (var i = 0; i < hex.length; i += 64) {
+      words.push(hex.slice(i, i + 64));
+    }
+
+    if (words.length === 0) return hexStr;
+
+    // Try to decode based on return type
+    if (returnTypes && returnTypes.length > 0) {
+      var results = [];
+      for (var i = 0; i < returnTypes.length && i < words.length; i++) {
+        var rt = returnTypes[i].trim();
+        var word = words[i];
+
+        if (rt === 'bool') {
+          results.push(word.slice(-1) === '1' ? 'true' : 'false');
+        } else if (rt === 'uint256' || rt === 'uint128' || rt === 'uint64' || rt === 'uint32' || rt === 'uint' ||
+                   rt === 'int256' || rt === 'int128' || rt === 'int' || rt === 'uint8') {
+          // Parse as big number (hex -> decimal)
+          var val = BigInt('0x' + word).toString();
+          results.push(val);
+        } else if (rt === 'address') {
+          // Last 40 chars of the word
+          results.push('0x' + word.slice(-40));
+        } else if (rt === 'string') {
+          // Dynamic string: first word is length, second+ is data
+          if (words.length >= 2) {
+            var len = parseInt(words[0], 16);
+            var strHex = words.slice(1).join('');
+            var str = '';
+            for (var j = 0; j < len * 2 && j < strHex.length; j += 2) {
+              str += String.fromCharCode(parseInt(strHex.slice(j, j + 2), 16));
+            }
+            results.push('"' + str + '"');
+          } else {
+            results.push('(string)');
+          }
+        } else {
+          results.push('0x' + word);
+        }
+      }
+      return results.join(', ');
+    }
+
+    // No return type info — just decode as uint256 if it looks like a number
+    if (words.length === 1) {
+      var val = BigInt('0x' + words[0]);
+      if (val < BigInt('999999999999999999999999999999999999999')) {
+        return val.toString();
+      }
+    }
+
+    return hexStr;
+  }
+
+  function populateEvmCallPanel(addr, solSource, contractName) {
+    var panel = document.getElementById('evmCallPanel');
+    if (!panel) return;
+
+    var funcs = parseSolidityFunctions(solSource);
+    if (funcs.length === 0) {
+      panel.style.display = 'block';
+      panel.innerHTML = '<div style="font-size:0.72rem;color:rgba(0,206,209,0.5);font-family:ui-monospace,monospace;">⟦ EVM INTERACT — ' + (contractName || 'Contract') + '.sol — No functions found in Solidity source ⟧</div>';
+      return;
+    }
+
+    // Build the function rows
+    var html = '<div style="font-size:0.72rem;color:rgba(0,206,209,0.6);margin-bottom:10px;font-family:ui-monospace,monospace;">' +
+      '⟦ EVM INTERACT — ' + (contractName || 'Contract') + '.sol — Call functions on the deployed Solidity contract ⟧</div>';
+
+    html += '<div style="font-size:0.68rem;color:rgba(255,255,255,0.3);margin-bottom:8px;font-family:ui-monospace,monospace;">' +
+      'Contract: <code style="color:#fbbf24;">' + addr + '</code></div>';
+
+    for (var i = 0; i < funcs.length; i++) {
+      var f = funcs[i];
+      var rowId = 'evmFunc_' + i;
+
+      var paramsHtml = '';
+      for (var j = 0; j < f.params.length; j++) {
+        var p = f.params[j];
+        paramsHtml += '<input type="text" placeholder="' + p.name + ' (' + p.type + ')" ' +
+          'style="width:' + (f.params.length === 1 ? '200px' : '120px') + ';background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:4px 8px;font-size:0.68rem;font-family:ui-monospace,monospace;color:#e2e8f0;outline:none;" ' +
+          'data-arg="' + j + '" data-type="' + p.type + '" />';
+        if (j < f.params.length - 1) paramsHtml += ' ';
+      }
+
+      // Both Call (read) and Send (write) buttons — the transpiler doesn't
+      // emit view/pure, so the user chooses which mode to use.
+      var callBtn = '<button onclick="callEvmFunction(' + i + ', true)" style="background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.4);color:#93c5fd;font-size:0.68rem;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600;">Call</button>';
+      var sendBtn = '<button onclick="callEvmFunction(' + i + ', false)" style="background:rgba(251,191,36,0.15);border:1px solid rgba(251,191,36,0.4);color:#fcd34d;font-size:0.68rem;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600;">Send</button>';
+
+      html += '<div id="' + rowId + '" style="display:flex;align-items:center;gap:8px;margin:6px 0;padding:6px 8px;background:rgba(0,0,0,0.2);border-radius:6px;flex-wrap:wrap;" ' +
+        'data-sig="' + f.signature + '" data-rtypes="' + (f.returnTypes.join(',') || '') + '" data-fname="' + f.name + '">' +
+        '<span style="font-family:ui-monospace,monospace;font-size:0.7rem;color:#e2e8f0;min-width:80px;">' + f.name + '</span>' +
+        paramsHtml +
+        ' ' + callBtn + ' ' + sendBtn +
+        '<span class="evmResult" style="font-family:ui-monospace,monospace;font-size:0.68rem;color:rgba(255,255,255,0.6);margin-left:4px;flex-grow:1;"></span>' +
+        '</div>';
+    }
+
+    panel.style.display = 'block';
+    panel.innerHTML = html;
+
+    // Store funcs for later access
+    window._evmFunctions = funcs;
+    window._evmContractAddress = addr;
+  }
+
+  async function callEvmFunction(idx, isView) {
+    var funcs = window._evmFunctions || [];
+    var f = funcs[idx];
+    if (!f) return;
+
+    var row = document.getElementById('evmFunc_' + idx);
+    if (!row) return;
+
+    var resultSpan = row.querySelector('.evmResult');
+    var btn = row.querySelector('button');
+    if (!resultSpan || !btn) return;
+
+    // Collect args from inputs
+    var args = [];
+    var inputs = row.querySelectorAll('input[data-arg]');
+    for (var i = 0; i < inputs.length; i++) {
+      var val = inputs[i].value.trim();
+      if (val === '') {
+        resultSpan.innerHTML = '<span style="color:#f87171;">missing arg: ' + (inputs[i].placeholder || ('arg' + i)) + '</span>';
+        return;
+      }
+      args.push(val);
+    }
+
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+    var originalBtn = btn.textContent;
+    btn.textContent = '...';
+
+    try {
+      var res = await fetch(EVM_CALL_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contract_address: window._evmContractAddress,
+          function_signature: f.signature,
+          args: args,
+          is_view: isView
+        })
+      });
+      var data = await res.json();
+
+      if (data.success) {
+        if (isView) {
+          // Decode hex output for display
+          var decoded = decodeEvmHexOutput(data.output, f.returnTypes);
+          var displayVal = decoded;
+
+          // If it's a BigInt, format with thousand separators for readability
+          if (/^\d+$/.test(decoded) && decoded.length > 6) {
+            displayVal = BigInt(decoded).toLocaleString();
+          }
+
+          resultSpan.innerHTML = '<span style="color:#34d399;">' + String(displayVal).replace(/</g, '&lt;') + '</span>';
+          if (f.returnTypes.length > 0) {
+            resultSpan.innerHTML += ' <span style="color:rgba(255,255,255,0.25);font-size:0.62rem;">(' + f.returnTypes.join(', ') + ')</span>';
+          }
+        } else {
+          // Write transaction — show tx hash, gas, block
+          var txShort = (data.tx_hash || '').slice(0, 18) + '...';
+          var gas = data.gas_used ? data.gas_used.toLocaleString() : '?';
+          var block = data.block_num !== null ? data.block_num : '?';
+          resultSpan.innerHTML = '<span style="color:#34d399;">✓</span> ' +
+            '<span style="color:rgba(255,255,255,0.4);">tx:</span> <code style="color:rgba(255,255,255,0.6);">' + txShort + '</code> ' +
+            '<span style="color:rgba(255,255,255,0.4);">gas:</span> <code style="color:rgba(255,255,255,0.6);">' + gas + '</code> ' +
+            '<span style="color:rgba(255,255,255,0.4);">block:</span> <code style="color:rgba(255,255,255,0.6);">#' + block + '</code>';
+        }
+      } else {
+        var errs = data.errors || ['Unknown error'];
+        resultSpan.innerHTML = '<span style="color:#f87171;">' + errs[0].replace(/</g, '&lt;').slice(0, 80) + '</span>';
+      }
+    } catch(e) {
+      resultSpan.innerHTML = '<span style="color:#f87171;">' + e.message.replace(/</g, '&lt;') + '</span>';
+    }
+
+    btn.disabled = false;
+    btn.style.opacity = '1';
+    btn.textContent = originalBtn;
+  }
+
+  window.callEvmFunction = callEvmFunction;
+  window.populateEvmCallPanel = populateEvmCallPanel;
+  window.parseSolidityFunctions = parseSolidityFunctions;
+  window.decodeEvmHexOutput = decodeEvmHexOutput;
+
+  window.deployToEvm = deployToEvm;
+
   window.runDiffTests = runDiffTests;
 
   /* ── Downloads ───────────────────────────────────────────────────────────── */
@@ -5280,113 +5705,40 @@
   window.loadVault      = loadVault;
 
 
-  function loadTypeTest() {
-    evictWorkspaceContractByName('TypeTestContract');
-    var _src = getContractSource('TypeTestContract');
-    document.getElementById('editor').value = _src;
-    updateLineNums();
-    clearResults();
-    syncCompileBtn();
-    setEditorBadges('TypeTestContract');
-    setActiveContract('TypeTestContract', _src);
-    setStatus('TypeTestContract loaded — Compile, Deploy, then call init() to begin testing all types and operators.', 'info');
-  }
+  function loadTypeTest() { loadContract('TypeTestContract'); }
   window.loadTypeTest = loadTypeTest;
   // ── Inline contract sources (extracted for diff tests without UI side effects) ──
 
   // ── BLANK_LINES: minimal template for the "New" button ──
 
-  function loadLoopDemo() {
-    evictWorkspaceContractByName('LoopDemo');
-    document.getElementById('editor').value = getContractSource('LoopDemo');
-    updateLineNums();
-    clearResults();
-    syncCompileBtn();
-    setEditorBadges('LoopDemo');
-    setActiveContract('LoopDemo', document.getElementById('editor').value);
-    setStatus('LoopDemo loaded. Call init() before runIterations(). Try factorial(5), sumRange(1,100), countEven(10), sqrtFloor(16), power(2,10).', 'info');
-  }
+  function loadLoopDemo() { loadContract('LoopDemo'); }
   window.loadLoopDemo = loadLoopDemo;
 
   // ── V3TYPES: new type aliases, attributes, authority, Bech32 builtins ──
 
-  function loadV3Demo() {
-    evictWorkspaceContractByName('V3Types');
-    document.getElementById('editor').value = getContractSource('V3Types');
-    updateLineNums();
-    clearResults();
-    syncCompileBtn();
-    setEditorBadges('V3Types');
-    setActiveContract('V3Types', document.getElementById('editor').value);
-    setStatus('V3Types loaded — Compile, Deploy, then call init() (sign with wallet). Try deriveContractAddr(42, 0, 4660) and getOwnerSyna() after init.', 'info');
-  }
+  function loadV3Demo() { loadContract('V3Types'); }
   window.loadV3Demo = loadV3Demo;
 
   // ── StructValue ──────────────────────────────────────────────────────────
-  function loadStructValue() {
-    evictWorkspaceContractByName('StructValue');
-        var src = getContractSource('StructValue');
-    document.getElementById('editor').value = src;
-    updateLineNums();
-    clearResults();
-    syncCompileBtn();
-    setEditorBadges('StructValue');
-    setActiveContract('StructValue', document.getElementById('editor').value);
-    setStatus('StructValue loaded — Compile, Deploy, then call init(). Try setCorner(10,20), getCornerX(), getBoxOriginX(), moveCorner(100,200).', 'info');
-  }
+  function loadStructValue() { loadContract('StructValue'); }
   window.loadStructValue = loadStructValue;
 
   // ── NamedError (RevertCode 0x35) ─────────────────────────────────────────
-  function loadNamedError() {
-    evictWorkspaceContractByName('NamedError');
-        var src = getContractSource('NamedError');
-    document.getElementById('editor').value = src;
-    updateLineNums();
-    clearResults();
-    syncCompileBtn();
-    setEditorBadges('NamedError');
-    setActiveContract('NamedError', document.getElementById('editor').value);
-    setStatus('NamedError loaded — Compile, Deploy, then call init(). Try withdraw(42) to see runtime arg in error, failOverflow() for multi-arg, or failUnauthorized() for no-arg.', 'info');
-  }
+  function loadNamedError() { loadContract('NamedError'); }
   window.loadNamedError = loadNamedError;
 
   // ── AssetDemo (opcodes 0x57-0x5B) ─────────────────────────────────────────────
-  function loadAssetDemo() {
-    evictWorkspaceContractByName('AssetDemo');
-    const src = getContractSource('AssetDemo');
-    document.getElementById('editor').value = src;
-    updateLineNums();
-    clearResults();
-    syncCompileBtn();
-    setEditorBadges('AssetDemo');
-    setActiveContract('AssetDemo', document.getElementById('editor').value);
-    setStatus('AssetDemo loaded — Compile, Deploy, then call init(). Try createAsset(1000), checkOwner(1), transferAsset(1, 42), burnAsset(2).', 'info');
-  }
+  function loadAssetDemo() { loadContract('AssetDemo'); }
   window.loadAssetDemo = loadAssetDemo;
 
   // ── StructField (TupleSet 0xAB) ──────────────────────────────────────────
-  function loadStructField() {
-    evictWorkspaceContractByName('StructField');
-    const src = getContractSource('StructField');
-    document.getElementById('editor').value = src;
-    updateLineNums();
-    clearResults();
-    syncCompileBtn();
-    setEditorBadges('StructField');
-    setActiveContract('StructField', document.getElementById('editor').value);
-    setStatus('StructField loaded — Compile, Deploy, then call init(). Try setOrigin(42, 99), getOriginX(), getOrigin(), moveX(10), swapCoordinates().', 'info');
-  }
+  function loadStructField() { loadContract('StructField'); }
   window.loadStructField = loadStructField;
 
   // ── StackFailDemo (verification education) ───────────────────────────────
   function loadPQCDemo() {
-    evictWorkspaceContractByName('PQCDemo');
-    document.getElementById('editor').value = getContractSource('PQCDemo');
-    updateLineNums(); clearResults(); syncCompileBtn();
-    setEditorBadges('PQCDemo');
-    setActiveContract('PQCDemo', document.getElementById('editor').value);
-    // Fetch a fresh ML-DSA-65 test vector from the server
-    fetch('/synq/pqc/test-vector')
+    loadContract('PQCDemo');
+    fetch('/synq/attest')
       .then(function(r) { return r.json(); })
       .then(function(tv) {
         window._pqcTestVector = tv;
@@ -5397,17 +5749,7 @@
   window.loadPQCDemo = loadPQCDemo;
 
   function loadStackFailDemo() {
-    evictWorkspaceContractByName('StackFailDemo');
-        var src = getContractSource('StackFailDemo');
-
-    document.getElementById('editor').value = src;
-    updateLineNums();
-    clearResults();
-    syncCompileBtn();
-    currentContractName = 'StackFailDemo';
-    currentBytecode = null;
-    currentExternContracts = [];
-    stateSnapshot = {};
+    loadContract('StackFailDemo');
     deployedContracts = {};
     setEditorBadges('StackFailDemo');
     setActiveContract('StackFailDemo', document.getElementById('editor').value);

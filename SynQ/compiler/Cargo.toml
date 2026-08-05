@@ -9,6 +9,7 @@ native = [
     "dep:synq-pqc-shims",
     "synq-pqc-shims/native",
     "dep:pqcrypto",
+    "quantumvm/native",
 ]
 wasm = [
     "dep:synq-pqc-shims",
@@ -24,7 +25,7 @@ pest_derive = "2.7.7"
 sha3        = "0.10"
 ruint       = { workspace = true }
 
-quantumvm      = { package = "synq-vm",        path = "../vm" }
+quantumvm      = { package = "synq-vm",        path = "../vm", default-features = false }
 synq-pqc-shims = { package = "synq-pqc-shims", path = "../pqc-shims", default-features = false, optional = true }
 pqcrypto       = { workspace = true, optional = true }
 
