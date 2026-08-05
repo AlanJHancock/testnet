@@ -388,7 +388,7 @@ fn transpile_function(out: &mut String, f: &FunctionDefinition, contract: &Contr
     if let Some(ret_ty) = &f.returns {
         set_type("__return_type__", ret_ty.clone());
     }
-    let vis = if f.is_public || f.requires_caller { "public" } else { "internal" };
+    let vis = "public";
 
     // Map attributes to Solidity modifiers/comments
     let mut modifiers = Vec::new();
