@@ -740,6 +740,8 @@ struct FunctionMeta {
     governance_scope: Option<String>,
     /// Authority scope name if @authority(ScopeName) is present
     authority_scope: Option<String>,
+    /// Whether this function is view-only (no state modification)
+    is_view: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -1136,6 +1138,7 @@ async fn compile_handler(
                             Some(scope.clone())
                         } else { None }
                     ),
+                    is_view:        synq_compiler::transpile_solidity::is_function_view(f, c),
                         modifies:       f.modifies.clone(),
                     }),
                     _ => None,

@@ -3715,16 +3715,20 @@
         if (j < f.params.length - 1) paramsHtml += ' ';
       }
 
-      // Both Call (read) and Send (write) buttons — the transpiler doesn't
-      // emit view/pure, so the user chooses which mode to use.
-      var callBtn = '<button onclick="callEvmFunction(' + i + ', true)" style="background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.4);color:#93c5fd;font-size:0.68rem;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600;">Call</button>';
-      var sendBtn = '<button onclick="callEvmFunction(' + i + ', false)" style="background:rgba(251,191,36,0.15);border:1px solid rgba(251,191,36,0.4);color:#fcd34d;font-size:0.68rem;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600;">Send</button>';
+      // Show Call (read) for view functions, Send (write) for state-changing functions
+      var callBtn = '';
+      var sendBtn = '';
+      if (f.is_view) {
+        callBtn = '<button onclick="callEvmFunction(' + i + ', true)" style="background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.4);color:#93c5fd;font-size:0.68rem;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600;">Call</button>';
+      } else {
+        sendBtn = '<button onclick="callEvmFunction(' + i + ', false)" style="background:rgba(251,191,36,0.15);border:1px solid rgba(251,191,36,0.4);color:#fcd34d;font-size:0.68rem;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600;">Send</button>';
+      }
 
       html += '<div id="' + rowId + '" style="display:flex;align-items:center;gap:8px;margin:6px 0;padding:6px 8px;background:rgba(0,0,0,0.2);border-radius:6px;flex-wrap:wrap;" ' +
         'data-sig="' + f.signature + '" data-rtypes="' + (f.returnTypes.join(',') || '') + '" data-fname="' + f.name + '">' +
         '<span style="font-family:ui-monospace,monospace;font-size:0.7rem;color:#e2e8f0;min-width:80px;">' + f.name + '</span>' +
         paramsHtml +
-        ' ' + callBtn + ' ' + sendBtn +
+        ' ' + callBtn + sendBtn +
         '<span class="evmResult" style="font-family:ui-monospace,monospace;font-size:0.68rem;color:rgba(255,255,255,0.6);margin-left:4px;flex-grow:1;"></span>' +
         '</div>';
     }

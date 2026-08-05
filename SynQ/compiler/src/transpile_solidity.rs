@@ -570,6 +570,42 @@ pub fn infer_function_return_type(block: &Block) -> Option<Type> {
     None
 }
 
+/// Determine if a function should be marked `view` in Solidity.
+/// A function is view iff it does NOT modify state, does NOT have @effects,
+/// does NOT require caller, and does NOT write to state vars in its body.
+pub fn is_function_view(f: &FunctionDefinition, contract: &ContractDefinition) -> bool {
+    let has_effects = f.attributes.iter().any(|a| matches!(a, Attribute::Effects(_)));
+    let has_modifies = !f.modifies.is_empty();
+    let state_var_names: std::collections::HashSet<String> = contract.parts.iter()
+        .filter_map(|p| if let ContractPart::StateVariable(sv) = p { Some(sv.name.clone()) } else { None })
+        .collect();
+    fn body_writes_state(block: &Block, state_vars: &std::collections::HashSet<String>) -> bool {
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Assignment(name, _) => {
+                    if state_vars.contains(name) { return true; }
+                }
+                Statement::FieldAssignment { .. } | Statement::MapAssignment { .. } | Statement::SetOp { .. } => {
+                    return true;
+                }
+                Statement::If { then_block, else_block, .. } => {
+                    if body_writes_state(then_block, state_vars) { return true; }
+                    if let Some(e) = else_block {
+                        if body_writes_state(e, state_vars) { return true; }
+                    }
+                }
+                Statement::While { body, .. } => {
+                    if body_writes_state(body, state_vars) { return true; }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+    let writes_state = body_writes_state(&f.body, &state_var_names);
+    !has_effects && !has_modifies && !f.requires_caller && !writes_state
+}
+
 /// Check if a block has any actual return statement (not just extern_call comments).
 pub fn block_has_return(block: &Block) -> bool {
     for stmt in &block.statements {
