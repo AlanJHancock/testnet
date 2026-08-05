@@ -3654,10 +3654,12 @@
           // Last 40 chars of the word
           results.push('0x' + word.slice(-40));
         } else if (rt === 'string') {
-          // Dynamic string: first word is length, second+ is data
-          if (words.length >= 2) {
-            var len = parseInt(words[0], 16);
-            var strHex = words.slice(1).join('');
+          // ABI dynamic string: word[0] = byte offset, data at offset = length + bytes
+          var offset = parseInt(words[0], 16);
+          var offsetWord = Math.floor(offset / 32);
+          if (offsetWord < words.length) {
+            var len = parseInt(words[offsetWord], 16);
+            var strHex = words.slice(offsetWord + 1).join('');
             var str = '';
             for (var j = 0; j < len * 2 && j < strHex.length; j += 2) {
               str += String.fromCharCode(parseInt(strHex.slice(j, j + 2), 16));
