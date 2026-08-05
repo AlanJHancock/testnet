@@ -738,6 +738,8 @@ struct FunctionMeta {
     modifies:       Vec<String>,
     /// Governance scope name if @governance(ScopeName) is present
     governance_scope: Option<String>,
+    /// Authority scope name if @authority(ScopeName) is present
+    authority_scope: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1129,6 +1131,11 @@ async fn compile_handler(
                             Some(scope.clone())
                         } else { None }
                     ),
+                    authority_scope: f.attributes.iter().find_map(|a|
+                        if let synq_compiler::ast::Attribute::Authority(scope) = a {
+                            Some(scope.clone())
+                        } else { None }
+                    ),
                         modifies:       f.modifies.clone(),
                     }),
                     _ => None,
@@ -1505,6 +1512,9 @@ async fn compile_handler(
             let sqb_gov_scopes: std::collections::HashMap<String, String> = sqb_functions.iter()
                 .filter_map(|f| f.governance_scope.as_ref().map(|s| (f.name.clone(), s.clone())))
                 .collect();
+            let sqb_auth_scopes: std::collections::HashMap<String, String> = sqb_functions.iter()
+                .filter_map(|f| f.authority_scope.as_ref().map(|s| (f.name.clone(), s.clone())))
+                .collect();
 
             let manifest_json = serde_json::json!({
                 "artifact_hash": artifact_hash,
@@ -1523,6 +1533,8 @@ async fn compile_handler(
                     "name": f.name,
                     "params": f.params,
                     "return_type": f.return_type,
+                    "authority_scope": f.authority_scope,
+                    "governance_scope": f.governance_scope,
                 })).collect::<Vec<_>>(),
                 "state_vars": sqb_state_vars.iter().map(|(name, slot)| {
                     let ty = {
@@ -1541,7 +1553,7 @@ async fn compile_handler(
                     ty
                 }).collect::<Vec<_>>(),
                 "governance_scopes": sqb_gov_scopes,
-                "authority_scopes": {},
+                "authority_scopes": sqb_auth_scopes,
             });
 
             // Compute manifest signature using the SAME canonical 8-field form
@@ -1601,6 +1613,8 @@ async fn compile_handler(
                     "name": f.name,
                     "params": f.params,
                     "return_type": f.return_type,
+                    "authority_scope": f.authority_scope,
+                    "governance_scope": f.governance_scope,
                 })).collect::<Vec<_>>(),
                 "state_vars": sqb_state_vars.iter().map(|(name, slot)| {
                     let ty = {
@@ -1619,7 +1633,7 @@ async fn compile_handler(
                     ty
                 }).collect::<Vec<_>>(),
                 "governance_scopes": sqb_gov_scopes,
-                "authority_scopes": {},
+                "authority_scopes": sqb_auth_scopes,
             });
             let manifest_bytes = serde_json::to_vec(&manifest_json).unwrap_or_default();
 
@@ -4024,8 +4038,6 @@ async fn session_new_handler(
                 let mut scopes = req.authority_scopes.unwrap_or_default();
                 if scopes.is_empty() {
                     let resolved_manifest = sqb_manifest.as_ref().or(req.manifest.as_ref());
-                    eprintln!("[SESSION] authority_scopes: req.manifest={}, sqb_manifest={}, resolved={}",
-                        req.manifest.is_some(), sqb_manifest.is_some(), resolved_manifest.is_some());
                     if let Some(ref manifest) = resolved_manifest {
                         if let Some(fns) = manifest.get("functions").and_then(|v| v.as_array()) {
                             for f in fns {
