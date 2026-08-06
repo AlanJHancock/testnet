@@ -3969,7 +3969,10 @@
           _sessionGrantExpiry = 0;
           var grantOk = await createSessionGrant();
           if (grantOk) {
+            updateWalletUI();  // ensure wallet bar reflects grant
             setStatus('Session grant active — signed once, no per-call signing needed for 1 hour.', 'ok');
+          } else {
+            updateWalletUI();  // refresh in case state changed
           }
         }
       })();
@@ -4477,10 +4480,12 @@
         if (data.caller_syna) {
           console.log('[GRANT] caller syna:', data.caller_syna);
         }
+        updateWalletUI();  // refresh wallet bar to show grant status
         return true;
       } else {
         console.warn('[GRANT] failed:', data.error || 'unknown');
         _sessionGrantActive = false;
+        updateWalletUI();
         return false;
       }
     } catch (e) {
