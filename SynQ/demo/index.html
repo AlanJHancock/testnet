@@ -4508,8 +4508,10 @@
         if (_gb) { _gb.innerHTML = '\u23F3\u2009Posting...'; }
         setStatus('[GRANT] Step 4/5: Signed. POSTing to server...', 'info');
       } catch (sigErr) {
-        setStatus('[GRANT] Failed: signing error - ' + (sigErr.message || sigErr), 'error');
-        console.warn('[GRANT] signing declined:', sigErr.message || sigErr);
+        var _sigErrMsg = sigErr.message || String(sigErr);
+        console.warn('[GRANT] signing declined:', _sigErrMsg);
+        setStatus('[GRANT] Failed: signing - ' + _sigErrMsg, 'error');
+        if (_gb) { _gb.className = 'grant-badge inactive'; _gb.innerHTML = '\u274C\u2009sign err'; _gb.title = 'Signing failed: ' + _sigErrMsg; _gb.style.display = 'inline-flex'; }
         return false;
       }
 
@@ -4543,15 +4545,19 @@
         setStatus('Session grant active - no per-call signing for 1 hour.', 'ok');
         return true;
       } else {
-        setStatus('[GRANT] Failed: server rejected - ' + (data.error || 'unknown'), 'error');
-        console.warn('[GRANT] failed:', data.error || 'unknown');
+        var _errMsg = data.error || 'unknown';
+        console.warn('[GRANT] failed:', _errMsg, 'full response:', JSON.stringify(data));
+        setStatus('[GRANT] Failed: ' + _errMsg, 'error');
+        if (_gb) { _gb.className = 'grant-badge inactive'; _gb.innerHTML = '\u274C\u2009' + _errMsg.slice(0, 30); _gb.title = 'Grant failed: ' + _errMsg; _gb.style.display = 'inline-flex'; }
         _sessionGrantActive = false;
         updateWalletUI();
         return false;
       }
     } catch (e) {
-      setStatus('[GRANT] Error: ' + (e.message || e), 'error');
-      console.warn('[GRANT] error:', e.message || e, e.stack || '');
+      var _errMsg = e.message || String(e);
+      console.warn('[GRANT] error:', _errMsg, e.stack || '');
+      setStatus('[GRANT] Error: ' + _errMsg, 'error');
+      if (_gb) { _gb.className = 'grant-badge inactive'; _gb.innerHTML = '\u274C\u2009' + _errMsg.slice(0, 30); _gb.title = 'Grant error: ' + _errMsg; _gb.style.display = 'inline-flex'; }
       _sessionGrantActive = false;
       updateWalletUI();
       return false;

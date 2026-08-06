@@ -4287,8 +4287,9 @@ async fn session_grant_handler(
     );
     let digest = eip712_digest_with_domain(run_domain, &struct_hash);
 
-    eprintln!("[GRANT] session={} caller={} expiry={} allowed={:?}",
-        session_id, req.evm_address, req.expiry, req.allowed_functions);
+    eprintln!("[GRANT] session={} caller={} expiry={} allowed={:?} nonce={}",
+        session_id, req.evm_address, req.expiry, req.allowed_functions, req.grant_nonce);
+    eprintln!("[GRANT] sig_len={} sig_head={}", req.evm_signature.len(), &req.evm_signature[..20.min(req.evm_signature.len())]);
 
     // ecrecover
     let sig_bytes = match hex_decode_strict(req.evm_signature.strip_prefix("0x").unwrap_or(&req.evm_signature)) {
@@ -4898,6 +4899,7 @@ async fn session_nonce_handler(
     let nonce_hex = hex_encode(&buf);
     session.pending_nonce = Some(nonce_hex.clone());
     session.last_used = Instant::now();
+    eprintln!("[NONCE] session={} nonce={}", session_id, nonce_hex);
     let contract_name = session.contract_name.clone();
     let network_id = V3_NETWORK_ID;
     let chain_id = V3_CHAIN_ID;
