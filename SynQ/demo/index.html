@@ -657,12 +657,12 @@
       Execute Contract
       <span id="contractNameBadge" style="font-size:0.72rem;font-family:ui-monospace,monospace;background:rgba(0,206,209,0.12);border:1px solid rgba(0,206,209,0.3);color:#00ced1;border-radius:10px;padding:2px 10px;margin-left:8px;letter-spacing:0.04em;text-transform:none;display:none;"></span>
     </span>
-    <span id="grantBadge" style="display:none;" class="grant-badge" title="Session Grant status — sign once at deploy, then no per-call wallet popups"></span>
     <span id="sessionBadge" style="display:none; font-size:0.7rem; font-family:ui-monospace,monospace;
       background:rgba(16,185,129,0.12); border:1px solid rgba(16,185,129,0.35);
       color:#6ee7b7; border-radius:10px; padding:2px 10px; letter-spacing:0.04em;">
       ● QVM — SynQ Virtual Machine active
     </span>
+    <span id="grantBadge" style="display:none;" class="grant-badge" title="Session Grant status — sign once at deploy, then no per-call wallet popups"></span>
     <span id="gasBadge2" style="display:none;" class="gas-badge active" title="Gas Budget (ACTS-VM-003 + ACTS-VM-005) — compute + PQC cost per invocation"></span>
     <span id="stepBadge2" style="display:none;" class="step-badge active" title="VM Step Budget (ACTS-VM-003) — compute steps per call"></span>
   </div>
@@ -828,6 +828,7 @@
   var _walletMode = "none"; // "synergy" | "ethereum" | "none"
   var _sessionGrantExpiry  = 0;     // unix seconds — 0 means no active grant
   var _sessionGrantActive  = false;  // true when grant is valid and not expired
+  var _manualSynw = null;     // manual synw override for devnet
   var _ephemeralPrivKey  = null;
   var _ephemeralAddress  = null; // always the address derived from _ephemeralPrivKey        // Uint8Array — secp256k1 private key
 
