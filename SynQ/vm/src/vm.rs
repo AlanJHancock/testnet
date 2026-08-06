@@ -2388,11 +2388,11 @@ contract SqrtTest {
     }
 
     #[test]
-    fn test_ir_bytecode_matches_codegen_for_loops() {
-        // Verify that IR and direct codegen produce FUNCTIONALLY EQUIVALENT
-        // bytecode for a contract with loops. The IR backend uses a slot-based
-        // approach (different memory layout), so byte-for-byte equality is not
-        // expected. Instead, we verify both compile and execute correctly.
+    fn test_ir_backend_loop_bytecode() {
+        // Verify that the IR backend produces correct bytecode for loops.
+        // The IR backend uses a slot-based
+        // approach, so byte-for-byte patterns are not the focus.
+        // Instead, we verify it compiles and executes correctly.
         let source = r#"pragma synq ^0.9;
 contract BytecodeMatchLoop {
     state {
