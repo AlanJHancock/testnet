@@ -4,6 +4,7 @@
 //! POST /attest         — EIP-191 EVM verification + PQC attestation (SynQAttestationV1)
 //! POST /session/new    — load bytecode into a fresh persistent VM session
 //! POST /session/run    — call a function on a persistent session
+//! POST /session/:id/grant — create a session grant (batched auth, skip per-call signing)
 //! DELETE /session/:id  — destroy a session
 //! GET  /health
 //!
@@ -143,6 +144,48 @@ const MAX_BODY_BYTES: usize    = 128 * 1024;
 /// vanish from the JSON entirely when this is disabled.
 const FUEL_REPORTING: bool = true;
 
+// ── Session Grant Model ──────────────────────────────────────────────────────
+// Opt-in batched auth: user signs once, authorizing functions for a bounded lifetime.
+// EIP-712: SessionGrant(string sessionId, string callerAddress, string[] allowedFunctions, uint256 expiry, string domainTag)
+const V3_DOMAIN_GRANT: &str = "SYNQ-GRANT-v3";
+
+#[derive(Clone)]
+struct SessionGrant {
+    caller_addr: [u8; 20],
+    display_synw: Option<String>,
+    allowed_functions: std::collections::HashSet<String>,
+    expiry: u64,
+    grant_nonce: String,
+}
+
+fn eip712_hash_session_grant_v3(
+    session_id: &str, caller_address: &str, allowed_functions: &[String],
+    expiry: u64, domain_tag: &str,
+) -> [u8; 32] {
+    let type_hash = keccak256_str(
+        "SessionGrant(string sessionId,string callerAddress,string[] allowedFunctions,uint256 expiry,string domainTag)"
+    );
+    let session_id_hash = keccak256_str(session_id);
+    let caller_hash = keccak256_str(caller_address);
+    let parts: Vec<[u8; 32]> = allowed_functions.iter().map(|f| keccak256_str(f)).collect();
+    let mut arr_enc = Vec::with_capacity(parts.len() * 32 + 32);
+    let len_bytes = (parts.len() as u64).to_be_bytes();
+    arr_enc.extend_from_slice(&len_bytes[4..]);
+    for p in &parts { arr_enc.extend_from_slice(p); }
+    let arr_hash = keccak256(&arr_enc);
+    let mut exp_bytes = [0u8; 32];
+    exp_bytes[24..].copy_from_slice(&expiry.to_be_bytes());
+    let domain_tag_hash = keccak256_str(domain_tag);
+    let mut enc = [0u8; 192];
+    enc[..32].copy_from_slice(&type_hash);
+    enc[32..64].copy_from_slice(&session_id_hash);
+    enc[64..96].copy_from_slice(&caller_hash);
+    enc[96..128].copy_from_slice(&arr_hash);
+    enc[128..160].copy_from_slice(&exp_bytes);
+    enc[160..192].copy_from_slice(&domain_tag_hash);
+    keccak256(&enc)
+}
+
 struct Session {
     vm:              QuantumVM,
     max_steps:       usize,
@@ -162,6 +205,7 @@ struct Session {
     authority_scopes: std::collections::HashMap<String, String>,
     /// Functions that use `as caller` — need non-zero caller on devnet
     caller_fns: std::collections::HashSet<String>,
+    session_grant: Option<SessionGrant>,
 }
 
 // ─── PR-G: Persistent compiler-attestation key ───────────────────────────────
@@ -4123,6 +4167,7 @@ async fn session_new_handler(
                 }
                 fns
             },
+            session_grant: None,
         });
         // Register contract in workspace if workspace_id provided
         if let (Some(wid), Some(cname)) = (wid, cname) {
@@ -4143,6 +4188,174 @@ async fn session_new_handler(
     }))
 }
 
+// ── POST /session/:id/grant -- Session Grant Model ──────────────────────────
+#[derive(Deserialize)]
+struct SessionGrantRequest {
+    evm_address:       String,
+    evm_signature:     String,
+    grant_nonce:       String,
+    #[serde(default)]
+    allowed_functions: Vec<String>,
+    expiry:            u64,
+    #[serde(default)]
+    display_synw:      Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct SessionGrantResponse {
+    success:    bool,
+    session_id: Option<String>,
+    error:      Option<String>,
+    grant_expiry: Option<u64>,
+    allowed_functions: Option<Vec<String>>,
+    caller_syna:  Option<String>,
+}
+
+const GRANT_MAX_LIFETIME_SECS: u64 = 3600;
+
+async fn session_grant_handler(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(req): Json<SessionGrantRequest>,
+) -> (StatusCode, RespJson<SessionGrantResponse>) {
+    let mut session = {
+        let mut map = state.sessions.lock().unwrap();
+        match map.remove(&session_id) {
+            Some(s) => s,
+            None => return (StatusCode::NOT_FOUND, RespJson(SessionGrantResponse {
+                success: false, session_id: None, error: Some("Session not found".into()),
+                grant_expiry: None, allowed_functions: None, caller_syna: None,
+            })),
+        }
+    };
+
+    // Validate nonce
+    match &session.pending_nonce {
+        None => {
+            { state.sessions.lock().unwrap().insert(session_id.clone(), session); }
+            return (StatusCode::UNAUTHORIZED, RespJson(SessionGrantResponse {
+                success: false, session_id: None,
+                error: Some("no pending nonce -- call GET /session/:id/nonce first".into()),
+                grant_expiry: None, allowed_functions: None, caller_syna: None,
+            }));
+        }
+        Some(pn) if pn != &req.grant_nonce => {
+            { state.sessions.lock().unwrap().insert(session_id.clone(), session); }
+            return (StatusCode::UNAUTHORIZED, RespJson(SessionGrantResponse {
+                success: false, session_id: None,
+                error: Some("nonce mismatch -- nonces are single-use, request a new one".into()),
+                grant_expiry: None, allowed_functions: None, caller_syna: None,
+            }));
+        }
+        _ => {}
+    }
+    if session.used_nonces.contains(req.grant_nonce.as_str()) {
+        { state.sessions.lock().unwrap().insert(session_id.clone(), session); }
+        return (StatusCode::UNAUTHORIZED, RespJson(SessionGrantResponse {
+            success: false, session_id: None,
+            error: Some("nonce already used -- replay attack rejected".into()),
+            grant_expiry: None, allowed_functions: None, caller_syna: None,
+        }));
+    }
+
+    // Validate expiry
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if req.expiry <= now_secs {
+        { state.sessions.lock().unwrap().insert(session_id.clone(), session); }
+        return (StatusCode::BAD_REQUEST, RespJson(SessionGrantResponse {
+            success: false, session_id: None,
+            error: Some("grant expiry must be in the future".into()),
+            grant_expiry: None, allowed_functions: None, caller_syna: None,
+        }));
+    }
+    if req.expiry > now_secs + GRANT_MAX_LIFETIME_SECS {
+        { state.sessions.lock().unwrap().insert(session_id.clone(), session); }
+        return (StatusCode::BAD_REQUEST, RespJson(SessionGrantResponse {
+            success: false, session_id: None,
+            error: Some(format!("grant expiry exceeds maximum lifetime of {} seconds", GRANT_MAX_LIFETIME_SECS)),
+            grant_expiry: None, allowed_functions: None, caller_syna: None,
+        }));
+    }
+
+    // Build EIP-712 SessionGrant digest
+    let run_domain = session.contract_name.as_deref()
+        .map(eip712_domain_separator_for_contract)
+        .unwrap_or_else(eip712_domain_separator_zero);
+    let struct_hash = eip712_hash_session_grant_v3(
+        &session_id, &req.evm_address, &req.allowed_functions, req.expiry, V3_DOMAIN_GRANT,
+    );
+    let digest = eip712_digest_with_domain(run_domain, &struct_hash);
+
+    eprintln!("[GRANT] session={} caller={} expiry={} allowed={:?}",
+        session_id, req.evm_address, req.expiry, req.allowed_functions);
+
+    // ecrecover
+    let sig_bytes = match hex_decode_strict(req.evm_signature.strip_prefix("0x").unwrap_or(&req.evm_signature)) {
+        Ok(b) => b,
+        Err(e) => {
+            { state.sessions.lock().unwrap().insert(session_id.clone(), session); }
+            return (StatusCode::BAD_REQUEST, RespJson(SessionGrantResponse {
+                success: false, session_id: None,
+                error: Some(format!("evm_signature hex invalid: {}", e)),
+                grant_expiry: None, allowed_functions: None, caller_syna: None,
+            }));
+        }
+    };
+    let recovered = match ecrecover(&digest, &sig_bytes) {
+        Ok(r) => r,
+        Err(e) => {
+            { state.sessions.lock().unwrap().insert(session_id.clone(), session); }
+            return (StatusCode::UNAUTHORIZED, RespJson(SessionGrantResponse {
+                success: false, session_id: None,
+                error: Some(format!("ecrecover failed: {}", e)),
+                grant_expiry: None, allowed_functions: None, caller_syna: None,
+            }));
+        }
+    };
+
+    let claimed = hex_decode_strict(req.evm_address.strip_prefix("0x").unwrap_or(&req.evm_address))
+        .unwrap_or_default();
+    if claimed.len() != 20 || claimed.as_slice() != &recovered {
+        { state.sessions.lock().unwrap().insert(session_id.clone(), session); }
+        return (StatusCode::UNAUTHORIZED, RespJson(SessionGrantResponse {
+            success: false, session_id: None,
+            error: Some("signature does not match claimed evm_address".into()),
+            grant_expiry: None, allowed_functions: None, caller_syna: None,
+        }));
+    }
+
+    // Consume nonce, create grant, persist session
+    session.pending_nonce = None;
+    session.used_nonces.insert(req.grant_nonce.clone());
+
+    let caller_syna = synq_vm::bech32::evm_to_syna(&recovered)
+        .unwrap_or_else(|_| hex_encode(&recovered));
+    let allowed_set: std::collections::HashSet<String> =
+        req.allowed_functions.iter().cloned().collect();
+
+    eprintln!("[GRANT] grant created for session={} caller={} allowed={:?} expiry={}",
+        session_id, hex_encode(&recovered), allowed_set, req.expiry);
+
+    session.session_grant = Some(SessionGrant {
+        caller_addr: recovered,
+        display_synw: req.display_synw.clone(),
+        allowed_functions: allowed_set,
+        expiry: req.expiry,
+        grant_nonce: req.grant_nonce,
+    });
+
+    { state.sessions.lock().unwrap().insert(session_id.clone(), session); }
+
+    (StatusCode::OK, RespJson(SessionGrantResponse {
+        success: true, session_id: Some(session_id), error: None,
+        grant_expiry: Some(req.expiry),
+        allowed_functions: Some(req.allowed_functions),
+        caller_syna: Some(caller_syna),
+    }))
+}
 // ─── POST /session/run ────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -4160,6 +4373,8 @@ struct SessionRunRequest {
     fault_step:       Option<usize>,
     fault_byte_offset: Option<usize>,
     fault_xor_mask:   Option<u8>,
+    #[serde(default)]
+    use_grant: Option<bool>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -4229,7 +4444,7 @@ fn parse_event_logs(log: &[String]) -> Vec<EventLog> {
 async fn session_run_handler(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    Json(req): Json<SessionRunRequest>,
+    Json(mut req): Json<SessionRunRequest>,
 ) -> (StatusCode, RespJson<RunResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
         return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), events: Vec::new(), error: Some("rate limit exceeded — retry later".into()), caller_syna: None, error_code: None, error_name: None, fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None }));
@@ -4284,8 +4499,44 @@ async fn session_run_handler(
         }
     };
 
+    // ── Session grant check ────────────────────────────────────────────────────
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let has_per_call_auth = req.evm_address.is_some()
+        && req.evm_signature.is_some()
+        && req.call_nonce.is_some();
+    let wants_grant = req.use_grant.unwrap_or(true);
+
+    if let Some(ref grant) = session.session_grant {
+        if wants_grant && !has_per_call_auth && now_secs < grant.expiry {
+            let function_allowed = grant.allowed_functions.is_empty()
+                || grant.allowed_functions.contains(&req.function);
+            if !function_allowed {
+                return (StatusCode::OK, RespJson(RunResponse {
+                    success: false, result: None, output: String::new(),
+                    events: Vec::new(),
+                    error: Some(format!("session grant does not allow function '{}'", req.function)),
+                    caller_syna: None, error_code: None, error_name: None,
+                    fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
+                }));
+            }
+            eprintln!("[GRANT] using grant for '{}' (caller={}, expires in {}s)",
+                req.function, hex_encode(&grant.caller_addr), grant.expiry.saturating_sub(now_secs));
+            if let Some(ref synw) = grant.display_synw {
+                if req.display_synw.is_none() { req.display_synw = Some(synw.clone()); }
+            }
+        }
+    }
+    let grant_active = session.session_grant.as_ref().is_some_and(|g| {
+        wants_grant && !has_per_call_auth && now_secs < g.expiry
+    });
+
     // ── Caller authentication ──────────────────────────────────────────────────
-    let caller_addr: [u8; 20] = if let (Some(addr_str), Some(sig_str), Some(nonce)) =
+    let caller_addr: [u8; 20] = if grant_active {
+        session.session_grant.as_ref().unwrap().caller_addr
+    } else if let (Some(addr_str), Some(sig_str), Some(nonce)) =
         (&req.evm_address, &req.evm_signature, &req.call_nonce)
     {
         // 1. Nonce must match the server-issued pending nonce
@@ -5240,6 +5491,7 @@ async fn list_contracts_handler(
         .route("/session/new",       post(session_new_handler))
         .route("/session/run",       post(session_run_handler))
         .route("/session/:id/nonce", get(session_nonce_handler))
+        .route("/session/:id/grant", post(session_grant_handler))
         .route("/session/:id",       delete(session_delete_handler))
         .route("/workspace/new",     post(workspace_new_handler))
         .route("/workspace/:id",     get(workspace_info_handler).delete(workspace_delete_handler))
