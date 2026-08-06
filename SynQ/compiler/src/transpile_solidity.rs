@@ -499,8 +499,68 @@ fn transpile_function(out: &mut String, f: &FunctionDefinition, contract: &Contr
         }
         false
     }
+    /// Detect calls to state-changing builtins: asset_create, asset_transfer,
+    /// asset_burn, and extern_call (cross-contract calls may mutate state).
+    fn body_calls_state_changing_builtin(block: &Block) -> bool {
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Expression(e) | Statement::Let { value: e, .. } => {
+                    if expr_calls_state_builtin(e) { return true; }
+                }
+                Statement::Assignment(_, e) => {
+                    if expr_calls_state_builtin(e) { return true; }
+                }
+                Statement::Require(cond, _) => {
+                    if expr_calls_state_builtin(cond) { return true; }
+                }
+                Statement::Return(Some(e)) => {
+                    if expr_calls_state_builtin(e) { return true; }
+                }
+                Statement::ExternCall { .. } => return true,
+                Statement::Emit { .. } => return true,
+                Statement::If { condition, then_block, else_block, .. } => {
+                    if expr_calls_state_builtin(condition) { return true; }
+                    if body_calls_state_changing_builtin(then_block) { return true; }
+                    if let Some(eb) = else_block {
+                        if body_calls_state_changing_builtin(eb) { return true; }
+                    }
+                }
+                Statement::While { condition, body } => {
+                    if expr_calls_state_builtin(condition) { return true; }
+                    if body_calls_state_changing_builtin(body) { return true; }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+    fn expr_calls_state_builtin(e: &Expression) -> bool {
+        match e {
+            Expression::Call(name, _) => {
+                matches!(name.as_str(),
+                    "asset_create" | "asset_transfer" | "asset_burn" |
+                    "extern_call"
+                )
+            }
+            Expression::BinaryOp(a, _, b) => {
+                expr_calls_state_builtin(a) || expr_calls_state_builtin(b)
+            }
+            Expression::UnaryOp(_, a) => expr_calls_state_builtin(a),
+            Expression::Tuple(exprs) => exprs.iter().any(expr_calls_state_builtin),
+            Expression::Some(e) | Expression::Ok(e) | Expression::Err(e) => expr_calls_state_builtin(e),
+            Expression::FieldAccess { object, .. } => expr_calls_state_builtin(object),
+            Expression::TupleIndex { object, .. } => expr_calls_state_builtin(object),
+            Expression::MapMethod { .. } | Expression::MapIndex(..) => false,
+            Expression::SetMethod { .. } => false,
+            Expression::StructLiteral { fields, .. } => {
+                fields.iter().any(|(_, v)| expr_calls_state_builtin(v))
+            }
+            _ => false,
+        }
+    }
     let writes_state = body_writes_state(&f.body, &state_var_names);
-    let is_view = !has_effects && !has_modifies && !f.requires_caller && !writes_state;
+    let calls_state_builtin = body_calls_state_changing_builtin(&f.body);
+    let is_view = !has_effects && !has_modifies && !writes_state && !calls_state_builtin;
 
     let view_modifier = if is_view { " view" } else { "" };
 
@@ -572,7 +632,7 @@ pub fn infer_function_return_type(block: &Block) -> Option<Type> {
 
 /// Determine if a function should be marked `view` in Solidity.
 /// A function is view iff it does NOT modify state, does NOT have @effects,
-/// does NOT require caller, and does NOT write to state vars in its body.
+/// does NOT call state-changing builtins, and does NOT write to state vars.
 pub fn is_function_view(f: &FunctionDefinition, contract: &ContractDefinition) -> bool {
     let has_effects = f.attributes.iter().any(|a| matches!(a, Attribute::Effects(_)));
     let has_modifies = !f.modifies.is_empty();
@@ -602,8 +662,61 @@ pub fn is_function_view(f: &FunctionDefinition, contract: &ContractDefinition) -
         }
         false
     }
+    fn body_calls_state_changing_builtin(block: &Block) -> bool {
+        for stmt in &block.statements {
+            match stmt {
+                Statement::Expression(e) | Statement::Let { value: e, .. } => {
+                    if expr_calls_state_builtin(e) { return true; }
+                }
+                Statement::Assignment(_, e) => {
+                    if expr_calls_state_builtin(e) { return true; }
+                }
+                Statement::Require(cond, _) => {
+                    if expr_calls_state_builtin(cond) { return true; }
+                }
+                Statement::Return(Some(e)) => {
+                    if expr_calls_state_builtin(e) { return true; }
+                }
+                Statement::ExternCall { .. } => return true,
+                Statement::Emit { .. } => return true,
+                Statement::If { condition, then_block, else_block, .. } => {
+                    if expr_calls_state_builtin(condition) { return true; }
+                    if body_calls_state_changing_builtin(then_block) { return true; }
+                    if let Some(eb) = else_block {
+                        if body_calls_state_changing_builtin(eb) { return true; }
+                    }
+                }
+                Statement::While { condition, body } => {
+                    if expr_calls_state_builtin(condition) { return true; }
+                    if body_calls_state_changing_builtin(body) { return true; }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+    fn expr_calls_state_builtin(e: &Expression) -> bool {
+        match e {
+            Expression::Call(name, _) => {
+                matches!(name.as_str(),
+                    "asset_create" | "asset_transfer" | "asset_burn" |
+                    "extern_call"
+                )
+            }
+            Expression::BinaryOp(a, _, b) => {
+                expr_calls_state_builtin(a) || expr_calls_state_builtin(b)
+            }
+            Expression::UnaryOp(_, a) => expr_calls_state_builtin(a),
+            Expression::Tuple(exprs) => exprs.iter().any(expr_calls_state_builtin),
+            Expression::Some(e) | Expression::Ok(e) | Expression::Err(e) => expr_calls_state_builtin(e),
+            Expression::FieldAccess { object, .. } => expr_calls_state_builtin(object),
+            Expression::TupleIndex { object, .. } => expr_calls_state_builtin(object),
+            _ => false,
+        }
+    }
     let writes_state = body_writes_state(&f.body, &state_var_names);
-    !has_effects && !has_modifies && !f.requires_caller && !writes_state
+    let calls_state_builtin = body_calls_state_changing_builtin(&f.body);
+    !has_effects && !has_modifies && !writes_state && !calls_state_builtin
 }
 
 /// Check if a block has any actual return statement (not just extern_call comments).

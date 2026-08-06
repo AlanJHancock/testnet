@@ -2447,6 +2447,22 @@ async fn evm_call_handler(
                         if parts.len() >= 2 { parts[1].trim().to_string() } else { "unknown".to_string() }
                     }).unwrap_or_default();
 
+                // Also run cast call to get the function's return value
+                // (cast send doesn't return the function's return data)
+                let mut call_cmd = Command::new(&cast_bin);
+                call_cmd.arg("call").arg(&req.contract_address).arg(&sig);
+                for arg in &converted_args {
+                    call_cmd.arg(arg);
+                }
+                call_cmd.args(["--rpc-url", rpc_url,
+                    "--from", "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"]);
+                let return_value = match call_cmd.output() {
+                    Ok(co) if co.status.success() => {
+                        Some(String::from_utf8_lossy(&co.stdout).trim().to_string())
+                    }
+                    _ => None,
+                };
+
                 let summary = format!(
                     "status: {}\ntxHash: {}\ngasUsed: {}\nblock: {}",
                     status,
@@ -2457,7 +2473,7 @@ async fn evm_call_handler(
 
                 (StatusCode::OK, RespJson(EvmCallResponse {
                     success: true,
-                    output: Some(summary),
+                    output: return_value.or(Some(summary)),
                     tx_hash,
                     gas_used,
                     block_num,

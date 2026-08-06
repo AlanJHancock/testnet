@@ -3855,14 +3855,28 @@
             resultSpan.innerHTML += ' <span style="color:rgba(255,255,255,0.25);font-size:0.62rem;">(' + f.returnTypes.join(', ') + ')</span>';
           }
         } else {
-          // Write transaction — show tx hash, gas, block
+          // Write transaction — show return value + tx hash, gas, block
           var txShort = (data.tx_hash || '').slice(0, 18) + '...';
           var gas = data.gas_used ? data.gas_used.toLocaleString() : '?';
           var block = data.block_num !== null ? data.block_num : '?';
-          resultSpan.innerHTML = '<span style="color:#34d399;">✓</span> ' +
-            '<span style="color:rgba(255,255,255,0.4);">tx:</span> <code style="color:rgba(255,255,255,0.6);">' + txShort + '</code> ' +
+          var html = '<span style="color:#34d399;">✓</span> ';
+          // Show decoded return value if available
+          if (data.output) {
+            var decoded = decodeEvmHexOutput(data.output, f.returnTypes);
+            var displayVal = decoded;
+            if (/^\d+$/.test(String(decoded)) && String(decoded).length > 6) {
+              displayVal = BigInt(decoded).toLocaleString();
+            }
+            html += '<span style="color:#93c5fd;">' + String(displayVal).replace(/</g, '&lt;').slice(0, 60) + '</span>';
+            if (f.returnTypes.length > 0) {
+              html += ' <span style="color:rgba(255,255,255,0.25);font-size:0.62rem;">(' + f.returnTypes.join(', ') + ')</span>';
+            }
+            html += ' ';
+          }
+          html += '<span style="color:rgba(255,255,255,0.4);">tx:</span> <code style="color:rgba(255,255,255,0.6);">' + txShort + '</code> ' +
             '<span style="color:rgba(255,255,255,0.4);">gas:</span> <code style="color:rgba(255,255,255,0.6);">' + gas + '</code> ' +
             '<span style="color:rgba(255,255,255,0.4);">block:</span> <code style="color:rgba(255,255,255,0.6);">#' + block + '</code>';
+          resultSpan.innerHTML = html;
         }
       } else {
         var errs = data.errors || ['Unknown error'];
