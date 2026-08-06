@@ -5171,6 +5171,31 @@
         }
         // V3: append caller_syna display
         display += callerSynaDisplay;
+        // ── Gas & Steps usage for this call ──────────────────────────────
+        if (data.steps_used !== undefined || data.fuel_used !== undefined) {
+          var _callSteps = data.steps_used !== undefined ? data.steps_used : 0;
+          var _callFuel  = data.fuel_used  !== undefined ? data.fuel_used  : 0;
+          var _callGas   = _callSteps + _callFuel;
+          var _cumGas   = window._gasUsed || 0;
+          var _gasBud   = window._gasBudget || 0;
+          var _cumSteps = window._stepUsed || 0;
+          var _stepBud  = window._stepBudget || 0;
+          var _gsParts = [];
+          if (_gasBud > 0) {
+            _gsParts.push('<span style="color:#93c5fd;">\u26fd Gas: ' + _callGas.toLocaleString() + '</span>'
+              + '<span style="color:rgba(255,255,255,0.3);"> (cum: ' + _cumGas.toLocaleString() + ' / ' + _gasBud.toLocaleString() + ')</span>');
+          }
+          if (_stepBud > 0) {
+            _gsParts.push('<span style="color:#c4b5fd;">\u25b8 Steps: ' + _callSteps.toLocaleString() + '</span>'
+              + '<span style="color:rgba(255,255,255,0.3);"> (cum: ' + _cumSteps.toLocaleString() + ' / ' + _stepBud.toLocaleString() + ')</span>');
+          }
+          if (_gsParts.length > 0) {
+            display += '<div style="margin-top:6px;font-size:0.72rem;font-family:ui-monospace,monospace;'
+              + 'color:rgba(255,255,255,0.4);border-top:1px solid rgba(255,255,255,0.08);padding-top:4px;">'
+              + _gsParts.join('<span style="color:rgba(255,255,255,0.15);margin:0 6px;">|</span>')
+              + '</div>';
+          }
+        }
         // data.output intentionally omitted — server echoes 'Return value: X'
         // which duplicates the rv line already rendered above.
         out.innerHTML = display;
@@ -5198,7 +5223,15 @@
           errMsg = 'Stack underflow: a cross-contract call failed internally — ensure all required contracts are deployed in the same workspace before calling this function.';
         }
         var errCallerSyna = data.caller_syna ? '<div style="margin-top:4px;font-size:0.72rem;color:rgba(167,139,250,0.7);">🔑 ' + data.caller_syna + '</div>' : '';
-        out.innerHTML = '<span class="err">' + errMsg + '</span>' + errCallerSyna;
+        // ── Gas & Steps usage even on error (call still consumed resources) ──
+        var errGasHtml = '';
+        if (data.steps_used !== undefined || data.fuel_used !== undefined) {
+          var _es = data.steps_used !== undefined ? data.steps_used : 0;
+          var _ef = data.fuel_used  !== undefined ? data.fuel_used  : 0;
+          var _eg = _es + _ef;
+          errGasHtml = '<div style="margin-top:4px;font-size:0.72rem;font-family:ui-monospace,monospace;color:rgba(255,255,255,0.3);">\u26fd Gas: ' + _eg.toLocaleString() + ' \u00b7 \u25b8 Steps: ' + _es.toLocaleString() + '</div>';
+        }
+        out.innerHTML = '<span class="err">' + errMsg + '</span>' + errCallerSyna + errGasHtml;
         probeStateVars();
       }
     } catch (err) {
