@@ -102,6 +102,10 @@
   .step-badge.active { background:rgba(168,85,247,0.12); border:1px solid rgba(168,85,247,0.35); color:#c4b5fd; }
   .step-badge.warn { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
   .step-badge.depleted { background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); color:#fca5a5; }
+.grant-badge { display:inline-flex; align-items:center; gap:5px; font-size:0.7rem; font-weight:700; letter-spacing:0.04em; padding:3px 10px; border-radius:12px; vertical-align:middle; }
+  .grant-badge.active { background:rgba(16,185,129,0.12); border:1px solid rgba(16,185,129,0.35); color:#6ee7b7; }
+  .grant-badge.expiring { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
+  .grant-badge.inactive { background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.25); color:#fca5a5; }
   .wallet-mode.ephemeral   { background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.3); color: #fcd34d; }
     .wallet-mode.persistent  { background: rgba(52,211,153,0.1);  border: 1px solid rgba(52,211,153,0.4);  color: #34d399; }
   .btn-wallet { display: inline-flex; align-items: center; gap: 6px; padding: 7px 18px; border-radius: 8px; font-size: 0.82rem; font-weight: 600; cursor: pointer; border: 1px solid rgba(124,58,237,0.5); background: rgba(124,58,237,0.15); color: #a78bfa; }
@@ -341,6 +345,10 @@
   .step-badge.active { background:rgba(168,85,247,0.12); border:1px solid rgba(168,85,247,0.35); color:#c4b5fd; }
   .step-badge.warn { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
   .step-badge.depleted { background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); color:#fca5a5; }
+.grant-badge { display:inline-flex; align-items:center; gap:5px; font-size:0.7rem; font-weight:700; letter-spacing:0.04em; padding:3px 10px; border-radius:12px; vertical-align:middle; }
+  .grant-badge.active { background:rgba(16,185,129,0.12); border:1px solid rgba(16,185,129,0.35); color:#6ee7b7; }
+  .grant-badge.expiring { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
+  .grant-badge.inactive { background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.25); color:#fca5a5; }
   .wallet-mode.ephemeral   { background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.3); color: #fcd34d; }
     .wallet-mode.persistent  { background: rgba(52,211,153,0.1);  border: 1px solid rgba(52,211,153,0.4);  color: #34d399; }
   .btn-wallet { display: inline-flex; align-items: center; gap: 6px; padding: 7px 18px; border-radius: 8px; font-size: 0.82rem; font-weight: 600; cursor: pointer; border: 1px solid rgba(124,58,237,0.5); background: rgba(124,58,237,0.15); color: #a78bfa; }
@@ -604,6 +612,7 @@
     <span id="pqcSimBadge" style="display:none;" class="wasm-toolbar-badge" title="PQC builtins will throw RuntimeError in browser — deploy to synq-server for real verification">&#x26A0; PQC Simulation</span>
     <span id="verifyBadge" style="display:none;" class="verify-badge pass" title="L1 Structural (hard gate) + L2 Stack Safety (advisory) — checked at compile"></span>
     <span id="layer3Badge" style="display:none;" class="verify-badge pass" title="L3 Manifest + ML-DSA-87 signature — checked at deploy"></span>
+    <span id="grantBadge" style="display:none;" class="grant-badge" title="Session Grant status — sign once at deploy, then no per-call wallet popups"></span>
     <span id="solVerifyBadge" style="display:none;" class="verify-badge pass" title="Solidity → EVM verification via Foundry (forge build)"></span>
     <span id="gasBadge" style="display:none;" class="gas-badge active" title="Gas Budget (ACTS-VM-003 + ACTS-VM-005) — compute + PQC cost per invocation"></span>
     <span id="stepBadge" style="display:none;" class="step-badge active" title="VM Step Budget (ACTS-VM-003) — compute steps per call"></span>
@@ -656,8 +665,6 @@
       color:#6ee7b7; border-radius:10px; padding:2px 10px; letter-spacing:0.04em;">
       ● QVM — SynQ Virtual Machine active
     </span>
-    <span id="gasBadge2" style="display:none;" class="gas-badge active" title="Gas Budget (ACTS-VM-003 + ACTS-VM-005) — compute + PQC cost per invocation"></span>
-    <span id="stepBadge2" style="display:none;" class="step-badge active" title="VM Step Budget (ACTS-VM-003) — compute steps per call"></span>
   </div>
 
   <!-- Function pills -->
@@ -1193,6 +1200,7 @@
   async function resetVM() {
     _sessionGrantActive = false;
     _sessionGrantExpiry = 0;
+    updateGrantBadge();
     var out = document.getElementById('vmOutput');
     out.innerHTML = '<span class="dim">Resetting all VM sessions...</span>';
     // Reset cumulative gas counter
@@ -1407,6 +1415,7 @@
       if (compilerTrust === 'compiler-attested' && compilerKeyId) {
         mode.textContent = 'Compiler-Attested PQC';
         mode.className   = 'wallet-mode persistent';
+        updateGrantBadge();
         note.textContent = 'Signing: ML-DSA-65 · key_id ' + compilerKeyId;
       } else {
         mode.textContent = 'Ephemeral PQC signing';
@@ -2052,6 +2061,7 @@
       if (isGrantValid()) {
         var _minsLeft = Math.floor((_sessionGrantExpiry - Math.floor(Date.now() / 1000)) / 60);
         mode.textContent  = 'Session Grant active (' + _minsLeft + 'm left)';
+        updateGrantBadge();
         mode.className    = 'wallet-mode hybrid';
         note.textContent  = 'Signed once - no per-call wallet popups until expiry';
       } else {
@@ -2129,6 +2139,7 @@
       if (compilerTrust === 'compiler-attested' && compilerKeyId) {
         mode.textContent = 'Compiler-Attested PQC';
         mode.className   = 'wallet-mode persistent';
+        updateGrantBadge();
         note.textContent = 'Signing: ML-DSA-65 · key_id ' + compilerKeyId;
       } else {
         mode.textContent = 'PQC signing';
@@ -2138,6 +2149,7 @@
       var _extAvailable2 = _checkAnyWallet();
       btn.textContent   = _extAvailable2 ? 'Connect Wallet' : 'Regen Devnet Key';
       btn.onclick       = _extAvailable2 ? connectWallet : regenerateEphemeralKey;
+      updateGrantBadge();
     }
   }
 
@@ -2189,6 +2201,7 @@
       if (compilerTrust === 'compiler-attested' && compilerKeyId) {
         mode.textContent = 'Compiler-Attested PQC';
         mode.className   = 'wallet-mode persistent';
+        updateGrantBadge();
         note.textContent = 'Signing: ML-DSA-65 · key_id ' + compilerKeyId;
       } else {
         mode.textContent = 'Ephemeral PQC signing';
@@ -3982,6 +3995,7 @@
       sessionId = deployedSessionId;
       _sessionGrantActive = false;
       _sessionGrantExpiry = 0;
+      updateGrantBadge();
       if (walletAddress) {
         console.log('[GRANT] auto-creating session grant for mode:', _walletMode);
         setStatus('Creating session grant (sign once, then no per-call signing)...', 'info');
@@ -3991,6 +4005,7 @@
           console.log('[GRANT] auto-grant succeeded');
         } else {
           updateWalletUI();
+          updateGrantBadge();
           setStatus('Session grant failed — using per-call signing', 'warn');
           console.warn('[GRANT] auto-grant failed — falling back to per-call signing');
         }
@@ -4502,6 +4517,7 @@
       if (data.success) {
         _sessionGrantExpiry = data.grant_expiry || expiry;
         _sessionGrantActive = true;
+        updateGrantBadge();
         console.log('[GRANT] session grant active until', new Date(_sessionGrantExpiry * 1000).toISOString());
         if (data.caller_syna) {
           console.log('[GRANT] caller syna:', data.caller_syna);
@@ -4526,6 +4542,29 @@
   }
 
   // Check if the current session grant is still valid
+  function updateGrantBadge() {
+    var el = document.getElementById('grantBadge');
+    if (!el) return;
+    if (isGrantValid()) {
+      var minsLeft = Math.floor((_sessionGrantExpiry - Math.floor(Date.now() / 1000)) / 60);
+      if (minsLeft <= 5) {
+        el.className = 'grant-badge expiring';
+        el.innerHTML = '\u23F1\u2009Grant ' + minsLeft + 'm left';
+        el.title = 'Session Grant expiring soon — ' + minsLeft + ' minutes remaining. Will need to re-sign after expiry.';
+      } else {
+        el.className = 'grant-badge active';
+        el.innerHTML = '\u2705\u2009Grant ' + minsLeft + 'm left';
+        el.title = 'Session Grant active — ' + minsLeft + ' minutes remaining. No per-call wallet popups needed.';
+      }
+      el.style.display = 'inline-flex';
+    } else {
+      el.className = 'grant-badge inactive';
+      el.innerHTML = '\u274C\u2009No Grant';
+      el.title = 'No active session grant — each function call requires a wallet signature. Deploy to create a grant.';
+      el.style.display = 'inline-flex';
+    }
+  }
+
   function isGrantValid() {
     if (!_sessionGrantActive || !sessionId) return false;
     var now = Math.floor(Date.now() / 1000);
