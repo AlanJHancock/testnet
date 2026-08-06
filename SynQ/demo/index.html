@@ -4974,9 +4974,11 @@
         var sb = document.getElementById('stepBadge');
         var sb2 = document.getElementById('stepBadge2');
         if ((!sb && !sb2) || !window._stepBudget) return;
-          var used = data.steps_used !== undefined ? data.steps_used : 0;
-          var remaining = data.steps_remaining !== undefined ? data.steps_remaining : (window._stepBudget - used);
-          window._stepUsed = used;
+          var _callSteps = data.steps_used !== undefined ? data.steps_used : 0;
+          window._stepUsed = (window._stepUsed || 0) + _callSteps;
+          var used = window._stepUsed;
+          var _callRemaining = data.steps_remaining !== undefined ? data.steps_remaining : (window._stepBudget - _callSteps);
+          var remaining = window._stepBudget > used ? window._stepBudget - used : 0;
           var budget = window._stepBudget;
           var pct = budget > 0 ? (used / budget) * 100 : 0;
           var fmtN = function(n) {
@@ -4994,9 +4996,10 @@
           }
           var _stepTitle = 'VM STEP BUDGET (ACTS-VM-003)\n'
             + '===============================================\n'
-            + 'Steps used this call: ' + fmtN(used) + '\n'
-            + 'Step budget: ' + fmtN(budget) + '\n'
-            + 'Gas Remaining: ' + fmtN(remaining) + '\n'
+            + 'Steps used (cumulative): ' + used.toLocaleString() + '\n'
+            + '  Last call: ' + _callSteps.toLocaleString() + '\n'
+            + 'Step budget (per call): ' + budget.toLocaleString() + '\n'
+            + 'Steps remaining: ' + remaining.toLocaleString() + '\n'
             + 'Usage: ' + pct.toFixed(2) + '%\n'
             + '===============================================\n'
             + 'Compute steps are counted per QVM instruction.\n'
