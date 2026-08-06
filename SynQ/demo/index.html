@@ -3536,6 +3536,7 @@
         })
       });
       var data = await res.json();
+      console.log('[GRANT] Step 4: response', JSON.stringify(data));
 
       if (data.success) {
         var addr = data.contract_address || 'unknown';
@@ -4421,21 +4422,30 @@
 
   /* ── Session Grant: sign once, call without per-call signing ──────────── */
   async function createSessionGrant() {
+    console.log('[GRANT] createSessionGrant called, walletAddress=' + walletAddress + ' sessionId=' + sessionId);
     if (!walletAddress || !sessionId) {
+      console.warn('[GRANT] skipped: walletAddress=' + walletAddress + ' sessionId=' + sessionId);
       setStatus('Grant skipped: no wallet/session', 'warn');
       return false;
     }
-    setStatus('[GRANT] Step 1/5: Fetching nonce...', 'info');
+    var _gb = document.getElementById('grantBadge');
+    if (_gb) { _gb.className = 'grant-badge expiring'; _gb.innerHTML = '\u23F3\u2009Creating...'; _gb.style.display = 'inline-flex'; _gb.title = 'Creating session grant...'; }
 
     try {
       // 1. Fetch a nonce from the server
+      console.log('[GRANT] Step 1: fetching nonce from', SESSION_NONCE_URL + sessionId + '/nonce');
+      setStatus('[GRANT] Step 1/5: Fetching nonce...', 'info');
       var nonceRes  = await fetch(SESSION_NONCE_URL + sessionId + '/nonce');
+      console.log('[GRANT] Step 1: nonce response status', nonceRes.status);
       var nonceData = await nonceRes.json();
+      console.log('[GRANT] Step 1: nonce data', JSON.stringify(nonceData));
       if (!nonceData.nonce) {
+        if (_gb) { _gb.className = 'grant-badge inactive'; _gb.innerHTML = '\u274C\u2009No Grant'; _gb.title = 'No nonce available: ' + (nonceData.error || 'unknown'); }
         setStatus('[GRANT] Failed: no nonce - ' + (nonceData.error || 'unknown'), 'error');
         console.warn('[GRANT] no nonce available:', nonceData.error || 'unknown');
         return false;
       }
+      if (_gb) { _gb.innerHTML = '\u23F3\u2009Signing...'; }
       setStatus('[GRANT] Step 2/5: Nonce received. Building EIP-712 typed data...', 'info');
       var grantNonce   = nonceData.nonce;
       var v3ChainId   = nonceData.chainId   || 1266;
@@ -4484,12 +4494,14 @@
       });
 
       console.log('[GRANT] creating session grant for', walletAddress, 'mode:', _walletMode, 'expiry in 3600s');
+      if (_gb) { _gb.innerHTML = '\u23F3\u2009Signing...'; }
       setStatus('[GRANT] Step 3/5: Signing EIP-712 SessionGrant (mode: ' + _walletMode + ')...', 'info');
 
       // 4. Sign with wallet
       var signature;
       try {
         signature = await getSignature(grantTypedData);
+        if (_gb) { _gb.innerHTML = '\u23F3\u2009Posting...'; }
         setStatus('[GRANT] Step 4/5: Signed. POSTing to server...', 'info');
       } catch (sigErr) {
         setStatus('[GRANT] Failed: signing error - ' + (sigErr.message || sigErr), 'error');
@@ -4507,6 +4519,7 @@
       };
       if (_manualSynw) grantBody.display_synw = _manualSynw;
 
+      console.log('[GRANT] Step 4: POSTing grant to', SESSION_GRANT_URL + sessionId + '/grant');
       var res = await fetch(SESSION_GRANT_URL + sessionId + '/grant', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4572,7 +4585,7 @@
     if (!valid && _sessionGrantActive) {
       console.log('[GRANT] expired - active=true but now(' + now + ') >= expiry(' + _sessionGrantExpiry + ')');
       _sessionGrantActive = false;
-      updateWalletUI();
+      updateGrantBadge();
     }
     return valid;
   }
