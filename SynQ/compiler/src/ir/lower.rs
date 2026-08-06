@@ -849,11 +849,12 @@ impl IrLowerer {
             IrOp::SetMethod(name, method, args) => {
                 let addr = self.state_var_addrs.get(name)
                     .ok_or_else(|| format!("unknown set: {}", name))?;
-                self.asm.emit_op(OpCode::Push);
-                self.asm.emit_i32(*addr as i32);
+                // VM SetContains/SetLen pops addr first (top), then val — push val first, addr last
                 for arg in args {
                     load_val!(self, *arg);
                 }
+                self.asm.emit_op(OpCode::Push);
+                self.asm.emit_i32(*addr as i32);
                 match method.as_str() {
                     "contains" => self.asm.emit_op(OpCode::SetContains),
                     "len" => self.asm.emit_op(OpCode::SetLen),
