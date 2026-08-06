@@ -4054,10 +4054,11 @@
       (function() {
         var fb = document.getElementById('gasBadge');
         var fb2 = document.getElementById('gasBadge2');
-        if (!fb) return;
+        if (!fb && !fb2) return;
         var budget = data.fuel_budget;
         if (budget === undefined || budget === null) {
-          fb.style.display = 'none';
+          if (fb) fb.style.display = 'none';
+          if (fb2) fb2.style.display = 'none';
           return;
         }
         window._gasBudget = budget;
@@ -4068,25 +4069,27 @@
           if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
           return String(n);
         };
-        fb.innerHTML = '\u26fd GAS: 0 / ' + fmtN(budget);
-        fb.className = 'gas-badge active';
-        fb.title = 'GAS BUDGET (ACTS-VM-003 + ACTS-VM-005)\n'
+        var _gasHtml = '\u26fd GAS: 0 / ' + fmtN(budget);
+        var _gasClass = 'gas-badge active';
+        var _gasTitle = 'GAS BUDGET (ACTS-VM-003 + ACTS-VM-005)\n'
           + '===============================================\n'
           + 'Gas = VM steps (compute) + PQC gas (AegisCall)\n'
           + 'Every opcode charges 1 gas. PQC ops charge extra.\n'
           + 'Reset on every function call (per-invocation budget).';
-        fb.style.display = 'inline-flex';
-        if (fb2) { fb2.innerHTML = fb.innerHTML; fb2.className = fb.className; fb2.title = fb.title; fb2.style.display = fb.style.display; }
+        var _gasDisplay = 'inline-flex';
+        if (fb) { fb.innerHTML = _gasHtml; fb.className = _gasClass; fb.title = _gasTitle; fb.style.display = _gasDisplay; }
+        if (fb2) { fb2.innerHTML = _gasHtml; fb2.className = _gasClass; fb2.title = _gasTitle; fb2.style.display = _gasDisplay; }
       })();
 
       // ── Step badge: VM compute budget from /session/new ────────────────
       (function() {
         var sb = document.getElementById('stepBadge');
         var sb2 = document.getElementById('stepBadge2');
-        if (!sb) return;
+        if (!sb && !sb2) return;
         var budget = data.max_steps;
         if (budget === undefined || budget === null) {
-          sb.style.display = 'none';
+          if (sb) sb.style.display = 'none';
+          if (sb2) sb2.style.display = 'none';
           return;
         }
         window._stepBudget = budget;
@@ -4097,16 +4100,17 @@
           if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
           return String(n);
         };
-        sb.innerHTML = '\u25b8 STEPS: 0 / ' + fmtN(budget);
-        sb.className = 'step-badge active';
-        sb.title = 'VM STEP BUDGET (ACTS-VM-003)\n'
+        var _stepHtml = '\u25b8 STEPS: 0 / ' + fmtN(budget);
+        var _stepClass = 'step-badge active';
+        var _stepTitle = 'VM STEP BUDGET (ACTS-VM-003)\n'
           + '===============================================\n'
           + 'Compute steps are counted per QVM instruction.\n'
           + 'The step limit prevents infinite loops and runaway\n'
           + 'computation. Reset on every function call.\n'
           + 'Configurable via max_steps in session/new.';
-        sb.style.display = 'inline-flex';
-        if (sb2) { sb2.innerHTML = sb.innerHTML; sb2.className = sb.className; sb2.title = sb.title; sb2.style.display = sb.style.display; }
+        var _stepDisplay = 'inline-flex';
+        if (sb) { sb.innerHTML = _stepHtml; sb.className = _stepClass; sb.title = _stepTitle; sb.style.display = _stepDisplay; }
+        if (sb2) { sb2.innerHTML = _stepHtml; sb2.className = _stepClass; sb2.title = _stepTitle; sb2.style.display = _stepDisplay; }
       })();
 
       // sessionId was already set before grant creation above.
@@ -4878,7 +4882,7 @@
       (function() {
         var fb = document.getElementById('gasBadge');
         var fb2 = document.getElementById('gasBadge2');
-        if (!fb || !window._gasBudget) return;
+        if ((!fb && !fb2) || !window._gasBudget) return;
           // Gas = cumulative across all calls in this session
           // (VM steps for compute + PQC fuel for AegisCall)
           var stepCost = data.steps_used !== undefined ? data.steps_used : 0;
@@ -4897,16 +4901,15 @@
             return String(n);
           };
           var gasExhausted = used >= budget;
-          fb.innerHTML = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget);
+          var _gasHtml = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget);
+          var _gasClass = 'gas-badge active';
           if (gasExhausted) {
-            fb.className = 'gas-badge depleted';
-            fb.innerHTML = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget) + ' \u26a0 EXHAUSTED';
+            _gasClass = 'gas-badge depleted';
+            _gasHtml = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget) + ' \u26a0 EXHAUSTED';
           } else if (pct >= 75) {
-            fb.className = 'gas-badge warn';
-          } else {
-            fb.className = 'gas-badge active';
+            _gasClass = 'gas-badge warn';
           }
-          fb.title = 'GAS BUDGET (ACTS-VM-003 + ACTS-VM-005)\n'
+          var _gasTitle = 'GAS BUDGET (ACTS-VM-003 + ACTS-VM-005)\n'
             + '===============================================\n'
             + 'Gas = VM steps (compute) + PQC gas (AegisCall)\n'
             + 'Gas Budget: ' + budget.toLocaleString() + '\n'
@@ -4916,14 +4919,15 @@
             + '    - PQC: ' + pqcCost.toLocaleString() + '\n'
             + 'Gas Remaining: ' + remaining.toLocaleString() + '\n'
             + 'Utilization: ' + pct.toFixed(2) + '%' + (gasExhausted ? '\n\n\u26a0 GAS EXHAUSTED — further calls blocked. Reset VM to continue.' : '') + (pct > 80 && !gasExhausted ? '\n\n\u26a0 Approaching gas limit.' : '');
-      if (fb2) { fb2.innerHTML = fb.innerHTML; fb2.className = fb.className; fb2.title = fb.title; fb2.style.display = fb.style.display; }
+      if (fb) { fb.innerHTML = _gasHtml; fb.className = _gasClass; fb.title = _gasTitle; fb.style.display = 'inline-flex'; }
+      if (fb2) { fb2.innerHTML = _gasHtml; fb2.className = _gasClass; fb2.title = _gasTitle; fb2.style.display = 'inline-flex'; }
       })();
 
       // ── Update step badge ───────────────────────────────────────────
       (function() {
         var sb = document.getElementById('stepBadge');
         var sb2 = document.getElementById('stepBadge2');
-        if (!sb || !window._stepBudget) return;
+        if ((!sb && !sb2) || !window._stepBudget) return;
           var used = data.steps_used !== undefined ? data.steps_used : 0;
           var remaining = data.steps_remaining !== undefined ? data.steps_remaining : (window._stepBudget - used);
           window._stepUsed = used;
@@ -4935,15 +4939,14 @@
             if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
             return String(n);
           };
-          sb.innerHTML = '\u25b8 STEPS: ' + fmtN(used) + ' / ' + fmtN(budget);
+          var _stepHtml = '\u25b8 STEPS: ' + fmtN(used) + ' / ' + fmtN(budget);
+          var _stepClass = 'step-badge active';
           if (pct >= 100) {
-            sb.className = 'step-badge depleted';
+            _stepClass = 'step-badge depleted';
           } else if (pct >= 75) {
-            sb.className = 'step-badge warn';
-          } else {
-            sb.className = 'step-badge active';
+            _stepClass = 'step-badge warn';
           }
-          sb.title = 'VM STEP BUDGET (ACTS-VM-003)\n'
+          var _stepTitle = 'VM STEP BUDGET (ACTS-VM-003)\n'
             + '===============================================\n'
             + 'Steps used this call: ' + fmtN(used) + '\n'
             + 'Step budget: ' + fmtN(budget) + '\n'
@@ -4953,8 +4956,8 @@
             + 'Compute steps are counted per QVM instruction.\n'
             + 'The step limit prevents infinite loops and runaway\n'
             + 'computation. Reset on every function call.';
-          sb.style.display = 'inline-flex';
-      if (sb2) { sb2.innerHTML = sb.innerHTML; sb2.className = sb.className; sb2.title = sb.title; sb2.style.display = sb.style.display; }
+      if (sb) { sb.innerHTML = _stepHtml; sb.className = _stepClass; sb.title = _stepTitle; sb.style.display = 'inline-flex'; }
+      if (sb2) { sb2.innerHTML = _stepHtml; sb2.className = _stepClass; sb2.title = _stepTitle; sb2.style.display = 'inline-flex'; }
       })();
 
       if (data.success) {
@@ -5396,7 +5399,11 @@
       _gb.title = 'GAS BUDGET\nGas Used: 0\nGas Remaining: ' + window._gasBudget.toLocaleString();
     }
     var _gb2 = document.getElementById('gasBadge2');
-    if (_gb2 && _gb) { _gb2.innerHTML = _gb.innerHTML; _gb2.className = _gb.className; _gb2.title = _gb.title; }
+    if (_gb2 && window._gasBudget) {
+      _gb2.innerHTML = '\u26fd GAS: 0 / ' + (window._gasBudget >= 1e6 ? (window._gasBudget/1e6).toFixed(1) + 'M' : String(window._gasBudget));
+      _gb2.className = 'gas-badge active';
+      _gb2.title = 'GAS BUDGET\nGas Used: 0\nGas Remaining: ' + window._gasBudget.toLocaleString();
+    }
 
     // ── Reset every contract in the workspace, not just the active one ──────
     // This ensures all contracts (e.g. SimpleToken) start with clean state
