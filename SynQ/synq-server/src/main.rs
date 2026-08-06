@@ -168,9 +168,7 @@ fn eip712_hash_session_grant_v3(
     let session_id_hash = keccak256_str(session_id);
     let caller_hash = keccak256_str(caller_address);
     let parts: Vec<[u8; 32]> = allowed_functions.iter().map(|f| keccak256_str(f)).collect();
-    let mut arr_enc = Vec::with_capacity(parts.len() * 32 + 32);
-    let len_bytes = (parts.len() as u64).to_be_bytes();
-    arr_enc.extend_from_slice(&len_bytes[4..]);
+    let mut arr_enc = Vec::with_capacity(parts.len() * 32);
     for p in &parts { arr_enc.extend_from_slice(p); }
     let arr_hash = keccak256(&arr_enc);
     let mut exp_bytes = [0u8; 32];
