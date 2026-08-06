@@ -2558,4 +2558,93 @@ contract Allowance {
     }
 
 
+    #[test]
+    fn test_3level_nested_map() {
+        // 3-level nested map: map<address, map<address, map<address, u256>>>
+        // Domain registry: domain => record_type => record_name => value
+        let source = r#"pragma synq ^0.9;
+contract DomainRegistry {
+    state {
+        registry: map<address, map<address, map<address, u256>>>;
+        initialised: bool;
+    }
+
+    @public
+    function init() -> bool {
+        if (initialised) { return true; }
+        initialised = true;
+        return true;
+    }
+
+    @public
+    function set_record(domain: address, record_type: address, record_name: address, value: u256) -> bool {
+        registry[domain][record_type][record_name] = value;
+        return true;
+    }
+
+    @public
+    function get_record(domain: address, record_type: address, record_name: address) -> u256 {
+        return registry[domain][record_type][record_name];
+    }
+}
+"#;
+
+        let mut vm = compile_ir_and_load(source);
+
+        // init
+        let r = vm.call_function("init", &[]).expect("init");
+        match r {
+            Some(Value::I32(1)) | Some(Value::Bool(true)) => {}
+            other => panic!("init should return true, got {:?}", other),
+        }
+
+        let addr1 = Value::Bytes(vec![0xAA; 20]);
+        let addr2 = Value::Bytes(vec![0xBB; 20]);
+        let addr3 = Value::Bytes(vec![0xCC; 20]);
+
+        // set_record(0xAA, 0xBB, 0xCC, 42) — 3-level nested write
+        let r = vm.call_function("set_record", &[addr1.clone(), addr2.clone(), addr3.clone(), Value::U256(U256::from(42u32))])
+            .expect("set_record");
+        match r {
+            Some(Value::I32(1)) | Some(Value::Bool(true)) => {}
+            other => panic!("set_record should return true, got {:?}", other),
+        }
+
+        // get_record(0xAA, 0xBB, 0xCC) should be 42 — 3-level nested read
+        let r = vm.call_function("get_record", &[addr1.clone(), addr2.clone(), addr3.clone()])
+            .expect("get_record");
+        match r {
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(42u32), "record should be 42"),
+            Some(Value::I32(v)) => assert_eq!(v, 42, "record should be 42"),
+            other => panic!("get_record should return 42, got {:?}", other),
+        }
+
+        // get_record on uninitialized keys should return 0
+        let addr4 = Value::Bytes(vec![0xDD; 20]);
+        let r = vm.call_function("get_record", &[addr1.clone(), addr2.clone(), addr4.clone()])
+            .expect("get_record unset");
+        match r {
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(0u32), "unset record should be 0"),
+            Some(Value::I32(v)) => assert_eq!(v, 0, "unset record should be 0"),
+            other => panic!("unset get_record should return 0, got {:?}", other),
+        }
+
+        // Update existing record
+        let r = vm.call_function("set_record", &[addr1.clone(), addr2.clone(), addr3.clone(), Value::U256(U256::from(99u32))])
+            .expect("set_record update");
+        match r {
+            Some(Value::I32(1)) | Some(Value::Bool(true)) => {}
+            other => panic!("set_record update should return true, got {:?}", other),
+        }
+
+        let r = vm.call_function("get_record", &[addr1, addr2, addr3])
+            .expect("get_record after update");
+        match r {
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(99u32), "updated record should be 99"),
+            Some(Value::I32(v)) => assert_eq!(v, 99, "updated record should be 99"),
+            other => panic!("updated get_record should return 99, got {:?}", other),
+        }
+    }
+
+
 }
