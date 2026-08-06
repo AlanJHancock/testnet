@@ -352,14 +352,17 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
             writeln!(out, "        require(_assetOwner[asset_id] == uint256(uint160(msg.sender)), \"not owner\");").unwrap();
             writeln!(out, "        uint256 value = _assetBalance[asset_id];").unwrap();
             writeln!(out, "        _assetBurned[asset_id] = true;").unwrap();
+            writeln!(out, "        _assetBalance[asset_id] = 0;").unwrap();
             writeln!(out, "        return value;").unwrap();
             writeln!(out, "    }}").unwrap();
             writeln!(out, "").unwrap();
             writeln!(out, "    function _asset_balance(uint256 asset_id) internal view returns (uint256) {{").unwrap();
+            writeln!(out, "        if (_assetBurned[asset_id]) return 0;").unwrap();
             writeln!(out, "        return _assetBalance[asset_id];").unwrap();
             writeln!(out, "    }}").unwrap();
             writeln!(out, "").unwrap();
             writeln!(out, "    function _asset_owner(uint256 asset_id) internal view returns (uint256) {{").unwrap();
+            writeln!(out, "        if (_assetBurned[asset_id]) return 0;").unwrap();
             writeln!(out, "        return _assetOwner[asset_id];").unwrap();
             writeln!(out, "    }}").unwrap();
         }
