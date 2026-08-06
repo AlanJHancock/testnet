@@ -915,16 +915,62 @@ impl IrLowerer {
                     .ok_or_else(|| format!("unknown enum: {}", enum_name))?;
                 let tag = enum_def.variants.iter().position(|v| &v.name == variant_name)
                     .ok_or_else(|| format!("unknown variant: {}", variant_name))?;
-                let msg = if args.is_empty() {
-                    format!("{}::{}", enum_name, variant_name)
+
+                if args.is_empty() {
+                    // Static revert — no runtime values to evaluate.
+                    let msg = format!("{}::{}", enum_name, variant_name);
+                    self.asm.emit_op(OpCode::RevertCode);
+                    self.asm.emit_u32(tag as u32);
+                    let mb = msg.as_bytes();
+                    self.asm.emit_u32(mb.len() as u32);
+                    self.asm.emit_raw(mb);
                 } else {
-                    format!("{}::{}({} arg(s))", enum_name, variant_name, args.len())
-                };
-                self.asm.emit_op(OpCode::RevertCode);
-                self.asm.emit_u32(tag as u32);
-                let mb = msg.as_bytes();
-                self.asm.emit_u32(mb.len() as u32);
-                self.asm.emit_raw(mb);
+                    // Dynamic revert — evaluate each argument at runtime and
+                    // build the message string on the stack, then RevertCodeDyn
+                    // pops it.  Message: "Enum::Variant(arg0, arg1, ...)"
+                    //
+                    // Stack plan (bottom → top):
+                    //   prefix_str  ← LoadImm "Enum::Variant("
+                    //   for each arg i:
+                    //     if i > 0: LoadImm ", "  → StrConcat
+                    //     load_val(arg_i) → ToString → StrConcat
+                    //   LoadImm ")" → StrConcat
+                    //   RevertCodeDyn <tag>
+
+                    let prefix = format!("{}::{}(", enum_name, variant_name);
+                    self.asm.emit_op(OpCode::LoadImm);
+                    let pb = prefix.as_bytes();
+                    self.asm.emit_u32(pb.len() as u32);
+                    self.asm.emit_raw(pb);
+
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            // Push ", " and concatenate
+                            let sep = ", ";
+                            self.asm.emit_op(OpCode::LoadImm);
+                            let sb = sep.as_bytes();
+                            self.asm.emit_u32(sb.len() as u32);
+                            self.asm.emit_raw(sb);
+                            self.asm.emit_op(OpCode::StrConcat);
+                        }
+                        // Evaluate the argument value → string → concat
+                        load_val!(self, *arg);
+                        self.asm.emit_op(OpCode::ToString);
+                        self.asm.emit_op(OpCode::StrConcat);
+                    }
+
+                    // Push ")" and concatenate
+                    let close = ")";
+                    self.asm.emit_op(OpCode::LoadImm);
+                    let cb = close.as_bytes();
+                    self.asm.emit_u32(cb.len() as u32);
+                    self.asm.emit_raw(cb);
+                    self.asm.emit_op(OpCode::StrConcat);
+
+                    // RevertCodeDyn pops the message from the stack
+                    self.asm.emit_op(OpCode::RevertCodeDyn);
+                    self.asm.emit_u32(tag as u32);
+                }
             }
 
             IrOp::Print(v) => {
