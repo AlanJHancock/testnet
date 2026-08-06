@@ -85,7 +85,7 @@
   .addr-popup .legend-item span { font-size: 0.72rem; color: #6b7280; }
   .addr-popup .close-btn { display: block; margin: 16px auto 0; padding: 6px 24px; background: rgba(124,58,237,0.2); border: 1px solid rgba(124,58,237,0.4); border-radius: 8px; color: #a78bfa; font-size: 0.78rem; cursor: pointer; }
   .addr-popup .close-btn:hover { background: rgba(124,58,237,0.3); }
-  .wallet-right { display: flex; align-items: center; gap: 10px; }
+  .wallet-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; flex-wrap: nowrap; }
   .wallet-mode { font-size: 0.72rem; padding: 3px 10px; border-radius: 12px; font-weight: 600; }
   .wallet-mode.hybrid { background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.4); color: #6ee7b7; }
   .wallet-mode.wasm     { background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.4); color: #93c5fd; }
@@ -324,7 +324,7 @@
   .addr-popup .legend-item span { font-size: 0.72rem; color: #6b7280; }
   .addr-popup .close-btn { display: block; margin: 16px auto 0; padding: 6px 24px; background: rgba(124,58,237,0.2); border: 1px solid rgba(124,58,237,0.4); border-radius: 8px; color: #a78bfa; font-size: 0.78rem; cursor: pointer; }
   .addr-popup .close-btn:hover { background: rgba(124,58,237,0.3); }
-  .wallet-right { display: flex; align-items: center; gap: 10px; }
+  .wallet-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; flex-wrap: nowrap; }
   .wallet-mode { font-size: 0.72rem; padding: 3px 10px; border-radius: 12px; font-weight: 600; }
   .wallet-mode.hybrid { background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.4); color: #6ee7b7; }
   .wallet-mode.wasm     { background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.4); color: #93c5fd; }
@@ -507,7 +507,7 @@
 
 <!-- Wallet bar -->
 <div class="wallet-bar">
-  <div class="wallet-left" style="flex-wrap:wrap;gap:6px 10px;">
+  <div class="wallet-left" style="flex:1;min-width:200px;flex-wrap:wrap;gap:6px 10px;">
     <div class="wallet-dot" id="walletDot"></div>
     <span class="wallet-label" id="walletLabel">No wallet connected</span>
     <span class="wallet-address" id="walletAddress" onclick="showAddrPopup()"></span>
