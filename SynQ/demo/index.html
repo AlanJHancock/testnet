@@ -2048,11 +2048,19 @@
       };
       var _isSyn = (_walletMode === 'synergy');
       var _isEth = (_walletMode === 'ethereum');
-      mode.textContent  = _isSyn ? 'Synergy Wallet' : _isEth ? 'EVM Wallet' : 'Ephemeral Devnet Key';
-      mode.className    = 'wallet-mode hybrid';
-      note.textContent  = (_isSyn || _isEth)
-        ? 'Signing: ' + (_isSyn ? 'Synergy Wallet' : 'EVM Wallet') + ' · EIP-712 · ' + (_syna ? _syna.slice(0,10) + '…' : walletAddress.slice(0,8) + '…')
-        : 'Signing: EIP-712 · ' + (_syna ? _syna.slice(0,10) + '…' : '');
+      // Grant status takes priority over wallet mode display
+      if (isGrantValid()) {
+        var _minsLeft = Math.floor((_sessionGrantExpiry - Math.floor(Date.now() / 1000)) / 60);
+        mode.textContent  = 'Session Grant active (' + _minsLeft + 'm left)';
+        mode.className    = 'wallet-mode hybrid';
+        note.textContent  = 'Signed once - no per-call wallet popups until expiry';
+      } else {
+        mode.textContent  = _isSyn ? 'Synergy Wallet' : _isEth ? 'EVM Wallet' : 'Ephemeral Devnet Key';
+        mode.className    = 'wallet-mode hybrid';
+        note.textContent  = (_isSyn || _isEth)
+          ? 'Signing: ' + (_isSyn ? 'Synergy Wallet' : 'EVM Wallet') + ' · EIP-712 · ' + (_syna ? _syna.slice(0,10) + '…' : walletAddress.slice(0,8) + '…')
+          : 'Signing: EIP-712 · ' + (_syna ? _syna.slice(0,10) + '…' : '');
+      }
       // Show appropriate button based on wallet mode
       var _extAvailable = _checkAnyWallet();
       if (_isSyn) {
@@ -4521,7 +4529,13 @@
   function isGrantValid() {
     if (!_sessionGrantActive || !sessionId) return false;
     var now = Math.floor(Date.now() / 1000);
-    return now < _sessionGrantExpiry;
+    var valid = now < _sessionGrantExpiry;
+    if (!valid && _sessionGrantActive) {
+      console.log('[GRANT] expired - active=true but now(' + now + ') >= expiry(' + _sessionGrantExpiry + ')');
+      _sessionGrantActive = false;
+      updateWalletUI();
+    }
+    return valid;
   }
 
   async function runFunction() {
