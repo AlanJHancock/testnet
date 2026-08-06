@@ -202,7 +202,7 @@ pub enum Statement {
     /// `obj.field = value` — struct field assignment
     FieldAssignment { object: String, field: String, value: Expression },
     /// `map[key] = value`
-    MapAssignment { map: String, key: Expression, value: Expression },
+    MapAssignment { map: String, keys: Vec<Expression>, value: Expression },
     /// `set.add(value)` / `set.remove(value)` as statements
     SetOp { set: String, op: SetOpKind, value: Expression },
     /// `let x = expr` or `let x: T = expr` — local variable binding
@@ -229,7 +229,7 @@ pub enum Expression {
     UnaryOp(UnaryOperator, Box<Expression>),
     Caller,   // `caller` builtin — authenticated EVM address
     /// `map[key]` — indexed read from a map state variable
-    MapIndex(String, Box<Expression>),
+    MapIndex(String, Vec<Expression>),
     /// `map.get(key)` / `map.contains(key)` / `map.len()` method calls
     MapMethod { map: String, method: String, args: Vec<Expression> },
     /// `set.contains(v)` / `set.len()` method calls

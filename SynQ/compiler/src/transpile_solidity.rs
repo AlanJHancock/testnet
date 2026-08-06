@@ -151,7 +151,7 @@ fn scan_expr_for_sets(expr: &Expression, vars: &mut HashSet<String>) {
         Expression::SetMethod { set, .. } => { vars.insert(set.clone()); }
         Expression::BinaryOp(l, _, r) => { scan_expr_for_sets(l, vars); scan_expr_for_sets(r, vars); }
         Expression::Call(_, args) => { for a in args { scan_expr_for_sets(a, vars); } }
-        Expression::MapIndex(_, k) => scan_expr_for_sets(k, vars),
+        Expression::MapIndex(_, keys) => { for k in keys { scan_expr_for_sets(k, vars); } }
         _ => {}
     }
 }
@@ -830,18 +830,27 @@ fn transpile_statement(out: &mut String, stmt: &Statement, indent: usize) {
         Statement::FieldAssignment { object, field, value } => {
             writeln!(out, "{}{}.{} = {};", pad, object, field, transpile_expr(value)).unwrap();
         }
-        Statement::MapAssignment { map, key, value } => {
-            let key_str = transpile_expr(key);
-            let key_sol = match get_type(map) {
-                Some(Type::Mapping(k, _)) if matches!(k.as_ref(), Type::Address) => {
-                    match key {
-                        Expression::Caller => "address(uint160(msg.sender))".to_string(),
-                        _ => format!("address(uint160({}))", key_str)
+        Statement::MapAssignment { map, keys, value } => {
+            let mut index_sol = String::new();
+            let mut current_type = get_type(map);
+            for key in keys.iter() {
+                let key_str = transpile_expr(key);
+                let key_sol = match &current_type {
+                    Some(Type::Mapping(k, _)) if matches!(k.as_ref(), Type::Address) => {
+                        match key {
+                            Expression::Caller => "address(uint160(msg.sender))".to_string(),
+                            _ => format!("address(uint160({}))", key_str)
+                        }
                     }
-                }
-                _ => key_str
-            };
-            writeln!(out, "{}{}[{}] = {};", pad, map, key_sol, transpile_expr(value)).unwrap();
+                    _ => key_str
+                };
+                index_sol.push_str(&format!("[{}]", key_sol));
+                current_type = match &current_type {
+                    Some(Type::Mapping(_, v)) => Some((**v).clone()),
+                    _ => None,
+                };
+            }
+            writeln!(out, "{}{}{} = {};", pad, map, index_sol, transpile_expr(value)).unwrap();
         }
         Statement::SetOp { set, op, value } => {
             let val_str = transpile_expr(value);
@@ -1029,17 +1038,29 @@ fn transpile_expr(expr: &Expression) -> String {
             format!("{}{}", unop_to_sol(op), transpile_expr(val))
         }
         Expression::Caller => "uint256(uint160(msg.sender))".to_string(),
-        Expression::MapIndex(map, key) => {
-            let key_str = transpile_expr(key);
-            match get_type(map) {
-                Some(Type::Mapping(k, _)) if matches!(k.as_ref(), Type::Address) => {
-                    match &**key {
-                        Expression::Caller => format!("{}[address(uint160(msg.sender))]", sol_identifier(map)),
-                        _ => format!("{}[address(uint160({}))]", sol_identifier(map), key_str)
+        Expression::MapIndex(map, keys) => {
+            let mut index_str = String::new();
+            let mut current_type = get_type(map);
+            for key in keys.iter() {
+                let key_str = transpile_expr(key);
+                let is_address_key = match &current_type {
+                    Some(Type::Mapping(k, _)) => matches!(k.as_ref(), Type::Address),
+                    _ => false,
+                };
+                if is_address_key {
+                    match key {
+                        Expression::Caller => index_str.push_str("[address(uint160(msg.sender))]"),
+                        _ => index_str.push_str(&format!("[address(uint160({}))]", key_str)),
                     }
+                } else {
+                    index_str.push_str(&format!("[{}]", key_str));
                 }
-                _ => format!("{}[{}]", sol_identifier(map), key_str)
+                current_type = match &current_type {
+                    Some(Type::Mapping(_, v)) => Some((**v).clone()),
+                    _ => None,
+                };
             }
+            format!("{}{}", sol_identifier(map), index_str)
         }
         Expression::MapMethod { map, method, args } => {
             let a: Vec<String> = args.iter().map(transpile_expr).collect();

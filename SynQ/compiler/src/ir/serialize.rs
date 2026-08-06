@@ -291,6 +291,8 @@ impl Writer {
             }
             IrOp::MapGet(name, key) => { self.u8(0x0C); self.str(name); self.u32(*key); }
             IrOp::MapSet(name, k, v) => { self.u8(0x0D); self.str(name); self.u32(*k); self.u32(*v); }
+            IrOp::MapGetVal(map, key) => { self.u8(0x0E); self.u32(*map); self.u32(*key); }
+            IrOp::MapSetVal(map, k, v) => { self.u8(0x0F); self.u32(*map); self.u32(*k); self.u32(*v); }
             IrOp::MapMethod(name, method, args) => {
                 self.u8(0x0E); self.str(name); self.str(method);
                 self.u32(args.len() as u32);
@@ -759,6 +761,8 @@ impl<'a> Reader<'a> {
             }
             0x0C => { let name = self.str()?; let key = self.u32()?; Ok(IrOp::MapGet(name, key)) }
             0x0D => { let name = self.str()?; let k = self.u32()?; let v = self.u32()?; Ok(IrOp::MapSet(name, k, v)) }
+            0x0E => { let map = self.u32()?; let key = self.u32()?; Ok(IrOp::MapGetVal(map, key)) }
+            0x0F => { let map = self.u32()?; let k = self.u32()?; let v = self.u32()?; Ok(IrOp::MapSetVal(map, k, v)) }
             0x0E => {
                 let name = self.str()?; let method = self.str()?;
                 let count = self.u32()? as usize;

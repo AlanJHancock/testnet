@@ -398,9 +398,12 @@ fn parse_statement(pair: Pair<Rule>) -> Statement {
         Rule::map_assign_statement => {
             let mut inner = pair.into_inner();
             let map_name = inner.next().unwrap().as_str().to_string();
-            let key_expr = parse_expression(inner.next().unwrap());
-            let val_expr = parse_expression(inner.next().unwrap());
-            Statement::MapAssignment { map: map_name, key: key_expr, value: val_expr }
+            // With ("[" ~ expression ~ "]")+ ~ "=" ~ expression ~ ";"
+            // inner pairs: IDENT, key1_expr, key2_expr, ..., val_expr
+            let all_exprs: Vec<_> = inner.map(parse_expression).collect();
+            let val_expr = all_exprs.last().unwrap().clone();
+            let keys = all_exprs[..all_exprs.len()-1].to_vec();
+            Statement::MapAssignment { map: map_name, keys, value: val_expr }
         }
         Rule::set_op_statement => {
             // Grammar: IDENT ~ "." ~ ("add"|"remove") ~ "(" ~ expression ~ ")" ~ ";"
@@ -638,8 +641,8 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
         Rule::map_index_expr  => {
             let mut inner = pair.into_inner();
             let map_name = inner.next().unwrap().as_str().to_string();
-            let key_expr = parse_expression(inner.next().unwrap());
-            Expression::MapIndex(map_name, Box::new(key_expr))
+            let keys: Vec<Expression> = inner.map(parse_expression).collect();
+            Expression::MapIndex(map_name, keys)
         }
         Rule::IDENT => match pair.as_str() {
             "caller" => Expression::Caller,

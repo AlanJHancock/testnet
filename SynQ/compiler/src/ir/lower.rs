@@ -819,6 +819,46 @@ impl IrLowerer {
                 self.asm.emit_i32(*addr as i32);
                 self.asm.emit_op(OpCode::MapSet);
             }
+            IrOp::MapGetVal(map_val, key) => {
+                // Nested map read: map_val is a Value::Map from a previous MapGet.
+                // Store to temp slot, MapGet from there.
+                let temp_addr = *self.local_var_addrs.entry("__nested_map_temp".to_string())
+                    .or_insert_with(|| {
+                        let a = self.next_local_addr;
+                        self.next_local_addr += 1;
+                        a
+                    });
+                load_val!(self, *map_val);
+                self.asm.emit_op(OpCode::Push);
+                self.asm.emit_i32(temp_addr as i32);
+                self.asm.emit_op(OpCode::Store);
+                load_val!(self, *key);
+                self.asm.emit_op(OpCode::Push);
+                self.asm.emit_i32(temp_addr as i32);
+                self.asm.emit_op(OpCode::MapGet);
+            }
+            IrOp::MapSetVal(map_val, key, val) => {
+                // Nested map write: store map to temp slot, MapSet there, Load back.
+                let temp_addr = *self.local_var_addrs.entry("__nested_map_temp".to_string())
+                    .or_insert_with(|| {
+                        let a = self.next_local_addr;
+                        self.next_local_addr += 1;
+                        a
+                    });
+                load_val!(self, *map_val);
+                self.asm.emit_op(OpCode::Push);
+                self.asm.emit_i32(temp_addr as i32);
+                self.asm.emit_op(OpCode::Store);
+                load_val!(self, *val);
+                load_val!(self, *key);
+                self.asm.emit_op(OpCode::Push);
+                self.asm.emit_i32(temp_addr as i32);
+                self.asm.emit_op(OpCode::MapSet);
+                // Load modified map as result
+                self.asm.emit_op(OpCode::Push);
+                self.asm.emit_i32(temp_addr as i32);
+                self.asm.emit_op(OpCode::Load);
+            }
             IrOp::SetOp(name, op, val) => {
                 let addr = self.state_var_addrs.get(name)
                     .ok_or_else(|| format!("unknown set: {}", name))?;

@@ -162,6 +162,8 @@ fn decompile_instruction(inst: &Instruction, names: &[String]) -> String {
         IrOp::Call(n, args) => format!("{}call {}({})", r, n, args.iter().map(|a| v(names, *a)).collect::<Vec<_>>().join(", ")),
         IrOp::ExternCall(c, f, args) => format!("{}extern_call {}.{}({})", r, c, f, args.iter().map(|a| v(names, *a)).collect::<Vec<_>>().join(", ")),
         IrOp::MapGet(n, key) => format!("{}map_get {}[{}]", r, n, v(names, *key)),
+        IrOp::MapGetVal(m, key) => format!("{}map_get_val %{}[{}]", r, m, v(names, *key)),
+        IrOp::MapSetVal(m, k, val) => format!("{}map_set_val %{}[%{}] = {}", r, m, k, v(names, *val)),
         IrOp::MapMethod(n, m, args) => format!("{}map_{}.{}({})", r, n, m, args.iter().map(|a| v(names, *a)).collect::<Vec<_>>().join(", ")),
         IrOp::SetMethod(n, m, args) => format!("{}set_{}.{}({})", r, n, m, args.iter().map(|a| v(names, *a)).collect::<Vec<_>>().join(", ")),
         IrOp::FieldAccess(o, idx) => format!("{}.field_{}", v(names, *o), idx),

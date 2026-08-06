@@ -448,10 +448,52 @@ impl<'a> BuildContext<'a> {
                 Ok(())
             }
 
-            Statement::MapAssignment { map, key, value } => {
-                let key_val = self.build_expression(key)?;
-                let val = self.build_expression(value)?;
-                self.push_effect(IrOp::MapSet(map.clone(), key_val, val));
+            Statement::MapAssignment { map, keys, value } => {
+                if keys.len() == 1 {
+                    let key_val = self.build_expression(&keys[0])?;
+                    let val = self.build_expression(value)?;
+                    self.push_effect(IrOp::MapSet(map.clone(), key_val, val));
+                } else {
+                    // Nested map write: map[k1][k2]...[kN] = val
+                    let mut key_vals: Vec<ValueId> = Vec::new();
+                    for k in keys {
+                        key_vals.push(self.build_expression(k)?);
+                    }
+                    let val = self.build_expression(value)?;
+
+                    // Read forward: collect intermediate map ValueIds
+                    let mut map_chain: Vec<ValueId> = Vec::new();
+                    let first = self.push_value(
+                        IrOp::MapGet(map.clone(), key_vals[0]),
+                        self.map_value_type(map, 0),
+                    );
+                    map_chain.push(first);
+
+                    for i in 1..keys.len()-1 {
+                        let inner = self.push_value(
+                            IrOp::MapGetVal(map_chain[i-1], key_vals[i]),
+                            self.map_value_type(map, i),
+                        );
+                        map_chain.push(inner);
+                    }
+
+                    // Write innermost: MapSetVal(innermost_map, last_key, val)
+                    let mut modified = self.push_value(
+                        IrOp::MapSetVal(*map_chain.last().unwrap(), key_vals[keys.len()-1], val),
+                        self.map_value_type(map, keys.len()-2),
+                    );
+
+                    // Write back up the chain (reverse)
+                    for i in (0..map_chain.len()-1).rev() {
+                        modified = self.push_value(
+                            IrOp::MapSetVal(map_chain[i], key_vals[i+1], modified),
+                            self.map_value_type(map, i),
+                        );
+                    }
+
+                    // Store back to state var
+                    self.push_effect(IrOp::MapSet(map.clone(), key_vals[0], modified));
+                }
                 self.ir_fn.collected_effects.push(EffectKind::Write(map.clone()));
                 Ok(())
             }
@@ -899,12 +941,36 @@ impl<'a> BuildContext<'a> {
                 }
             }
 
-            Expression::MapIndex(map, key) => {
-                let key_val = self.build_expression(key)?;
-                let (val_ty, _) = self.state_vars.get(map)
-                    .map(|(t, a)| (t.clone(), *a))
-                    .unwrap_or((IrType::U256, 0));
-                Ok(self.push_value(IrOp::MapGet(map.clone(), key_val), val_ty))
+            Expression::MapIndex(map, keys) => {
+                if keys.len() == 1 {
+                    let key_val = self.build_expression(&keys[0])?;
+                    let (val_ty, _) = self.state_vars.get(map)
+                        .map(|(t, a)| (t.clone(), *a))
+                        .unwrap_or((IrType::U256, 0));
+                    Ok(self.push_value(IrOp::MapGet(map.clone(), key_val), val_ty))
+                } else {
+                    // Nested map read: map[k1][k2]...[kN]
+                    let mut key_vals: Vec<ValueId> = Vec::new();
+                    for k in keys {
+                        key_vals.push(self.build_expression(k)?);
+                    }
+
+                    let first = self.push_value(
+                        IrOp::MapGet(map.clone(), key_vals[0]),
+                        self.map_value_type(map, 0),
+                    );
+
+                    let mut current = first;
+                    for i in 1..keys.len() {
+                        current = self.push_value(
+                            IrOp::MapGetVal(current, key_vals[i]),
+                            self.map_value_type(map, i),
+                        );
+                    }
+
+                    let val_ty = self.map_value_type(map, keys.len() - 1);
+                    Ok(current)
+                }
             }
 
             Expression::MapMethod { map, method, args } => {
@@ -1036,4 +1102,21 @@ impl<'a> BuildContext<'a> {
         }
         0
     }
+
+    /// Get the value type at a given depth of a (potentially nested) map state var.
+    fn map_value_type(&self, map_name: &str, depth: usize) -> IrType {
+        let (ty, _) = match self.state_vars.get(map_name) {
+            Some((t, a)) => (t.clone(), *a),
+            None => return IrType::U256,
+        };
+        let mut current = ty;
+        for _ in 0..depth {
+            match &current {
+                IrType::Map(_, v) => current = (**v).clone(),
+                _ => return current,
+            }
+        }
+        current
+    }
+
 }

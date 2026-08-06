@@ -120,6 +120,10 @@ pub enum IrOp {
     FieldStore(String, String, ValueId),
     /// Map assignment: map[key] = value.
     MapSet(String, ValueId, ValueId),
+    /// Nested map read: takes a map Value (from previous MapGet) + key -> result
+    MapGetVal(ValueId, ValueId),
+    /// Nested map write: takes a map Value + key + val -> modified map Value
+    MapSetVal(ValueId, ValueId, ValueId),
     /// Set operation: set.add(value) / set.remove(value).
     SetOp(String, SetOpKind, ValueId),
     /// Emit event: emit EventName(args).
@@ -200,6 +204,8 @@ impl Instruction {
             IrOp::Store(_, v) | IrOp::FieldStore(_, _, v) => vec![*v],
             IrOp::Emit(_, args) => args.clone(),
             IrOp::MapSet(_, k, v) => vec![*k, *v],
+            IrOp::MapGetVal(map, key) => vec![*map, *key],
+            IrOp::MapSetVal(map, k, v) => vec![*map, *k, *v],
             IrOp::SetOp(_, _, v) => vec![*v],
             IrOp::Require(cond, _) => vec![*cond],
             IrOp::RevertNamed(_, _, args) => args.clone(),

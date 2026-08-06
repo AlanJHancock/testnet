@@ -126,9 +126,9 @@ fn collect_identifiers(expr: &Expression, out: &mut Vec<String>) {
         Expression::StructLiteral { fields, .. } => {
             for (_, v) in fields { collect_identifiers(v, out); }
         }
-        Expression::MapIndex(map, key) => {
+        Expression::MapIndex(map, keys) => {
             out.push(map.clone());
-            collect_identifiers(key, out);
+            for k in keys { collect_identifiers(k, out); }
         }
         Expression::MapMethod { map, args, .. } => {
             out.push(map.clone());
@@ -221,7 +221,7 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                     Statement::If { condition, then_block, else_block: _ } => vec![condition],
                     Statement::Let { value, .. } => vec![value],
                     Statement::LetDestructure { value, .. } => vec![value.as_ref()],
-                    Statement::MapAssignment { key, value, .. } => vec![key, value],
+                    Statement::MapAssignment { keys, value, .. } => { let mut v: Vec<&Expression> = keys.iter().collect(); v.push(value); v },
                     Statement::FieldAssignment { value, .. } => vec![value],
                     Statement::SetOp { value, .. } => vec![value],
                     Statement::While { condition, .. } => vec![condition],
@@ -316,7 +316,7 @@ fn check_call_graph(contract: &ContractDefinition) -> Result<(), String> {
                     Statement::If { condition, then_block: _, else_block: _ } => vec![condition],
                     Statement::Let { value, .. } => vec![value],
                     Statement::LetDestructure { value, .. } => vec![value.as_ref()],
-                    Statement::MapAssignment { key, value, .. } => vec![key, value],
+                    Statement::MapAssignment { keys, value, .. } => { let mut v: Vec<&Expression> = keys.iter().collect(); v.push(value); v },
                     Statement::FieldAssignment { value, .. } => vec![value],
                     Statement::SetOp { value, .. } => vec![value],
                     Statement::While { condition, .. } => vec![condition],
