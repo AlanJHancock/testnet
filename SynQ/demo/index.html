@@ -3968,31 +3968,27 @@
 
       const deployedSessionId  = data.session_id;
 
-      // ── Auto-create session grant: sign once, skip per-call signing ──
-      // Only for real wallets (not ephemeral). Non-blocking — if it fails,
-      // we fall back to per-call signing.
-      // ── Auto-create session grant for all wallet modes ──
-      // Ephemeral: signs instantly (no popup), saves server round-trips per call.
-      // Real wallet: one popup at deploy, then no per-call popups for 1 hour.
-      (async function() {
-        if (walletAddress) {
-          sessionId = deployedSessionId;
-          _sessionGrantActive = false;
-          _sessionGrantExpiry = 0;
-          console.log('[GRANT] auto-creating session grant for mode:', _walletMode);
-          var grantOk = await createSessionGrant();
-          if (grantOk) {
-            updateWalletUI();
-            setStatus('Session grant active — no per-call signing for 1 hour.', 'ok');
-            console.log('[GRANT] auto-grant succeeded');
-          } else {
-            updateWalletUI();
-            console.warn('[GRANT] auto-grant failed — falling back to per-call signing');
-          }
+      // ── Auto-create session grant (blocking) ──
+      // Sign once at deploy, then no per-call signing for 1 hour.
+      // Ephemeral: instant (no popup). Real wallet: one popup, then silence.
+      sessionId = deployedSessionId;
+      _sessionGrantActive = false;
+      _sessionGrantExpiry = 0;
+      if (walletAddress) {
+        console.log('[GRANT] auto-creating session grant for mode:', _walletMode);
+        setStatus('Creating session grant (sign once, then no per-call signing)...', 'info');
+        var grantOk = await createSessionGrant();
+        if (grantOk) {
+          updateWalletUI();
+          console.log('[GRANT] auto-grant succeeded');
         } else {
-          console.warn('[GRANT] no walletAddress — skipping grant creation');
+          updateWalletUI();
+          setStatus('Session grant failed — using per-call signing', 'warn');
+          console.warn('[GRANT] auto-grant failed — falling back to per-call signing');
         }
-      })();
+      } else {
+        console.warn('[GRANT] no walletAddress — skipping grant creation');
+      }
       const deployedName       = currentContractName || 'Contract';
       const deployedAddress    = currentContractAddress;
       const deployedBytecode   = currentBytecode;
@@ -4089,10 +4085,7 @@
         if (sb2) { sb2.innerHTML = sb.innerHTML; sb2.className = sb.className; sb2.title = sb.title; sb2.style.display = sb.style.display; }
       })();
 
-      // Always update sessionId to the freshly deployed session.
-      // The old guard prevented re-deploys from updating sessionId when a
-      // workspace was active, causing init() to fire against a stale session.
-      sessionId = deployedSessionId;
+      // sessionId was already set before grant creation above.
       updateSessionBadge();
       probeStateVars();
 
@@ -4405,18 +4398,22 @@
 
   /* ── Session Grant: sign once, call without per-call signing ──────────── */
   async function createSessionGrant() {
-    if (!walletAddress || !sessionId) return false;
-    // Grants work for all modes — ephemeral signing is instant (no popup),
-    // and the grant still saves a nonce-fetch + sign + POST per call.
+    if (!walletAddress || !sessionId) {
+      setStatus('Grant skipped: no wallet/session', 'warn');
+      return false;
+    }
+    setStatus('[GRANT] Step 1/5: Fetching nonce...', 'info');
 
     try {
       // 1. Fetch a nonce from the server
       var nonceRes  = await fetch(SESSION_NONCE_URL + sessionId + '/nonce');
       var nonceData = await nonceRes.json();
       if (!nonceData.nonce) {
+        setStatus('[GRANT] Failed: no nonce - ' + (nonceData.error || 'unknown'), 'error');
         console.warn('[GRANT] no nonce available:', nonceData.error || 'unknown');
         return false;
       }
+      setStatus('[GRANT] Step 2/5: Nonce received. Building EIP-712 typed data...', 'info');
       var grantNonce   = nonceData.nonce;
       var v3ChainId   = nonceData.chainId   || 1266;
       var v3NetworkId = nonceData.networkId || 'synergy-testnet-v3';
@@ -4464,13 +4461,15 @@
       });
 
       console.log('[GRANT] creating session grant for', walletAddress, 'mode:', _walletMode, 'expiry in 3600s');
-      setStatus('Creating session grant...', 'info');
+      setStatus('[GRANT] Step 3/5: Signing EIP-712 SessionGrant (mode: ' + _walletMode + ')...', 'info');
 
       // 4. Sign with wallet
       var signature;
       try {
         signature = await getSignature(grantTypedData);
+        setStatus('[GRANT] Step 4/5: Signed. POSTing to server...', 'info');
       } catch (sigErr) {
+        setStatus('[GRANT] Failed: signing error - ' + (sigErr.message || sigErr), 'error');
         console.warn('[GRANT] signing declined:', sigErr.message || sigErr);
         return false;
       }
@@ -4499,19 +4498,21 @@
         if (data.caller_syna) {
           console.log('[GRANT] caller syna:', data.caller_syna);
         }
-        updateWalletUI();  // refresh wallet bar to show grant status
+        updateWalletUI();
+        setStatus('Session grant active - no per-call signing for 1 hour.', 'ok');
         return true;
       } else {
+        setStatus('[GRANT] Failed: server rejected - ' + (data.error || 'unknown'), 'error');
         console.warn('[GRANT] failed:', data.error || 'unknown');
         _sessionGrantActive = false;
         updateWalletUI();
         return false;
       }
     } catch (e) {
+      setStatus('[GRANT] Error: ' + (e.message || e), 'error');
       console.warn('[GRANT] error:', e.message || e, e.stack || '');
       _sessionGrantActive = false;
       updateWalletUI();
-      setStatus('Session grant failed: ' + (e.message || e) + ' — using per-call signing', 'error');
       return false;
     }
   }
