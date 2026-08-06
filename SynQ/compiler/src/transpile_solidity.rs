@@ -831,7 +831,17 @@ fn transpile_statement(out: &mut String, stmt: &Statement, indent: usize) {
             writeln!(out, "{}{}.{} = {};", pad, object, field, transpile_expr(value)).unwrap();
         }
         Statement::MapAssignment { map, key, value } => {
-            writeln!(out, "{}{}[{}] = {};", pad, map, transpile_expr(key), transpile_expr(value)).unwrap();
+            let key_str = transpile_expr(key);
+            let key_sol = match get_type(map) {
+                Some(Type::Mapping(k, _)) if matches!(k.as_ref(), Type::Address) => {
+                    match key {
+                        Expression::Caller => "address(uint160(msg.sender))".to_string(),
+                        _ => format!("address(uint160({}))", key_str)
+                    }
+                }
+                _ => key_str
+            };
+            writeln!(out, "{}{}[{}] = {};", pad, map, key_sol, transpile_expr(value)).unwrap();
         }
         Statement::SetOp { set, op, value } => {
             let val_str = transpile_expr(value);
@@ -1020,7 +1030,16 @@ fn transpile_expr(expr: &Expression) -> String {
         }
         Expression::Caller => "uint256(uint160(msg.sender))".to_string(),
         Expression::MapIndex(map, key) => {
-            format!("{}[{}]", sol_identifier(map), transpile_expr(key))
+            let key_str = transpile_expr(key);
+            match get_type(map) {
+                Some(Type::Mapping(k, _)) if matches!(k.as_ref(), Type::Address) => {
+                    match &**key {
+                        Expression::Caller => format!("{}[address(uint160(msg.sender))]", sol_identifier(map)),
+                        _ => format!("{}[address(uint160({}))]", sol_identifier(map), key_str)
+                    }
+                }
+                _ => format!("{}[{}]", sol_identifier(map), key_str)
+            }
         }
         Expression::MapMethod { map, method, args } => {
             let a: Vec<String> = args.iter().map(transpile_expr).collect();
