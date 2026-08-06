@@ -2447,21 +2447,33 @@ async fn evm_call_handler(
                         if parts.len() >= 2 { parts[1].trim().to_string() } else { "unknown".to_string() }
                     }).unwrap_or_default();
 
-                // Also run cast call to get the function's return value
-                // (cast send doesn't return the function's return data)
-                let mut call_cmd = Command::new(&cast_bin);
-                call_cmd.arg("call").arg(&req.contract_address).arg(&sig);
-                for arg in &converted_args {
-                    call_cmd.arg(arg);
-                }
-                call_cmd.args(["--rpc-url", rpc_url,
-                    "--from", "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"]);
-                let return_value = match call_cmd.output() {
-                    Ok(co) if co.status.success() => {
-                        Some(String::from_utf8_lossy(&co.stdout).trim().to_string())
+                // Use cast run --json to get the actual return value from the
+                // transaction trace (not a second simulation like cast call)
+                let return_value = if let Some(ref txh) = tx_hash {
+                    let mut run_cmd = Command::new(&cast_bin);
+                    run_cmd.arg("run").arg(txh);
+                    run_cmd.args(["--rpc-url", rpc_url, "--json"]);
+                    match run_cmd.output() {
+                        Ok(co) if co.status.success() => {
+                            let trace = String::from_utf8_lossy(&co.stdout);
+                            // Parse JSON trace: arena[0].trace.output = return data
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trace.trim()) {
+                                if let Some(arena) = v.get("arena").and_then(|a| a.as_array()) {
+                                    if let Some(first) = arena.first() {
+                                        if let Some(trace_obj) = first.get("trace") {
+                                            if let Some(out) = trace_obj.get("output").and_then(|o| o.as_str()) {
+                                                if out != "0x" && !out.is_empty() {
+                                                    Some(out.to_string())
+                                                } else { None }
+                                            } else { None }
+                                        } else { None }
+                                    } else { None }
+                                } else { None }
+                            } else { None }
+                        }
+                        _ => None,
                     }
-                    _ => None,
-                };
+                } else { None };
 
                 let summary = format!(
                     "status: {}\ntxHash: {}\ngasUsed: {}\nblock: {}",

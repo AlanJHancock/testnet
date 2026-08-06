@@ -30,6 +30,7 @@ struct BuiltinFlags {
     needs_to_syna: bool,
     needs_from_syna: bool,
     needs_contract_addr: bool,
+    needs_asset: bool,
 }
 
 fn set_type(name: &str, ty: Type) {
@@ -321,6 +322,47 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
     // Emit helper functions for used builtins
     BUILTIN_FLAGS.with(|flags| {
         let f = flags.borrow();
+        if f.needs_asset {
+            writeln!(out, "").unwrap();
+            writeln!(out, "    // ── Asset registry (EVM simulation of SynQ asset builtins) ──").unwrap();
+            writeln!(out, "    uint256 internal _nextAssetId;").unwrap();
+            writeln!(out, "    mapping(uint256 => uint256) internal _assetBalance;").unwrap();
+            writeln!(out, "    mapping(uint256 => uint256) internal _assetOwner;").unwrap();
+            writeln!(out, "    mapping(uint256 => bool) internal _assetBurned;").unwrap();
+            writeln!(out, "").unwrap();
+            writeln!(out, "    function _asset_create(string memory /*symbol*/, uint256 value) internal returns (uint256) {{").unwrap();
+            writeln!(out, "        uint256 id = ++_nextAssetId;").unwrap();
+            writeln!(out, "        _assetBalance[id] = value;").unwrap();
+            writeln!(out, "        _assetOwner[id] = uint256(uint160(msg.sender));").unwrap();
+            writeln!(out, "        return id;").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out, "").unwrap();
+            writeln!(out, "    function _asset_transfer(uint256 asset_id, uint256 to) internal returns (uint256) {{").unwrap();
+            writeln!(out, "        require(!_assetBurned[asset_id], \"asset burned\");").unwrap();
+            writeln!(out, "        require(_assetOwner[asset_id] == uint256(uint160(msg.sender)), \"not owner\");").unwrap();
+            writeln!(out, "        uint256 new_id = ++_nextAssetId;").unwrap();
+            writeln!(out, "        _assetBalance[new_id] = _assetBalance[asset_id];").unwrap();
+            writeln!(out, "        _assetOwner[new_id] = to;").unwrap();
+            writeln!(out, "        _assetBurned[asset_id] = true;").unwrap();
+            writeln!(out, "        return new_id;").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out, "").unwrap();
+            writeln!(out, "    function _asset_burn(uint256 asset_id) internal returns (uint256) {{").unwrap();
+            writeln!(out, "        require(!_assetBurned[asset_id], \"already burned\");").unwrap();
+            writeln!(out, "        require(_assetOwner[asset_id] == uint256(uint160(msg.sender)), \"not owner\");").unwrap();
+            writeln!(out, "        uint256 value = _assetBalance[asset_id];").unwrap();
+            writeln!(out, "        _assetBurned[asset_id] = true;").unwrap();
+            writeln!(out, "        return value;").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out, "").unwrap();
+            writeln!(out, "    function _asset_balance(uint256 asset_id) internal view returns (uint256) {{").unwrap();
+            writeln!(out, "        return _assetBalance[asset_id];").unwrap();
+            writeln!(out, "    }}").unwrap();
+            writeln!(out, "").unwrap();
+            writeln!(out, "    function _asset_owner(uint256 asset_id) internal view returns (uint256) {{").unwrap();
+            writeln!(out, "        return _assetOwner[asset_id];").unwrap();
+            writeln!(out, "    }}").unwrap();
+        }
         if f.needs_to_syna {
             writeln!(out, "").unwrap();
             writeln!(out, "    // SynQ Bech32 builtin: to_syna — EVM approximation (hex string)").unwrap();
@@ -894,11 +936,14 @@ fn transpile_expr(expr: &Expression) -> String {
                     format!("false /* SXCP bridge stub: {} */", name),
                 "kyber_decaps" | "kyber_encaps" =>
                     format!("bytes(new bytes(0)) /* SXCP bridge stub: {} */", name),
+                "asset_create" | "asset_transfer" | "asset_burn" |
+                "asset_balance" | "asset_owner" => {
+                    BUILTIN_FLAGS.with(|f| f.borrow_mut().needs_asset = true);
+                    format!("_{}({})", name, a.join(", "))
+                }
                 "aegis_call" | "aegis_decaps" |
                 "authority_envelope" | "authority_require" |
-                "ai_infer" |
-                "asset_create" | "asset_transfer" | "asset_burn" |
-                "asset_balance" | "asset_owner" =>
+                "ai_infer" =>
                     format!("uint256(0) /* SXCP bridge stub: {} */", name),
                 "authority_identity" =>
                     format!("uint256(uint160(msg.sender)) /* EVM approximation: authority_identity = msg.sender */"),
