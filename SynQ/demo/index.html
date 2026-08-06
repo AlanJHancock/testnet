@@ -781,6 +781,7 @@
     }).catch(function() {});
   })();
   var SESSION_RUN_URL = 'https://hanksweb.co.uk/synq/session/run';
+  var SESSION_GRANT_URL = 'https://hanksweb.co.uk/synq/session/';  // + sessionId + '/grant'
   var SESSION_DEL_URL   = 'https://hanksweb.co.uk/synq/session/';
   var SESSION_NONCE_URL = 'https://hanksweb.co.uk/synq/session/';
 
@@ -818,6 +819,8 @@
   var walletSyna      = null;  // Native V3 syna... Bech32 address
   var walletUma       = null;
   var _walletMode = "none"; // "synergy" | "ethereum" | "none"
+  var _sessionGrantExpiry  = 0;     // unix seconds — 0 means no active grant
+  var _sessionGrantActive  = false;  // true when grant is valid and not expired
   var _ephemeralPrivKey  = null;
   var _ephemeralAddress  = null; // always the address derived from _ephemeralPrivKey        // Uint8Array — secp256k1 private key
 
@@ -1188,6 +1191,8 @@
   }
 
   async function resetVM() {
+    _sessionGrantActive = false;
+    _sessionGrantExpiry = 0;
     var out = document.getElementById('vmOutput');
     out.innerHTML = '<span class="dim">Resetting all VM sessions...</span>';
     // Reset cumulative gas counter
@@ -1247,6 +1252,8 @@
               || c.session_id === sessionId
               || toReset.length === 1) {
             sessionId = newSid;
+            _sessionGrantActive = false;
+            _sessionGrantExpiry = 0;
             updateSessionBadge();
           }
         } else {
@@ -1316,9 +1323,16 @@
       label.textContent = 'Connected:';
       addr.textContent  = walletSyna || (walletAddress ? evmToSyna(walletAddress) : '') || (walletAddress.slice(0,6) + '...' + walletAddress.slice(-4));
       addr.title        = walletAddress + ' → ' + (walletSyna || evmToSyna(walletAddress) || '');
-      mode.textContent  = 'Hybrid PQC + EVM signing';
-      mode.className    = 'wallet-mode hybrid';
-      note.textContent  = 'Signing: EVM wallet + ML-DSA-65 wrapper';
+      if (isGrantValid()) {
+        var minsLeft = Math.floor((_sessionGrantExpiry - Math.floor(Date.now() / 1000)) / 60);
+        mode.textContent  = 'Session Grant active (' + minsLeft + 'm left)';
+        mode.className    = 'wallet-mode hybrid';
+        note.textContent  = 'Signed once — no per-call wallet popups until expiry';
+      } else {
+        mode.textContent  = 'Hybrid PQC + EVM signing';
+        mode.className    = 'wallet-mode hybrid';
+        note.textContent  = 'Signing: EVM wallet + ML-DSA-65 wrapper';
+      }
       btn.textContent   = 'Disconnect';
       btn.onclick       = disconnectWallet;
       // Compute + display UMA in wallet bar
@@ -3944,6 +3958,21 @@
       }
 
       const deployedSessionId  = data.session_id;
+
+      // ── Auto-create session grant: sign once, skip per-call signing ──
+      // Only for real wallets (not ephemeral). Non-blocking — if it fails,
+      // we fall back to per-call signing.
+      (async function() {
+        if (walletAddress && _walletMode !== 'ephemeral' && _walletMode !== 'none') {
+          sessionId = deployedSessionId;  // ensure grant uses the new session
+          _sessionGrantActive = false;    // clear stale grant from previous session
+          _sessionGrantExpiry = 0;
+          var grantOk = await createSessionGrant();
+          if (grantOk) {
+            setStatus('Session grant active — signed once, no per-call signing needed for 1 hour.', 'ok');
+          }
+        }
+      })();
       const deployedName       = currentContractName || 'Contract';
       const deployedAddress    = currentContractAddress;
       const deployedBytecode   = currentBytecode;
@@ -4354,6 +4383,120 @@
     if (el) el.innerHTML = htmlContent;
   }
 
+  /* ── Session Grant: sign once, call without per-call signing ──────────── */
+  async function createSessionGrant() {
+    if (!walletAddress || !sessionId) return false;
+    if (_walletMode === 'ephemeral') return false;  // ephemeral doesn't need grants
+
+    try {
+      // 1. Fetch a nonce from the server
+      var nonceRes  = await fetch(SESSION_NONCE_URL + sessionId + '/nonce');
+      var nonceData = await nonceRes.json();
+      if (!nonceData.nonce) {
+        console.warn('[GRANT] no nonce available:', nonceData.error || 'unknown');
+        return false;
+      }
+      var grantNonce   = nonceData.nonce;
+      var v3ChainId   = nonceData.chainId   || 1266;
+      var v3NetworkId = nonceData.networkId || 'synergy-testnet-v3';
+      var v3DomainTag = 'SYNQ-GRANT-v3';
+
+      // 2. Compute expiry: 1 hour from now (server max is 3600s)
+      var expiry = Math.floor(Date.now() / 1000) + 3600;
+
+      // 3. Build EIP-712 SessionGrant typed data
+      var grantTypedData = JSON.stringify({
+        types: {
+          EIP712Domain: [
+            { name: 'name',              type: 'string'  },
+            { name: 'version',           type: 'string'  },
+            { name: 'chainId',           type: 'uint256' },
+            { name: 'verifyingContract', type: 'address' }
+          ],
+          SessionGrant: [
+            { name: 'sessionId',       type: 'string' },
+            { name: 'callerAddress',   type: 'string' },
+            { name: 'allowedFunctions', type: 'string[]' },
+            { name: 'expiry',          type: 'uint256' },
+            { name: 'domainTag',       type: 'string' }
+          ]
+        },
+        primaryType: 'SessionGrant',
+        domain: {
+          name:              currentContractName ? ('SynQ \u00b7 ' + currentContractName + ' \u00b7 ' + v3NetworkId) : ('SynQ \u00b7 ' + v3NetworkId),
+          version:           '1',
+          chainId:           v3ChainId,
+          verifyingContract: (function() {
+            if (currentContractName && window.keccak_256) {
+              return '0x' + window.keccak_256('SynQ:' + currentContractName).slice(24);
+            }
+            return currentContractAddress || '0x0000000000000000000000000000000000000000';
+          })()
+        },
+        message: {
+          sessionId:        sessionId,
+          callerAddress:    walletAddress,
+          allowedFunctions: [],   // empty = all functions
+          expiry:           String(expiry),
+          domainTag:        v3DomainTag
+        }
+      });
+
+      console.log('[GRANT] creating session grant for', walletAddress, 'expiry in 3600s');
+
+      // 4. Sign with wallet
+      var signature;
+      try {
+        signature = await getSignature(grantTypedData);
+      } catch (sigErr) {
+        console.warn('[GRANT] signing declined:', sigErr.message || sigErr);
+        return false;
+      }
+
+      // 5. POST to /session/:id/grant
+      var grantBody = {
+        evm_address:       walletAddress,
+        evm_signature:     signature,
+        grant_nonce:       grantNonce,
+        allowed_functions: [],  // empty = all functions
+        expiry:            expiry
+      };
+      if (_manualSynw) grantBody.display_synw = _manualSynw;
+
+      var res = await fetch(SESSION_GRANT_URL + sessionId + '/grant', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(grantBody)
+      });
+      var data = await res.json();
+
+      if (data.success) {
+        _sessionGrantExpiry = data.grant_expiry || expiry;
+        _sessionGrantActive = true;
+        console.log('[GRANT] session grant active until', new Date(_sessionGrantExpiry * 1000).toISOString());
+        if (data.caller_syna) {
+          console.log('[GRANT] caller syna:', data.caller_syna);
+        }
+        return true;
+      } else {
+        console.warn('[GRANT] failed:', data.error || 'unknown');
+        _sessionGrantActive = false;
+        return false;
+      }
+    } catch (e) {
+      console.warn('[GRANT] error:', e.message || e);
+      _sessionGrantActive = false;
+      return false;
+    }
+  }
+
+  // Check if the current session grant is still valid
+  function isGrantValid() {
+    if (!_sessionGrantActive || !sessionId) return false;
+    var now = Math.floor(Date.now() / 1000);
+    return now < _sessionGrantExpiry;
+  }
+
   async function runFunction() {
     if (!selectedFunc || !currentBytecode) return;
 
@@ -4481,7 +4624,11 @@
         param_types:  (selectedFunc.paramTypes || []).map(function(t) { return t || 'u256'; })
       };
 
-      if (walletAddress) {
+      // ── Session Grant: if we have an active grant, skip per-call signing ──
+      if (isGrantValid()) {
+        callBody.use_grant = true;
+        console.log('[GRANT] using session grant, skipping per-call signing for', selectedFunc.name);
+      } else if (walletAddress) {
         // Liveness check: only needed for extension wallet; ephemeral key is always valid
         if (_walletMode === 'synergy' || _walletMode === 'ethereum') {
           var liveAccounts = await _walletRequest('eth_accounts');
@@ -4618,7 +4765,7 @@
         callBody.evm_address   = (_walletMode === 'ephemeral' && _ephemeralAddress) ? _ephemeralAddress : walletAddress;
         callBody.evm_signature = signature;
         callBody.call_nonce    = callNonce;
-      }
+      } /* end per-call signing (grant active path has no else) */
 
       // ── Gas exhaustion guard: block calls when budget is spent ───────────
       if (window._gasUsed && window._gasBudget && window._gasUsed >= window._gasBudget) {
@@ -5140,6 +5287,8 @@
   }
 
   async function resetVM() {
+    _sessionGrantActive = false;
+    _sessionGrantExpiry = 0;
     var out = document.getElementById('vmOutput');
     out.innerHTML = '<span class="dim">Resetting all VM sessions...</span>';
     // Reset cumulative gas counter
@@ -5210,6 +5359,8 @@
               || c.session_id === sessionId
               || toReset.length === 1) {
             sessionId = newSid;
+            _sessionGrantActive = false;
+            _sessionGrantExpiry = 0;
             updateSessionBadge();
           }
         } else {
