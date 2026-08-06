@@ -4527,13 +4527,34 @@
       };
       if (_manualSynw) grantBody.display_synw = _manualSynw;
 
-      console.log('[GRANT] Step 4: POSTing grant to', SESSION_GRANT_URL + sessionId + '/grant');
-      var res = await fetch(SESSION_GRANT_URL + sessionId + '/grant', {
+      console.log('[GRANT] Step 4: signature=', signature ? (signature.substring(0, 20) + '... len=' + signature.length) : 'NULL/UNDEFINED');
+      if (!signature || signature === 'undefined' || signature === 'null') {
+        _grantError = 'no signature returned';
+        console.warn('[GRANT] signature is null/undefined — wallet did not return a signature');
+        setStatus('[GRANT] Failed: no signature returned from wallet', 'error');
+        if (_gb) { _gb.className = 'grant-badge inactive'; _gb.innerHTML = '\u274C\u2009no sig'; _gb.title = 'Wallet did not return a signature. Check console for details.'; _gb.style.display = 'inline-flex'; }
+        return false;
+      }
+      var grantUrl = SESSION_GRANT_URL + sessionId + '/grant';
+      console.log('[GRANT] Step 5: POSTing grant to', grantUrl);
+      console.log('[GRANT] Step 5: body=', JSON.stringify(grantBody).substring(0, 200));
+      var res = await fetch(grantUrl, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify(grantBody)
       });
-      var data = await res.json();
+      console.log('[GRANT] Step 5: response status', res.status, res.statusText);
+      var resText = await res.text();
+      console.log('[GRANT] Step 5: response body', resText.substring(0, 500));
+      var data;
+      try { data = JSON.parse(resText); }
+      catch (parseErr) {
+        _grantError = 'server returned non-JSON (status ' + res.status + ')';
+        console.warn('[GRANT] non-JSON response:', resText.substring(0, 200));
+        setStatus('[GRANT] Failed: server error (HTTP ' + res.status + ')', 'error');
+        if (_gb) { _gb.className = 'grant-badge inactive'; _gb.innerHTML = '\u274C\u2009HTTP ' + res.status; _gb.title = 'Server returned HTTP ' + res.status + ': ' + resText.substring(0, 200); _gb.style.display = 'inline-flex'; }
+        return false;
+      }
 
       if (data.success) {
         _sessionGrantExpiry = data.grant_expiry || expiry;
@@ -4578,11 +4599,11 @@
       var minsLeft = Math.floor((_sessionGrantExpiry - Math.floor(Date.now() / 1000)) / 60);
       if (minsLeft <= 5) {
         el.className = 'grant-badge expiring';
-        el.innerHTML = '\u23F1\u2009Grant ' + minsLeft + 'm left';
+        el.innerHTML = '\u23F1\u2009Session Grant ' + minsLeft + 'm left';
         el.title = 'Session Grant expiring soon — ' + minsLeft + ' minutes remaining. Will need to re-sign after expiry.';
       } else {
         el.className = 'grant-badge active';
-        el.innerHTML = '\u2705\u2009Grant ' + minsLeft + 'm left';
+        el.innerHTML = '\u2705\u2009Session Grant ' + minsLeft + 'm left';
         el.title = 'Session Grant active — ' + minsLeft + ' minutes remaining. No per-call wallet popups needed.';
       }
       el.style.display = 'inline-flex';
@@ -4592,7 +4613,7 @@
         el.innerHTML = '\u274C\u2009' + _grantError.slice(0, 25);
         el.title = 'Grant failed: ' + _grantError + '\nEach function call requires a wallet signature.';
       } else {
-        el.innerHTML = '\u274C\u2009No Grant';
+        el.innerHTML = '\u274C\u2009Session Grant';
         el.title = 'No active session grant — each function call requires a wallet signature. Deploy to create a grant.';
       }
       el.style.display = 'inline-flex';
