@@ -4640,6 +4640,13 @@
     return valid;
   }
 
+  // Live countdown: update grant badge every 30 seconds
+  setInterval(function() {
+    if (typeof _sessionGrantActive !== 'undefined' && _sessionGrantActive) {
+      updateGrantBadge();
+    }
+  }, 30000);
+
   async function runFunction() {
     if (!selectedFunc || !currentBytecode) return;
 
