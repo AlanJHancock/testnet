@@ -612,7 +612,6 @@
     <span id="pqcSimBadge" style="display:none;" class="wasm-toolbar-badge" title="PQC builtins will throw RuntimeError in browser — deploy to synq-server for real verification">&#x26A0; PQC Simulation</span>
     <span id="verifyBadge" style="display:none;" class="verify-badge pass" title="L1 Structural (hard gate) + L2 Stack Safety (advisory) — checked at compile"></span>
     <span id="layer3Badge" style="display:none;" class="verify-badge pass" title="L3 Manifest + ML-DSA-87 signature — checked at deploy"></span>
-    <span id="grantBadge" style="display:none;" class="grant-badge" title="Session Grant status — sign once at deploy, then no per-call wallet popups"></span>
     <span id="solVerifyBadge" style="display:none;" class="verify-badge pass" title="Solidity → EVM verification via Foundry (forge build)"></span>
     <span id="depsHint" style="font-size:0.75rem;visibility:hidden;">&nbsp;</span>
   </div>
@@ -658,6 +657,7 @@
       Execute Contract
       <span id="contractNameBadge" style="font-size:0.72rem;font-family:ui-monospace,monospace;background:rgba(0,206,209,0.12);border:1px solid rgba(0,206,209,0.3);color:#00ced1;border-radius:10px;padding:2px 10px;margin-left:8px;letter-spacing:0.04em;text-transform:none;display:none;"></span>
     </span>
+    <span id="grantBadge" style="display:none;" class="grant-badge" title="Session Grant status — sign once at deploy, then no per-call wallet popups"></span>
     <span id="sessionBadge" style="display:none; font-size:0.7rem; font-family:ui-monospace,monospace;
       background:rgba(16,185,129,0.12); border:1px solid rgba(16,185,129,0.35);
       color:#6ee7b7; border-radius:10px; padding:2px 10px; letter-spacing:0.04em;">
@@ -4509,6 +4509,7 @@
         setStatus('[GRANT] Step 4/5: Signed. POSTing to server...', 'info');
       } catch (sigErr) {
         var _sigErrMsg = sigErr.message || String(sigErr);
+        _grantError = 'sign: ' + _sigErrMsg.slice(0, 20);
         console.warn('[GRANT] signing declined:', _sigErrMsg);
         setStatus('[GRANT] Failed: signing - ' + _sigErrMsg, 'error');
         if (_gb) { _gb.className = 'grant-badge inactive'; _gb.innerHTML = '\u274C\u2009sign err'; _gb.title = 'Signing failed: ' + _sigErrMsg; _gb.style.display = 'inline-flex'; }
@@ -4536,6 +4537,7 @@
       if (data.success) {
         _sessionGrantExpiry = data.grant_expiry || expiry;
         _sessionGrantActive = true;
+        _grantError = null;
         updateGrantBadge();
         console.log('[GRANT] session grant active until', new Date(_sessionGrantExpiry * 1000).toISOString());
         if (data.caller_syna) {
@@ -4546,6 +4548,7 @@
         return true;
       } else {
         var _errMsg = data.error || 'unknown';
+        _grantError = _errMsg;
         console.warn('[GRANT] failed:', _errMsg, 'full response:', JSON.stringify(data));
         setStatus('[GRANT] Failed: ' + _errMsg, 'error');
         if (_gb) { _gb.className = 'grant-badge inactive'; _gb.innerHTML = '\u274C\u2009' + _errMsg.slice(0, 30); _gb.title = 'Grant failed: ' + _errMsg; _gb.style.display = 'inline-flex'; }
@@ -4555,6 +4558,7 @@
       }
     } catch (e) {
       var _errMsg = e.message || String(e);
+      _grantError = _errMsg;
       console.warn('[GRANT] error:', _errMsg, e.stack || '');
       setStatus('[GRANT] Error: ' + _errMsg, 'error');
       if (_gb) { _gb.className = 'grant-badge inactive'; _gb.innerHTML = '\u274C\u2009' + _errMsg.slice(0, 30); _gb.title = 'Grant error: ' + _errMsg; _gb.style.display = 'inline-flex'; }
@@ -4565,6 +4569,7 @@
   }
 
   // Check if the current session grant is still valid
+  var _grantError = null;
   function updateGrantBadge() {
     var el = document.getElementById('grantBadge');
     if (!el) return;
@@ -4582,8 +4587,13 @@
       el.style.display = 'inline-flex';
     } else {
       el.className = 'grant-badge inactive';
-      el.innerHTML = '\u274C\u2009No Grant';
-      el.title = 'No active session grant — each function call requires a wallet signature. Deploy to create a grant.';
+      if (_grantError) {
+        el.innerHTML = '\u274C\u2009' + _grantError.slice(0, 25);
+        el.title = 'Grant failed: ' + _grantError + '\nEach function call requires a wallet signature.';
+      } else {
+        el.innerHTML = '\u274C\u2009No Grant';
+        el.title = 'No active session grant — each function call requires a wallet signature. Deploy to create a grant.';
+      }
       el.style.display = 'inline-flex';
     }
   }
