@@ -1670,11 +1670,19 @@
         return await signEIP712Ephemeral(typedData);
       }
       // Ensure wallet is on chain 1266 before signing (MetaMask enforces domain chainId match)
-      await _ensureChain();
-      var json = typeof typedData === 'string' ? typedData : JSON.stringify(typedData);
-      console.log('[SynQ Wallet] Requesting signature from extension...', 'method: eth_signTypedData_v4');
+      // Non-fatal: if chain switch fails, try signing anyway — some wallets
+      // allow signing regardless of current chain
       try {
-        return await _walletRequest('eth_signTypedData_v4', [walletAddress, json]);
+        await _ensureChain();
+      } catch(chainErr) {
+        console.warn('[SynQ Wallet] Chain switch failed (non-fatal, will try signing anyway):', chainErr.message || chainErr);
+      }
+      var json = typeof typedData === 'string' ? typedData : JSON.stringify(typedData);
+      console.log('[SynQ Wallet] Requesting signature from extension...', 'method: eth_signTypedData_v4', 'mode:', _walletMode);
+      try {
+        var _sig = await _walletRequest('eth_signTypedData_v4', [walletAddress, json]);
+        console.log('[SynQ Wallet] Signature received:', _sig ? (_sig.substring(0, 18) + '... len=' + _sig.length) : 'NULL');
+        return _sig;
       } catch(e) {
         console.warn('[SynQ Wallet] Extension signing failed:', e.code, e.message);
         console.warn('[SynQ Wallet] Falling back to ephemeral EIP-712 signing');
