@@ -75,6 +75,7 @@ use synq_vm::{QuantumVM, Value};
 use synq_vm::verify;
 
 mod wasm_compiler;
+mod aivm_handler;
 mod sqb;
 
 // ─── Security constants ───────────────────────────────────────────────────────
@@ -110,8 +111,8 @@ fn authority_scope_hash(scope_name: &str) -> [u8; 32] {
 }
 
 // V3 chain parameters
-const V3_CHAIN_ID: u64 = 1266;
-const V3_NETWORK_ID: &str = "synergy-testnet-v3";
+const V3_CHAIN_ID: u64 = 1264;
+const V3_NETWORK_ID: &str = "synergy-testnet";
 
 
 // ─── PR-F Item 2: Per-IP rate limiting ───────────────────────────────────────
@@ -152,7 +153,7 @@ const V3_DOMAIN_GRANT: &str = "SYNQ-GRANT-v3";
 #[derive(Clone)]
 struct SessionGrant {
     caller_addr: [u8; 20],
-    display_synw: Option<String>,
+    display_tsynq: Option<String>,
     allowed_functions: std::collections::HashSet<String>,
     expiry: u64,
     grant_nonce: String,
@@ -383,7 +384,7 @@ fn eip712_domain_separator(domain_name: &str, verifying_contract: &[u8; 20]) -> 
     );
     let name_hash    = keccak256_str(domain_name);
     let version_hash = keccak256_str("1");
-    // V3: chain ID 1266 (synergy-testnet-v3). Was 1337 (legacy devnet).
+    // V3: chain ID 1264 (synergy-testnet). Per synq-address-format-spec v0.1.
     let chain_id     = pad32(&V3_CHAIN_ID.to_be_bytes());
     let mut contract_slot = [0u8; 32];
     contract_slot[12..].copy_from_slice(verifying_contract);
@@ -832,7 +833,7 @@ struct ManifestInfo {
     required_signature_algorithm: String,
     /// Consensus signature algorithm (ML-DSA-65 for V3)
     consensus_signature_algorithm: String,
-    /// Chain ID (1266 for Testnet-v3)
+    /// Chain ID (1264 for testnet per synq-address-format-spec)
     chain_id: u64,
     /// Network ID
     network_id: String,
@@ -4224,7 +4225,7 @@ struct SessionGrantRequest {
     allowed_functions: Vec<String>,
     expiry:            u64,
     #[serde(default)]
-    display_synw:      Option<String>,
+    display_tsynq:      Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -4234,7 +4235,7 @@ struct SessionGrantResponse {
     error:      Option<String>,
     grant_expiry: Option<u64>,
     allowed_functions: Option<Vec<String>>,
-    caller_syna:  Option<String>,
+    caller_tsynq:  Option<String>,
 }
 
 const GRANT_MAX_LIFETIME_SECS: u64 = 3600;
@@ -4250,7 +4251,7 @@ async fn session_grant_handler(
             Some(s) => s,
             None => return (StatusCode::NOT_FOUND, RespJson(SessionGrantResponse {
                 success: false, session_id: None, error: Some("Session not found".into()),
-                grant_expiry: None, allowed_functions: None, caller_syna: None,
+                grant_expiry: None, allowed_functions: None, caller_tsynq: None,
             })),
         }
     };
@@ -4262,7 +4263,7 @@ async fn session_grant_handler(
             return (StatusCode::UNAUTHORIZED, RespJson(SessionGrantResponse {
                 success: false, session_id: None,
                 error: Some("no pending nonce -- call GET /session/:id/nonce first".into()),
-                grant_expiry: None, allowed_functions: None, caller_syna: None,
+                grant_expiry: None, allowed_functions: None, caller_tsynq: None,
             }));
         }
         Some(pn) if pn != &req.grant_nonce => {
@@ -4270,7 +4271,7 @@ async fn session_grant_handler(
             return (StatusCode::UNAUTHORIZED, RespJson(SessionGrantResponse {
                 success: false, session_id: None,
                 error: Some("nonce mismatch -- nonces are single-use, request a new one".into()),
-                grant_expiry: None, allowed_functions: None, caller_syna: None,
+                grant_expiry: None, allowed_functions: None, caller_tsynq: None,
             }));
         }
         _ => {}
@@ -4280,7 +4281,7 @@ async fn session_grant_handler(
         return (StatusCode::UNAUTHORIZED, RespJson(SessionGrantResponse {
             success: false, session_id: None,
             error: Some("nonce already used -- replay attack rejected".into()),
-            grant_expiry: None, allowed_functions: None, caller_syna: None,
+            grant_expiry: None, allowed_functions: None, caller_tsynq: None,
         }));
     }
 
@@ -4294,7 +4295,7 @@ async fn session_grant_handler(
         return (StatusCode::BAD_REQUEST, RespJson(SessionGrantResponse {
             success: false, session_id: None,
             error: Some("grant expiry must be in the future".into()),
-            grant_expiry: None, allowed_functions: None, caller_syna: None,
+            grant_expiry: None, allowed_functions: None, caller_tsynq: None,
         }));
     }
     if req.expiry > now_secs + GRANT_MAX_LIFETIME_SECS {
@@ -4302,7 +4303,7 @@ async fn session_grant_handler(
         return (StatusCode::BAD_REQUEST, RespJson(SessionGrantResponse {
             success: false, session_id: None,
             error: Some(format!("grant expiry exceeds maximum lifetime of {} seconds", GRANT_MAX_LIFETIME_SECS)),
-            grant_expiry: None, allowed_functions: None, caller_syna: None,
+            grant_expiry: None, allowed_functions: None, caller_tsynq: None,
         }));
     }
 
@@ -4327,7 +4328,7 @@ async fn session_grant_handler(
             return (StatusCode::BAD_REQUEST, RespJson(SessionGrantResponse {
                 success: false, session_id: None,
                 error: Some(format!("evm_signature hex invalid: {}", e)),
-                grant_expiry: None, allowed_functions: None, caller_syna: None,
+                grant_expiry: None, allowed_functions: None, caller_tsynq: None,
             }));
         }
     };
@@ -4338,7 +4339,7 @@ async fn session_grant_handler(
             return (StatusCode::UNAUTHORIZED, RespJson(SessionGrantResponse {
                 success: false, session_id: None,
                 error: Some(format!("ecrecover failed: {}", e)),
-                grant_expiry: None, allowed_functions: None, caller_syna: None,
+                grant_expiry: None, allowed_functions: None, caller_tsynq: None,
             }));
         }
     };
@@ -4350,7 +4351,7 @@ async fn session_grant_handler(
         return (StatusCode::UNAUTHORIZED, RespJson(SessionGrantResponse {
             success: false, session_id: None,
             error: Some("signature does not match claimed evm_address".into()),
-            grant_expiry: None, allowed_functions: None, caller_syna: None,
+            grant_expiry: None, allowed_functions: None, caller_tsynq: None,
         }));
     }
 
@@ -4358,7 +4359,7 @@ async fn session_grant_handler(
     session.pending_nonce = None;
     session.used_nonces.insert(req.grant_nonce.clone());
 
-    let caller_syna = synq_vm::bech32::evm_to_syna(&recovered)
+    let caller_tsynq = synq_vm::bech32::encode_address(&recovered)
         .unwrap_or_else(|_| hex_encode(&recovered));
     let allowed_set: std::collections::HashSet<String> =
         req.allowed_functions.iter().cloned().collect();
@@ -4368,7 +4369,7 @@ async fn session_grant_handler(
 
     session.session_grant = Some(SessionGrant {
         caller_addr: recovered,
-        display_synw: req.display_synw.clone(),
+        display_tsynq: req.display_tsynq.clone(),
         allowed_functions: allowed_set,
         expiry: req.expiry,
         grant_nonce: req.grant_nonce,
@@ -4380,7 +4381,7 @@ async fn session_grant_handler(
         success: true, session_id: Some(session_id), error: None,
         grant_expiry: Some(req.expiry),
         allowed_functions: Some(req.allowed_functions),
-        caller_syna: Some(caller_syna),
+        caller_tsynq: Some(caller_tsynq),
     }))
 }
 // ─── POST /session/run ────────────────────────────────────────────────────────
@@ -4395,7 +4396,7 @@ struct SessionRunRequest {
     call_nonce:     Option<String>,
     call_signature: Option<String>,  // "functionName(arg0, arg1, ...)" — must match frontend
     param_types:    Option<Vec<String>>,  // declared types per arg ("str","u256","bool")
-    display_synw:   Option<String>,  // Manual synw address override (devnet only)
+    display_tsynq:   Option<String>,  // Manual synw address override (devnet only)
     // ── Runtime fault injection (cosmic ray simulation) ──
     fault_step:       Option<usize>,
     fault_byte_offset: Option<usize>,
@@ -4419,7 +4420,7 @@ struct RunResponse {
     events:  Vec<EventLog>,
     error:   Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    caller_syna: Option<String>,
+    caller_tsynq: Option<String>,
     /// Structured error code from named revert (RevertCode opcode).
     #[serde(skip_serializing_if = "Option::is_none")]
     error_code: Option<u32>,
@@ -4474,7 +4475,7 @@ async fn session_run_handler(
     Json(mut req): Json<SessionRunRequest>,
 ) -> (StatusCode, RespJson<RunResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), events: Vec::new(), error: Some("rate limit exceeded — retry later".into()), caller_syna: None, error_code: None, error_name: None, fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None }));
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), events: Vec::new(), error: Some("rate limit exceeded — retry later".into()), caller_tsynq: None, error_code: None, error_name: None, fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None }));
     }
     let mut vm_args: Vec<Value> = Vec::new();
     // Build call_sig before args are moved — used in EIP-712 digest if wallet auth is present.
@@ -4502,7 +4503,7 @@ async fn session_run_handler(
                 success: false, result: None, output: String::new(),
                 events: Vec::new(),
                 error: Some(format!("arg[{}]: {}", i, e)),
-            caller_syna: None,
+            caller_tsynq: None,
             error_code: None,
             error_name: None,
             fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
@@ -4518,7 +4519,7 @@ async fn session_run_handler(
                 success: false, result: None, output: String::new(),
                 events: Vec::new(),
                 error: Some(format!("Session '{}' not found or expired", req.session_id)),
-            caller_syna: None,
+            caller_tsynq: None,
             error_code: None,
             error_name: None,
             fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
@@ -4545,14 +4546,14 @@ async fn session_run_handler(
                     success: false, result: None, output: String::new(),
                     events: Vec::new(),
                     error: Some(format!("session grant does not allow function '{}'", req.function)),
-                    caller_syna: None, error_code: None, error_name: None,
+                    caller_tsynq: None, error_code: None, error_name: None,
                     fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
                 }));
             }
             eprintln!("[GRANT] using grant for '{}' (caller={}, expires in {}s)",
                 req.function, hex_encode(&grant.caller_addr), grant.expiry.saturating_sub(now_secs));
-            if let Some(ref synw) = grant.display_synw {
-                if req.display_synw.is_none() { req.display_synw = Some(synw.clone()); }
+            if let Some(ref synw) = grant.display_tsynq {
+                if req.display_tsynq.is_none() { req.display_tsynq = Some(synw.clone()); }
             }
         }
     }
@@ -4574,7 +4575,7 @@ async fn session_run_handler(
                     success: false, result: None, output: String::new(),
                     events: Vec::new(),
                     error: Some("caller auth: no pending nonce — call GET /session/:id/nonce first".into()),
-                caller_syna: None,
+                caller_tsynq: None,
                 error_code: None,
                 error_name: None,
                 fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
@@ -4586,7 +4587,7 @@ async fn session_run_handler(
                     success: false, result: None, output: String::new(),
                     events: Vec::new(),
                     error: Some("caller auth: nonce mismatch — nonces are single-use, request a new one".into()),
-                caller_syna: None,
+                caller_tsynq: None,
                 error_code: None,
                 error_name: None,
                 fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
@@ -4601,7 +4602,7 @@ async fn session_run_handler(
                 success: false, result: None, output: String::new(),
                 events: Vec::new(),
                 error: Some("caller auth: nonce already used — replay attack rejected".into()),
-            caller_syna: None,
+            caller_tsynq: None,
             error_code: None,
             error_name: None,
             fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
@@ -4632,7 +4633,7 @@ async fn session_run_handler(
                 { state.sessions.lock().unwrap().insert(req.session_id.clone(), session); }
                 return (StatusCode::BAD_REQUEST, RespJson(RunResponse {
                     success: false, result: None, output: String::new(), events: Vec::new(), error: Some(e),
-                caller_syna: None,
+                caller_tsynq: None,
                 error_code: None,
                 error_name: None,
                 fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
@@ -4650,7 +4651,7 @@ async fn session_run_handler(
                     success: false, result: None, output: String::new(),
                     events: Vec::new(),
                     error: Some(format!("caller auth: ecrecover failed: {}", e)),
-                caller_syna: None,
+                caller_tsynq: None,
                 error_code: None,
                 error_name: None,
                 fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
@@ -4666,7 +4667,7 @@ async fn session_run_handler(
                 success: false, result: None, output: String::new(),
                 events: Vec::new(),
                 error: Some("caller auth: signature does not match claimed evm_address".into()),
-            caller_syna: None,
+            caller_tsynq: None,
             error_code: None,
             error_name: None,
             fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
@@ -4683,7 +4684,7 @@ async fn session_run_handler(
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some("caller auth: evm_address, evm_signature, and call_nonce must all be provided together".into()),
-        caller_syna: None,
+        caller_tsynq: None,
         error_code: None,
         error_name: None,
         fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
@@ -4765,16 +4766,16 @@ async fn session_run_handler(
     let copy_len = domain_tag_bytes.len().min(16);
     auth_envelope[88..88 + copy_len].copy_from_slice(&domain_tag_bytes[..copy_len]);
 
-    // Devnet: if display_synw is provided, override caller_addr with the synw address.
+    // Devnet: if display_tsynq is provided, override caller_addr with the synw address.
     // The EVM signature still authenticates the request (nonce + ephemeral key),
     // but the contract sees the user's synw identity as the caller.
     let mut effective_caller = caller_addr;
-    if let Some(ref synw) = req.display_synw {
-        if let Ok(decoded) = synq_vm::bech32::from_any_syn(synw) {
-            eprintln!("[RUN] display_synw override: {} -> {}", synw, hex_encode(&decoded));
+    if let Some(ref synw) = req.display_tsynq {
+        if let Ok(decoded) = synq_vm::bech32::from_any_synq(synw) {
+            eprintln!("[RUN] display_tsynq override: {} -> {}", synw, hex_encode(&decoded));
             effective_caller = decoded;
         } else {
-            eprintln!("[RUN] display_synw decode failed for: {}", synw);
+            eprintln!("[RUN] display_tsynq decode failed for: {}", synw);
         }
     }
     // Devnet: if no wallet connected (caller is all-zeros) and this is an
@@ -4831,13 +4832,13 @@ async fn session_run_handler(
         }));
     }
 
-    // If display_synw was provided, show it as the caller; otherwise encode the EVM address
-    let caller_syna = if let Some(ref synw) = req.display_synw {
+    // If display_tsynq was provided, show it as the caller; otherwise encode the EVM address
+    let caller_tsynq = if let Some(ref synw) = req.display_tsynq {
         synw.clone()
     } else {
-        synq_vm::bech32::evm_to_syna(&caller_addr).unwrap_or_else(|_| hex_encode(&caller_addr))
+        synq_vm::bech32::encode_address(&caller_addr).unwrap_or_else(|_| hex_encode(&caller_addr))
     };
-    eprintln!("[RUN] sid={} caller={} fn={} args_len={}", &req.session_id, caller_syna, req.function, vm_args.len());
+    eprintln!("[RUN] sid={} caller={} fn={} args_len={}", &req.session_id, caller_tsynq, req.function, vm_args.len());
 
     // ── Runtime fault injection (cosmic ray / Rowhammer simulation) ────────
     if let (Some(step), Some(offset), Some(mask)) = (req.fault_step, req.fault_byte_offset, req.fault_xor_mask) {
@@ -4877,15 +4878,15 @@ async fn session_run_handler(
                 None    => (None, "Function completed (no return value)".to_string()),
             };
             {
-        let caller_syna = if let Some(ref synw) = req.display_synw { Some(synw.clone()) } else { synq_vm::bech32::evm_to_syna(&caller_addr).ok() };
-        (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None, error_code: None, error_name: None, caller_syna, fuel_used, fuel_remaining, steps_used, steps_remaining }))
+        let caller_tsynq = if let Some(ref synw) = req.display_tsynq { Some(synw.clone()) } else { synq_vm::bech32::encode_address(&caller_addr).ok() };
+        (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None, error_code: None, error_name: None, caller_tsynq, fuel_used, fuel_remaining, steps_used, steps_remaining }))
     }
         }
         Err(synq_vm::VMError::RevertedNamed { code, message }) => (StatusCode::OK, RespJson(RunResponse {
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("revert: {}", message)),
-            caller_syna: req.display_synw.clone().or_else(|| synq_vm::bech32::evm_to_syna(&caller_addr).ok()),
+            caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_address(&caller_addr).ok()),
             error_code: Some(code),
             error_name: Some(message.split('(').next().unwrap_or(&message).split("::").last().unwrap_or(&message).to_string()),
             fuel_used, fuel_remaining, steps_used, steps_remaining,
@@ -4894,7 +4895,7 @@ async fn session_run_handler(
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("require failed: {}", msg)),
-        caller_syna: req.display_synw.clone().or_else(|| synq_vm::bech32::evm_to_syna(&caller_addr).ok()),
+        caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_address(&caller_addr).ok()),
         error_code: None,
         error_name: None,
         fuel_used, fuel_remaining, steps_used, steps_remaining,
@@ -4903,7 +4904,7 @@ async fn session_run_handler(
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("{}", e)),
-        caller_syna: req.display_synw.clone().or_else(|| synq_vm::bech32::evm_to_syna(&caller_addr).ok()),
+        caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_address(&caller_addr).ok()),
         error_code: None,
         error_name: None,
         fuel_used, fuel_remaining, steps_used, steps_remaining,
@@ -5513,6 +5514,7 @@ async fn list_contracts_handler(
         .route("/health/ready",      get(health_ready))
         .route("/pubkey",            get(pubkey_handler))
         .route("/compile",           post(compile_handler))
+        .route("/compile-aivm",       post(aivm_handler::compile_aivm_handler))
         .route("/attest",            post(attest_handler))
         .route("/source-nonce",      post(source_nonce_handler))
         .route("/compile/sign-source", post(sign_source_handler))
