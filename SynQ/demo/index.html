@@ -1,4 +1,4 @@
-<!-- SynQ IDE v2026.08.06.1 — tuple param expansion + @effects guard -->
+<!-- SynQ IDE v2026.08.08.1 — tuple param expansion + @effects guard -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -142,6 +142,30 @@
   /* results */
   .results-section { margin-top: 20px; display: none; }
   .results-section.show { display: block; }
+
+  /* ── AIVM side-by-side comparison panel ──────────────────────────────── */
+  .aivm-card { margin-top: 16px; padding: 16px 18px; background: rgba(124,58,237,0.06); border: 1px solid rgba(124,58,237,0.25); border-radius: 10px; display: none; }
+  .aivm-card.show { display: block; }
+  .aivm-card-title { font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #a78bfa; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .aivm-compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .aivm-side { padding: 10px 12px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; }
+  .aivm-side-header { font-size: 0.68rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+  .aivm-side-header.qvm { color: #00ced1; }
+  .aivm-side-header.aivm { color: #a78bfa; }
+  .aivm-metric-row { display: flex; justify-content: space-between; font-family: ui-monospace,monospace; font-size: 0.68rem; padding: 1px 0; }
+  .aivm-metric-label { color: rgba(255,255,255,0.4); }
+  .aivm-metric-value { color: rgba(255,255,255,0.8); }
+  .aivm-delta { font-size: 0.68rem; font-family: ui-monospace,monospace; padding: 6px 10px; background: rgba(0,0,0,0.2); border-radius: 6px; margin-bottom: 10px; color: rgba(255,255,255,0.5); }
+  .aivm-delta .pos { color: #6ee7b7; }
+  .aivm-delta .neg { color: #f87171; }
+  .aivm-fn-table { width: 100%; font-family: ui-monospace,monospace; font-size: 0.66rem; border-collapse: collapse; }
+  .aivm-fn-table th { text-align: left; padding: 3px 8px; color: rgba(255,255,255,0.35); font-weight: 500; border-bottom: 1px solid rgba(255,255,255,0.06); }
+  .aivm-fn-table td { padding: 3px 8px; color: rgba(255,255,255,0.65); }
+  .aivm-fn-table tr:hover td { background: rgba(124,58,237,0.06); }
+  .aivm-state-list { font-family: ui-monospace,monospace; font-size: 0.66rem; color: rgba(255,255,255,0.5); margin-top: 4px; }
+  .aivm-badge { font-size: 0.6rem; font-family: ui-monospace,monospace; background: rgba(124,58,237,0.15); border: 1px solid rgba(124,58,237,0.3); color: #c4b5fd; border-radius: 8px; padding: 1px 8px; }
+  .aivm-warnings { font-size: 0.66rem; font-family: ui-monospace,monospace; color: #fbbf24; margin-top: 6px; padding: 4px 8px; background: rgba(251,191,36,0.06); border-radius: 4px; }
+
   .results-title { font-size: 0.78rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: rgba(255,255,255,0.4); margin-bottom: 10px; }
   .results-title .fn-name { text-transform: none; color: rgba(0,245,255,0.9); font-weight: 700; }
   .bytecode-display { background: rgba(3,7,15,0.9); border: 1px solid rgba(0,206,209,0.15); border-radius: 8px; padding: 14px 16px; font-family: ui-monospace, monospace; font-size: 11.5px; line-height: 19px; color: #a5f3fc; white-space: pre; overflow-x: auto; max-height: 450px; overflow-y: auto; }
@@ -385,6 +409,30 @@
   /* results */
   .results-section { margin-top: 20px; display: none; }
   .results-section.show { display: block; }
+
+  /* ── AIVM side-by-side comparison panel ──────────────────────────────── */
+  .aivm-card { margin-top: 16px; padding: 16px 18px; background: rgba(124,58,237,0.06); border: 1px solid rgba(124,58,237,0.25); border-radius: 10px; display: none; }
+  .aivm-card.show { display: block; }
+  .aivm-card-title { font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #a78bfa; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .aivm-compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .aivm-side { padding: 10px 12px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; }
+  .aivm-side-header { font-size: 0.68rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+  .aivm-side-header.qvm { color: #00ced1; }
+  .aivm-side-header.aivm { color: #a78bfa; }
+  .aivm-metric-row { display: flex; justify-content: space-between; font-family: ui-monospace,monospace; font-size: 0.68rem; padding: 1px 0; }
+  .aivm-metric-label { color: rgba(255,255,255,0.4); }
+  .aivm-metric-value { color: rgba(255,255,255,0.8); }
+  .aivm-delta { font-size: 0.68rem; font-family: ui-monospace,monospace; padding: 6px 10px; background: rgba(0,0,0,0.2); border-radius: 6px; margin-bottom: 10px; color: rgba(255,255,255,0.5); }
+  .aivm-delta .pos { color: #6ee7b7; }
+  .aivm-delta .neg { color: #f87171; }
+  .aivm-fn-table { width: 100%; font-family: ui-monospace,monospace; font-size: 0.66rem; border-collapse: collapse; }
+  .aivm-fn-table th { text-align: left; padding: 3px 8px; color: rgba(255,255,255,0.35); font-weight: 500; border-bottom: 1px solid rgba(255,255,255,0.06); }
+  .aivm-fn-table td { padding: 3px 8px; color: rgba(255,255,255,0.65); }
+  .aivm-fn-table tr:hover td { background: rgba(124,58,237,0.06); }
+  .aivm-state-list { font-family: ui-monospace,monospace; font-size: 0.66rem; color: rgba(255,255,255,0.5); margin-top: 4px; }
+  .aivm-badge { font-size: 0.6rem; font-family: ui-monospace,monospace; background: rgba(124,58,237,0.15); border: 1px solid rgba(124,58,237,0.3); color: #c4b5fd; border-radius: 8px; padding: 1px 8px; }
+  .aivm-warnings { font-size: 0.66rem; font-family: ui-monospace,monospace; color: #fbbf24; margin-top: 6px; padding: 4px 8px; background: rgba(251,191,36,0.06); border-radius: 4px; }
+
   .results-title { font-size: 0.78rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: rgba(255,255,255,0.4); margin-bottom: 10px; }
   .bytecode-display { background: rgba(3,7,15,0.9); border: 1px solid rgba(0,206,209,0.15); border-radius: 8px; padding: 14px 16px; font-family: ui-monospace, monospace; font-size: 11.5px; line-height: 19px; color: #a5f3fc; white-space: pre; overflow-x: auto; max-height: 450px; overflow-y: auto; }
   .compile-split { display: flex; gap: 12px; }
@@ -649,6 +697,47 @@
   </div>
 </div>
 
+
+<!-- AIVM side-by-side comparison -->
+<div class="aivm-card" id="aivmCompareCard">
+  <div class="aivm-card-title">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+    AIVM v7.0 — Abstract Instruction VM <span class="aivm-badge" id="aivmStatusBadge">side-by-side</span>
+  </div>
+  <div class="aivm-compare-grid">
+    <div class="aivm-side">
+      <div class="aivm-side-header qvm">⟦ QVM ⟧ Current Engine</div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">Bytecode size</span><span class="aivm-metric-value" id="qvmBytecodeSize">—</span></div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">Instructions</span><span class="aivm-metric-value" id="qvmInstrCount">—</span></div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">Functions</span><span class="aivm-metric-value" id="qvmFnCount">—</span></div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">State vars</span><span class="aivm-metric-value" id="qvmStateCount">—</span></div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">Format</span><span class="aivm-metric-value">QVM  + header</span></div>
+    </div>
+    <div class="aivm-side">
+      <div class="aivm-side-header aivm">⟦ AIVM ⟧ v7.0 Target</div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">Bytecode size</span><span class="aivm-metric-value" id="aivmBytecodeSize">—</span></div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">Instructions</span><span class="aivm-metric-value" id="aivmInstrCount">—</span></div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">Functions</span><span class="aivm-metric-value" id="aivmFnCount">—</span></div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">State vars</span><span class="aivm-metric-value" id="aivmStateCount">—</span></div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">Format</span><span class="aivm-metric-value">SYNQ 108B header</span></div>
+    </div>
+  </div>
+  <div class="aivm-delta" id="aivmDeltaRow">—</div>
+  <div id="aivmFnTableWrap" style="display:none;">
+    <div style="font-size:0.66rem;color:rgba(255,255,255,0.35);margin-bottom:4px;">AIVM Function Table</div>
+    <table class="aivm-fn-table" id="aivmFnTable">
+      <thead><tr><th>Name</th><th>Selector</th><th>Visibility</th><th>Mutability</th><th>Params</th></tr></thead>
+      <tbody id="aivmFnTableBody"></tbody>
+    </table>
+  </div>
+  <div id="aivmStateList" class="aivm-state-list" style="display:none;"></div>
+  <div id="aivmWarnings"></div>
+  <div style="margin-top:8px;font-size:0.62rem;color:rgba(255,255,255,0.25);font-style:italic;">
+    AIVM is the v7.0 target execution engine. Side-by-side mode compiles to both QVM and AIVM for differential testing.
+    QVM remains the active execution path; AIVM output is advisory until promoted.
+  </div>
+</div>
+
 <!-- VM Execution card -->
 <div class="card vm-card" id="vmCard">
   <div class="card-title" style="justify-content: space-between; flex-wrap: wrap; gap: 8px;">
@@ -724,7 +813,7 @@
 
 <div class="footer">
   Powered by <a href="https://synergy-network.io" target="_blank">Synergy Network</a>
-  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.06.1</span>
+  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 + AIVM v7.0 side-by-side &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.08.1</span>
 </div>
 
 <script>
@@ -741,6 +830,7 @@
   }
 
   var COMPILE_URL       = 'https://hanksweb.co.uk/synq/compile';
+  var COMPILE_AIVM_URL  = 'https://hanksweb.co.uk/synq/compile-aivm';
   var VERIFY_SOL_URL    = 'https://hanksweb.co.uk/synq/verify-sol';
   var DEPLOY_EVM_URL    = 'https://hanksweb.co.uk/synq/deploy-evm';
   var EVM_CALL_URL      = 'https://hanksweb.co.uk/synq/evm-call';
@@ -2220,12 +2310,154 @@
     document.getElementById('attestPanel').classList.remove('show');
     var _vc = document.getElementById('vmCard'); _vc.classList.remove('show'); _vc.style.display = '';
     var _fp = document.getElementById('qvmCallPanel'); if (_fp) _fp.innerHTML = '';
+    var _aivm = document.getElementById('aivmCompareCard'); if (_aivm) _aivm.classList.remove('show');
+    aivmCompileData = null;
     var _dh = document.getElementById('depsHint'); if (_dh) { _dh.style.visibility = 'hidden'; _dh.textContent = '\u00a0'; }
     
     
     
     document.getElementById('vmOutput').innerHTML = '<span class="dim">Select a function and press Run.</span>';
   }
+
+
+  // ── AIVM side-by-side compilation ───────────────────────────────────────
+  var aivmCompileData = null;
+
+  async function fetchAivmCompile(source) {
+    try {
+      var res = await fetch(COMPILE_AIVM_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: source })
+      });
+      var data = await res.json();
+      if (data.success) {
+        aivmCompileData = data;
+        renderAivmCompare(data);
+      } else {
+        aivmCompileData = null;
+        var card = document.getElementById('aivmCompareCard');
+        if (card) card.classList.remove('show');
+        if (data.errors && data.errors.length > 0) {
+          console.warn('[AIVM] Compile failed:', data.errors[0]);
+        }
+      }
+    } catch(e) {
+      console.warn('[AIVM] Side-by-side fetch failed:', e.message);
+      var card = document.getElementById('aivmCompareCard');
+      if (card) card.classList.remove('show');
+    }
+  }
+
+  function renderAivmCompare(aivmData) {
+    var card = document.getElementById('aivmCompareCard');
+    if (!card) return;
+    card.classList.add('show');
+
+    // QVM metrics from current compile
+    var qvmBytes = currentBytecode ? (currentBytecode.startsWith('0x') ? currentBytecode.slice(2).length / 2 : currentBytecode.length / 2) : 0;
+    var qvmInstr = 0;
+    // Parse QVM bytecode to count instructions (rough: count non-zero bytes after 16-byte header)
+    if (currentBytecode) {
+      var hex = currentBytecode.startsWith('0x') ? currentBytecode.slice(2) : currentBytecode;
+      // QVM header is 16 bytes (32 hex chars), then instructions follow
+      var codeHex = hex.slice(32);
+      // Count instructions — each instruction is 1 byte opcode + variable operands
+      // For a rough count, just use the compile functions length as a proxy
+      qvmInstr = compileFunctions ? compileFunctions.length : 0;
+    }
+    var qvmFns = compileFunctions ? compileFunctions.length : 0;
+    var qvmState = currentStateVars ? currentStateVars.length : 0;
+
+    document.getElementById('qvmBytecodeSize').textContent = qvmBytes + ' bytes';
+    document.getElementById('qvmInstrCount').textContent = qvmInstr + ' (functions)';
+    document.getElementById('qvmFnCount').textContent = qvmFns;
+    document.getElementById('qvmStateCount').textContent = qvmState;
+
+    // AIVM metrics
+    var aivmBytes = aivmData.bytecode_hex ? aivmData.bytecode_hex.length / 2 : 0;
+    var aivmFns = aivmData.functions ? aivmData.functions.length : 0;
+    var aivmState = aivmData.state_vars ? aivmData.state_vars.length : 0;
+    // Count AIVM instructions from bytecode — CODE section starts after header
+    var aivmInstrCount = 0;
+    if (aivmData.bytecode_hex) {
+      // SYNQ header is 108 bytes (216 hex chars)
+      // Then sections — CODE section contains the instructions
+      // For now, count total bytes minus header as a rough proxy
+      aivmInstrCount = Math.max(0, Math.round((aivmBytes - 108) / 3)); // ~3 bytes per instruction avg
+    }
+
+    document.getElementById('aivmBytecodeSize').textContent = aivmBytes + ' bytes';
+    document.getElementById('aivmInstrCount').textContent = aivmInstrCount + ' (est.)';
+    document.getElementById('aivmFnCount').textContent = aivmFns;
+    document.getElementById('aivmStateCount').textContent = aivmState;
+
+    // Delta comparison
+    var deltaEl = document.getElementById('aivmDeltaRow');
+    if (deltaEl) {
+      var sizeDiff = aivmBytes - qvmBytes;
+      var sizePct = qvmBytes > 0 ? Math.round((sizeDiff / qvmBytes) * 100) : 0;
+      var sizeClass = sizeDiff > 0 ? 'neg' : 'pos';
+      var sizeSign = sizeDiff > 0 ? '+' : '';
+      deltaEl.innerHTML =
+        'Bytecode: <span class="' + sizeClass + '">' + sizeSign + sizeDiff + ' bytes (' + sizePct + '%)</span>' +
+        '  ·  Functions: ' + (aivmFns === qvmFns ? '<span class="pos">✓ match</span>' : '<span class="neg">mismatch (' + aivmFns + ' vs ' + qvmFns + ')</span>') +
+        '  ·  State vars: ' + (aivmState === qvmState ? '<span class="pos">✓ match</span>' : '<span class="neg">mismatch (' + aivmState + ' vs ' + qvmState + ')</span>');
+    }
+
+    // Function table
+    var fnTableWrap = document.getElementById('aivmFnTableWrap');
+    var fnTableBody = document.getElementById('aivmFnTableBody');
+    if (fnTableWrap && fnTableBody && aivmData.functions && aivmData.functions.length > 0) {
+      fnTableWrap.style.display = 'block';
+      fnTableBody.innerHTML = aivmData.functions.map(function(f) {
+        return '<tr>' +
+          '<td style="color:#c4b5fd;">' + f.name + '</td>' +
+          '<td>' + f.selector + '</td>' +
+          '<td>' + f.visibility + '</td>' +
+          '<td>' + f.mutability + '</td>' +
+          '<td>' + f.param_count + '</td>' +
+          '</tr>';
+      }).join('');
+    } else if (fnTableWrap) {
+      fnTableWrap.style.display = 'none';
+    }
+
+    // State vars
+    var stateList = document.getElementById('aivmStateList');
+    if (stateList && aivmData.state_vars && aivmData.state_vars.length > 0) {
+      stateList.style.display = 'block';
+      stateList.textContent = 'State: ' + aivmData.state_vars.map(function(s) {
+        return s.name + ':' + s.abi_type + ' (slot ' + s.key_index + ')';
+      }).join('  ·  ');
+    } else if (stateList) {
+      stateList.style.display = 'none';
+    }
+
+    // Hashes
+    var badge = document.getElementById('aivmStatusBadge');
+    if (badge) {
+      var hashInfo = [];
+      if (aivmData.code_hash) hashInfo.push('code: ' + aivmData.code_hash.slice(0, 10));
+      if (aivmData.abi_hash) hashInfo.push('abi: ' + aivmData.abi_hash.slice(0, 10));
+      badge.textContent = hashInfo.join(' · ') || 'side-by-side';
+      badge.title = 'AIVM hashes — ' + hashInfo.join('\n');
+    }
+
+    // Warnings
+    var warnEl = document.getElementById('aivmWarnings');
+    if (warnEl) {
+      if (aivmData.warnings && aivmData.warnings.length > 0) {
+        warnEl.innerHTML = aivmData.warnings.map(function(w) {
+          return '<div class="aivm-warnings">⚠ ' + w.replace(/</g, '&lt;') + '</div>';
+        }).join('');
+      } else {
+        warnEl.innerHTML = '';
+      }
+    }
+  }
+
+  window.fetchAivmCompile = fetchAivmCompile;
 
   function setStatus(msg, type) {
     var bar = document.getElementById('statusBar');
@@ -2884,6 +3116,8 @@
 
       // ── Compile success — store state ──────────────────────────────────────
       currentBytecode        = data.bytecode;
+      // ── Fire AIVM side-by-side compile ──────────────────────────────
+      fetchAivmCompile(source);
       window._lastSoliditySource = data.solidity_source || null;
       window._lastCompiledContractName = data.contract_name || null;
       currentManifest         = data.manifest || null;
