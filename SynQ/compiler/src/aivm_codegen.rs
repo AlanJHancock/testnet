@@ -470,14 +470,39 @@ impl<'a> CodegenContext<'a> {
                 self.emit(Instruction::HostCall(7)); // context.call_sender (immediate calling contract)
             }
             Expression::Call(name, args) => {
-                for arg in args {
-                    self.gen_expr(arg)?;
-                }
-                match self.func_index(name) {
-                    Some(idx) => self.emit(Instruction::Call(idx)),
-                    None => {
-                        self.warnings.push(format!("Call to unknown function: {}", name));
-                        self.emit(Instruction::Call(0));
+                // ── Builtin functions (map to HostCall) ──
+                let host_idx = match name.as_str() {
+                    "str_len" => Some(9),       // string.length
+                    "str_concat" => Some(10),    // string.concat
+                    "str_eq" => Some(11),        // string.eq
+                    "asset_create" => Some(12),  // asset.create
+                    "asset_transfer" => Some(13), // asset.transfer
+                    "asset_burn" => Some(14),    // asset.burn
+                    "asset_balance" => Some(15), // asset.balance
+                    "asset_owner" => Some(16),   // asset.owner
+                    "to_tsynq" | "to_syna" => Some(17), // addr.encode
+                    "from_tsynq" | "from_syn" | "from_syna" => Some(18), // addr.decode
+                    "contract_address" => Some(19), // addr.contract_address
+                    "authority_require" => Some(20), // auth.require
+                    "authority_identity" => Some(21), // auth.identity
+                    _ => None,
+                };
+                if let Some(hidx) = host_idx {
+                    for arg in args {
+                        self.gen_expr(arg)?;
+                    }
+                    self.emit(Instruction::HostCall(hidx));
+                } else {
+                    // User-defined function call
+                    for arg in args {
+                        self.gen_expr(arg)?;
+                    }
+                    match self.func_index(name) {
+                        Some(idx) => self.emit(Instruction::Call(idx)),
+                        None => {
+                            self.warnings.push(format!("Call to unknown function: {}", name));
+                            self.emit(Instruction::Call(0));
+                        }
                     }
                 }
             }

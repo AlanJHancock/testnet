@@ -23,15 +23,28 @@ impl HostFunctions {
     pub fn default_v01() -> Self {
         Self {
             imports: vec![
-                "state.read".to_string(),
-                "state.write".to_string(),
-                "event.emit".to_string(),
-                "context.chain_id".to_string(),
-                "context.network_id".to_string(),
-                "context.caller".to_string(),
-                "context.contract_address".to_string(),
-                "context.call_sender".to_string(),
-                "extern.call".to_string(),
+                "state.read".to_string(),           // 0
+                "state.write".to_string(),          // 1
+                "event.emit".to_string(),           // 2
+                "context.chain_id".to_string(),     // 3
+                "context.network_id".to_string(),   // 4
+                "context.caller".to_string(),       // 5
+                "context.contract_address".to_string(), // 6
+                "context.call_sender".to_string(),  // 7
+                "extern.call".to_string(),           // 8
+                "string.length".to_string(),        // 9
+                "string.concat".to_string(),        // 10
+                "string.eq".to_string(),            // 11
+                "asset.create".to_string(),         // 12
+                "asset.transfer".to_string(),       // 13
+                "asset.burn".to_string(),           // 14
+                "asset.balance".to_string(),        // 15
+                "asset.owner".to_string(),          // 16
+                "addr.encode".to_string(),           // 17
+                "addr.decode".to_string(),           // 18
+                "addr.contract_address".to_string(), // 19
+                "auth.require".to_string(),          // 20
+                "auth.identity".to_string(),          // 21
             ],
         }
     }
