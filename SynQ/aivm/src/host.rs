@@ -30,6 +30,8 @@ impl HostFunctions {
                 "context.network_id".to_string(),
                 "context.caller".to_string(),
                 "context.contract_address".to_string(),
+                "context.call_sender".to_string(),
+                "extern.call".to_string(),
             ],
         }
     }
@@ -194,6 +196,14 @@ pub fn execute_host_call(
         }
         "context.contract_address" => {
             stack.push(Value::Address(ctx.contract_address));
+        }
+        "context.call_sender" => {
+            stack.push(Value::Address(ctx.caller)); // For now, same as caller
+        }
+        "extern.call" => {
+            // Stub — real cross-contract calls need host runtime support
+            let _ = stack.pop();
+            stack.push(Value::U64(0));
         }
         other => {
             return Err(AivmError::HostFunctionNotDeclared(other.to_string()));

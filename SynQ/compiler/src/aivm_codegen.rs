@@ -120,7 +120,13 @@ pub fn compile_to_aivm(contract: &ContractDefinition) -> Result<AivmCompileResul
         }
     }
 
-    // 3. Generate instructions for each function
+    // 3. Build function name -> index map for Call resolution
+    let func_name_map: Vec<(String, u32)> = functions.iter()
+        .enumerate()
+        .map(|(i, f)| (f.name.clone(), i as u32))
+        .collect();
+
+    // 4. Generate instructions for each function
     let mut all_instructions: Vec<Instruction> = Vec::new();
 
     for (fidx, fbody) in func_bodies.iter().enumerate() {
@@ -135,6 +141,7 @@ pub fn compile_to_aivm(contract: &ContractDefinition) -> Result<AivmCompileResul
             next_local: 0,
             func_index: fidx as u32,
             warnings: &mut warnings,
+            func_name_map: &func_name_map,
         };
 
         // Map params to local slots
@@ -217,12 +224,19 @@ struct CodegenContext<'a> {
     next_local: u16,
     func_index: u32,
     warnings: &'a mut Vec<String>,
+    func_name_map: &'a [(String, u32)],
 }
 
 impl<'a> CodegenContext<'a> {
     fn state_index(&self, name: &str) -> Option<u16> {
         self.state_var_map.iter()
             .find(|(n, _)| n == name)
+            .map(|(_, idx)| *idx)
+    }
+
+    fn func_index(&self, name: &str) -> Option<u32> {
+        self.func_name_map.iter()
+            .find(|(n, _)| *n == name)
             .map(|(_, idx)| *idx)
     }
 
@@ -310,9 +324,12 @@ impl<'a> CodegenContext<'a> {
                 }
                 self.emit(Instruction::Ret);
             }
-            Statement::ExternCall { contract: _, function: _, args: _ } => {
-                self.warnings.push("ExternCall not yet supported in AIVM codegen".to_string());
-                self.emit(Instruction::PushU64(0));
+            Statement::ExternCall { contract, function, args } => {
+                for arg in args {
+                    self.gen_expr(arg)?;
+                }
+                self.warnings.push(format!("ExternCall {}.{} — mapped to HostCall(extern.call)", contract, function));
+                self.emit(Instruction::HostCall(8));
             }
             Statement::Emit { event, args } => {
                 if let Some(arg) = args.first() {
@@ -422,28 +439,13 @@ impl<'a> CodegenContext<'a> {
                     BinaryOperator::Sub => self.emit(Instruction::SubU64),
                     BinaryOperator::Mul => self.emit(Instruction::MulU64),
                     BinaryOperator::Div => self.emit(Instruction::DivU64),
-                    BinaryOperator::Mod => {
-                        self.warnings.push("Modulo not directly supported in AIVM, using Div".to_string());
-                        self.emit(Instruction::DivU64);
-                    }
+                    BinaryOperator::Mod => self.emit(Instruction::ModU64),
                     BinaryOperator::Eq => self.emit(Instruction::Eq),
-                    BinaryOperator::Ne => {
-                        self.emit(Instruction::Eq);
-                        self.emit(Instruction::PushU64(1));
-                        self.emit(Instruction::SubU64);
-                    }
+                    BinaryOperator::Ne => self.emit(Instruction::Ne),
                     BinaryOperator::Lt => self.emit(Instruction::Lt),
-                    BinaryOperator::Le => {
-                        self.emit(Instruction::Gt);
-                        self.emit(Instruction::PushU64(1));
-                        self.emit(Instruction::SubU64);
-                    }
+                    BinaryOperator::Le => self.emit(Instruction::Le),
                     BinaryOperator::Gt => self.emit(Instruction::Gt),
-                    BinaryOperator::Ge => {
-                        self.emit(Instruction::Lt);
-                        self.emit(Instruction::PushU64(1));
-                        self.emit(Instruction::SubU64);
-                    }
+                    BinaryOperator::Ge => self.emit(Instruction::Ge),
                     BinaryOperator::And | BinaryOperator::Or => {} // handled above
                 }
             }
@@ -465,14 +467,19 @@ impl<'a> CodegenContext<'a> {
                 self.emit(Instruction::HostCall(5)); // context.caller
             }
             Expression::CallSender => {
-                self.emit(Instruction::HostCall(6)); // context.call_sender (immediate calling contract)
+                self.emit(Instruction::HostCall(7)); // context.call_sender (immediate calling contract)
             }
             Expression::Call(name, args) => {
                 for arg in args {
                     self.gen_expr(arg)?;
                 }
-                self.warnings.push(format!("Call to {} — needs function index resolution", name));
-                self.emit(Instruction::Call(0)); // placeholder
+                match self.func_index(name) {
+                    Some(idx) => self.emit(Instruction::Call(idx)),
+                    None => {
+                        self.warnings.push(format!("Call to unknown function: {}", name));
+                        self.emit(Instruction::Call(0));
+                    }
+                }
             }
             Expression::MapIndex(map, _keys) => {
                 let idx = self.state_index(map)

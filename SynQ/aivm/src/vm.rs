@@ -273,6 +273,15 @@ impl Avm {
                     }
                     stack.push(Value::U64(a / b));
                 }
+                Instruction::ModU64 => {
+                    gas.charge(gas_cost::DIVISION)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+                    if b == 0 {
+                        return Err(AivmError::DivisionByZero);
+                    }
+                    stack.push(Value::U64(a % b));
+                }
                 Instruction::Eq => {
                     gas.charge(gas_cost::COMPARISON)?;
                     let b = stack.pop().ok_or(AivmError::StackUnderflow)?;
@@ -290,6 +299,24 @@ impl Avm {
                     let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
                     let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
                     stack.push(Value::Bool(a > b));
+                }
+                Instruction::Ne => {
+                    gas.charge(gas_cost::COMPARISON)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+                    stack.push(Value::Bool(a != b));
+                }
+                Instruction::Le => {
+                    gas.charge(gas_cost::COMPARISON)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+                    stack.push(Value::Bool(a <= b));
+                }
+                Instruction::Ge => {
+                    gas.charge(gas_cost::COMPARISON)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+                    stack.push(Value::Bool(a >= b));
                 }
                 Instruction::Jmp(target) => {
                     gas.charge(gas_cost::JUMP)?;
