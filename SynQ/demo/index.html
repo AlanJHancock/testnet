@@ -3787,6 +3787,12 @@
             '<span style="color:rgba(255,255,255,0.4);">RPC:</span><code style="color:rgba(255,255,255,0.7);">' + rpcUrl + '</code>' +
             '<span style="color:rgba(255,255,255,0.4);">Forge:</span><code style="color:rgba(255,255,255,0.7);">' + (data.forge_version || 'unknown') + '</code>' +
             '</div>' +
+            (data.init_auto_called
+              ? '<div style="margin-top:8px;font-size:0.7rem;font-family:ui-monospace,monospace;">' +
+                '<span style="color:rgba(100,220,150,0.9);">&#x2713;</span> <span style="color:rgba(255,255,255,0.55);">init() auto-called on deploy</span>' +
+                (data.init_result ? ' <span style="color:rgba(255,255,255,0.35);">— ' + data.init_result + '</span>' : '') +
+                '</div>'
+              : '') +
             '<div style="margin-top:8px;font-size:0.68rem;color:rgba(255,255,255,0.25);font-style:italic;">' +
             '⚠ This is the EVM (Solidity) contract running on Anvil — not the QVM (SynQ) contract. ' +
             'The Solidity was auto-transpiled from SynQ source and deployed to a local Ethereum VM for differential testing.</div>';
@@ -3913,6 +3919,9 @@
             '<div style="display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-family:ui-monospace,monospace;font-size:0.72rem;">';
           data.contracts.forEach(function(c) {
             html += '<span style="color:rgba(255,255,255,0.4);">' + c.name + ':</span><code style="color:#fbbf24;">' + c.address + '</code>';
+            if (c.init_auto_called) {
+              html += '<span style="color:rgba(255,255,255,0.4);"></span><code style="color:rgba(100,220,150,0.7);">&#x2713; init() auto-called</code>';
+            }
           });
           html += '<span style="color:rgba(255,255,255,0.4);">Chain ID:</span><code style="color:rgba(255,255,255,0.7);">' + (data.chain_id || 31337) + '</code>' +
             '<span style="color:rgba(255,255,255,0.4);">RPC:</span><code style="color:rgba(255,255,255,0.7);">' + (data.rpc_url || 'http://127.0.0.1:8546') + '</code>';
@@ -4122,7 +4131,7 @@
         '<span style="font-family:ui-monospace,monospace;font-size:0.7rem;color:#e2e8f0;min-width:80px;">' + f.name + '</span>' +
         paramsHtml +
         ' ' + callBtn + sendBtn +
-        '<span class="evmResult" style="font-family:ui-monospace,monospace;font-size:0.68rem;color:rgba(255,255,255,0.6);margin-left:4px;flex-grow:1;"></span>' +
+        '<span class="evmResult" style="font-family:ui-monospace,monospace;font-size:0.68rem;color:rgba(255,255,255,0.6);margin-left:4px;flex-grow:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></span>' +
         '</div>';
     }
 
@@ -5516,7 +5525,7 @@
             diffLines.push(line);
           });
           if (diffLines.length > 0) {
-            display += '  <span style="color:rgba(255,255,255,0.15);">|</span>  ' + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ');
+            display += '\u00A0\u00A0<span style="color:rgba(255,255,255,0.15);">|</span>\u00A0\u00A0' + diffLines.join('\u00A0\u00A0<span style="color:rgba(255,255,255,0.15);">|</span>\u00A0\u00A0');
           } else {
             display += '<span class="ok" style="font-size:0.85rem;">void</span>';
           }
@@ -6744,16 +6753,16 @@
           if (typeof after === 'object') return;
           if (after === undefined) return;
           var changed = (before !== undefined && before !== after);
-          var line = '<span style="color:rgba(255,255,255,0.55);">' + n + '</span>'
-            + ' <span style="color:rgba(255,255,255,0.25);">\u2192</span> '
-            + '<span style="font-weight:600;color:rgba(100,220,180,1);">' + formatStateVal(n, after) + '</span>';
+          var line = '<span style="white-space:nowrap;color:rgba(255,255,255,0.55);">' + n + '</span>'
+            + ' <span style="white-space:nowrap;color:rgba(255,255,255,0.25);">\u2192</span> '
+            + '<span style="white-space:nowrap;font-weight:600;color:rgba(100,220,180,1);">' + formatStateVal(n, after) + '</span>';
           if (changed) {
-            line += ' <span style="font-size:0.7rem;color:rgba(255,255,255,0.22);">(was ' + formatStateVal(n, before) + ')</span>';
+            line += ' <span style="white-space:nowrap;font-size:0.7rem;color:rgba(255,255,255,0.22);">(was ' + formatStateVal(n, before) + ')</span>';
           }
           diffLines.push(line);
         });
         if (diffLines.length > 0) {
-          display += '  <span style="color:rgba(255,255,255,0.15);">|</span>  ' + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ');
+          display += '\u00A0\u00A0<span style="color:rgba(255,255,255,0.15);">|</span>\u00A0\u00A0' + diffLines.join('\u00A0\u00A0<span style="color:rgba(255,255,255,0.15);">|</span>\u00A0\u00A0');
         }
       } else {
         // void return — show ALL non-mapping state vars (consistent output every time)
@@ -6772,16 +6781,16 @@
           if (typeof after === 'object') return;
           if (after === undefined) return;
           var changed = (before !== undefined && before !== after);
-          var line = '<span style="color:rgba(255,255,255,0.55);">' + n + '</span>'
-            + ' <span style="color:rgba(255,255,255,0.25);">\u2192</span> '
-            + '<span style="font-weight:600;color:rgba(100,220,180,1);">' + formatStateVal(n, after) + '</span>';
+          var line = '<span style="white-space:nowrap;color:rgba(255,255,255,0.55);">' + n + '</span>'
+            + ' <span style="white-space:nowrap;color:rgba(255,255,255,0.25);">\u2192</span> '
+            + '<span style="white-space:nowrap;font-weight:600;color:rgba(100,220,180,1);">' + formatStateVal(n, after) + '</span>';
           if (changed) {
-            line += ' <span style="font-size:0.7rem;color:rgba(255,255,255,0.22);">(was ' + formatStateVal(n, before) + ')</span>';
+            line += ' <span style="white-space:nowrap;font-size:0.7rem;color:rgba(255,255,255,0.22);">(was ' + formatStateVal(n, before) + ')</span>';
           }
           diffLines.push(line);
         });
         if (diffLines.length > 0) {
-          display += diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ');
+          display += diffLines.join('\u00A0\u00A0<span style="color:rgba(255,255,255,0.15);">|</span>\u00A0\u00A0');
         } else {
           display += '<span style="color:#34d399;font-size:0.85rem;">\u2713 void</span>';
         }
@@ -6789,7 +6798,7 @@
 
       // Events
       if (data.events && data.events.length > 0) {
-        display += '  <span style="color:rgba(255,255,255,0.15);">|</span>  ';
+        display += '\u00A0\u00A0<span style="color:rgba(255,255,255,0.15);">|</span>\u00A0\u00A0';
         data.events.forEach(function(ev) {
           display += '<span style="font-size:0.72rem;color:rgba(150,220,255,0.85);">\u2605 ' + ev.name + '</span>';
         });

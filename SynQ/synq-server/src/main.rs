@@ -1967,6 +1967,8 @@ struct DeployEvmResponse {
     errors:           Vec<String>,
     warnings:         Vec<String>,
     forge_version:   Option<String>,
+    init_auto_called: bool,
+    init_result:      Option<String>,
 }
 
 async fn deploy_evm_handler(
@@ -2023,6 +2025,7 @@ async fn deploy_evm_handler(
                 rpc_url: None, chain_id: None,
                 errors: vec!["Failed to start Anvil — is Foundry installed?".to_string()],
                 warnings: vec![], forge_version: forge_ver,
+                init_auto_called: false, init_result: None,
             }));
         }
     }
@@ -2054,6 +2057,7 @@ async fn deploy_evm_handler(
             rpc_url: None, chain_id: None,
             errors: vec![format!("Failed to create temp dir: {}", e)],
             warnings: vec![], forge_version: forge_ver,
+            init_auto_called: false, init_result: None,
         }));
     }
 
@@ -2073,6 +2077,7 @@ solc_version = "0.8.20"
             rpc_url: None, chain_id: None,
             errors: vec![format!("Failed to write .sol: {}", e)],
             warnings: vec![], forge_version: forge_ver,
+            init_auto_called: false, init_result: None,
         }));
     }
 
@@ -2116,6 +2121,7 @@ solc_version = "0.8.20"
                 rpc_url: Some(rpc_url), chain_id: None,
                 errors: vec!["Forge build failed: ".to_string() + &stderr],
                 warnings: vec![], forge_version: forge_ver,
+                init_auto_called: false, init_result: None,
             }));
         }
     };
@@ -2207,6 +2213,7 @@ solc_version = "0.8.20"
                     rpc_url: Some(rpc_url), chain_id: Some(31337),
                     errors: vec!["forge create failed: ".to_string() + &combined],
                     warnings: vec![], forge_version: forge_ver,
+                    init_auto_called: false, init_result: None,
                 }));
             }
         }
@@ -2218,6 +2225,7 @@ solc_version = "0.8.20"
                 rpc_url: Some(rpc_url), chain_id: None,
                 errors: vec![format!("Failed to run forge create: {}", e)],
                 warnings: vec![], forge_version: forge_ver,
+                init_auto_called: false, init_result: None,
             }));
         }
     };
@@ -2232,6 +2240,8 @@ solc_version = "0.8.20"
         .unwrap_or(31337);
 
     // Auto-call init() if the contract has one (matches QVM auto-init behavior)
+    let mut init_auto_called = false;
+    let mut init_result: Option<String> = None;
     if let Some(ref contract_addr) = contract_address {
         let init_args: Vec<String> = if let Some(ref wallet) = use_wallet {
             vec!["--rpc-url".into(), rpc_url.clone(), "--from".into(), wallet.to_string(), "--unlocked".into()]
@@ -2244,7 +2254,23 @@ solc_version = "0.8.20"
             .output();
         match init_output {
             Ok(o) if o.status.success() => {
-                eprintln!("[deploy-evm] Auto-called init()");
+                init_auto_called = true;
+                // Try to read the return value via cast call
+                let read_back = Command::new(&cast_bin)
+                    .arg("call").arg(contract_addr).arg("isReady()(bool)")
+                    .args(["--rpc-url", &rpc_url])
+                    .output();
+                if let Ok(rb) = read_back {
+                    if rb.status.success() {
+                        let val = String::from_utf8_lossy(&rb.stdout).trim().to_string();
+                        init_result = Some(format!("init() auto-called: ready={}", val));
+                    } else {
+                        init_result = Some("init() auto-called".to_string());
+                    }
+                } else {
+                    init_result = Some("init() auto-called".to_string());
+                }
+                eprintln!("[deploy-evm] Auto-called init() — {:?}", init_result);
             }
             Ok(o) => {
                 let err = String::from_utf8_lossy(&o.stderr);
@@ -2271,6 +2297,8 @@ solc_version = "0.8.20"
         errors: vec![],
         warnings: vec![],
         forge_version: forge_ver,
+        init_auto_called,
+        init_result,
     }))
 }
 
@@ -2300,6 +2328,8 @@ struct DeployedContractInfo {
     name:             String,
     address:          String,
     transaction_hash: Option<String>,
+    init_auto_called: bool,
+    init_result:      Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -2490,6 +2520,8 @@ async fn deploy_evm_workspace_handler(
             name: name.clone(),
             address: addr.clone(),
             transaction_hash: tx_hash,
+            init_auto_called: false,
+            init_result: None,
         });
 
         eprintln!("[deploy-evm-ws] Deployed {} to {}", name, addr);
@@ -2522,9 +2554,20 @@ async fn deploy_evm_workspace_handler(
             .arg("send").arg(&addr).arg("init()")
             .args(&init_args)
             .output();
+        let mut _ws_init_called = false;
+        let mut _ws_init_result: Option<String> = None;
         match init_output {
-            Ok(o) if o.status.success() => eprintln!("[deploy-evm-ws] Auto-called init() on {}", name),
+            Ok(o) if o.status.success() => {
+                _ws_init_called = true;
+                _ws_init_result = Some("init() auto-called".to_string());
+                eprintln!("[deploy-evm-ws] Auto-called init() on {}", name);
+            }
             _ => eprintln!("[deploy-evm-ws] init() on {} non-fatal or absent", name),
+        }
+        // Update the contract info with init status
+        if let Some(c) = results.iter_mut().find(|c| c.name == *name) {
+            c.init_auto_called = _ws_init_called;
+            c.init_result = _ws_init_result.clone();
         }
     }
 
