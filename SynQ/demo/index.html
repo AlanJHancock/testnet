@@ -1608,7 +1608,7 @@
     var r=sig.r.toString(16).padStart(64,'0');
     var s=sig.s.toString(16).padStart(64,'0');
     var v=(sig.recovery+27).toString(16).padStart(2,'0');
-    return '0x'+r+s+v;
+    return {sig: '0x'+r+s+v, addr: _ephemeralAddress};
   }
 
   /* ── Chain switch — ensure MetaMask is on chain 1264 before signing ─────── */
@@ -1682,7 +1682,7 @@
       try {
         var _sig = await _walletRequest('eth_signTypedData_v4', [walletAddress, json]);
         console.log('[SynQ Wallet] Signature received:', _sig ? (_sig.substring(0, 18) + '... len=' + _sig.length) : 'NULL');
-        return _sig;
+        return {sig: _sig, addr: walletAddress};
       } catch(e) {
         console.warn('[SynQ Wallet] Extension signing failed:', e.code, e.message);
         console.warn('[SynQ Wallet] Falling back to ephemeral EIP-712 signing');
@@ -3138,7 +3138,9 @@
           setStatus('Signing source commit...', 'info');
           var evmSig;
           setStatus('Signing with ' + (_walletMode === 'synergy' ? 'Synergy Wallet' : _walletMode === 'ethereum' ? 'EVM Wallet' : 'ephemeral devnet key') + '...', 'info');
-          evmSig = await getSignature(typedData);
+          var sigResult = await getSignature(typedData);
+          evmSig = sigResult.sig;
+          var sigAddr = sigResult.addr;
 
           // 5. POST /compile/sign-source — server re-compiles + binds author → source → bytecode
           setStatus('Source signed — generating PQC SourceCommit...', 'info');
@@ -3146,7 +3148,7 @@
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               source:        source,
-              evm_address:   (_walletMode === 'ephemeral' && _ephemeralAddress) ? _ephemeralAddress : walletAddress,
+              evm_address:   sigAddr,
               evm_signature: evmSig,
               nonce:         sourceNonce,
               wasm_extern_contracts: data.extern_contracts || []
@@ -4911,7 +4913,7 @@
 
         var signature;
         try {
-          signature = await getSignature(callTypedData);
+          var callSigResult = await getSignature(callTypedData); signature = callSigResult.sig; var callSigAddr = callSigResult.addr;
           console.log('[SynQ auth] signature:', signature);
         } catch (sigErr) {
           var sigErrMsg;
@@ -4928,7 +4930,7 @@
         }
         // Use the key-derived address when signing ephemerally — walletAddress
         // may show a display identity (e.g. imported Synergy addr) that differs.
-        callBody.evm_address   = (_walletMode === 'ephemeral' && _ephemeralAddress) ? _ephemeralAddress : walletAddress;
+        callBody.evm_address   = callSigAddr || ((_walletMode === 'ephemeral' && _ephemeralAddress) ? _ephemeralAddress : walletAddress);
         callBody.evm_signature = signature;
         callBody.call_nonce    = callNonce;
       } /* end per-call signing (grant active path has no else) */
