@@ -172,7 +172,7 @@ const PQC_BUILTINS: &[&str] = &[
     // Authority builtins (v7.0 authority model)
     "authority_envelope", "authority_require", "authority_identity",
     // Address builtins (V3 Bech32)
-    "to_tsynq", "from_tsynq", "contract_address",
+    "to_tsynq", "from_tsynq", "to_syna", "from_syna", "contract_address",
     // AEG1 builtins
     "aegis_call", "aegis_verify", "aegis_decaps",
     // String builtins

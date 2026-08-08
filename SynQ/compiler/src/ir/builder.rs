@@ -791,10 +791,10 @@ impl<'a> BuildContext<'a> {
 
                 // Check for builtins
                 match name.as_str() {
-                    "to_syna" => {
+                    "to_tsynq" | "to_syna" => {
                         Ok(self.push_value(IrOp::AddrEncode(arg_vals[0]), IrType::Str))
                     }
-                    "from_syna" | "from_syn" => {
+                    "from_tsynq" | "from_syn" | "from_syna" => {
                         Ok(self.push_value(IrOp::AddrDecode(arg_vals[0]), IrType::Address))
                     }
                     "contract_address" => {
