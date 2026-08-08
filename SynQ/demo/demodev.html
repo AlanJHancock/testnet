@@ -5596,8 +5596,8 @@
             }
           });
           if (diffLines.length > 0) {
-            display += '<div style="line-height:1.8;margin-top:2px;font-size:0.82rem;font-family:ui-monospace,monospace;">'
-              + diffLines.join('<br>') + '</div>';
+            display += '<div style="margin-top:2px;font-size:0.82rem;font-family:ui-monospace,monospace;white-space:nowrap;overflow-x:auto;">'
+              + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ') + '</div>';
           } else {
             display += '<span class="ok" style="font-size:0.85rem;">void</span>';
           }
@@ -6357,7 +6357,7 @@
   // ── Per-function hints: description + suggested inputs ──
   var FUNCTION_HINTS = {
     'init':            'Initialize contract state. Call first — sets ready=true.',
-    'testArith':       'Arithmetic ops: a+b, a-b, a*b, a/b. Try a=10, b=3 → returns 13.',
+    'testArithmetic':  'Computes quot+rem from a mix of +,-,*,/,%. Try a=7, b=8 → returns 9.',
     'testCompare':     'All 6 comparison operators. ok=(eq==!ne) is always true. Try a=5, b=5 or a=3, b=7.',
     'testRequireFail': 'Intentionally reverts with require(false). Expect: "intentional revert".',
     'testBool':        'Logical AND/OR/NOT. Try flag=1 → returns true.',
@@ -6803,7 +6803,7 @@
           }
         });
         if (diffLines.length > 0) {
-          display += '<div style="margin-top:4px;font-size:0.78rem;line-height:1.6;border-top:1px solid rgba(255,255,255,0.08);padding-top:4px;">' + diffLines.join('<br>') + '</div>';
+          display += '<div style="margin-top:4px;font-size:0.78rem;border-top:1px solid rgba(255,255,255,0.08);padding-top:4px;white-space:nowrap;overflow-x:auto;">' + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ') + '</div>';
         }
       } else {
         // void return — show state diff (state already probed above)
@@ -6828,7 +6828,7 @@
           }
         });
         if (diffLines.length > 0) {
-          display += '<div style="line-height:1.8;font-size:0.82rem;">' + diffLines.join('<br>') + '</div>';
+          display += '<div style="font-size:0.82rem;white-space:nowrap;overflow-x:auto;">' + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ') + '</div>';
         } else {
           display += '<span style="color:#34d399;font-size:0.85rem;">\u2713 void</span>';
         }
