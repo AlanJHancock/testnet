@@ -1,4 +1,4 @@
-<!-- SynQ IDE v2026.08.05.4 — tuple param expansion + @effects guard -->
+<!-- SynQ IDE v2026.08.08.1 — tuple param expansion + @effects guard -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -85,7 +85,7 @@
   .addr-popup .legend-item span { font-size: 0.72rem; color: #6b7280; }
   .addr-popup .close-btn { display: block; margin: 16px auto 0; padding: 6px 24px; background: rgba(124,58,237,0.2); border: 1px solid rgba(124,58,237,0.4); border-radius: 8px; color: #a78bfa; font-size: 0.78rem; cursor: pointer; }
   .addr-popup .close-btn:hover { background: rgba(124,58,237,0.3); }
-  .wallet-right { display: flex; align-items: center; gap: 10px; }
+  .wallet-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; flex-wrap: nowrap; }
   .wallet-mode { font-size: 0.72rem; padding: 3px 10px; border-radius: 12px; font-weight: 600; }
   .wallet-mode.hybrid { background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.4); color: #6ee7b7; }
   .wallet-mode.wasm     { background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.4); color: #93c5fd; }
@@ -102,6 +102,10 @@
   .step-badge.active { background:rgba(168,85,247,0.12); border:1px solid rgba(168,85,247,0.35); color:#c4b5fd; }
   .step-badge.warn { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
   .step-badge.depleted { background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); color:#fca5a5; }
+.grant-badge { display:inline-flex; align-items:center; gap:5px; font-size:0.7rem; font-weight:700; letter-spacing:0.04em; padding:3px 10px; border-radius:12px; vertical-align:middle; }
+  .grant-badge.active { background:rgba(16,185,129,0.12); border:1px solid rgba(16,185,129,0.35); color:#6ee7b7; }
+  .grant-badge.expiring { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
+  .grant-badge.inactive { background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.25); color:#fca5a5; }
   .wallet-mode.ephemeral   { background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.3); color: #fcd34d; }
     .wallet-mode.persistent  { background: rgba(52,211,153,0.1);  border: 1px solid rgba(52,211,153,0.4);  color: #34d399; }
   .btn-wallet { display: inline-flex; align-items: center; gap: 6px; padding: 7px 18px; border-radius: 8px; font-size: 0.82rem; font-weight: 600; cursor: pointer; border: 1px solid rgba(124,58,237,0.5); background: rgba(124,58,237,0.15); color: #a78bfa; }
@@ -138,6 +142,30 @@
   /* results */
   .results-section { margin-top: 20px; display: none; }
   .results-section.show { display: block; }
+
+  /* ── AIVM side-by-side comparison panel ──────────────────────────────── */
+  .aivm-card { margin-top: 16px; padding: 16px 18px; background: rgba(124,58,237,0.06); border: 1px solid rgba(124,58,237,0.25); border-radius: 10px; display: none; }
+  .aivm-card.show { display: block; }
+  .aivm-card-title { font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #a78bfa; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .aivm-compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .aivm-side { padding: 10px 12px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; }
+  .aivm-side-header { font-size: 0.68rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+  .aivm-side-header.qvm { color: #00ced1; }
+  .aivm-side-header.aivm { color: #a78bfa; }
+  .aivm-metric-row { display: flex; justify-content: space-between; font-family: ui-monospace,monospace; font-size: 0.68rem; padding: 1px 0; }
+  .aivm-metric-label { color: rgba(255,255,255,0.4); }
+  .aivm-metric-value { color: rgba(255,255,255,0.8); }
+  .aivm-delta { font-size: 0.68rem; font-family: ui-monospace,monospace; padding: 6px 10px; background: rgba(0,0,0,0.2); border-radius: 6px; margin-bottom: 10px; color: rgba(255,255,255,0.5); }
+  .aivm-delta .pos { color: #6ee7b7; }
+  .aivm-delta .neg { color: #f87171; }
+  .aivm-fn-table { width: 100%; font-family: ui-monospace,monospace; font-size: 0.66rem; border-collapse: collapse; }
+  .aivm-fn-table th { text-align: left; padding: 3px 8px; color: rgba(255,255,255,0.35); font-weight: 500; border-bottom: 1px solid rgba(255,255,255,0.06); }
+  .aivm-fn-table td { padding: 3px 8px; color: rgba(255,255,255,0.65); }
+  .aivm-fn-table tr:hover td { background: rgba(124,58,237,0.06); }
+  .aivm-state-list { font-family: ui-monospace,monospace; font-size: 0.66rem; color: rgba(255,255,255,0.5); margin-top: 4px; }
+  .aivm-badge { font-size: 0.6rem; font-family: ui-monospace,monospace; background: rgba(124,58,237,0.15); border: 1px solid rgba(124,58,237,0.3); color: #c4b5fd; border-radius: 8px; padding: 1px 8px; }
+  .aivm-warnings { font-size: 0.66rem; font-family: ui-monospace,monospace; color: #fbbf24; margin-top: 6px; padding: 4px 8px; background: rgba(251,191,36,0.06); border-radius: 4px; }
+
   .results-title { font-size: 0.78rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: rgba(255,255,255,0.4); margin-bottom: 10px; }
   .results-title .fn-name { text-transform: none; color: rgba(0,245,255,0.9); font-weight: 700; }
   .bytecode-display { background: rgba(3,7,15,0.9); border: 1px solid rgba(0,206,209,0.15); border-radius: 8px; padding: 14px 16px; font-family: ui-monospace, monospace; font-size: 11.5px; line-height: 19px; color: #a5f3fc; white-space: pre; overflow-x: auto; max-height: 450px; overflow-y: auto; }
@@ -324,7 +352,7 @@
   .addr-popup .legend-item span { font-size: 0.72rem; color: #6b7280; }
   .addr-popup .close-btn { display: block; margin: 16px auto 0; padding: 6px 24px; background: rgba(124,58,237,0.2); border: 1px solid rgba(124,58,237,0.4); border-radius: 8px; color: #a78bfa; font-size: 0.78rem; cursor: pointer; }
   .addr-popup .close-btn:hover { background: rgba(124,58,237,0.3); }
-  .wallet-right { display: flex; align-items: center; gap: 10px; }
+  .wallet-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; flex-wrap: nowrap; }
   .wallet-mode { font-size: 0.72rem; padding: 3px 10px; border-radius: 12px; font-weight: 600; }
   .wallet-mode.hybrid { background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.4); color: #6ee7b7; }
   .wallet-mode.wasm     { background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.4); color: #93c5fd; }
@@ -341,6 +369,10 @@
   .step-badge.active { background:rgba(168,85,247,0.12); border:1px solid rgba(168,85,247,0.35); color:#c4b5fd; }
   .step-badge.warn { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
   .step-badge.depleted { background:rgba(239,68,68,0.12); border:1px solid rgba(239,68,68,0.35); color:#fca5a5; }
+.grant-badge { display:inline-flex; align-items:center; gap:5px; font-size:0.7rem; font-weight:700; letter-spacing:0.04em; padding:3px 10px; border-radius:12px; vertical-align:middle; }
+  .grant-badge.active { background:rgba(16,185,129,0.12); border:1px solid rgba(16,185,129,0.35); color:#6ee7b7; }
+  .grant-badge.expiring { background:rgba(251,191,36,0.12); border:1px solid rgba(251,191,36,0.35); color:#fcd34d; }
+  .grant-badge.inactive { background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.25); color:#fca5a5; }
   .wallet-mode.ephemeral   { background: rgba(251,191,36,0.1); border: 1px solid rgba(251,191,36,0.3); color: #fcd34d; }
     .wallet-mode.persistent  { background: rgba(52,211,153,0.1);  border: 1px solid rgba(52,211,153,0.4);  color: #34d399; }
   .btn-wallet { display: inline-flex; align-items: center; gap: 6px; padding: 7px 18px; border-radius: 8px; font-size: 0.82rem; font-weight: 600; cursor: pointer; border: 1px solid rgba(124,58,237,0.5); background: rgba(124,58,237,0.15); color: #a78bfa; }
@@ -377,6 +409,30 @@
   /* results */
   .results-section { margin-top: 20px; display: none; }
   .results-section.show { display: block; }
+
+  /* ── AIVM side-by-side comparison panel ──────────────────────────────── */
+  .aivm-card { margin-top: 16px; padding: 16px 18px; background: rgba(124,58,237,0.06); border: 1px solid rgba(124,58,237,0.25); border-radius: 10px; display: none; }
+  .aivm-card.show { display: block; }
+  .aivm-card-title { font-size: 0.72rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #a78bfa; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+  .aivm-compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .aivm-side { padding: 10px 12px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; }
+  .aivm-side-header { font-size: 0.68rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+  .aivm-side-header.qvm { color: #00ced1; }
+  .aivm-side-header.aivm { color: #a78bfa; }
+  .aivm-metric-row { display: flex; justify-content: space-between; font-family: ui-monospace,monospace; font-size: 0.68rem; padding: 1px 0; }
+  .aivm-metric-label { color: rgba(255,255,255,0.4); }
+  .aivm-metric-value { color: rgba(255,255,255,0.8); }
+  .aivm-delta { font-size: 0.68rem; font-family: ui-monospace,monospace; padding: 6px 10px; background: rgba(0,0,0,0.2); border-radius: 6px; margin-bottom: 10px; color: rgba(255,255,255,0.5); }
+  .aivm-delta .pos { color: #6ee7b7; }
+  .aivm-delta .neg { color: #f87171; }
+  .aivm-fn-table { width: 100%; font-family: ui-monospace,monospace; font-size: 0.66rem; border-collapse: collapse; }
+  .aivm-fn-table th { text-align: left; padding: 3px 8px; color: rgba(255,255,255,0.35); font-weight: 500; border-bottom: 1px solid rgba(255,255,255,0.06); }
+  .aivm-fn-table td { padding: 3px 8px; color: rgba(255,255,255,0.65); }
+  .aivm-fn-table tr:hover td { background: rgba(124,58,237,0.06); }
+  .aivm-state-list { font-family: ui-monospace,monospace; font-size: 0.66rem; color: rgba(255,255,255,0.5); margin-top: 4px; }
+  .aivm-badge { font-size: 0.6rem; font-family: ui-monospace,monospace; background: rgba(124,58,237,0.15); border: 1px solid rgba(124,58,237,0.3); color: #c4b5fd; border-radius: 8px; padding: 1px 8px; }
+  .aivm-warnings { font-size: 0.66rem; font-family: ui-monospace,monospace; color: #fbbf24; margin-top: 6px; padding: 4px 8px; background: rgba(251,191,36,0.06); border-radius: 4px; }
+
   .results-title { font-size: 0.78rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: rgba(255,255,255,0.4); margin-bottom: 10px; }
   .bytecode-display { background: rgba(3,7,15,0.9); border: 1px solid rgba(0,206,209,0.15); border-radius: 8px; padding: 14px 16px; font-family: ui-monospace, monospace; font-size: 11.5px; line-height: 19px; color: #a5f3fc; white-space: pre; overflow-x: auto; max-height: 450px; overflow-y: auto; }
   .compile-split { display: flex; gap: 12px; }
@@ -507,7 +563,7 @@
 
 <!-- Wallet bar -->
 <div class="wallet-bar">
-  <div class="wallet-left" style="flex-wrap:wrap;gap:6px 10px;">
+  <div class="wallet-left" style="flex:1;min-width:200px;flex-wrap:wrap;gap:6px 10px;">
     <div class="wallet-dot" id="walletDot"></div>
     <span class="wallet-label" id="walletLabel">No wallet connected</span>
     <span class="wallet-address" id="walletAddress" onclick="showAddrPopup()"></span>
@@ -605,8 +661,6 @@
     <span id="verifyBadge" style="display:none;" class="verify-badge pass" title="L1 Structural (hard gate) + L2 Stack Safety (advisory) — checked at compile"></span>
     <span id="layer3Badge" style="display:none;" class="verify-badge pass" title="L3 Manifest + ML-DSA-87 signature — checked at deploy"></span>
     <span id="solVerifyBadge" style="display:none;" class="verify-badge pass" title="Solidity → EVM verification via Foundry (forge build)"></span>
-    <span id="gasBadge" style="display:none;" class="gas-badge active" title="Gas Budget (ACTS-VM-003 + ACTS-VM-005) — compute + PQC cost per invocation"></span>
-    <span id="stepBadge" style="display:none;" class="step-badge active" title="VM Step Budget (ACTS-VM-003) — compute steps per call"></span>
     <span id="depsHint" style="font-size:0.75rem;visibility:hidden;">&nbsp;</span>
   </div>
   <div class="status-bar" id="statusBar"></div>
@@ -643,6 +697,47 @@
   </div>
 </div>
 
+
+<!-- AIVM side-by-side comparison -->
+<div class="aivm-card" id="aivmCompareCard">
+  <div class="aivm-card-title">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+    AIVM v7.0 — Abstract Instruction VM <span class="aivm-badge" id="aivmStatusBadge">side-by-side</span>
+  </div>
+  <div class="aivm-compare-grid">
+    <div class="aivm-side">
+      <div class="aivm-side-header qvm">⟦ QVM ⟧ Current Engine</div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">Bytecode size</span><span class="aivm-metric-value" id="qvmBytecodeSize">—</span></div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">Instructions</span><span class="aivm-metric-value" id="qvmInstrCount">—</span></div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">Functions</span><span class="aivm-metric-value" id="qvmFnCount">—</span></div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">State vars</span><span class="aivm-metric-value" id="qvmStateCount">—</span></div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">Format</span><span class="aivm-metric-value">QVM  + header</span></div>
+    </div>
+    <div class="aivm-side">
+      <div class="aivm-side-header aivm">⟦ AIVM ⟧ v7.0 Target</div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">Bytecode size</span><span class="aivm-metric-value" id="aivmBytecodeSize">—</span></div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">Instructions</span><span class="aivm-metric-value" id="aivmInstrCount">—</span></div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">Functions</span><span class="aivm-metric-value" id="aivmFnCount">—</span></div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">State vars</span><span class="aivm-metric-value" id="aivmStateCount">—</span></div>
+      <div class="aivm-metric-row"><span class="aivm-metric-label">Format</span><span class="aivm-metric-value">SYNQ 108B header</span></div>
+    </div>
+  </div>
+  <div class="aivm-delta" id="aivmDeltaRow">—</div>
+  <div id="aivmFnTableWrap" style="display:none;">
+    <div style="font-size:0.66rem;color:rgba(255,255,255,0.35);margin-bottom:4px;">AIVM Function Table</div>
+    <table class="aivm-fn-table" id="aivmFnTable">
+      <thead><tr><th>Name</th><th>Selector</th><th>Visibility</th><th>Mutability</th><th>Params</th></tr></thead>
+      <tbody id="aivmFnTableBody"></tbody>
+    </table>
+  </div>
+  <div id="aivmStateList" class="aivm-state-list" style="display:none;"></div>
+  <div id="aivmWarnings"></div>
+  <div style="margin-top:8px;font-size:0.62rem;color:rgba(255,255,255,0.25);font-style:italic;">
+    AIVM is the v7.0 target execution engine. Side-by-side mode compiles to both QVM and AIVM for differential testing.
+    QVM remains the active execution path; AIVM output is advisory until promoted.
+  </div>
+</div>
+
 <!-- VM Execution card -->
 <div class="card vm-card" id="vmCard">
   <div class="card-title" style="justify-content: space-between; flex-wrap: wrap; gap: 8px;">
@@ -656,35 +751,26 @@
       color:#6ee7b7; border-radius:10px; padding:2px 10px; letter-spacing:0.04em;">
       ● QVM — SynQ Virtual Machine active
     </span>
+    <span id="grantBadge" style="display:none;" class="grant-badge" title="Session Grant status — sign once at deploy, then no per-call wallet popups"></span>
     <span id="gasBadge2" style="display:none;" class="gas-badge active" title="Gas Budget (ACTS-VM-003 + ACTS-VM-005) — compute + PQC cost per invocation"></span>
     <span id="stepBadge2" style="display:none;" class="step-badge active" title="VM Step Budget (ACTS-VM-003) — compute steps per call"></span>
   </div>
 
-  <!-- Function pills -->
+  <!-- Per-function call panel (matches EVM pattern) -->
   <div class="results-title">Functions</div>
-  <div class="func-pills" id="funcPills"></div>
+  <div id="qvmCallPanel" style="margin-top:4px;"></div>
 
-  <!-- Param inputs (shown when function selected) -->
-  <div id="paramsSection" style="display:none;">
-    <div class="results-title" id="paramsTitle">Parameters</div>
-    <div class="params-grid" id="paramsGrid"></div>
-  </div>
-
-  <!-- Run / Reset buttons -->
-  <div class="vm-actions">
-    <button class="btn btn-run" id="runBtn" onclick="runFunction()" disabled>
-      <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-      Run Function
-    </button>
+  <!-- Reset button -->
+  <div class="vm-actions" style="margin-top:12px;">
     <button class="btn btn-reset" onclick="resetVM()">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.5"/></svg>
       Reset Virtual Machine (VM)
     </button>
   </div>
 
-  <!-- Output -->
-  <div class="results-title">Execution Output</div>
-  <div class="vm-output" id="vmOutput"><span class="dim">Select a function and press Run.</span></div>
+  <!-- Shared output area (for state diffs, errors that span functions) -->
+  <div class="results-title">Execution Log</div>
+  <div class="vm-output" id="vmOutput"><span class="dim">Deploy a contract to see callable functions.</span></div>
     <div id="statePanel" style="display:none;margin-top:8px;padding:8px 10px;background:rgba(0,206,209,0.06);border:1px solid rgba(0,206,209,0.2);border-radius:6px;font-family:ui-monospace,monospace;font-size:11px;color:#7efcfd;"><span id="stateLabel" style="opacity:0.6;">contract state &nbsp;▸&nbsp;</span><span id="stateValues"></span></div>
 </div>
 
@@ -699,6 +785,7 @@
   <div class="workspace-contracts" id="workspaceContracts">
     <div class="workspace-empty">No contracts deployed yet.</div>
   </div>
+  <button id="deployWsEvmBtn" onclick="deployWorkspaceToEvm()" style="display:none;margin-top:8px;font-size:12px;padding:5px 14px;background:rgba(251,191,36,0.12);border:1px solid rgba(251,191,36,0.4);color:rgba(253,230,138,0.9);border-radius:6px;cursor:pointer;" title="Deploy all workspace contracts to EVM in dependency order"><span style="font-family:monospace;">⟦EVM⟧</span> Deploy Workspace → EVM</button>
 </div>
 </div>
 
@@ -726,7 +813,7 @@
 
 <div class="footer">
   Powered by <a href="https://synergy-network.io" target="_blank">Synergy Network</a>
-  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.05.4</span>
+  &nbsp;&middot;&nbsp; Aegis PQC Compiler &nbsp;&middot;&nbsp; QVM Bytecode v1 + AIVM v7.0 side-by-side &nbsp;&middot;&nbsp; <span style="color:#58a6ff;font-size:0.7rem;">IDE v2026.08.08.1</span>
 </div>
 
 <script>
@@ -743,9 +830,11 @@
   }
 
   var COMPILE_URL       = 'https://hanksweb.co.uk/synq/compile';
+  var COMPILE_AIVM_URL  = 'https://hanksweb.co.uk/synq/compile-aivm';
   var VERIFY_SOL_URL    = 'https://hanksweb.co.uk/synq/verify-sol';
   var DEPLOY_EVM_URL    = 'https://hanksweb.co.uk/synq/deploy-evm';
   var EVM_CALL_URL      = 'https://hanksweb.co.uk/synq/evm-call';
+  var DEPLOY_EVM_WS_URL  = 'https://hanksweb.co.uk/synq/deploy-evm-workspace';
   var DIFF_TEST_URL     = 'https://hanksweb.co.uk/synq/diff-test';
   var SYNQ_SERVER        = 'https://hanksweb.co.uk/synq';
   var SIGN_SOURCE_URL   = 'https://hanksweb.co.uk/synq/compile/sign-source';
@@ -781,6 +870,7 @@
     }).catch(function() {});
   })();
   var SESSION_RUN_URL = 'https://hanksweb.co.uk/synq/session/run';
+  var SESSION_GRANT_URL = 'https://hanksweb.co.uk/synq/session/';  // + sessionId + '/grant'
   var SESSION_DEL_URL   = 'https://hanksweb.co.uk/synq/session/';
   var SESSION_NONCE_URL = 'https://hanksweb.co.uk/synq/session/';
 
@@ -818,6 +908,9 @@
   var walletSyna      = null;  // Native V3 syna... Bech32 address
   var walletUma       = null;
   var _walletMode = "none"; // "synergy" | "ethereum" | "none"
+  var _sessionGrantExpiry  = 0;     // unix seconds — 0 means no active grant
+  var _sessionGrantActive  = false;  // true when grant is valid and not expired
+  var _manualSynw = null;     // manual synw override for devnet
   var _ephemeralPrivKey  = null;
   var _ephemeralAddress  = null; // always the address derived from _ephemeralPrivKey        // Uint8Array — secp256k1 private key
 
@@ -1188,6 +1281,9 @@
   }
 
   async function resetVM() {
+    _sessionGrantActive = false;
+    _sessionGrantExpiry = 0;
+    updateGrantBadge();
     var out = document.getElementById('vmOutput');
     out.innerHTML = '<span class="dim">Resetting all VM sessions...</span>';
     // Reset cumulative gas counter
@@ -1248,6 +1344,8 @@
               || c.session_id === sessionId
               || toReset.length === 1) {
             sessionId = newSid;
+            _sessionGrantActive = false;
+            _sessionGrantExpiry = 0;
             updateSessionBadge();
           }
         } else {
@@ -1317,9 +1415,16 @@
       label.textContent = 'Connected:';
       addr.textContent  = walletSyna || (walletAddress ? evmToSyna(walletAddress) : '') || (walletAddress.slice(0,6) + '...' + walletAddress.slice(-4));
       addr.title        = walletAddress + ' → ' + (walletSyna || evmToSyna(walletAddress) || '');
-      mode.textContent  = 'Hybrid PQC + EVM signing';
-      mode.className    = 'wallet-mode hybrid';
-      note.textContent  = 'Signing: EVM wallet + ML-DSA-65 wrapper';
+      if (isGrantValid()) {
+        var minsLeft = Math.floor((_sessionGrantExpiry - Math.floor(Date.now() / 1000)) / 60);
+        mode.textContent  = 'Session Grant active (' + minsLeft + 'm left)';
+        mode.className    = 'wallet-mode hybrid';
+        note.textContent  = 'Signed once — no per-call wallet popups until expiry';
+      } else {
+        mode.textContent  = 'Hybrid PQC + EVM signing';
+        mode.className    = 'wallet-mode hybrid';
+        note.textContent  = 'Signing: EVM wallet + ML-DSA-65 wrapper';
+      }
       btn.textContent   = 'Disconnect';
       btn.onclick       = disconnectWallet;
       // Compute + display UMA in wallet bar
@@ -1394,6 +1499,7 @@
       if (compilerTrust === 'compiler-attested' && compilerKeyId) {
         mode.textContent = 'Compiler-Attested PQC';
         mode.className   = 'wallet-mode persistent';
+        updateGrantBadge();
         note.textContent = 'Signing: ML-DSA-65 · key_id ' + compilerKeyId;
       } else {
         mode.textContent = 'Ephemeral PQC signing';
@@ -1556,6 +1662,15 @@
       else if(type==='uint256'){var n=BigInt(value);var hx2=n.toString(16).padStart(64,'0');for(var i=0;i<32;i++)buf[i]=parseInt(hx2.substr(i*2,2),16);}
       else if(type==='string'||type==='bytes'){return keccak256Bytes(new TextEncoder().encode(value));}
       else if(type==='bool'){buf[31]=value?1:0;}
+      else if(type.endsWith('[]')){
+        // EIP-712 dynamic array: keccak256(concat(encode(elem1), encode(elem2), ...))
+        var elemType=type.slice(0,-2);
+        var parts=(value||[]).map(function(v){return encodePrimitive(elemType,v);});
+        var total=parts.reduce(function(s,p){return s+p.length;},0);
+        var combined=new Uint8Array(total);
+        var off=0;parts.forEach(function(p){combined.set(p,off);off+=p.length;});
+        return keccak256Bytes(combined);
+      }
       return buf;
     }
     function hashStruct(typeName,value,types){
@@ -1638,11 +1753,19 @@
         return await signEIP712Ephemeral(typedData);
       }
       // Ensure wallet is on chain 1264 before signing (MetaMask enforces domain chainId match)
-      await _ensureChain();
-      var json = typeof typedData === 'string' ? typedData : JSON.stringify(typedData);
-      console.log('[SynQ Wallet] Requesting signature from extension...', 'method: eth_signTypedData_v4');
+      // Non-fatal: if chain switch fails, try signing anyway — some wallets
+      // allow signing regardless of current chain
       try {
-        var walletSig = await _walletRequest('eth_signTypedData_v4', [walletAddress, json]); return {sig: walletSig, addr: walletAddress};
+        await _ensureChain();
+      } catch(chainErr) {
+        console.warn('[SynQ Wallet] Chain switch failed (non-fatal, will try signing anyway):', chainErr.message || chainErr);
+      }
+      var json = typeof typedData === 'string' ? typedData : JSON.stringify(typedData);
+      console.log('[SynQ Wallet] Requesting signature from extension...', 'method: eth_signTypedData_v4', 'mode:', _walletMode);
+      try {
+        var _sig = await _walletRequest('eth_signTypedData_v4', [walletAddress, json]);
+        console.log('[SynQ Wallet] Signature received:', _sig ? (_sig.substring(0, 18) + '... len=' + _sig.length) : 'NULL');
+        return {sig: _sig, addr: walletAddress};
       } catch(e) {
         console.warn('[SynQ Wallet] Extension signing failed:', e.code, e.message);
         console.warn('[SynQ Wallet] Falling back to ephemeral EIP-712 signing');
@@ -2026,11 +2149,20 @@
       };
       var _isSyn = (_walletMode === 'synergy');
       var _isEth = (_walletMode === 'ethereum');
-      mode.textContent  = _isSyn ? 'Synergy Wallet' : _isEth ? 'EVM Wallet' : 'Ephemeral Devnet Key';
-      mode.className    = 'wallet-mode hybrid';
-      note.textContent  = (_isSyn || _isEth)
-        ? 'Signing: ' + (_isSyn ? 'Synergy Wallet' : 'EVM Wallet') + ' · EIP-712 · ' + (_syna ? _syna.slice(0,10) + '…' : walletAddress.slice(0,8) + '…')
-        : 'Signing: EIP-712 · ' + (_syna ? _syna.slice(0,10) + '…' : '');
+      // Grant status takes priority over wallet mode display
+      if (isGrantValid()) {
+        var _minsLeft = Math.floor((_sessionGrantExpiry - Math.floor(Date.now() / 1000)) / 60);
+        mode.textContent  = 'Session Grant active (' + _minsLeft + 'm left)';
+        updateGrantBadge();
+        mode.className    = 'wallet-mode hybrid';
+        note.textContent  = 'Signed once - no per-call wallet popups until expiry';
+      } else {
+        mode.textContent  = _isSyn ? 'Synergy Wallet' : _isEth ? 'EVM Wallet' : 'Ephemeral Devnet Key';
+        mode.className    = 'wallet-mode hybrid';
+        note.textContent  = (_isSyn || _isEth)
+          ? 'Signing: ' + (_isSyn ? 'Synergy Wallet' : 'EVM Wallet') + ' · EIP-712 · ' + (_syna ? _syna.slice(0,10) + '…' : walletAddress.slice(0,8) + '…')
+          : 'Signing: EIP-712 · ' + (_syna ? _syna.slice(0,10) + '…' : '');
+      }
       // Show appropriate button based on wallet mode
       var _extAvailable = _checkAnyWallet();
       if (_isSyn) {
@@ -2099,6 +2231,7 @@
       if (compilerTrust === 'compiler-attested' && compilerKeyId) {
         mode.textContent = 'Compiler-Attested PQC';
         mode.className   = 'wallet-mode persistent';
+        updateGrantBadge();
         note.textContent = 'Signing: ML-DSA-65 · key_id ' + compilerKeyId;
       } else {
         mode.textContent = 'PQC signing';
@@ -2108,6 +2241,7 @@
       var _extAvailable2 = _checkAnyWallet();
       btn.textContent   = _extAvailable2 ? 'Connect Wallet' : 'Regen Devnet Key';
       btn.onclick       = _extAvailable2 ? connectWallet : regenerateEphemeralKey;
+      updateGrantBadge();
     }
   }
 
@@ -2159,6 +2293,7 @@
       if (compilerTrust === 'compiler-attested' && compilerKeyId) {
         mode.textContent = 'Compiler-Attested PQC';
         mode.className   = 'wallet-mode persistent';
+        updateGrantBadge();
         note.textContent = 'Signing: ML-DSA-65 · key_id ' + compilerKeyId;
       } else {
         mode.textContent = 'Ephemeral PQC signing';
@@ -2174,13 +2309,155 @@
     document.getElementById('statusBar').classList.remove('show');
     document.getElementById('attestPanel').classList.remove('show');
     var _vc = document.getElementById('vmCard'); _vc.classList.remove('show'); _vc.style.display = '';
-    document.getElementById('funcPills').innerHTML = '';
+    var _fp = document.getElementById('qvmCallPanel'); if (_fp) _fp.innerHTML = '';
+    var _aivm = document.getElementById('aivmCompareCard'); if (_aivm) _aivm.classList.remove('show');
+    aivmCompileData = null;
     var _dh = document.getElementById('depsHint'); if (_dh) { _dh.style.visibility = 'hidden'; _dh.textContent = '\u00a0'; }
-    document.getElementById('paramsSection').style.display = 'none';
-    document.getElementById('paramsGrid').innerHTML = '';
-    document.getElementById('runBtn').disabled = true;
+    
+    
+    
     document.getElementById('vmOutput').innerHTML = '<span class="dim">Select a function and press Run.</span>';
   }
+
+
+  // ── AIVM side-by-side compilation ───────────────────────────────────────
+  var aivmCompileData = null;
+
+  async function fetchAivmCompile(source) {
+    try {
+      var res = await fetch(COMPILE_AIVM_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: source })
+      });
+      var data = await res.json();
+      if (data.success) {
+        aivmCompileData = data;
+        renderAivmCompare(data);
+      } else {
+        aivmCompileData = null;
+        var card = document.getElementById('aivmCompareCard');
+        if (card) card.classList.remove('show');
+        if (data.errors && data.errors.length > 0) {
+          console.warn('[AIVM] Compile failed:', data.errors[0]);
+        }
+      }
+    } catch(e) {
+      console.warn('[AIVM] Side-by-side fetch failed:', e.message);
+      var card = document.getElementById('aivmCompareCard');
+      if (card) card.classList.remove('show');
+    }
+  }
+
+  function renderAivmCompare(aivmData) {
+    var card = document.getElementById('aivmCompareCard');
+    if (!card) return;
+    card.classList.add('show');
+
+    // QVM metrics from current compile
+    var qvmBytes = currentBytecode ? (currentBytecode.startsWith('0x') ? currentBytecode.slice(2).length / 2 : currentBytecode.length / 2) : 0;
+    var qvmInstr = 0;
+    // Parse QVM bytecode to count instructions (rough: count non-zero bytes after 16-byte header)
+    if (currentBytecode) {
+      var hex = currentBytecode.startsWith('0x') ? currentBytecode.slice(2) : currentBytecode;
+      // QVM header is 16 bytes (32 hex chars), then instructions follow
+      var codeHex = hex.slice(32);
+      // Count instructions — each instruction is 1 byte opcode + variable operands
+      // For a rough count, just use the compile functions length as a proxy
+      qvmInstr = compileFunctions ? compileFunctions.length : 0;
+    }
+    var qvmFns = compileFunctions ? compileFunctions.length : 0;
+    var qvmState = currentStateVars ? currentStateVars.length : 0;
+
+    document.getElementById('qvmBytecodeSize').textContent = qvmBytes + ' bytes';
+    document.getElementById('qvmInstrCount').textContent = qvmInstr + ' (functions)';
+    document.getElementById('qvmFnCount').textContent = qvmFns;
+    document.getElementById('qvmStateCount').textContent = qvmState;
+
+    // AIVM metrics
+    var aivmBytes = aivmData.bytecode_hex ? aivmData.bytecode_hex.length / 2 : 0;
+    var aivmFns = aivmData.functions ? aivmData.functions.length : 0;
+    var aivmState = aivmData.state_vars ? aivmData.state_vars.length : 0;
+    // Count AIVM instructions from bytecode — CODE section starts after header
+    var aivmInstrCount = 0;
+    if (aivmData.bytecode_hex) {
+      // SYNQ header is 108 bytes (216 hex chars)
+      // Then sections — CODE section contains the instructions
+      // For now, count total bytes minus header as a rough proxy
+      aivmInstrCount = Math.max(0, Math.round((aivmBytes - 108) / 3)); // ~3 bytes per instruction avg
+    }
+
+    document.getElementById('aivmBytecodeSize').textContent = aivmBytes + ' bytes';
+    document.getElementById('aivmInstrCount').textContent = aivmInstrCount + ' (est.)';
+    document.getElementById('aivmFnCount').textContent = aivmFns;
+    document.getElementById('aivmStateCount').textContent = aivmState;
+
+    // Delta comparison
+    var deltaEl = document.getElementById('aivmDeltaRow');
+    if (deltaEl) {
+      var sizeDiff = aivmBytes - qvmBytes;
+      var sizePct = qvmBytes > 0 ? Math.round((sizeDiff / qvmBytes) * 100) : 0;
+      var sizeClass = sizeDiff > 0 ? 'neg' : 'pos';
+      var sizeSign = sizeDiff > 0 ? '+' : '';
+      deltaEl.innerHTML =
+        'Bytecode: <span class="' + sizeClass + '">' + sizeSign + sizeDiff + ' bytes (' + sizePct + '%)</span>' +
+        '  ·  Functions: ' + (aivmFns === qvmFns ? '<span class="pos">✓ match</span>' : '<span class="neg">mismatch (' + aivmFns + ' vs ' + qvmFns + ')</span>') +
+        '  ·  State vars: ' + (aivmState === qvmState ? '<span class="pos">✓ match</span>' : '<span class="neg">mismatch (' + aivmState + ' vs ' + qvmState + ')</span>');
+    }
+
+    // Function table
+    var fnTableWrap = document.getElementById('aivmFnTableWrap');
+    var fnTableBody = document.getElementById('aivmFnTableBody');
+    if (fnTableWrap && fnTableBody && aivmData.functions && aivmData.functions.length > 0) {
+      fnTableWrap.style.display = 'block';
+      fnTableBody.innerHTML = aivmData.functions.map(function(f) {
+        return '<tr>' +
+          '<td style="color:#c4b5fd;">' + f.name + '</td>' +
+          '<td>' + f.selector + '</td>' +
+          '<td>' + f.visibility + '</td>' +
+          '<td>' + f.mutability + '</td>' +
+          '<td>' + f.param_count + '</td>' +
+          '</tr>';
+      }).join('');
+    } else if (fnTableWrap) {
+      fnTableWrap.style.display = 'none';
+    }
+
+    // State vars
+    var stateList = document.getElementById('aivmStateList');
+    if (stateList && aivmData.state_vars && aivmData.state_vars.length > 0) {
+      stateList.style.display = 'block';
+      stateList.textContent = 'State: ' + aivmData.state_vars.map(function(s) {
+        return s.name + ':' + s.abi_type + ' (slot ' + s.key_index + ')';
+      }).join('  ·  ');
+    } else if (stateList) {
+      stateList.style.display = 'none';
+    }
+
+    // Hashes
+    var badge = document.getElementById('aivmStatusBadge');
+    if (badge) {
+      var hashInfo = [];
+      if (aivmData.code_hash) hashInfo.push('code: ' + aivmData.code_hash.slice(0, 10));
+      if (aivmData.abi_hash) hashInfo.push('abi: ' + aivmData.abi_hash.slice(0, 10));
+      badge.textContent = hashInfo.join(' · ') || 'side-by-side';
+      badge.title = 'AIVM hashes — ' + hashInfo.join('\n');
+    }
+
+    // Warnings
+    var warnEl = document.getElementById('aivmWarnings');
+    if (warnEl) {
+      if (aivmData.warnings && aivmData.warnings.length > 0) {
+        warnEl.innerHTML = aivmData.warnings.map(function(w) {
+          return '<div class="aivm-warnings">⚠ ' + w.replace(/</g, '&lt;') + '</div>';
+        }).join('');
+      } else {
+        warnEl.innerHTML = '';
+      }
+    }
+  }
+
+  window.fetchAivmCompile = fetchAivmCompile;
 
   function setStatus(msg, type) {
     var bar = document.getElementById('statusBar');
@@ -2839,6 +3116,8 @@
 
       // ── Compile success — store state ──────────────────────────────────────
       currentBytecode        = data.bytecode;
+      // ── Fire AIVM side-by-side compile ──────────────────────────────
+      fetchAivmCompile(source);
       window._lastSoliditySource = data.solidity_source || null;
       window._lastCompiledContractName = data.contract_name || null;
       currentManifest         = data.manifest || null;
@@ -3086,7 +3365,9 @@
           setStatus('Signing source commit...', 'info');
           var evmSig;
           setStatus('Signing with ' + (_walletMode === 'synergy' ? 'Synergy Wallet' : _walletMode === 'ethereum' ? 'EVM Wallet' : 'ephemeral devnet key') + '...', 'info');
-          var sigResult = await getSignature(typedData); evmSig = sigResult.sig; var sigAddr = sigResult.addr;
+          var sigResult = await getSignature(typedData);
+          evmSig = sigResult.sig;
+          var sigAddr = sigResult.addr;
 
           // 5. POST /compile/sign-source — server re-compiles + binds author → source → bytecode
           setStatus('Source signed — generating PQC SourceCommit...', 'info');
@@ -3491,10 +3772,12 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           solidity_source: solSource,
-          contract_name: contractName
+          contract_name: contractName,
+          wallet_address: walletAddress || undefined
         })
       });
       var data = await res.json();
+      console.log('[GRANT] Step 4: response', JSON.stringify(data));
 
       if (data.success) {
         var addr = data.contract_address || 'unknown';
@@ -3570,6 +3853,131 @@
       }
     }
   }
+  // ── Deploy Workspace → EVM (multi-contract) ────────────────────────────
+  async function deployWorkspaceToEvm() {
+    var btn = document.getElementById('deployWsEvmBtn');
+    if (btn) {
+      btn.innerHTML = '<span class="spinner" style="width:10px;height:10px;"></span> Deploying...';
+      btn.style.pointerEvents = 'none';
+    }
+
+    if (workspaceContracts.length === 0) {
+      setStatus('No workspace contracts to deploy', 'error');
+      if (btn) { btn.innerHTML = '<span style="font-family:monospace;">⟦EVM⟧</span> Deploy Workspace → EVM'; btn.style.pointerEvents = 'auto'; }
+      return;
+    }
+
+    setStatus('Compiling ' + workspaceContracts.length + ' contracts and deploying to EVM...', 'info');
+
+    try {
+      // Compile each workspace contract to get its Solidity source
+      var contracts = [];
+      for (var i = 0; i < workspaceContracts.length; i++) {
+        var wc = workspaceContracts[i];
+        // Use cached Solidity if available, otherwise compile from source
+        if (wc.soliditySource) {
+          contracts.push({ solidity_source: wc.soliditySource, contract_name: wc.name });
+          continue;
+        }
+        // Fetch the source for this contract from the editor or recompile
+        // For now, compile via /compile endpoint using cached source
+        var src = wc.source || '';
+        if (!src) {
+          console.warn('[deploy-ws-evm] No source for ' + wc.name + ', skipping');
+          continue;
+        }
+        var compileRes = await fetch(COMPILE_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ source: src })
+        });
+        var compileData = await compileRes.json();
+        if (compileData.solidity_source) {
+          wc.soliditySource = compileData.solidity_source; // cache
+          contracts.push({ solidity_source: compileData.solidity_source, contract_name: wc.name });
+        } else {
+          console.error('[deploy-ws-evm] Compile failed for ' + wc.name);
+        }
+      }
+
+      if (contracts.length === 0) {
+        setStatus('No contracts compiled successfully', 'error');
+        if (btn) { btn.innerHTML = '<span style="font-family:monospace;">⟦EVM⟧</span> Deploy Workspace → EVM'; btn.style.pointerEvents = 'auto'; }
+        return;
+      }
+
+      setStatus('Deploying ' + contracts.length + ' contracts to EVM in dependency order...', 'info');
+
+      var res = await fetch(DEPLOY_EVM_WS_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contracts: contracts,
+          wallet_address: walletAddress || undefined
+        })
+      });
+      var data = await res.json();
+
+      if (data.success) {
+        var lines = data.contracts.map(function(c) {
+          return c.name + ': ' + c.address.slice(0, 10) + '...';
+        });
+        setStatus('EVM workspace deploy success — ' + lines.join(', '), 'success');
+
+        // Show result in the evmDeployResult panel
+        var panel = document.getElementById('evmDeployResult');
+        if (panel) {
+          panel.style.display = 'block';
+          var html = '<div style="font-size:0.72rem;color:rgba(251,191,36,0.6);margin-bottom:6px;font-family:ui-monospace,monospace;">' +
+            '⟦ EVM WORKSPACE DEPLOYMENT — ' + data.contracts.length + ' contracts on Foundry Anvil ⟧</div>' +
+            '<div style="display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-family:ui-monospace,monospace;font-size:0.72rem;">';
+          data.contracts.forEach(function(c) {
+            html += '<span style="color:rgba(255,255,255,0.4);">' + c.name + ':</span><code style="color:#fbbf24;">' + c.address + '</code>';
+          });
+          html += '<span style="color:rgba(255,255,255,0.4);">Chain ID:</span><code style="color:rgba(255,255,255,0.7);">' + (data.chain_id || 31337) + '</code>' +
+            '<span style="color:rgba(255,255,255,0.4);">RPC:</span><code style="color:rgba(255,255,255,0.7);">' + (data.rpc_url || 'http://127.0.0.1:8546') + '</code>';
+          html += '</div>';
+          html += '<div style="margin-top:8px;font-size:0.68rem;color:rgba(255,255,255,0.25);font-style:italic;">' +
+            'Contracts deployed in dependency order with automatic address linking (_set&lt;Contract&gt;Addr).' +
+            '</div>';
+          panel.innerHTML = html;
+        }
+
+        // Populate EVM call panel with the LAST deployed contract (most likely the one with extern_call)
+        var lastContract = data.contracts[data.contracts.length - 1];
+        if (lastContract && contracts.length > 0) {
+          var lastSol = contracts[contracts.length - 1].solidity_source;
+          window._lastEvmAddress = lastContract.address;
+          window._evmContractAddress = lastContract.address;
+          populateEvmCallPanel(lastContract.address, lastSol, lastContract.name);
+        }
+
+        if (btn) {
+          btn.innerHTML = '<span style="font-family:monospace;">⟦EVM⟧</span> ✓ ' + data.contracts.length + ' contracts deployed';
+          btn.style.background = 'rgba(34,197,94,0.12)';
+          btn.style.borderColor = 'rgba(34,197,94,0.4)';
+          btn.style.color = 'rgba(134,239,172,0.9)';
+          btn.style.pointerEvents = 'auto';
+        }
+      } else {
+        var errs = data.errors || ['Unknown error'];
+        setStatus('EVM workspace deploy failed: ' + errs[0], 'error');
+        var panel = document.getElementById('evmDeployResult');
+        if (panel) {
+          panel.style.display = 'block';
+          panel.innerHTML = '<div style="color:#f87171;font-size:0.72rem;font-family:ui-monospace,monospace;">⟦ EVM WORKSPACE DEPLOY FAILED ⟧<br>' +
+            errs.map(function(e){ return e.replace(/</g,'&lt;'); }).join('<br>') + '</div>';
+        }
+        if (btn) { btn.innerHTML = '<span style="font-family:monospace;">⟦EVM⟧</span> Deploy Workspace → EVM'; btn.style.pointerEvents = 'auto'; }
+      }
+    } catch(e) {
+      setStatus('EVM workspace deploy error: ' + e.message, 'error');
+      if (btn) { btn.innerHTML = '<span style="font-family:monospace;">⟦EVM⟧</span> Deploy Workspace → EVM'; btn.style.pointerEvents = 'auto'; }
+    }
+  }
+
+  window.deployWorkspaceToEvm = deployWorkspaceToEvm;
+
   // ── EVM Call Panel: parse Solidity functions and show interactive UI ─────
   // Parses the transpiled Solidity source for function signatures, then
   // renders each function as a row with input fields and a Call/Send button.
@@ -3783,7 +4191,8 @@
           contract_address: window._evmContractAddress,
           function_signature: f.signature,
           args: args,
-          is_view: isView
+          is_view: isView,
+          wallet_address: walletAddress || undefined
         })
       });
       var data = await res.json();
@@ -3804,14 +4213,28 @@
             resultSpan.innerHTML += ' <span style="color:rgba(255,255,255,0.25);font-size:0.62rem;">(' + f.returnTypes.join(', ') + ')</span>';
           }
         } else {
-          // Write transaction — show tx hash, gas, block
+          // Write transaction — show return value + tx hash, gas, block
           var txShort = (data.tx_hash || '').slice(0, 18) + '...';
           var gas = data.gas_used ? data.gas_used.toLocaleString() : '?';
           var block = data.block_num !== null ? data.block_num : '?';
-          resultSpan.innerHTML = '<span style="color:#34d399;">✓</span> ' +
-            '<span style="color:rgba(255,255,255,0.4);">tx:</span> <code style="color:rgba(255,255,255,0.6);">' + txShort + '</code> ' +
+          var html = '<span style="color:#34d399;">✓</span> ';
+          // Show decoded return value if available
+          if (data.output) {
+            var decoded = decodeEvmHexOutput(data.output, f.returnTypes);
+            var displayVal = decoded;
+            if (/^\d+$/.test(String(decoded)) && String(decoded).length > 6) {
+              displayVal = BigInt(decoded).toLocaleString();
+            }
+            html += '<span style="color:#93c5fd;">' + String(displayVal).replace(/</g, '&lt;').slice(0, 60) + '</span>';
+            if (f.returnTypes.length > 0) {
+              html += ' <span style="color:rgba(255,255,255,0.25);font-size:0.62rem;">(' + f.returnTypes.join(', ') + ')</span>';
+            }
+            html += ' ';
+          }
+          html += '<span style="color:rgba(255,255,255,0.4);">tx:</span> <code style="color:rgba(255,255,255,0.6);">' + txShort + '</code> ' +
             '<span style="color:rgba(255,255,255,0.4);">gas:</span> <code style="color:rgba(255,255,255,0.6);">' + gas + '</code> ' +
             '<span style="color:rgba(255,255,255,0.4);">block:</span> <code style="color:rgba(255,255,255,0.6);">#' + block + '</code>';
+          resultSpan.innerHTML = html;
         }
       } else {
         var errs = data.errors || ['Unknown error'];
@@ -3948,6 +4371,30 @@
       }
 
       const deployedSessionId  = data.session_id;
+
+      // ── Auto-create session grant (blocking) ──
+      // Sign once at deploy, then no per-call signing for 1 hour.
+      // Ephemeral: instant (no popup). Real wallet: one popup, then silence.
+      sessionId = deployedSessionId;
+      _sessionGrantActive = false;
+      _sessionGrantExpiry = 0;
+      updateGrantBadge();
+      if (walletAddress) {
+        console.log('[GRANT] auto-creating session grant for mode:', _walletMode);
+        setStatus('Creating session grant (sign once, then no per-call signing)...', 'info');
+        var grantOk = await createSessionGrant();
+        if (grantOk) {
+          updateWalletUI();
+          console.log('[GRANT] auto-grant succeeded');
+        } else {
+          updateWalletUI();
+          updateGrantBadge();
+          setStatus('Session grant failed — using per-call signing', 'warn');
+          console.warn('[GRANT] auto-grant failed — falling back to per-call signing');
+        }
+      } else {
+        console.warn('[GRANT] no walletAddress — skipping grant creation');
+      }
       const deployedName       = currentContractName || 'Contract';
       const deployedAddress    = currentContractAddress;
       const deployedBytecode   = currentBytecode;
@@ -3989,10 +4436,11 @@
       (function() {
         var fb = document.getElementById('gasBadge');
         var fb2 = document.getElementById('gasBadge2');
-        if (!fb) return;
+        if (!fb && !fb2) return;
         var budget = data.fuel_budget;
         if (budget === undefined || budget === null) {
-          fb.style.display = 'none';
+          if (fb) fb.style.display = 'none';
+          if (fb2) fb2.style.display = 'none';
           return;
         }
         window._gasBudget = budget;
@@ -4003,25 +4451,27 @@
           if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
           return String(n);
         };
-        fb.innerHTML = '\u26fd GAS: 0 / ' + fmtN(budget);
-        fb.className = 'gas-badge active';
-        fb.title = 'GAS BUDGET (ACTS-VM-003 + ACTS-VM-005)\n'
+        var _gasHtml = '\u26fd GAS: 0 / ' + fmtN(budget);
+        var _gasClass = 'gas-badge active';
+        var _gasTitle = 'GAS BUDGET (ACTS-VM-003 + ACTS-VM-005)\n'
           + '===============================================\n'
           + 'Gas = VM steps (compute) + PQC gas (AegisCall)\n'
           + 'Every opcode charges 1 gas. PQC ops charge extra.\n'
           + 'Reset on every function call (per-invocation budget).';
-        fb.style.display = 'inline-flex';
-        if (fb2) { fb2.innerHTML = fb.innerHTML; fb2.className = fb.className; fb2.title = fb.title; fb2.style.display = fb.style.display; }
+        var _gasDisplay = 'inline-flex';
+        if (fb) { fb.innerHTML = _gasHtml; fb.className = _gasClass; fb.title = _gasTitle; fb.style.display = _gasDisplay; }
+        if (fb2) { fb2.innerHTML = _gasHtml; fb2.className = _gasClass; fb2.title = _gasTitle; fb2.style.display = _gasDisplay; }
       })();
 
       // ── Step badge: VM compute budget from /session/new ────────────────
       (function() {
         var sb = document.getElementById('stepBadge');
         var sb2 = document.getElementById('stepBadge2');
-        if (!sb) return;
+        if (!sb && !sb2) return;
         var budget = data.max_steps;
         if (budget === undefined || budget === null) {
-          sb.style.display = 'none';
+          if (sb) sb.style.display = 'none';
+          if (sb2) sb2.style.display = 'none';
           return;
         }
         window._stepBudget = budget;
@@ -4032,22 +4482,20 @@
           if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
           return String(n);
         };
-        sb.innerHTML = '\u25b8 STEPS: 0 / ' + fmtN(budget);
-        sb.className = 'step-badge active';
-        sb.title = 'VM STEP BUDGET (ACTS-VM-003)\n'
+        var _stepHtml = '\u25b8 STEPS: 0 / ' + fmtN(budget);
+        var _stepClass = 'step-badge active';
+        var _stepTitle = 'VM STEP BUDGET (ACTS-VM-003)\n'
           + '===============================================\n'
           + 'Compute steps are counted per QVM instruction.\n'
           + 'The step limit prevents infinite loops and runaway\n'
           + 'computation. Reset on every function call.\n'
           + 'Configurable via max_steps in session/new.';
-        sb.style.display = 'inline-flex';
-        if (sb2) { sb2.innerHTML = sb.innerHTML; sb2.className = sb.className; sb2.title = sb.title; sb2.style.display = sb.style.display; }
+        var _stepDisplay = 'inline-flex';
+        if (sb) { sb.innerHTML = _stepHtml; sb.className = _stepClass; sb.title = _stepTitle; sb.style.display = _stepDisplay; }
+        if (sb2) { sb2.innerHTML = _stepHtml; sb2.className = _stepClass; sb2.title = _stepTitle; sb2.style.display = _stepDisplay; }
       })();
 
-      // Always update sessionId to the freshly deployed session.
-      // The old guard prevented re-deploys from updating sessionId when a
-      // workspace was active, causing init() to fire against a stale session.
-      sessionId = deployedSessionId;
+      // sessionId was already set before grant creation above.
       updateSessionBadge();
       probeStateVars();
 
@@ -4065,7 +4513,7 @@
     }
 
     populateFunctionPicker();
-    document.getElementById('runBtn').disabled = true;
+    
     selectedFunc = null;
 
     var vc = document.getElementById('vmCard');
@@ -4112,16 +4560,21 @@
   }
 
   function selectFunction(idx) {
+    // No-op: params are now always visible in per-function rows.
+    // Kept for backward compatibility (switchToContract may call it).
+    if (parsedFunctions[idx]) selectedFunc = parsedFunctions[idx];
+    return;
+    // Legacy code below (dead):
     selectedFunc = parsedFunctions[idx];
 
     // Update pill active state
-    var pills = document.getElementById('funcPills').getElementsByClassName('func-pill');
+    var pills = document.getElementById('qvmCallPanel').getElementsByClassName('func-pill');
     for (var i = 0; i < pills.length; i++) {
       pills[i].classList.toggle('active', i === idx);
     }
 
     // Build param inputs
-    var grid = document.getElementById('paramsGrid');
+    var grid = document.getElementById('qvmCallPanel');
     grid.innerHTML = '';
     if (selectedFunc.paramCount > 0) {
       for (var p = 0; p < selectedFunc.paramCount; p++) {
@@ -4344,12 +4797,12 @@
         grid.appendChild(group);
       }
       document.getElementById('paramsTitle').innerHTML = 'Parameters for <span class=\"fn-name\">' + selectedFunc.name + '()</span>';
-      document.getElementById('paramsSection').style.display = 'block';
+      document.getElementById('qvmCallPanel').style.display = 'block';
     } else {
-      document.getElementById('paramsSection').style.display = 'none';
+      
     }
 
-    document.getElementById('runBtn').disabled = false;
+    
     document.getElementById('vmOutput').innerHTML = '<span class="dim">Ready to run ' + selectedFunc.name + '.</span>';
   }
 
@@ -4358,7 +4811,227 @@
     if (el) el.innerHTML = htmlContent;
   }
 
+  /* ── Session Grant: sign once, call without per-call signing ──────────── */
+  async function createSessionGrant() {
+    console.log('[GRANT] createSessionGrant called, walletAddress=' + walletAddress + ' sessionId=' + sessionId);
+    if (!walletAddress || !sessionId) {
+      console.warn('[GRANT] skipped: walletAddress=' + walletAddress + ' sessionId=' + sessionId);
+      setStatus('Grant skipped: no wallet/session', 'warn');
+      return false;
+    }
+    var _gb = document.getElementById('grantBadge');
+    if (_gb) { _gb.className = 'grant-badge expiring'; _gb.innerHTML = '\u23F3\u2009Creating...'; _gb.style.display = 'inline-flex'; _gb.title = 'Creating session grant...'; }
+
+    try {
+      // 1. Fetch a nonce from the server
+      console.log('[GRANT] Step 1: fetching nonce from', SESSION_NONCE_URL + sessionId + '/nonce');
+      setStatus('[GRANT] Step 1/5: Fetching nonce...', 'info');
+      var nonceRes  = await fetch(SESSION_NONCE_URL + sessionId + '/nonce');
+      console.log('[GRANT] Step 1: nonce response status', nonceRes.status);
+      var nonceData = await nonceRes.json();
+      console.log('[GRANT] Step 1: nonce data', JSON.stringify(nonceData));
+      if (!nonceData.nonce) {
+        if (_gb) { _gb.className = 'grant-badge inactive'; _gb.innerHTML = '\u274C\u2009No Grant'; _gb.title = 'No nonce available: ' + (nonceData.error || 'unknown'); }
+        setStatus('[GRANT] Failed: no nonce - ' + (nonceData.error || 'unknown'), 'error');
+        console.warn('[GRANT] no nonce available:', nonceData.error || 'unknown');
+        return false;
+      }
+      if (_gb) { _gb.innerHTML = '\u23F3\u2009Signing...'; }
+      setStatus('[GRANT] Step 2/5: Nonce received. Building EIP-712 typed data...', 'info');
+      var grantNonce   = nonceData.nonce;
+      var v3ChainId   = nonceData.chainId   || 1264;
+      var v3NetworkId = nonceData.networkId || 'synergy-testnet';
+      var v3DomainTag = 'SYNQ-GRANT-v3';
+
+      // 2. Compute expiry: 1 hour from now (server max is 3600s)
+      var expiry = Math.floor(Date.now() / 1000) + 3600;
+
+      // 3. Build EIP-712 SessionGrant typed data
+      var grantTypedData = JSON.stringify({
+        types: {
+          EIP712Domain: [
+            { name: 'name',              type: 'string'  },
+            { name: 'version',           type: 'string'  },
+            { name: 'chainId',           type: 'uint256' },
+            { name: 'verifyingContract', type: 'address' }
+          ],
+          SessionGrant: [
+            { name: 'sessionId',       type: 'string' },
+            { name: 'callerAddress',   type: 'string' },
+            { name: 'allowedFunctions', type: 'string[]' },
+            { name: 'expiry',          type: 'uint256' },
+            { name: 'domainTag',       type: 'string' }
+          ]
+        },
+        primaryType: 'SessionGrant',
+        domain: {
+          name:              currentContractName ? ('SynQ \u00b7 ' + currentContractName + ' \u00b7 ' + v3NetworkId) : ('SynQ \u00b7 ' + v3NetworkId),
+          version:           '1',
+          chainId:           v3ChainId,
+          verifyingContract: (function() {
+            if (currentContractName && window.keccak_256) {
+              return '0x' + window.keccak_256('SynQ:' + currentContractName).slice(24);
+            }
+            return currentContractAddress || '0x0000000000000000000000000000000000000000';
+          })()
+        },
+        message: {
+          sessionId:        sessionId,
+          callerAddress:    walletAddress,
+          allowedFunctions: [],   // empty = all functions
+          expiry:           String(expiry),
+          domainTag:        v3DomainTag
+        }
+      });
+
+      console.log('[GRANT] creating session grant for', walletAddress, 'mode:', _walletMode, 'expiry in 3600s');
+      if (_gb) { _gb.innerHTML = '\u23F3\u2009Signing...'; }
+      setStatus('[GRANT] Step 3/5: Signing EIP-712 SessionGrant (mode: ' + _walletMode + ')...', 'info');
+
+      // 4. Sign with wallet
+      var signature;
+      try {
+        var grantSigResult = await getSignature(grantTypedData); signature = grantSigResult.sig; var grantSigAddr = grantSigResult.addr;
+        if (_gb) { _gb.innerHTML = '\u23F3\u2009Posting...'; }
+        setStatus('[GRANT] Step 4/5: Signed. POSTing to server...', 'info');
+      } catch (sigErr) {
+        var _sigErrMsg = sigErr.message || String(sigErr);
+        _grantError = 'sign: ' + _sigErrMsg.slice(0, 20);
+        console.warn('[GRANT] signing declined:', _sigErrMsg);
+        setStatus('[GRANT] Failed: signing - ' + _sigErrMsg, 'error');
+        if (_gb) { _gb.className = 'grant-badge inactive'; _gb.innerHTML = '\u274C\u2009sign err'; _gb.title = 'Signing failed: ' + _sigErrMsg; _gb.style.display = 'inline-flex'; }
+        return false;
+      }
+
+      // 5. POST to /session/:id/grant
+      var grantBody = {
+        evm_address:       grantSigAddr || walletAddress,
+        evm_signature:     signature,
+        grant_nonce:       grantNonce,
+        allowed_functions: [],  // empty = all functions
+        expiry:            expiry
+      };
+      if (_manualSynw) grantBody.display_synw = _manualSynw;
+
+      console.log('[GRANT] Step 4: signature=', signature ? (signature.substring(0, 20) + '... len=' + signature.length) : 'NULL/UNDEFINED');
+      if (!signature || signature === 'undefined' || signature === 'null') {
+        _grantError = 'no signature returned';
+        console.warn('[GRANT] signature is null/undefined — wallet did not return a signature');
+        setStatus('[GRANT] Failed: no signature returned from wallet', 'error');
+        if (_gb) { _gb.className = 'grant-badge inactive'; _gb.innerHTML = '\u274C\u2009no sig'; _gb.title = 'Wallet did not return a signature. Check console for details.'; _gb.style.display = 'inline-flex'; }
+        return false;
+      }
+      var grantUrl = SESSION_GRANT_URL + sessionId + '/grant';
+      console.log('[GRANT] Step 5: POSTing grant to', grantUrl);
+      console.log('[GRANT] Step 5: body=', JSON.stringify(grantBody).substring(0, 200));
+      var res = await fetch(grantUrl, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(grantBody)
+      });
+      console.log('[GRANT] Step 5: response status', res.status, res.statusText);
+      var resText = await res.text();
+      console.log('[GRANT] Step 5: response body', resText.substring(0, 500));
+      var data;
+      try { data = JSON.parse(resText); }
+      catch (parseErr) {
+        _grantError = 'server returned non-JSON (status ' + res.status + ')';
+        console.warn('[GRANT] non-JSON response:', resText.substring(0, 200));
+        setStatus('[GRANT] Failed: server error (HTTP ' + res.status + ')', 'error');
+        if (_gb) { _gb.className = 'grant-badge inactive'; _gb.innerHTML = '\u274C\u2009HTTP ' + res.status; _gb.title = 'Server returned HTTP ' + res.status + ': ' + resText.substring(0, 200); _gb.style.display = 'inline-flex'; }
+        return false;
+      }
+
+      if (data.success) {
+        _sessionGrantExpiry = data.grant_expiry || expiry;
+        _sessionGrantActive = true;
+        _grantError = null;
+        updateGrantBadge();
+        console.log('[GRANT] session grant active until', new Date(_sessionGrantExpiry * 1000).toISOString());
+        if (data.caller_syna) {
+          console.log('[GRANT] caller syna:', data.caller_syna);
+        }
+        updateWalletUI();
+        setStatus('Session grant active - no per-call signing for 1 hour.', 'ok');
+        return true;
+      } else {
+        var _errMsg = data.error || 'unknown';
+        _grantError = _errMsg;
+        console.warn('[GRANT] failed:', _errMsg, 'full response:', JSON.stringify(data));
+        setStatus('[GRANT] Failed: ' + _errMsg, 'error');
+        if (_gb) { _gb.className = 'grant-badge inactive'; _gb.innerHTML = '\u274C\u2009' + _errMsg.slice(0, 30); _gb.title = 'Grant failed: ' + _errMsg; _gb.style.display = 'inline-flex'; }
+        _sessionGrantActive = false;
+        updateWalletUI();
+        return false;
+      }
+    } catch (e) {
+      var _errMsg = e.message || String(e);
+      _grantError = _errMsg;
+      console.warn('[GRANT] error:', _errMsg, e.stack || '');
+      setStatus('[GRANT] Error: ' + _errMsg, 'error');
+      if (_gb) { _gb.className = 'grant-badge inactive'; _gb.innerHTML = '\u274C\u2009' + _errMsg.slice(0, 30); _gb.title = 'Grant error: ' + _errMsg; _gb.style.display = 'inline-flex'; }
+      _sessionGrantActive = false;
+      updateWalletUI();
+      return false;
+    }
+  }
+
+  // Check if the current session grant is still valid
+  var _grantError = null;
+  function updateGrantBadge() {
+    var el = document.getElementById('grantBadge');
+    if (!el) return;
+    if (isGrantValid()) {
+      var minsLeft = Math.floor((_sessionGrantExpiry - Math.floor(Date.now() / 1000)) / 60);
+      if (minsLeft <= 5) {
+        el.className = 'grant-badge expiring';
+        el.innerHTML = '\u23F1\u2009Session Grant ' + minsLeft + 'm left';
+        el.title = 'Session Grant expiring soon — ' + minsLeft + ' minutes remaining. Will need to re-sign after expiry.';
+      } else {
+        el.className = 'grant-badge active';
+        el.innerHTML = '\u2705\u2009Session Grant ' + minsLeft + 'm left';
+        el.title = 'Session Grant active — ' + minsLeft + ' minutes remaining. No per-call wallet popups needed.';
+      }
+      el.style.display = 'inline-flex';
+    } else {
+      el.className = 'grant-badge inactive';
+      if (_grantError) {
+        el.innerHTML = '\u274C\u2009' + _grantError.slice(0, 25);
+        el.title = 'Grant failed: ' + _grantError + '\nEach function call requires a wallet signature.';
+      } else {
+        el.innerHTML = '\u274C\u2009Session Grant';
+        el.title = 'No active session grant — each function call requires a wallet signature. Deploy to create a grant.';
+      }
+      el.style.display = 'inline-flex';
+    }
+  }
+
+  function isGrantValid() {
+    if (!_sessionGrantActive || !sessionId) return false;
+    var now = Math.floor(Date.now() / 1000);
+    var valid = now < _sessionGrantExpiry;
+    if (!valid && _sessionGrantActive) {
+      console.log('[GRANT] expired - active=true but now(' + now + ') >= expiry(' + _sessionGrantExpiry + ')');
+      _sessionGrantActive = false;
+      updateGrantBadge();
+    }
+    return valid;
+  }
+
+  // Live countdown: update grant badge every 30 seconds
+  setInterval(function() {
+    if (typeof _sessionGrantActive !== 'undefined' && _sessionGrantActive) {
+      updateGrantBadge();
+    }
+  }, 30000);
+
   async function runFunction() {
+    // Backward compat — delegate to runFunctionByIdx with selected func
+    if (selectedFunc) {
+      var _idx = parsedFunctions.indexOf(selectedFunc);
+      if (_idx >= 0) return runFunctionByIdx(_idx);
+    }
+    return;
     if (!selectedFunc || !currentBytecode) return;
 
     // Guard: block init() if contract is already initialised
@@ -4485,7 +5158,11 @@
         param_types:  (selectedFunc.paramTypes || []).map(function(t) { return t || 'u256'; })
       };
 
-      if (walletAddress) {
+      // ── Session Grant: if we have an active grant, skip per-call signing ──
+      if (isGrantValid()) {
+        callBody.use_grant = true;
+        console.log('[GRANT] using session grant, skipping per-call signing for', selectedFunc.name);
+      } else if (walletAddress) {
         // Liveness check: only needed for extension wallet; ephemeral key is always valid
         if (_walletMode === 'synergy' || _walletMode === 'ethereum') {
           var liveAccounts = await _walletRequest('eth_accounts');
@@ -4525,7 +5202,7 @@
                 if (_idx >= 0) {
                   selectFunction(_idx);
                   // Restore arg input values
-                  var _inputs = document.getElementById('paramsGrid').querySelectorAll('input, textarea');
+                  var _inputs = document.getElementById('qvmCallPanel').querySelectorAll('input, textarea');
                   for (var _a = 0; _a < _savedArgs.length && _a < _inputs.length; _a++) {
                     _inputs[_a].value = _savedArgs[_a];
                   }
@@ -4622,7 +5299,7 @@
         callBody.evm_address   = callSigAddr || ((_walletMode === 'ephemeral' && _ephemeralAddress) ? _ephemeralAddress : walletAddress);
         callBody.evm_signature = signature;
         callBody.call_nonce    = callNonce;
-      }
+      } /* end per-call signing (grant active path has no else) */
 
       // ── Gas exhaustion guard: block calls when budget is spent ───────────
       if (window._gasUsed && window._gasBudget && window._gasUsed >= window._gasBudget) {
@@ -4642,7 +5319,7 @@
       (function() {
         var fb = document.getElementById('gasBadge');
         var fb2 = document.getElementById('gasBadge2');
-        if (!fb || !window._gasBudget) return;
+        if ((!fb && !fb2) || !window._gasBudget) return;
           // Gas = cumulative across all calls in this session
           // (VM steps for compute + PQC fuel for AegisCall)
           var stepCost = data.steps_used !== undefined ? data.steps_used : 0;
@@ -4661,16 +5338,15 @@
             return String(n);
           };
           var gasExhausted = used >= budget;
-          fb.innerHTML = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget);
+          var _gasHtml = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget);
+          var _gasClass = 'gas-badge active';
           if (gasExhausted) {
-            fb.className = 'gas-badge depleted';
-            fb.innerHTML = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget) + ' \u26a0 EXHAUSTED';
+            _gasClass = 'gas-badge depleted';
+            _gasHtml = '\u26fd GAS: ' + fmtN(used) + ' / ' + fmtN(budget) + ' \u26a0 EXHAUSTED';
           } else if (pct >= 75) {
-            fb.className = 'gas-badge warn';
-          } else {
-            fb.className = 'gas-badge active';
+            _gasClass = 'gas-badge warn';
           }
-          fb.title = 'GAS BUDGET (ACTS-VM-003 + ACTS-VM-005)\n'
+          var _gasTitle = 'GAS BUDGET (ACTS-VM-003 + ACTS-VM-005)\n'
             + '===============================================\n'
             + 'Gas = VM steps (compute) + PQC gas (AegisCall)\n'
             + 'Gas Budget: ' + budget.toLocaleString() + '\n'
@@ -4680,17 +5356,20 @@
             + '    - PQC: ' + pqcCost.toLocaleString() + '\n'
             + 'Gas Remaining: ' + remaining.toLocaleString() + '\n'
             + 'Utilization: ' + pct.toFixed(2) + '%' + (gasExhausted ? '\n\n\u26a0 GAS EXHAUSTED — further calls blocked. Reset VM to continue.' : '') + (pct > 80 && !gasExhausted ? '\n\n\u26a0 Approaching gas limit.' : '');
-      if (fb2) { fb2.innerHTML = fb.innerHTML; fb2.className = fb.className; fb2.title = fb.title; fb2.style.display = fb.style.display; }
+      if (fb) { fb.innerHTML = _gasHtml; fb.className = _gasClass; fb.title = _gasTitle; fb.style.display = 'inline-flex'; }
+      if (fb2) { fb2.innerHTML = _gasHtml; fb2.className = _gasClass; fb2.title = _gasTitle; fb2.style.display = 'inline-flex'; }
       })();
 
       // ── Update step badge ───────────────────────────────────────────
       (function() {
         var sb = document.getElementById('stepBadge');
         var sb2 = document.getElementById('stepBadge2');
-        if (!sb || !window._stepBudget) return;
-          var used = data.steps_used !== undefined ? data.steps_used : 0;
-          var remaining = data.steps_remaining !== undefined ? data.steps_remaining : (window._stepBudget - used);
-          window._stepUsed = used;
+        if ((!sb && !sb2) || !window._stepBudget) return;
+          var _callSteps = data.steps_used !== undefined ? data.steps_used : 0;
+          window._stepUsed = (window._stepUsed || 0) + _callSteps;
+          var used = window._stepUsed;
+          var _callRemaining = data.steps_remaining !== undefined ? data.steps_remaining : (window._stepBudget - _callSteps);
+          var remaining = window._stepBudget > used ? window._stepBudget - used : 0;
           var budget = window._stepBudget;
           var pct = budget > 0 ? (used / budget) * 100 : 0;
           var fmtN = function(n) {
@@ -4699,26 +5378,26 @@
             if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
             return String(n);
           };
-          sb.innerHTML = '\u25b8 STEPS: ' + fmtN(used) + ' / ' + fmtN(budget);
+          var _stepHtml = '\u25b8 STEPS: ' + fmtN(used) + ' / ' + fmtN(budget);
+          var _stepClass = 'step-badge active';
           if (pct >= 100) {
-            sb.className = 'step-badge depleted';
+            _stepClass = 'step-badge depleted';
           } else if (pct >= 75) {
-            sb.className = 'step-badge warn';
-          } else {
-            sb.className = 'step-badge active';
+            _stepClass = 'step-badge warn';
           }
-          sb.title = 'VM STEP BUDGET (ACTS-VM-003)\n'
+          var _stepTitle = 'VM STEP BUDGET (ACTS-VM-003)\n'
             + '===============================================\n'
-            + 'Steps used this call: ' + fmtN(used) + '\n'
-            + 'Step budget: ' + fmtN(budget) + '\n'
-            + 'Gas Remaining: ' + fmtN(remaining) + '\n'
+            + 'Steps used (cumulative): ' + used.toLocaleString() + '\n'
+            + '  Last call: ' + _callSteps.toLocaleString() + '\n'
+            + 'Step budget (per call): ' + budget.toLocaleString() + '\n'
+            + 'Steps remaining: ' + remaining.toLocaleString() + '\n'
             + 'Usage: ' + pct.toFixed(2) + '%\n'
             + '===============================================\n'
             + 'Compute steps are counted per QVM instruction.\n'
             + 'The step limit prevents infinite loops and runaway\n'
             + 'computation. Reset on every function call.';
-          sb.style.display = 'inline-flex';
-      if (sb2) { sb2.innerHTML = sb.innerHTML; sb2.className = sb.className; sb2.title = sb.title; sb2.style.display = sb.style.display; }
+      if (sb) { sb.innerHTML = _stepHtml; sb.className = _stepClass; sb.title = _stepTitle; sb.style.display = 'inline-flex'; }
+      if (sb2) { sb2.innerHTML = _stepHtml; sb2.className = _stepClass; sb2.title = _stepTitle; sb2.style.display = 'inline-flex'; }
       })();
 
       if (data.success) {
@@ -4886,6 +5565,31 @@
         }
         // V3: append caller_syna display
         display += callerSynaDisplay;
+        // ── Gas & Steps usage for this call ──────────────────────────────
+        if (data.steps_used !== undefined || data.fuel_used !== undefined) {
+          var _callSteps = data.steps_used !== undefined ? data.steps_used : 0;
+          var _callFuel  = data.fuel_used  !== undefined ? data.fuel_used  : 0;
+          var _callGas   = _callSteps + _callFuel;
+          var _cumGas   = window._gasUsed || 0;
+          var _gasBud   = window._gasBudget || 0;
+          var _cumSteps = window._stepUsed || 0;
+          var _stepBud  = window._stepBudget || 0;
+          var _gsParts = [];
+          if (_gasBud > 0) {
+            _gsParts.push('<span style="color:#93c5fd;">\u26fd Gas: ' + _callGas.toLocaleString() + '</span>'
+              + '<span style="color:rgba(255,255,255,0.3);"> (cum: ' + _cumGas.toLocaleString() + ' / ' + _gasBud.toLocaleString() + ')</span>');
+          }
+          if (_stepBud > 0) {
+            _gsParts.push('<span style="color:#c4b5fd;">\u25b8 Steps: ' + _callSteps.toLocaleString() + '</span>'
+              + '<span style="color:rgba(255,255,255,0.3);"> (cum: ' + _cumSteps.toLocaleString() + ' / ' + _stepBud.toLocaleString() + ')</span>');
+          }
+          if (_gsParts.length > 0) {
+            display += '<div style="margin-top:6px;font-size:0.72rem;font-family:ui-monospace,monospace;'
+              + 'color:rgba(255,255,255,0.4);border-top:1px solid rgba(255,255,255,0.08);padding-top:4px;">'
+              + _gsParts.join('<span style="color:rgba(255,255,255,0.15);margin:0 6px;">|</span>')
+              + '</div>';
+          }
+        }
         // data.output intentionally omitted — server echoes 'Return value: X'
         // which duplicates the rv line already rendered above.
         out.innerHTML = display;
@@ -4913,7 +5617,15 @@
           errMsg = 'Stack underflow: a cross-contract call failed internally — ensure all required contracts are deployed in the same workspace before calling this function.';
         }
         var errCallerSyna = data.caller_syna ? '<div style="margin-top:4px;font-size:0.72rem;color:rgba(167,139,250,0.7);">🔑 ' + data.caller_syna + '</div>' : '';
-        out.innerHTML = '<span class="err">' + errMsg + '</span>' + errCallerSyna;
+        // ── Gas & Steps usage even on error (call still consumed resources) ──
+        var errGasHtml = '';
+        if (data.steps_used !== undefined || data.fuel_used !== undefined) {
+          var _es = data.steps_used !== undefined ? data.steps_used : 0;
+          var _ef = data.fuel_used  !== undefined ? data.fuel_used  : 0;
+          var _eg = _es + _ef;
+          errGasHtml = '<div style="margin-top:4px;font-size:0.72rem;font-family:ui-monospace,monospace;color:rgba(255,255,255,0.3);">\u26fd Gas: ' + _eg.toLocaleString() + ' \u00b7 \u25b8 Steps: ' + _es.toLocaleString() + '</div>';
+        }
+        out.innerHTML = '<span class="err">' + errMsg + '</span>' + errCallerSyna + errGasHtml;
         probeStateVars();
       }
     } catch (err) {
@@ -5144,6 +5856,8 @@
   }
 
   async function resetVM() {
+    _sessionGrantActive = false;
+    _sessionGrantExpiry = 0;
     var out = document.getElementById('vmOutput');
     out.innerHTML = '<span class="dim">Resetting all VM sessions...</span>';
     // Reset cumulative gas counter
@@ -5158,7 +5872,11 @@
       _gb.title = 'GAS BUDGET\nGas Used: 0\nGas Remaining: ' + window._gasBudget.toLocaleString();
     }
     var _gb2 = document.getElementById('gasBadge2');
-    if (_gb2 && _gb) { _gb2.innerHTML = _gb.innerHTML; _gb2.className = _gb.className; _gb2.title = _gb.title; }
+    if (_gb2 && window._gasBudget) {
+      _gb2.innerHTML = '\u26fd GAS: 0 / ' + (window._gasBudget >= 1e6 ? (window._gasBudget/1e6).toFixed(1) + 'M' : String(window._gasBudget));
+      _gb2.className = 'gas-badge active';
+      _gb2.title = 'GAS BUDGET\nGas Used: 0\nGas Remaining: ' + window._gasBudget.toLocaleString();
+    }
 
     // ── Reset every contract in the workspace, not just the active one ──────
     // This ensures all contracts (e.g. SimpleToken) start with clean state
@@ -5187,6 +5905,7 @@
       if (c.name)      resetBody.contract_name = c.name;
       if (workspaceId)        resetBody.workspace_id    = workspaceId;
       if (c.fnReturnTypes)   resetBody.fn_return_types = c.fnReturnTypes;
+      if (walletAddress)      resetBody.caller_address  = walletAddress;
       try {
         var res  = await fetch(SESSION_NEW_URL, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -5214,6 +5933,8 @@
               || c.session_id === sessionId
               || toReset.length === 1) {
             sessionId = newSid;
+            _sessionGrantActive = false;
+            _sessionGrantExpiry = 0;
             updateSessionBadge();
           }
         } else {
@@ -5396,7 +6117,7 @@
   // Highlight or grey-out the init pill based on current state snapshot.
   // Called after every probeStateVars() so the UI reflects live VM state.
   function syncInitPillHint() {
-    var pills = document.getElementById('funcPills');
+    var pills = document.getElementById('qvmCallPanel');
     if (!pills) return;
     var initPill = null;
     var allPills = pills.getElementsByClassName('func-pill');
@@ -5441,6 +6162,9 @@
   }
 
   function renderWorkspacePanel() {
+    // Toggle workspace EVM deploy button visibility
+    var wsEvmBtn = document.getElementById('deployWsEvmBtn');
+    if (wsEvmBtn) wsEvmBtn.style.display = workspaceContracts.length > 1 ? 'block' : 'none';
     var panel = document.getElementById('workspacePanel');
     var list  = document.getElementById('workspaceContracts');
     var badge = document.getElementById('workspaceIdBadge');
@@ -5558,49 +6282,437 @@
       return ai - bi;
     });
 
-    var pills = document.getElementById('funcPills');
-    pills.innerHTML = '';
-
-    if (parsedFunctions.length === 0) {
-      pills.innerHTML = '<span style="color:rgba(255,255,255,0.3);font-size:0.8rem;">No callable functions found in dispatch table.</span>';
-    } else {
-      parsedFunctions.forEach(function(fn, idx) {
-        var pill = document.createElement('button');
-        pill.className = 'func-pill';
-        
-        var innerHTML = '';
-        if (fn.requiresCaller) {
-          innerHTML += '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0; margin-right: 4px;"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>';
-        }
-        var _paramLabel = '';
-        if (fn.paramCount > 0) {
-          var _pNames = fn.paramNames || [];
-          var _pTypes = fn.paramTypes || [];
-          for (var _pi = 0; _pi < fn.paramCount; _pi++) {
-            var _pn = _pNames[_pi] || ('param_' + _pi);
-            var _pt = _pTypes[_pi] || '';
-            _paramLabel += (_pi > 0 ? ', ' : '') + _pn + (_pt ? ': ' + _pt : '');
-          }
-        }
-        innerHTML += fn.name + '(' + _paramLabel + ')';
-        
-        if (fn.capabilities && fn.capabilities.length > 0) {
-          fn.capabilities.forEach(function(cap) {
-            innerHTML += '<span class="cap-badge" style="background: rgba(167,139,250,0.15); border: 1px solid rgba(167,139,250,0.4); color: #c084fc; font-size: 0.65rem; padding: 1px 5px; border-radius: 4px; margin-left: 6px; font-family: inherit; flex-shrink: 0; line-height: 1;">' + cap + '</span>';
-          });
-        }
-        pill.innerHTML = innerHTML;
-        
-        pill.onclick = (function(i) { return function() { selectFunction(i); }; })(idx);
-        pills.appendChild(pill);
-      });
-    }
-
-    document.getElementById('vmOutput').innerHTML = '<span class="dim">Select a function above and press Run.</span>';
-    document.getElementById('paramsSection').style.display = 'none';
-    document.getElementById('paramsGrid').innerHTML = '';
+    // Build per-function call rows (like the EVM panel)
+    populateQvmCallPanel();
     syncInitPillHint();
   }
+
+  // ── QVM Call Panel: per-function rows with inline inputs + results ──
+  function populateQvmCallPanel() {
+    var panel = document.getElementById('qvmCallPanel');
+    if (!panel) return;
+    panel.innerHTML = '';
+
+    if (!currentBytecode || parsedFunctions.length === 0) {
+      panel.innerHTML = '<span style="color:rgba(255,255,255,0.3);font-size:0.8rem;">No callable functions. Deploy a contract to see functions.</span>';
+      return;
+    }
+
+    var html = '';
+    parsedFunctions.forEach(function(fn, idx) {
+      var rowId = 'qvmFunc_' + idx;
+      var isView = !fn.requiresCaller && !fn.requiresAuthority && !fn.requiresGovernance;
+      // Check if function has state-changing builtins
+      if (fn.returnType === 'void' || (!fn.returnType && !fn.requiresCaller)) {
+        // Could be view or void state-changer — err on side of "Call" if no caller needed
+      }
+
+      // Build param inputs (inline, like EVM)
+      var paramsHtml = '';
+      for (var j = 0; j < fn.paramCount; j++) {
+        var pName = (fn.paramNames && fn.paramNames[j]) ? fn.paramNames[j] : ('param_' + j);
+        var pType = (fn.paramTypes && fn.paramTypes[j]) ? fn.paramTypes[j] : 'u256';
+        var isStr = pType === 'str';
+        var isBytes = pType === 'bytes';
+        var isBool = pType === 'bool';
+        var defaultVal = isStr || isBytes ? '' : '0';
+
+        // Check for struct/tuple params
+        var _structDef = lookupStructDef(pType);
+        var _tupleTypes = parseTupleType(pType);
+
+        if (_structDef && _structDef.fields && _structDef.fields.length > 0) {
+          // Struct param: render sub-field inputs
+          for (var sf = 0; sf < _structDef.fields.length; sf++) {
+            var sfName = _structDef.fields[sf].name || ('f' + sf);
+            var sfType = _structDef.fields[sf].ty || 'u256';
+            paramsHtml += '<input type="text" placeholder="' + pName + '.' + sfName + ' (' + sfType + ')" ' +
+              'style="width:100px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:4px 8px;font-size:0.68rem;font-family:ui-monospace,monospace;color:#e2e8f0;outline:none;" ' +
+              'data-arg="' + j + '" data-subfield="' + sf + '" data-type="' + sfType + '" value="' + (sfType === 'str' ? '' : '0') + '" />';
+            if (sf < _structDef.fields.length - 1) paramsHtml += ' ';
+          }
+        } else if (_tupleTypes) {
+          for (var sf = 0; sf < _tupleTypes.length; sf++) {
+            paramsHtml += '<input type="text" placeholder="' + pName + '[' + sf + '] (' + _tupleTypes[sf] + ')" ' +
+              'style="width:100px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:4px 8px;font-size:0.68rem;font-family:ui-monospace,monospace;color:#e2e8f0;outline:none;" ' +
+              'data-arg="' + j + '" data-subfield="' + sf + '" data-type="' + _tupleTypes[sf] + '" value="0" />';
+            if (sf < _tupleTypes.length - 1) paramsHtml += ' ';
+          }
+        } else if (isBool) {
+          paramsHtml += '<select data-arg="' + j + '" data-type="bool" ' +
+            'style="width:70px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:4px 8px;font-size:0.68rem;font-family:ui-monospace,monospace;color:#e2e8f0;outline:none;">' +
+            '<option value="0">false</option><option value="1">true</option></select>';
+        } else {
+          var w = fn.paramCount === 1 ? '200px' : '120px';
+          paramsHtml += '<input type="text" placeholder="' + pName + ' (' + pType + ')" ' +
+            'style="width:' + w + ';background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:4px 8px;font-size:0.68rem;font-family:ui-monospace,monospace;color:#e2e8f0;outline:none;" ' +
+            'data-arg="' + j + '" data-type="' + pType + '" value="' + defaultVal + '" />';
+        }
+        if (j < fn.paramCount - 1) paramsHtml += ' ';
+      }
+
+      // Run button — same style for all, color indicates auth requirement
+      var btnColor = fn.requiresCaller
+        ? 'background:rgba(251,191,36,0.15);border:1px solid rgba(251,191,36,0.4);color:#fcd34d;'
+        : 'background:rgba(59,130,246,0.15);border:1px solid rgba(59,130,246,0.4);color:#93c5fd;';
+      var btnLabel = fn.requiresCaller ? 'Send' : 'Call';
+      var btnHtml = '<button onclick="runFunctionByIdx(' + idx + ')" style="' + btnColor + 'font-size:0.68rem;padding:4px 14px;border-radius:4px;cursor:pointer;font-weight:600;">' + btnLabel + '</button>';
+
+      // Cap badges
+      var capHtml = '';
+      if (fn.capabilities && fn.capabilities.length > 0) {
+        fn.capabilities.forEach(function(cap) {
+          capHtml += '<span style="background: rgba(167,139,250,0.15); border: 1px solid rgba(167,139,250,0.4); color: #c084fc; font-size: 0.6rem; padding: 1px 5px; border-radius: 4px; margin-left: 4px;">' + cap + '</span>';
+        });
+      }
+
+      // Lock icon for auth-required
+      var lockIcon = fn.requiresCaller
+        ? '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink:0;margin-right:3px;opacity:0.6;"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>'
+        : '';
+
+      html += '<div id="' + rowId + '" style="display:flex;align-items:center;gap:8px;margin:6px 0;padding:6px 8px;background:rgba(0,0,0,0.2);border-radius:6px;flex-wrap:wrap;" ' +
+        'data-fidx="' + idx + '" data-fname="' + fn.name + '">' +
+        '<span style="font-family:ui-monospace,monospace;font-size:0.7rem;color:#e2e8f0;min-width:90px;display:flex;align-items:center;">' + lockIcon + fn.name + '</span>' +
+        paramsHtml + ' ' + btnHtml + capHtml +
+        '<span class="qvmResult" style="font-family:ui-monospace,monospace;font-size:0.68rem;color:rgba(255,255,255,0.6);margin-left:4px;flex-grow:1;"></span>' +
+        '</div>';
+    });
+
+    panel.innerHTML = html;
+  }
+
+  // Run a function by index — reads args from the specific row's inputs
+  async function runFunctionByIdx(idx) {
+    if (!parsedFunctions[idx] || !currentBytecode) return;
+    selectedFunc = parsedFunctions[idx];
+    var fn = selectedFunc;
+
+    var row = document.getElementById('qvmFunc_' + idx);
+    if (!row) return;
+    var resultSpan = row.querySelector('.qvmResult');
+    var btn = row.querySelector('button');
+    if (!resultSpan || !btn) return;
+
+    // Guard: block init() if contract is already initialised
+    if (fn.name === 'init') {
+      var _iv = stateSnapshot['initialised'];
+      var _av = stateSnapshot['active'];
+      var _alreadyDone = (_iv === '1' || _iv === 'true' || _iv === 1 || _iv === true)
+                     || (_av === '1' || _av === 1 || _av === 'true' || _av === true);
+      if (_alreadyDone) {
+        resultSpan.innerHTML = '<span style="color:#f87171;">Already initialised. Reset VM to start fresh.</span>';
+        return;
+      }
+    }
+
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+    var originalBtn = btn.textContent;
+    btn.textContent = '...';
+
+    var out = document.getElementById('vmOutput');
+
+    // Build args from this row's inputs
+    var args = [];
+    var argError = null;
+    for (var p = 0; p < fn.paramCount; p++) {
+      var _pType = (fn.paramTypes && fn.paramTypes[p]) || '';
+      var _structDef2 = lookupStructDef(_pType);
+      var _tupleTypes2 = parseTupleType(_pType);
+
+      if (_structDef2 && _structDef2.fields && _structDef2.fields.length > 0) {
+        var subVals = [];
+        for (var sf = 0; sf < _structDef2.fields.length; sf++) {
+          var subEl = row.querySelector('input[data-arg="' + p + '"][data-subfield="' + sf + '"]');
+          subVals.push(subEl ? subEl.value.trim() : '0');
+        }
+        args.push(subVals.join(', '));
+        continue;
+      }
+      if (_tupleTypes2) {
+        var subVals = [];
+        for (var sf = 0; sf < _tupleTypes2.length; sf++) {
+          var subEl = row.querySelector('input[data-arg="' + p + '"][data-subfield="' + sf + '"]');
+          subVals.push(subEl ? subEl.value.trim() : '0');
+        }
+        args.push(subVals.join(', '));
+        continue;
+      }
+
+      // Regular input
+      var inputEl = row.querySelector('input[data-arg="' + p + '"], select[data-arg="' + p + '"]');
+      var paramIsStr = fn.paramTypes && fn.paramTypes[p] === 'str';
+      var paramIsBytes = fn.paramTypes && fn.paramTypes[p] === 'bytes';
+      var raw = inputEl ? (paramIsStr || paramIsBytes ? inputEl.value : inputEl.value.trim()) : '';
+      if (!paramIsStr && !paramIsBytes && raw === '') {
+        if (isExpandableType(_pType)) break;
+        argError = fn.paramNames && fn.paramNames[p]
+          ? 'Enter a value for "' + fn.paramNames[p] + '"'
+          : 'Enter a value for parameter ' + p;
+        break;
+      }
+      if (paramIsBytes) {
+        var hexVal = raw.trim().replace(/^0x/, '');
+        if (hexVal === '' || !/^[0-9a-fA-F]*$/.test(hexVal)) {
+          argError = 'param_' + p + ': must be valid hex.';
+          break;
+        }
+        args.push(hexVal);
+      } else if (paramIsStr) {
+        args.push(raw);
+      } else {
+        if (!/^\d+$/.test(raw) && !(fn.paramTypes && fn.paramTypes[p] === 'str')) {
+          if (fn.paramTypes && fn.paramTypes[p] === 'str') break;
+          argError = 'param_' + p + ': "' + raw + '" must be a non-negative integer.';
+          break;
+        }
+        var isSafe = raw.length < 16 || (raw.charAt(0) !== '-' && raw.length <= 15);
+        args.push(isSafe ? Number(raw) : raw);
+      }
+    }
+
+    if (argError) {
+      resultSpan.innerHTML = '<span style="color:#f87171;">' + argError + '</span>';
+      btn.disabled = false; btn.style.opacity = '1'; btn.textContent = originalBtn;
+      return;
+    }
+
+    // Pre-flight check for setPaused
+    if (fn.name === 'setPaused') {
+      var flagVal = String(args[0]);
+      if (flagVal !== '0' && flagVal !== '1') {
+        resultSpan.innerHTML = '<span style="color:#f87171;">require failed: flag must be 0 or 1</span>';
+        btn.disabled = false; btn.style.opacity = '1'; btn.textContent = originalBtn;
+        return;
+      }
+    }
+
+    var runSessionId = sessionId;
+    var preCallSnapshot = Object.assign({}, stateSnapshot);
+    resultSpan.innerHTML = '<span style="color:rgba(255,255,255,0.4);font-size:0.65rem;">Calling ' + fn.name + '...</span>';
+
+    if (!sessionId) {
+      resultSpan.innerHTML = '<span style="color:#f87171;">No active session. Recompile to deploy.</span>';
+      btn.disabled = false; btn.style.opacity = '1'; btn.textContent = originalBtn;
+      return;
+    }
+
+    try {
+      var callBody = {
+        session_id: sessionId,
+        function: fn.name,
+        args: args.map(function(a) { return String(a); }),
+        param_types: (fn.paramTypes || []).map(function(t) { return t || 'u256'; })
+      };
+
+      // Session Grant or per-call signing
+      if (isGrantValid()) {
+        callBody.use_grant = true;
+      } else if (walletAddress) {
+        if (_walletMode === 'synergy' || _walletMode === 'ethereum') {
+          var liveAccounts = await _walletRequest('eth_accounts');
+          if (!liveAccounts || liveAccounts.length === 0) {
+            walletAddress = null; updateWalletUI();
+            resultSpan.innerHTML = '<span style="color:#f87171;">Wallet disconnected.</span>';
+            btn.disabled = false; btn.style.opacity = '1'; btn.textContent = originalBtn;
+            return;
+          }
+          walletAddress = liveAccounts[0];
+        }
+
+        if (!sessionId) {
+          resultSpan.innerHTML = '<span style="color:#f87171;">No active session.</span>';
+          btn.disabled = false; btn.style.opacity = '1'; btn.textContent = originalBtn;
+          return;
+        }
+        var nonceRes = await fetch(SESSION_NONCE_URL + sessionId + '/nonce');
+        var nonceData = await nonceRes.json();
+        if (!nonceData.nonce) {
+          var nonceErr = nonceData.error || 'unknown';
+          var _isExpired = (nonceErr.toLowerCase().indexOf('not found') !== -1 || nonceErr.toLowerCase().indexOf('expired') !== -1);
+          if (_isExpired && !window._autoRedeploying) {
+            window._autoRedeploying = true;
+            resultSpan.innerHTML = '<span style="color:#fbbf24;">Session expired — auto-redeploying...</span>';
+            try {
+              await initVMPanel();
+              if (sessionId) {
+                window._autoRedeploying = false;
+                resultSpan.innerHTML = '<span style="color:#6ee7b7;">Session restored — retrying...</span>';
+                return runFunctionByIdx(idx);
+              }
+            } catch (e) { /* fall through */ }
+            window._autoRedeploying = false;
+          }
+          resultSpan.innerHTML = '<span style="color:#f87171;">Session expired — redeploy manually.</span>';
+          btn.disabled = false; btn.style.opacity = '1'; btn.textContent = originalBtn;
+          return;
+        }
+        var callNonce = nonceData.nonce;
+        var v3ChainId = nonceData.chainId || 1264;
+        var v3NetworkId = nonceData.networkId || 'synergy-testnet';
+        var v3DomainTag = nonceData.domainTag || 'SYNQ-CALL-v3';
+        var callSignature = fn.name + '(' + args.join(', ') + ')';
+        var callTypedData = JSON.stringify({
+          types: {
+            EIP712Domain: [
+              { name: 'name', type: 'string' },
+              { name: 'version', type: 'string' },
+              { name: 'chainId', type: 'uint256' },
+              { name: 'verifyingContract', type: 'address' }
+            ],
+            ContractCall: [
+              { name: 'callSignature', type: 'string' },
+              { name: 'sessionId', type: 'string' },
+              { name: 'nonce', type: 'string' },
+              { name: 'domainTag', type: 'string' }
+            ]
+          },
+          primaryType: 'ContractCall',
+          domain: {
+            name: currentContractName ? ('SynQ \u00b7 ' + currentContractName + ' \u00b7 ' + v3NetworkId) : ('SynQ \u00b7 ' + v3NetworkId),
+            version: '1',
+            chainId: v3ChainId,
+            verifyingContract: (function() {
+              if (currentContractName && window.keccak_256) {
+                return '0x' + window.keccak_256('SynQ:' + currentContractName).slice(24);
+              }
+              return currentContractAddress || '0x0000000000000000000000000000000000000000';
+            })()
+          },
+          message: {
+            callSignature: callSignature,
+            sessionId: sessionId,
+            nonce: callNonce,
+            domainTag: v3DomainTag
+          }
+        });
+        resultSpan.innerHTML = '<span style="color:rgba(255,255,255,0.5);font-size:0.65rem;">\uD83D\uDD10 Sign ' + fn.name + '() in wallet...</span>';
+        var signature;
+        try {
+          var callSigResult = await getSignature(callTypedData);
+          signature = callSigResult.sig;
+          var callSigAddr = callSigResult.addr;
+          callBody.signature = signature;
+          callBody.caller_address = callSigAddr || walletAddress;
+        } catch (e) {
+          resultSpan.innerHTML = '<span style="color:#f87171;">Sign rejected: ' + e.message + '</span>';
+          btn.disabled = false; btn.style.opacity = '1'; btn.textContent = originalBtn;
+          return;
+        }
+      } else {
+        // Devnet: inject caller from wallet or default
+        callBody.caller_address = walletAddress || '0x2222222222222222222222222222222222222222';
+      }
+
+      // Send the call
+      var runRes = await fetch(SESSION_RUN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(callBody)
+      });
+      var data = await runRes.json();
+
+      if (!data.success) {
+        var errs = data.errors || ['Unknown error'];
+        resultSpan.innerHTML = '<span style="color:#f87171;">' + errs[errs.length - 1].replace(/</g, '&lt;').slice(0, 100) + '</span>';
+        btn.disabled = false; btn.style.opacity = '1'; btn.textContent = originalBtn;
+        return;
+      }
+
+      // ── Display result inline ──
+      var display = '';
+      if (data.result && data.result.length > 0) {
+        data.result.forEach(function(rv, ri) {
+          if (typeof rv === 'object' && rv !== null && rv.value !== undefined) {
+            var val = rv.value;
+            var _rvType = rv.type || '';
+            var _declRet = (currentFnReturnTypes && selectedFunc) ? (currentFnReturnTypes[selectedFunc.name] || '') : '';
+            var type = (_declRet === 'str') ? 'str' : (_declRet === 'bool') ? 'Bool' : _rvType;
+            var isStringResult = (type === 'String' || type === 'Str' || type === 'str');
+            var isBoolResult = (type === 'Bool');
+            if (isStringResult) {
+              display += '<span style="color:rgba(180,230,180,1);font-weight:600;">"' + String(val).replace(/</g, '&lt;') + '"</span>';
+              display += ' <span style="font-size:0.62rem;color:rgba(255,255,255,0.28);">str</span>';
+            } else if (isBoolResult) {
+              var isT = (val === 'true' || val === '1');
+              var bc = isT ? 'rgba(100,220,150,0.9)' : 'rgba(255,120,100,0.85)';
+              display += '<span style="font-size:0.78rem;font-family:monospace;background:' + bc + ';color:#111;border-radius:3px;padding:1px 6px;font-weight:700;">' + (isT ? 'true' : 'false') + '</span>';
+            } else {
+              var dispVal = val;
+              if ((type === 'UInt256' || type === 'u256') && /^\d+$/.test(val) && BigInt(val) > 0n) {
+                try { var h = BigInt(val).toString(16); if (h.length >= 20) dispVal = '0x' + h.padStart(40, '0'); } catch(e) {}
+              }
+              display += '<span style="color:#34d399;font-weight:600;">' + dispVal + '</span>';
+              if (type) display += ' <span style="font-size:0.62rem;color:rgba(255,255,255,0.28);">' + type + '</span>';
+            }
+          } else {
+            display += '<span style="color:#34d399;">' + String(rv).replace(/</g, '&lt;') + '</span>';
+          }
+          if (ri < data.result.length - 1) display += ' ';
+        });
+      } else {
+        // void return — probe state and show diff
+        await probeStateVars(runSessionId);
+        var diffLines = [];
+        var mappingSlotNames = {};
+        if (currentStateVars) {
+          currentStateVars.forEach(function(sv) {
+            var n = sv[0], slot = String(sv[1]);
+            if (/balance|_role|map|set|roles/i.test(n)) mappingSlotNames[n] = true;
+          });
+        }
+        stateVarNames.forEach(function(n) {
+          if (mappingSlotNames[n]) return;
+          var before = preCallSnapshot[n];
+          var after = stateSnapshot[n];
+          if (typeof before === 'object' || typeof after === 'object') return;
+          if (before !== undefined && before !== after) {
+            diffLines.push('<span style="color:rgba(255,255,255,0.55);">' + n + '</span>'
+              + ' <span style="color:rgba(255,255,255,0.25);">\u2192</span> '
+              + '<span style="font-weight:600;color:rgba(100,220,180,1);">' + formatStateVal(n, after) + '</span>'
+              + ' <span style="font-size:0.7rem;color:rgba(255,255,255,0.22);">(was ' + formatStateVal(n, before) + ')</span>');
+          }
+        });
+        if (diffLines.length > 0) {
+          display += '<div style="line-height:1.8;font-size:0.82rem;">' + diffLines.join('<br>') + '</div>';
+        } else {
+          display += '<span style="color:#34d399;font-size:0.85rem;">\u2713 void</span>';
+        }
+      }
+
+      // Events
+      if (data.events && data.events.length > 0) {
+        display += '<div style="margin-top:4px;">';
+        data.events.forEach(function(ev) {
+          display += '<div style="font-size:0.72rem;color:rgba(150,220,255,0.85);">\u2605 ' + ev.name + '</div>';
+        });
+        display += '</div>';
+      }
+
+      resultSpan.innerHTML = display;
+
+      // Also update vmOutput with state info
+      out.innerHTML = '<span class="dim">Last call: ' + fn.name + '(' + args.join(', ') + ')</span>';
+
+      // Update gas/step badges
+      if (data.gas_used !== undefined) {
+        var gb = document.getElementById('gasBadge2');
+        if (gb) { gb.style.display = 'inline-flex'; gb.textContent = 'Gas: ' + data.gas_used; }
+      }
+      if (data.steps_used !== undefined) {
+        var sb = document.getElementById('stepBadge2');
+        if (sb) { sb.style.display = 'inline-flex'; sb.textContent = 'Steps: ' + data.steps_used; }
+      }
+
+    } catch (e) {
+      resultSpan.innerHTML = '<span style="color:#f87171;">' + e.message.replace(/</g, '&lt;') + '</span>';
+    }
+
+    btn.disabled = false; btn.style.opacity = '1'; btn.textContent = originalBtn;
+  }
+
+  window.runFunctionByIdx = runFunctionByIdx;
 
   function switchToContract(sid) {
     var c = workspaceContracts.find(function(x){ return x.session_id === sid; });
