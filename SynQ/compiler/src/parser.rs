@@ -481,6 +481,13 @@ fn parse_statement(pair: Pair<Rule>) -> Statement {
             let expr = parse_expression(inner.next().unwrap());
             Statement::Assignment(name, expr)
         }
+        Rule::self_field_assign_statement => {
+            // self.field = expr  =>  Assignment to state variable "field"
+            let mut inner = pair.into_inner();
+            let field = inner.next().unwrap().as_str().to_string();
+            let val = parse_expression(inner.next().unwrap());
+            Statement::Assignment(field, val)
+        }
         Rule::field_assign_statement => {
             let mut inner = pair.into_inner();
             let object = inner.next().unwrap().as_str().to_string();
