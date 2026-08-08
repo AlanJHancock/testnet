@@ -6678,6 +6678,9 @@
 
       // ── Display result inline ──
       var display = '';
+      // Always probe state after a successful call — state vars can change
+      // regardless of whether the function has a return value.
+      await probeStateVars(runSessionId);
       var _rvList = null;
       if (data.result && Array.isArray(data.result) && data.result.length > 0) {
         _rvList = data.result;
@@ -6713,9 +6716,32 @@
           }
           if (ri < _rvList.length - 1) display += ' ';
         });
+        // Show state diff for non-void calls too (state already probed above)
+        var diffLines = [];
+        var mappingSlotNames = {};
+        if (currentStateVars) {
+          currentStateVars.forEach(function(sv) {
+            var n = sv[0], slot = String(sv[1]);
+            if (/balance|_role|map|set|roles/i.test(n)) mappingSlotNames[n] = true;
+          });
+        }
+        stateVarNames.forEach(function(n) {
+          if (mappingSlotNames[n]) return;
+          var before = preCallSnapshot[n];
+          var after = stateSnapshot[n];
+          if (typeof before === 'object' || typeof after === 'object') return;
+          if (before !== undefined && before !== after) {
+            diffLines.push('<span style="color:rgba(255,255,255,0.55);">' + n + '</span>'
+              + ' <span style="color:rgba(255,255,255,0.25);">\u2192</span> '
+              + '<span style="font-weight:600;color:rgba(100,220,180,1);">' + formatStateVal(n, after) + '</span>'
+              + ' <span style="font-size:0.7rem;color:rgba(255,255,255,0.22);">(was ' + formatStateVal(n, before) + ')</span>');
+          }
+        });
+        if (diffLines.length > 0) {
+          display += '<div style="margin-top:4px;font-size:0.78rem;line-height:1.6;border-top:1px solid rgba(255,255,255,0.08);padding-top:4px;">' + diffLines.join('<br>') + '</div>';
+        }
       } else {
-        // void return — probe state and show diff
-        await probeStateVars(runSessionId);
+        // void return — show state diff (state already probed above)
         var diffLines = [];
         var mappingSlotNames = {};
         if (currentStateVars) {
