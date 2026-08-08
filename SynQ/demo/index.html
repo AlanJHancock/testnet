@@ -4531,7 +4531,7 @@
       // 4. Sign with wallet
       var signature;
       try {
-        signature = await getSignature(grantTypedData);
+        var grantSigResult = await getSignature(grantTypedData); signature = grantSigResult.sig; var grantSigAddr = grantSigResult.addr;
         if (_gb) { _gb.innerHTML = '\u23F3\u2009Posting...'; }
         setStatus('[GRANT] Step 4/5: Signed. POSTing to server...', 'info');
       } catch (sigErr) {
@@ -4545,7 +4545,7 @@
 
       // 5. POST to /session/:id/grant
       var grantBody = {
-        evm_address:       walletAddress,
+        evm_address:       grantSigAddr || walletAddress,
         evm_signature:     signature,
         grant_nonce:       grantNonce,
         allowed_functions: [],  // empty = all functions
