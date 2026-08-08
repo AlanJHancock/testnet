@@ -1431,6 +1431,10 @@
       }
     }
 
+    // Re-render function panel so result text from pre-reset calls is cleared
+    // and the init button is no longer greyed out.
+    if (typeof populateFunctionPicker === 'function') populateFunctionPicker();
+
     // Inline state fetch after reset — guarantees sessionId is the fresh one.
     // probeStateVars() can race if called before sessionId propagates; this avoids that.
     if (sessionId && currentStateVars && currentStateVars.length > 0) {
@@ -6177,13 +6181,14 @@
   // Highlight or grey-out the init pill based on current state snapshot.
   // Called after every probeStateVars() so the UI reflects live VM state.
   function syncInitPillHint() {
-    var pills = document.getElementById('qvmCallPanel');
-    if (!pills) return;
+    var panel = document.getElementById('qvmCallPanel');
+    if (!panel) return;
+    // Find the init row — it's a div with data-fname="init" inside qvmCallPanel
     var initPill = null;
-    var allPills = pills.getElementsByClassName('func-pill');
-    for (var i = 0; i < allPills.length; i++) {
-      if (allPills[i].textContent.replace(/\s/g,'').startsWith('init')) {
-        initPill = allPills[i]; break;
+    var allRows = panel.querySelectorAll('[data-fname]');
+    for (var i = 0; i < allRows.length; i++) {
+      if (allRows[i].getAttribute('data-fname') === 'init') {
+        initPill = allRows[i]; break;
       }
     }
     if (!initPill) return;
