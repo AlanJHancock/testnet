@@ -202,7 +202,7 @@ fn test_transpile_bech32_stubs() {
         }
     "#);
     assert!(sol.contains("string"));
-    assert!(sol.contains("to_syna"));
+    assert!(sol.contains("_toSyna"));
 }
 
 #[test]

@@ -27,8 +27,8 @@ thread_local! {
 
 #[derive(Default)]
 struct BuiltinFlags {
-    needs_to_syna: bool,
-    needs_from_syna: bool,
+    needs_to_tsynq: bool,
+    needs_from_tsynq: bool,
     needs_contract_addr: bool,
     needs_asset: bool,
 }
@@ -366,9 +366,9 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
             writeln!(out, "        return _assetOwner[asset_id];").unwrap();
             writeln!(out, "    }}").unwrap();
         }
-        if f.needs_to_syna {
+        if f.needs_to_tsynq {
             writeln!(out, "").unwrap();
-            writeln!(out, "    // SynQ Bech32 builtin: to_syna — EVM approximation (hex string)").unwrap();
+            writeln!(out, "    // SynQ Bech32 builtin: to_tsynq — EVM approximation (hex string)").unwrap();
             writeln!(out, "    function _toSyna(address addr) internal pure returns (string memory) {{").unwrap();
             writeln!(out, "        bytes memory s = new bytes(42);").unwrap();
             writeln!(out, "        s[0] = bytes1(uint8(0x30)); s[1] = bytes1(uint8(0x78));").unwrap();
@@ -381,9 +381,9 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
             writeln!(out, "        return string(s);").unwrap();
             writeln!(out, "    }}").unwrap();
         }
-        if f.needs_from_syna {
+        if f.needs_from_tsynq {
             writeln!(out, "").unwrap();
-            writeln!(out, "    // SynQ Bech32 builtin: from_syna — EVM approximation (parse hex string)").unwrap();
+            writeln!(out, "    // SynQ Bech32 builtin: from_tsynq — EVM approximation (parse hex string)").unwrap();
             writeln!(out, "    function _fromSyna(string memory s) internal pure returns (uint256) {{").unwrap();
             writeln!(out, "        bytes memory b = bytes(s);").unwrap();
             writeln!(out, "        uint256 result = 0;").unwrap();
@@ -969,8 +969,8 @@ fn transpile_expr(expr: &Expression) -> String {
                     format!("uint256(0) /* SXCP bridge stub: {} */", name),
                 "authority_identity" =>
                     format!("uint256(uint160(msg.sender)) /* EVM approximation: authority_identity = msg.sender */"),
-                "to_syna" => {
-                    BUILTIN_FLAGS.with(|f| f.borrow_mut().needs_to_syna = true);
+                "to_tsynq" | "to_syna" => {
+                    BUILTIN_FLAGS.with(|f| f.borrow_mut().needs_to_tsynq = true);
                     format!("_toSyna(address(uint160({})))", transpile_expr(&args[0]))
                 }
                 "contract_address" => {
@@ -980,8 +980,8 @@ fn transpile_expr(expr: &Expression) -> String {
                         transpile_expr(&args[1]),
                         transpile_expr(&args[2]))
                 },
-                "from_syna" => {
-                    BUILTIN_FLAGS.with(|f| f.borrow_mut().needs_from_syna = true);
+                "from_tsynq" | "from_syna" | "from_syn" => {
+                    BUILTIN_FLAGS.with(|f| f.borrow_mut().needs_from_tsynq = true);
                     format!("_fromSyna({})", transpile_expr(&args[0]))
                 },
                 "extern_call" => {
