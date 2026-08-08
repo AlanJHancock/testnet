@@ -436,7 +436,7 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
             writeln!(out, "        bytes memory charset = \"qpzry9x8gf2tvdw0s3jn54khce6mua7l\";").unwrap();
             writeln!(out, "        // Find separator 1").unwrap();
             writeln!(out, "        uint sep = 0;").unwrap();
-            writeln!(out, "        for (uint i = 0; i < b.length; i++) if (b[i] == 1) sep = i;").unwrap();
+            writeln!(out, "        for (uint i = 0; i < b.length; i++) if (b[i] == bytes1(uint8(0x31))) sep = i;").unwrap();
             writeln!(out, "        // Decode data chars after separator (skip last 6 = checksum)").unwrap();
             writeln!(out, "        uint dataLen = b.length - sep - 1 - 6;").unwrap();
             writeln!(out, "        uint8[] memory data5 = new uint8[](dataLen);").unwrap();
