@@ -645,7 +645,14 @@ fn parse_arg_typed(v: &serde_json::Value, ty_hint: &str) -> Result<Value, String
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 // Negative → signed Value; positive small → I32; large → U128
-                if i < 0 { return Ok(if i >= i32::MIN as i64 { Value::I32(i as i32) } else { Value::I64(i) }); }
+                if i < 0 {
+                    // Reject negative values for unsigned types (u256, u128)
+                    let ty_lower = ty_hint.to_lowercase();
+                    if ty_lower == "u256" || ty_lower == "uint256" || ty_lower == "u128" || ty_lower == "uint128" || ty_lower == "usize" {
+                        return Err(format!("Negative value {} not allowed for unsigned type {}", i, ty_hint));
+                    }
+                    return Ok(if i >= i32::MIN as i64 { Value::I32(i as i32) } else { Value::I64(i) });
+                }
                 return Ok(if i <= i32::MAX as i64 { Value::I32(i as i32) } else { Value::U128(i as u128) });
             }
             if let Some(u) = n.as_u64() { return Ok(Value::U128(u as u128)); }
@@ -689,6 +696,11 @@ fn parse_arg_typed(v: &serde_json::Value, ty_hint: &str) -> Result<Value, String
                 ));
             }
             if s.starts_with('-') {
+                // Reject negative values for unsigned types (u256, u128, usize)
+                let ty_lower = ty_hint.to_lowercase();
+                if ty_lower == "u256" || ty_lower == "uint256" || ty_lower == "u128" || ty_lower == "uint128" || ty_lower == "usize" {
+                    return Err(format!("Negative value {} not allowed for unsigned type {}", s, ty_hint));
+                }
                 if let Ok(i) = s.parse::<i64>() {
                     return Ok(if i >= i32::MIN as i64 { Value::I32(i as i32) } else { Value::I64(i) });
                 }
