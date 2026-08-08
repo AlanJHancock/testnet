@@ -6678,8 +6678,8 @@
       var data = await runRes.json();
 
       if (!data.success) {
-        var errs = data.errors || ['Unknown error'];
-        resultSpan.innerHTML = '<span style="color:#f87171;">' + errs[errs.length - 1].replace(/</g, '&lt;').slice(0, 100) + '</span>';
+        var errMsg = data.error || (data.errors && data.errors.length ? data.errors[data.errors.length - 1] : 'Unknown error');
+        resultSpan.innerHTML = '<span style="color:#f87171;">' + errMsg.replace(/</g, '&lt;').slice(0, 120) + '</span>';
         btn.disabled = false; btn.style.opacity = '1'; btn.textContent = originalBtn;
         return;
       }
