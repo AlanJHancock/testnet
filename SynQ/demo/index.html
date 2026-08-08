@@ -6678,8 +6678,14 @@
 
       // ── Display result inline ──
       var display = '';
-      if (data.result && data.result.length > 0) {
-        data.result.forEach(function(rv, ri) {
+      var _rvList = null;
+      if (data.result && Array.isArray(data.result) && data.result.length > 0) {
+        _rvList = data.result;
+      } else if (data.result && typeof data.result === 'object' && data.result.value !== undefined) {
+        _rvList = [data.result];
+      }
+      if (_rvList) {
+        _rvList.forEach(function(rv, ri) {
           if (typeof rv === 'object' && rv !== null && rv.value !== undefined) {
             var val = rv.value;
             var _rvType = rv.type || '';
@@ -6705,7 +6711,7 @@
           } else {
             display += '<span style="color:#34d399;">' + String(rv).replace(/</g, '&lt;') + '</span>';
           }
-          if (ri < data.result.length - 1) display += ' ';
+          if (ri < _rvList.length - 1) display += ' ';
         });
       } else {
         // void return — probe state and show diff
