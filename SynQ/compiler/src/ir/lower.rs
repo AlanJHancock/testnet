@@ -519,7 +519,7 @@ impl IrLowerer {
                     }
                     UnaryOperator::Not => {
                         self.asm.emit_op(OpCode::Push);
-                        self.asm.emit_i32(1);
+                        self.asm.emit_i32(0);
                         self.asm.emit_op(OpCode::Eq);
                     }
                 }

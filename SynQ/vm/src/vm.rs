@@ -2403,6 +2403,82 @@ contract SqrtTest {
     }
 
     #[test]
+    fn test_ir_unary_not_negates_correctly() {
+        // Regression test: UnaryOperator::Not was lowered as `(x == 1)`
+        // (the identity function on 0/1 booleans) instead of `(x == 0)`
+        // (true negation). This made `eq == !ne` always evaluate false
+        // instead of always true, since eq and ne are always opposite.
+        let source = r#"pragma synq ^0.9;
+contract NotTest {
+    state {
+        initialised: bool;
+    }
+
+    @public
+    function init() -> bool {
+        if (initialised) { return false; }
+        initialised = true;
+        return true;
+    }
+
+    @public
+    function testNot(a: u256, b: u256) -> bool {
+        let eq = (a == b);
+        let ne = (a != b);
+        // eq and ne are always logical opposites, so eq == !ne must
+        // always be true regardless of a and b.
+        return eq == !ne;
+    }
+
+    @public
+    function notOfFalse() -> bool {
+        return !false;
+    }
+
+    @public
+    function notOfTrue() -> bool {
+        return !true;
+    }
+}
+"#;
+
+        let mut vm = compile_ir_and_load(source);
+        vm.call_function("init", &[]).expect("init() should succeed");
+
+        for (a, b) in [(5u32, 5u32), (3, 7), (7, 3), (0, 0), (100, 1)] {
+            let r = vm.call_function("testNot", &[
+                Value::U256(U256::from(a)),
+                Value::U256(U256::from(b)),
+            ]).expect("testNot should execute");
+            match r {
+                Some(Value::Bool(v)) => assert!(v,
+                    "testNot({}, {}) should always be true, got {}", a, b, v),
+                Some(Value::I32(v)) => assert_eq!(v, 1,
+                    "testNot({}, {}) should always be true (1), got {}", a, b, v),
+                Some(Value::U256(v)) => assert_eq!(v, U256::from(1u32),
+                    "testNot({}, {}) should always be true (1), got {}", a, b, v),
+                other => panic!("testNot({}, {}) unexpected result: {:?}", a, b, other),
+            }
+        }
+
+        let rf = vm.call_function("notOfFalse", &[]).expect("notOfFalse should execute");
+        match rf {
+            Some(Value::Bool(v)) => assert!(v, "!false should be true, got {}", v),
+            Some(Value::I32(v)) => assert_eq!(v, 1, "!false should be true (1), got {}", v),
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(1u32), "!false should be true (1), got {}", v),
+            other => panic!("notOfFalse unexpected result: {:?}", other),
+        }
+
+        let rt = vm.call_function("notOfTrue", &[]).expect("notOfTrue should execute");
+        match rt {
+            Some(Value::Bool(v)) => assert!(!v, "!true should be false, got {}", v),
+            Some(Value::I32(v)) => assert_eq!(v, 0, "!true should be false (0), got {}", v),
+            Some(Value::U256(v)) => assert_eq!(v, U256::from(0u32), "!true should be false (0), got {}", v),
+            other => panic!("notOfTrue unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_ir_backend_loop_bytecode() {
         // Verify that the IR backend produces correct bytecode for loops.
         // The IR backend uses a slot-based
