@@ -3252,7 +3252,7 @@ async fn sign_source_handler(
         "issued_at":       issued_at,
         "eip712_domain": {
             "name": "SynQ", "version": "3",
-            "chainId": 1266, "verifyingContract": vc_hex,
+            "chainId": 1264, "verifyingContract": vc_hex,
         },
         "pqc_signature":   pqc_sig_hex,
         "pqc_public_key":  pqc_pubkey_hex,

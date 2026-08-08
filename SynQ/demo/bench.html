@@ -1046,10 +1046,10 @@ async function runExecPhaseFresh(source, name) {
   elog('Signer 2 (secondary): ' + evmAddr2);
   elog('');
 
-  // V3 EIP-712 domain (must match server: chainId=1266, domainTag=SYNQ-CALL-v3)
+  // V3 EIP-712 domain (must match server: chainId=1264, domainTag=SYNQ-CALL-v3)
   var verifyingContract = '0x' + ethers.keccak256(ethers.toUtf8Bytes('SynQ:' + cname)).slice(26, 66);
-  var V3_NETWORK_ID = 'synergy-testnet-v3';
-  var V3_CHAIN_ID   = 1266;
+  var V3_NETWORK_ID = 'synergy-testnet';
+  var V3_CHAIN_ID   = 1264;
   var V3_DOMAIN_TAG = 'SYNQ-CALL-v3';
   var domain = {
     name: 'SynQ \u00b7 ' + cname + ' \u00b7 ' + V3_NETWORK_ID,
