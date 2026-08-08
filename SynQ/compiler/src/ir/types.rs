@@ -28,7 +28,7 @@ pub enum IrType {
     U256,
     Bytes,
     Str,
-    Address,       // 20-byte address (syna/sync)
+    Address,       // 20-byte address (tsynq Bech32m)
 
     // ── Fixed-size types ──
     BytesN(usize),  // Bytes<N>

@@ -28,16 +28,16 @@ contract V3Types {
     return true;
   }
 
-  // Returns owner address as syna... Bech32 string.
+  // Returns owner address as tsynq... Bech32 string.
   @public
   function getOwnerSyna() -> str {
-    return to_syna(owner);
+    return to_tsynq(owner);
   }
 
-  // Returns current caller as syna... Bech32 string.
+  // Returns current caller as tsynq... Bech32 string.
   @public
   function getCallerSyna() as caller -> str {
-    return to_syna(caller);
+    return to_tsynq(caller);
   }
 
   // Returns the UMA identity stored during init.
@@ -81,7 +81,7 @@ contract V3Types {
   // Decodes a syna... string back to a u256 address.
   @public
   function parseSyna(s: str) -> u256 {
-    return from_syna(s);
+    return from_tsynq(s);
   }
 
   @public

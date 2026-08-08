@@ -82,9 +82,9 @@ pub enum IrOp {
     IsOk(ValueId),
     /// IsSome check: result = option.is_some().
     IsSome(ValueId),
-    /// Bech32 encode: result = to_syna(address).
+    /// Bech32 encode: result = to_tsynq(address).
     AddrEncode(ValueId),
-    /// Bech32 decode: result = from_syna(string).
+    /// Bech32 decode: result = from_tsynq(string).
     AddrDecode(ValueId),
     /// Contract address derivation.
     ContractAddr(ValueId, ValueId, ValueId), // deployer, nonce, artifact_hash

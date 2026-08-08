@@ -3551,6 +3551,9 @@ struct NewSessionResponse {
     /// Present when deployment was via SQB artifact.
     #[serde(skip_serializing_if = "Option::is_none")]
     sqb_verified: Option<bool>,
+    /// Whether init() was auto-called on session creation (matches EVM constructor behavior).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    init_called: Option<bool>,
 }
 
 /// Layer 3: Manifest + ML-DSA-87 signature verification result
@@ -3907,7 +3910,7 @@ async fn session_new_handler(
     Json(req): Json<NewSessionRequest>,
 ) -> (StatusCode, RespJson<NewSessionResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, contract_name: None, error: Some("rate limit exceeded — retry later".into()), layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None, sqb_verified: None }));
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, contract_name: None, error: Some("rate limit exceeded — retry later".into()), layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None, sqb_verified: None, init_called: None }));
     }
 
     // ── v7.0: SQB unified deployment path ────────────────────────────────────
@@ -3930,6 +3933,7 @@ async fn session_new_handler(
                 error: Some(format!("SQB base64 decode failed: {}", e)),
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
                 sqb_verified: None,
+            init_called: None,
             })),
         };
 
@@ -3940,6 +3944,7 @@ async fn session_new_handler(
                 error: Some(format!("SQB decode failed: {}", e)),
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
                 sqb_verified: None,
+            init_called: None,
             })),
         };
 
@@ -3951,6 +3956,7 @@ async fn session_new_handler(
                 error: Some("SQB artifact has no CODE section".into()),
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
                 sqb_verified: None,
+            init_called: None,
             })),
         };
 
@@ -3989,6 +3995,7 @@ async fn session_new_handler(
                 error: Some("SQB signature verification failed — artifact may be tampered".into()),
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
                 sqb_verified: Some(false),
+            init_called: None,
             }));
         }
 
@@ -4031,6 +4038,7 @@ async fn session_new_handler(
                 success: false, session_id: None, contract_name: None, error: Some("no bytecode or SQB artifact provided".into()),
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
                 sqb_verified: None,
+            init_called: None,
             })),
         }
     };
@@ -4042,6 +4050,7 @@ async fn session_new_handler(
             error: Some(format!("Bytecode verification failed: {}", e)),
             layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
             sqb_verified,
+        init_called: None,
         }));
     }
 
@@ -4060,6 +4069,7 @@ async fn session_new_handler(
                 error: Some("SQB artifact missing manifest — L3 verification mandatory for SQB deployments".into()),
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None,
                 steps_remaining: None, sqb_verified,
+                init_called: None,
             })),
         }
     } else {
@@ -4092,6 +4102,7 @@ async fn session_new_handler(
                     error: Some(format!("L3 verification FAILED: {}", reason)),
                     layer3: layer3_result.clone(), fuel_budget: None, max_steps: None,
                     steps_used: None, steps_remaining: None, sqb_verified,
+                init_called: None,
                 }));
             }
         }
@@ -4103,6 +4114,7 @@ async fn session_new_handler(
             success: false, session_id: None, contract_name: None, error: Some(format!("Load error: {}", e)),
             layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
             sqb_verified,
+        init_called: None,
         }));
     }
     // Apply optional step limit override
@@ -4207,12 +4219,43 @@ async fn session_new_handler(
         }
     }
 
+    // ── Auto-call init() if present (matches EVM constructor behavior) ────────
+    let mut init_called = None;
+    {
+        let mut map = state.sessions.lock().unwrap();
+        if let Some(session) = map.get_mut(&id) {
+            let has_init = session.vm.list_functions().iter().any(|f| f == "init");
+            if has_init {
+                use sha3::Digest;
+                let devnet_id = sha3::Sha3_256::digest(b"SYNQ-DEVNET-AUTHORITY");
+                let mut devnet_caller = [0u8; 20];
+                devnet_caller.copy_from_slice(&devnet_id[0..20]);
+                session.vm.call_context = synq_vm::CallContext::with_authority(
+                    devnet_caller,
+                    None,
+                    vec![0u8; 104],
+                );
+                match session.vm.call_function("init", &[]) {
+                    Ok(_) => {
+                        eprintln!("[SESSION] Auto-called init() for session {}", id);
+                        init_called = Some(true);
+                    }
+                    Err(e) => {
+                        eprintln!("[SESSION] init() auto-call failed for session {}: {}", id, e);
+                        init_called = Some(false);
+                    }
+                }
+            }
+        }
+    }
+
     (StatusCode::OK, RespJson(NewSessionResponse { success: true, session_id: Some(id), contract_name: req.contract_name.clone(), error: None, layer3: layer3_result,
         fuel_budget: if FUEL_REPORTING { Some(synq_vm::DEFAULT_MAX_FUEL) } else { None },
         max_steps: Some(effective_max_steps),
         steps_used: if FUEL_REPORTING { Some(0) } else { None },
         steps_remaining: if FUEL_REPORTING { Some(effective_max_steps) } else { None },
         sqb_verified,
+        init_called,
     }))
 }
 

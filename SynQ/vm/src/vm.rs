@@ -954,7 +954,7 @@ impl QuantumVM {
             // ── Map operations ──────────────────────────────────────────────
             // state address and pushes that address (I32) as the handle.
             
-            // ── AddrEncode (0x54): pop value → push syna... Bech32 string ──
+            // ── AddrEncode (0x54): pop value → push tsynq... Bech32m string ──
             // Accepts: Bytes (any length, left-padded to 20), U256 (low 20 bytes), I32
             OpCode::AddrEncode => {
                 let v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
@@ -998,13 +998,13 @@ impl QuantumVM {
                     }
                     _ => return Err(VMError::RuntimeError("AddrEncode: expected address value (Bytes/U256/U128/I32)".into())),
                 };
-                match crate::bech32::evm_to_syna(&addr20) {
+                match crate::bech32::encode_address(&addr20) {
                     Ok(encoded) => self.stack.push(Value::Bytes(encoded.into_bytes())),
                     Err(e) => return Err(VMError::RuntimeError(format!("AddrEncode: {}", e))),
                 }
             }
 
-            // ── AddrDecode (0x55): pop Bech32 string → push 20-byte value ──
+            // ── AddrDecode (0x55): pop Bech32m string → push 20-byte value ──
             OpCode::AddrDecode => {
                 let v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
                 let s = match v {
@@ -1012,15 +1012,14 @@ impl QuantumVM {
                         .map_err(|_| VMError::RuntimeError("AddrDecode: invalid UTF-8".into()))?,
                     _ => return Err(VMError::RuntimeError("AddrDecode: expected Bytes (Bech32 string)".into())),
                 };
-                let addr = crate::bech32::syna_to_evm(&s)
-                    .or_else(|_| crate::bech32::from_sync(&s))
+                let addr = crate::bech32::decode_address(&s)
                     .map_err(|e| VMError::RuntimeError(format!("AddrDecode: {}", e)))?;
                 let mut b32 = [0u8; 32];
                 b32[12..32].copy_from_slice(&addr);
                 self.stack.push(Value::U256(U256::from_be_bytes::<32>(b32)));
             }
 
-            // ── ContractAddr (0x56): pop deployer + nonce + artifact_hash → push sync... ──
+            // ── ContractAddr (0x56): pop deployer + nonce + artifact_hash → push tsynq... ──
             OpCode::ContractAddr => {
                 let deployer_v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
                 let nonce_v = self.stack.pop().ok_or(VMError::StackUnderflow)?;
@@ -1100,7 +1099,7 @@ impl QuantumVM {
                 };
 
                 let constructor_hash = [0u8; 32];
-                let network = std::option_env!("SYNQ_NETWORK_ID").unwrap_or("synergy-testnet-v3");
+                let network = std::option_env!("SYNQ_NETWORK_ID").unwrap_or("synergy-testnet");
 
                 match crate::bech32::derive_contract_address(&deployer, nonce, &artifact_hash, &constructor_hash, network) {
                     Ok(encoded) => self.stack.push(Value::Bytes(encoded.into_bytes())),

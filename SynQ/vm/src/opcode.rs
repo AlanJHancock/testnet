@@ -81,9 +81,9 @@ pub enum OpCode {
     LoadAuthority = 0x51,  // push current call's AuthorityEnvelope as Bytes
     AuthRequire   = 0x52,  // pop envelope + scope_hash → push Bool (validated)
     AuthIdentity  = 0x53,  // pop envelope → push UMA identity (U256)
-    AddrEncode   = 0x54,  // pop 20-byte value → push syna... Bech32 string as Bytes
-    AddrDecode   = 0x55,  // pop Bech32 string (Bytes) → push 20-byte value as U256
-    ContractAddr = 0x56,  // pop deployer(U256) + nonce(U256) + artifact_hash(Bytes32) → push sync... Bech32 string
+    AddrEncode   = 0x54,  // pop 20-byte value → push tsynq... Bech32m string as Bytes
+    AddrDecode   = 0x55,  // pop Bech32m string (Bytes) → push 20-byte value as U256
+    ContractAddr = 0x56,  // pop deployer(U256) + nonce(U256) + artifact_hash(Bytes32) → push tsynq... Bech32m string
     // ── Linear asset tracking (0x57-0x5B) ──────────────────────────────
     AssetCreate   = 0x57,  // pop type_tag(I32) + value(U256) → push asset_id(U256)
     AssetTransfer = 0x58,  // pop new_owner(U256) + asset_id(U256) → push new_asset_id(U256)
