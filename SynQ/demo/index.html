@@ -1233,6 +1233,7 @@
       if (c.manifest) resetBody.manifest = c.manifest;
       if (c.name)      resetBody.contract_name = c.name;
       if (workspaceId)        resetBody.workspace_id    = workspaceId;
+      if (walletAddress)      resetBody.caller_address  = walletAddress;
       if (c.fnReturnTypes)   resetBody.fn_return_types = c.fnReturnTypes;
       try {
         var res  = await fetch(SESSION_NEW_URL, {
@@ -3986,7 +3987,8 @@
       // v7.0: Deploy from SQB artifact when available (unified deployment unit)
       var deployBody = Object.assign(
         { state_vars: currentStateVars, contract_name: currentContractName },
-        workspaceId ? { workspace_id: workspaceId } : {}
+        workspaceId ? { workspace_id: workspaceId } : {},
+        walletAddress ? { caller_address: walletAddress } : {}
       );
       if (currentSqb) {
         deployBody.sqb = currentSqb;
@@ -5539,6 +5541,7 @@
       if (c.name)      resetBody.contract_name = c.name;
       if (workspaceId)        resetBody.workspace_id    = workspaceId;
       if (c.fnReturnTypes)   resetBody.fn_return_types = c.fnReturnTypes;
+      if (walletAddress)      resetBody.caller_address  = walletAddress;
       try {
         var res  = await fetch(SESSION_NEW_URL, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
