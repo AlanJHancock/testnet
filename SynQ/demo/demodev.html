@@ -1330,135 +1330,6 @@
     window._stepUsed = 0;
   }
 
-  async function resetVM() {
-    _sessionGrantActive = false;
-    _sessionGrantExpiry = 0;
-    updateGrantBadge();
-    var out = document.getElementById('vmOutput');
-    out.innerHTML = '<span class="dim">Resetting all VM sessions...</span>';
-    // Reset cumulative gas counter
-    window._gasUsed = 0;
-
-    // ── Reset every contract in the workspace, not just the active one ──────
-    // This ensures all contracts (e.g. SimpleToken) start with clean state
-    // so TokenVault.init() can call extern_call("SimpleToken","init") fresh.
-    var toReset = workspaceContracts.length > 0
-      ? workspaceContracts.slice()   // copy — reset all workspace members
-      : (currentBytecode ? [{ name: currentContractName, session_id: sessionId,
-                               bytecode: currentBytecode, state_vars: currentStateVars }] : []);
-
-    if (toReset.length === 0) {
-      out.innerHTML = '<span class="dim">No bytecode loaded — compile a contract first.</span>';
-      return;
-    }
-
-    var failed = [];
-    for (var ri = 0; ri < toReset.length; ri++) {
-      var c = toReset[ri];
-      // 1. Delete the old session
-      if (c.session_id) {
-        try { await fetch(SESSION_DEL_URL + c.session_id, { method: 'DELETE' }); } catch(e){}
-      }
-      // 2. Create a fresh session
-      var resetBody = { state_vars: c.stateVars || c.state_vars || [] };
-      if (c.sqb) { resetBody.sqb = c.sqb; } else { resetBody.bytecode = c.bytecode; }
-      if (c.manifest) resetBody.manifest = c.manifest;
-      if (c.name)      resetBody.contract_name = c.name;
-      if (workspaceId)        resetBody.workspace_id    = workspaceId;
-      if (walletAddress)      resetBody.caller_address  = walletAddress;
-      if (c.fnReturnTypes)   resetBody.fn_return_types = c.fnReturnTypes;
-      try {
-        var res  = await fetch(SESSION_NEW_URL, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(resetBody)
-        });
-        var data = await res.json();
-        if (data.success) {
-          var newSid = data.session_id;
-          _autoInitCalled = (data.init_called === true);  // server auto-calls init()
-          // 3. Re-register into workspace
-          if (workspaceId && c.name) {
-            try {
-              await fetch(WORKSPACE_URL + '/' + workspaceId + '/join', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ session_id: newSid, contract_name: c.name })
-              });
-            } catch(we) { console.warn('[resetVM] workspace re-join failed for', c.name, we); }
-          }
-          // 4. Update local state
-          var ci = workspaceContracts.findIndex(function(w){ return w.name === c.name; });
-          if (ci >= 0) workspaceContracts[ci].session_id = newSid;
-          // Update active sessionId if this contract is the active one.
-          // Match on name OR on old session_id (covers single-contract flow
-          // where c.name may be undefined or currentContractName unset).
-          if (c.name === currentContractName
-              || c.session_id === sessionId
-              || toReset.length === 1) {
-            sessionId = newSid;
-            _sessionGrantActive = false;
-            _sessionGrantExpiry = 0;
-            updateSessionBadge();
-          }
-        } else {
-          failed.push(c.name + ': ' + (data.error || 'unknown'));
-        }
-      } catch(e) { failed.push(c.name + ': ' + e.message); }
-    }
-
-    renderWorkspacePanel();
-
-    if (failed.length > 0) {
-      out.innerHTML = '<span class="err">Reset partial — failed: ' + failed.join(', ') + '</span>';
-    } else {
-      var names = toReset.map(function(c){ return c.name; }).join(', ');
-      out.innerHTML = '<span class="ok">All sessions reset (' + names + '). ' + 'State cleared — the <b>init</b> pill will glow amber on each contract that needs initialising.</span>';
-    }
-
-      // Immediately zero stateSnapshot so panel shows clean VM, not stale '?'
-      stateSnapshot = {};
-      if (stateVarNames && stateVarNames.length > 0) {
-        stateVarNames.forEach(function(n) { stateSnapshot[n] = '0'; });
-      }
-      window._sessionLostHinted = false;
-      _autoInitCalled = false;  // fresh session, init not yet called
-      updateStateDisplay();
-      syncInitPillHint();
-
-    // Clear param inputs
-    for (var p = 0; p < (selectedFunc ? selectedFunc.paramCount : 0); p++) {
-      var el = document.getElementById('param_' + p);
-      if (el) {
-        // Reset str params to blank, numeric params to 0
-        var _isStr = selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'str';
-        el.value = (_isStr || (selectedFunc.paramTypes && selectedFunc.paramTypes[p] === 'bytes')) ? '' : '0';
-      }
-    }
-
-    // Re-render function panel so result text from pre-reset calls is cleared
-    // and the init button is no longer greyed out.
-    if (typeof populateFunctionPicker === 'function') populateFunctionPicker();
-
-    // Inline state fetch after reset — guarantees sessionId is the fresh one.
-    // probeStateVars() can race if called before sessionId propagates; this avoids that.
-    if (sessionId && currentStateVars && currentStateVars.length > 0) {
-      try {
-        var _rr = await fetch(SESSION_DEL_URL + sessionId + '/state');
-        var _rd = await _rr.json();
-        if (_rd.success && _rd.state) {
-          var _names = currentStateVars.map(function(sv){ return sv[0]; });
-          stateVarNames = _names;
-          stateSnapshot = {};
-          _names.forEach(function(n) {
-            var raw = _rd.state[n];
-            stateSnapshot[n] = (raw === undefined || raw === null) ? '0' : String(raw);
-          });
-          updateStateDisplay();
-          syncInitPillHint();
-        }
-      } catch(_re) {}
-    }
-  }
-
   function updateWalletUI() {
     var dot   = document.getElementById('walletDot');
     var label = document.getElementById('walletLabel');
@@ -5600,8 +5471,8 @@
             }
           });
           if (diffLines.length > 0) {
-            display += '<div style="margin-top:2px;font-size:0.82rem;font-family:ui-monospace,monospace;white-space:nowrap;overflow-x:auto;">'
-              + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ') + '</div>';
+            display += '<span style="display:block;margin-top:2px;font-size:0.72rem;font-family:ui-monospace,monospace;white-space:nowrap;overflow-x:auto;">'
+              + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ') + '</span>';
           } else {
             display += '<span class="ok" style="font-size:0.85rem;">void</span>';
           }
@@ -6001,6 +5872,7 @@
               || c.session_id === sessionId
               || toReset.length === 1) {
             sessionId = newSid;
+            _autoInitCalled = (data.init_called === true);  // server auto-calls init()
             _sessionGrantActive = false;
             _sessionGrantExpiry = 0;
             updateSessionBadge();
@@ -6013,11 +5885,21 @@
 
     renderWorkspacePanel();
 
+    // ── Re-create session grant so calls don't fall back to per-call signing ──
+    // Reset creates fresh sessions server-side, invalidating any prior grant.
+    var grantOk = true;
+    if (walletAddress && sessionId) {
+      out.innerHTML = '<span class="dim">Sessions reset. Re-creating session grant (sign once)...</span>';
+      grantOk = await createSessionGrant();
+      if (grantOk) { updateWalletUI(); } else { updateWalletUI(); updateGrantBadge(); }
+    }
+
     if (failed.length > 0) {
       out.innerHTML = '<span class="err">Reset partial — failed: ' + failed.join(', ') + '</span>';
     } else {
       var names = toReset.map(function(c){ return c.name; }).join(', ');
-      out.innerHTML = '<span class="ok">All sessions reset (' + names + '). All state back to zero — init() auto-called on new session.</span>';
+      var grantNote = walletAddress ? (grantOk ? ' Grant re-created — no per-call signing.' : ' Grant failed — per-call signing required.') : '';
+      out.innerHTML = '<span class="ok">All sessions reset (' + names + '). All state back to zero — init() auto-called on new session.' + grantNote + '</span>';
     }
 
       // Immediately zero stateSnapshot so panel shows clean VM, not stale '?'
@@ -6026,7 +5908,6 @@
         stateVarNames.forEach(function(n) { stateSnapshot[n] = '0'; });
       }
       window._sessionLostHinted = false;
-      _autoInitCalled = false;  // fresh session, init not yet called
       updateStateDisplay();
       syncInitPillHint();
 
@@ -6206,7 +6087,8 @@
       initPill.style.outline       = '';
       initPill.dataset.blocked     = '1';
       // Update the result span to show auto-init status
-      var _rs = initPill.querySelector('.qvmResult');
+      var _rs = initPill.nextElementSibling;
+      if (!_rs || !_rs.classList.contains('qvmResult')) _rs = initPill.querySelector('.qvmResult');
       if (_rs && !_rs.innerHTML) {
         _rs.innerHTML = '<span style="color:rgba(100,220,180,0.6);font-size:0.65rem;">\u2713 auto-initialised on deploy</span>';
       }
@@ -6509,8 +6391,8 @@
         'data-fidx="' + idx + '" data-fname="' + fn.name + '">' +
         '<span style="font-family:ui-monospace,monospace;font-size:0.7rem;color:#e2e8f0;flex-shrink:0;display:flex;align-items:center;">' + lockIcon + fn.name + '</span>' +
         paramsHtml + ' ' + btnHtml + capHtml +
-        '<span class="qvmResult" style="font-family:ui-monospace,monospace;font-size:0.68rem;color:rgba(255,255,255,0.6);margin-left:4px;flex-shrink:0;"></span>' +
-        '</div>';
+        '</div>' +
+        '<div class="qvmResult" style="font-family:ui-monospace,monospace;font-size:0.72rem;color:rgba(255,255,255,0.6);margin:0 0 6px 8px;padding:2px 8px;min-height:0;"></div>';
       // Hint line — always its own full-width line directly under the row,
       // indented to line up with the params (not the function name column).
       var _hint = FUNCTION_HINTS[fn.name];
@@ -6530,7 +6412,11 @@
 
     var row = document.getElementById('qvmFunc_' + idx);
     if (!row) return;
-    var resultSpan = row.querySelector('.qvmResult');
+    // qvmResult is now a sibling div after the row (not a child)
+    var resultSpan = row.nextElementSibling;
+    if (!resultSpan || !resultSpan.classList.contains('qvmResult')) {
+      resultSpan = row.querySelector('.qvmResult'); // fallback
+    }
     var btn = row.querySelector('button');
     if (!resultSpan || !btn) return;
 
@@ -6824,7 +6710,7 @@
           }
         });
         if (diffLines.length > 0) {
-          display += '<div style="margin-top:4px;font-size:0.78rem;border-top:1px solid rgba(255,255,255,0.08);padding-top:4px;white-space:nowrap;overflow-x:auto;">' + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ') + '</div>';
+          display += '<span style="display:block;margin-top:4px;font-size:0.72rem;border-top:1px solid rgba(255,255,255,0.08);padding-top:3px;white-space:nowrap;overflow-x:auto;">' + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ') + '</span>';
         }
       } else {
         // void return — show state diff (state already probed above)
@@ -6849,7 +6735,7 @@
           }
         });
         if (diffLines.length > 0) {
-          display += '<div style="font-size:0.82rem;white-space:nowrap;overflow-x:auto;">' + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ') + '</div>';
+          display += '<span style="display:block;font-size:0.72rem;white-space:nowrap;overflow-x:auto;">' + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ') + '</span>';
         } else {
           display += '<span style="color:#34d399;font-size:0.85rem;">\u2713 void</span>';
         }
@@ -6857,11 +6743,11 @@
 
       // Events
       if (data.events && data.events.length > 0) {
-        display += '<div style="margin-top:4px;">';
+        display += '<span style="display:block;margin-top:4px;">';
         data.events.forEach(function(ev) {
-          display += '<div style="font-size:0.72rem;color:rgba(150,220,255,0.85);">\u2605 ' + ev.name + '</div>';
+          display += '<span style="display:block;font-size:0.72rem;color:rgba(150,220,255,0.85);">\u2605 ' + ev.name + '</span>';
         });
-        display += '</div>';
+        display += '</span>';
       }
 
       resultSpan.innerHTML = display;
