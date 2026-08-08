@@ -2862,8 +2862,52 @@
   function loadComprehensive() { loadContract('ComprehensiveToken'); }
 
 
+  /* ── Per-function relevant-state-var detection ──────────────────────────────
+     Statically scans the current source for each function's body and returns
+     only the scalar state vars that function actually WRITES. This keeps the
+     inline result line consistent across repeated calls (same fields every
+     time, since it's based on source not runtime state) AND relevant (skips
+     fields the function never touches, e.g. a pure getter shows none). ── */
+  function stripCommentsForScan(src) {
+    // Always strip comments before regex matching (standing rule).
+    return src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/.*$/gm, ' ');
+  }
+  function extractFunctionBody(src, fnName) {
+    var clean = stripCommentsForScan(src || '');
+    var sigRe = new RegExp('function\\s+' + fnName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\(');
+    var m = sigRe.exec(clean);
+    if (!m) return '';
+    var braceStart = clean.indexOf('{', m.index);
+    if (braceStart === -1) return '';
+    var depth = 0, i = braceStart;
+    for (; i < clean.length; i++) {
+      if (clean[i] === '{') depth++;
+      else if (clean[i] === '}') { depth--; if (depth === 0) { i++; break; } }
+    }
+    return clean.slice(braceStart, i);
+  }
+  var _writtenVarsCache = {};
+  function getWrittenStateVars(fnName, mappingSlotNames) {
+    if (_writtenVarsCache[fnName]) return _writtenVarsCache[fnName];
+    var src = (document.getElementById('editor') && document.getElementById('editor').value) || '';
+    var body = extractFunctionBody(src, fnName);
+    var written = [];
+    if (body && stateVarNames && stateVarNames.length) {
+      stateVarNames.forEach(function(n) {
+        if (mappingSlotNames[n]) return;
+        var esc = n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // name = value (not ==, <=, >=, !=), or name[...] = , or name.add/remove/insert(
+        var writeRe = new RegExp('\\b' + esc + '\\b\\s*(\\[[^\\]]*\\]\\s*)?[+\\-*/%]?=(?!=)|\\b' + esc + '\\b\\s*\\.(add|remove|insert|push)\\s*\\(');
+        if (writeRe.test(body)) written.push(n);
+      });
+    }
+    _writtenVarsCache[fnName] = written;
+    return written;
+  }
+
   /* ── Compile ─────────────────────────────────────────────────────────────── */
   async function doCompile() {
+    _writtenVarsCache = {}; // clear per-function write-var cache on recompile
     var source = document.getElementById('editor').value.trim();
     if (!source) { setStatus('No source code to compile.', 'error'); return; }
     var btn = document.getElementById('compileBtn');
@@ -5455,8 +5499,9 @@
               if (/balance|_role|map|set|roles|admin|ready|labelled|initialised|active/i.test(n)) mappingSlotNames[n] = true;
             });
           }
-          stateVarNames.forEach(function(n) {
-            if (mappingSlotNames[n]) return; // skip non-enumerable mapping slots
+          var _relVars1 = (selectedFunc && selectedFunc.name)
+            ? getWrittenStateVars(selectedFunc.name, mappingSlotNames) : [];
+          _relVars1.forEach(function(n) {
             var before = preCallSnapshot[n];
             var after  = stateSnapshot[n];
             if (typeof after === 'object') return;
@@ -6692,8 +6737,8 @@
             if (/balance|_role|map|set|roles|admin|ready|labelled|initialised|active/i.test(n)) mappingSlotNames[n] = true;
           });
         }
-        stateVarNames.forEach(function(n) {
-          if (mappingSlotNames[n]) return;
+        var _relVars2 = (fn && fn.name) ? getWrittenStateVars(fn.name, mappingSlotNames) : [];
+        _relVars2.forEach(function(n) {
           var before = preCallSnapshot[n];
           var after = stateSnapshot[n];
           if (typeof after === 'object') return;
@@ -6720,8 +6765,8 @@
             if (/balance|_role|map|set|roles|admin|ready|labelled|initialised|active/i.test(n)) mappingSlotNames[n] = true;
           });
         }
-        stateVarNames.forEach(function(n) {
-          if (mappingSlotNames[n]) return;
+        var _relVars3 = (fn && fn.name) ? getWrittenStateVars(fn.name, mappingSlotNames) : [];
+        _relVars3.forEach(function(n) {
           var before = preCallSnapshot[n];
           var after = stateSnapshot[n];
           if (typeof after === 'object') return;
