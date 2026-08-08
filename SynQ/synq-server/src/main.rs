@@ -2274,6 +2274,281 @@ solc_version = "0.8.20"
     }))
 }
 
+// ── POST /deploy-evm-workspace ──────────────────────────────────────────────────────────────
+//
+// Deploys multiple Solidity contracts to Anvil in dependency order, then calls
+// _set<Contract>Addr() to link cross-contract references.  This is the EVM
+// workspace deployment path — compiles all contracts together, deploys in
+// topological order (contracts with no extern refs first), and wires up
+// addresses automatically.
+
+#[derive(serde::Deserialize)]
+struct WorkspaceContractInput {
+    solidity_source: String,
+    contract_name:   String,
+}
+
+#[derive(serde::Deserialize)]
+struct DeployEvmWorkspaceRequest {
+    contracts:       Vec<WorkspaceContractInput>,
+    #[serde(default)]
+    wallet_address:  Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct DeployedContractInfo {
+    name:             String,
+    address:          String,
+    transaction_hash: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct DeployEvmWorkspaceResponse {
+    success:   bool,
+    contracts: Vec<DeployedContractInfo>,
+    rpc_url:   Option<String>,
+    chain_id:  Option<u64>,
+    errors:    Vec<String>,
+    warnings:  Vec<String>,
+}
+
+async fn deploy_evm_workspace_handler(
+    Json(req): Json<DeployEvmWorkspaceRequest>,
+) -> (StatusCode, RespJson<DeployEvmWorkspaceResponse>) {
+    use std::process::Command;
+    use std::fs;
+    use std::collections::{HashMap, HashSet};
+
+    let forge_bin  = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()) + "/.foundry/bin/forge";
+    let anvil_bin  = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()) + "/.foundry/bin/anvil";
+    let cast_bin   = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()) + "/.foundry/bin/cast";
+    let anvil_pk   = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+    let anvil_port = 8546u16;
+    let rpc_url    = format!("http://127.0.0.1:{}", anvil_port);
+
+    // ── Start anvil if not running ──────────────────────────────────────
+    let anvil_running = Command::new(&cast_bin)
+        .args(["chain-id", "--rpc-url", &rpc_url])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !anvil_running {
+        let _ = Command::new(&anvil_bin)
+            .args(["--port", &anvil_port.to_string(),
+                   "--accounts", "1", "--balance", "10000", "--silent"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+        let check = Command::new(&cast_bin)
+            .args(["chain-id", "--rpc-url", &rpc_url])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !check {
+            return (StatusCode::INTERNAL_SERVER_ERROR, RespJson(DeployEvmWorkspaceResponse {
+                success: false, contracts: vec![], rpc_url: None, chain_id: None,
+                errors: vec!["Failed to start Anvil".to_string()], warnings: vec![],
+            }));
+        }
+    }
+
+    // ── Impersonate wallet if provided ─────────────────────────────────
+    let use_wallet = req.wallet_address.as_deref()
+        .filter(|s| s.starts_with("0x") && s.len() == 42)
+        .map(|s| s.to_lowercase())
+        .filter(|s| s != "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+    if let Some(ref wallet) = use_wallet {
+        let _ = Command::new(&cast_bin)
+            .args(["rpc", "--rpc-url", &rpc_url, "anvil_impersonateAccount", wallet])
+            .output();
+        let _ = Command::new(&cast_bin)
+            .args(["rpc", "--rpc-url", &rpc_url, "anvil_setBalance", wallet, "0x56BC75E2D63100000"])
+            .output();
+    }
+
+    // ── Create temp Foundry project ────────────────────────────────────
+    let temp_dir = format!("/tmp/synq-evm-ws-{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+    let src_dir = format!("{}/src", temp_dir);
+    let _ = fs::create_dir_all(&src_dir);
+    let _ = fs::write(format!("{}/foundry.toml", temp_dir),
+        "[profile.default]\nsrc = \"src\"\nout = \"out\"\nlibs = [\"lib\"]\nsolc_version = \"0.8.20\"\n");
+
+    // Write each contract to its own .sol file
+    let mut contract_names = Vec::new();
+    for c in &req.contracts {
+        let filename = format!("{}.sol", c.contract_name);
+        let _ = fs::write(format!("{}/{}", src_dir, filename), &c.solidity_source);
+        contract_names.push(c.contract_name.clone());
+    }
+
+    // ── Build all contracts ────────────────────────────────────────────
+    let build_output = Command::new(&forge_bin)
+        .arg("build").current_dir(&temp_dir).output();
+
+    if !build_output.as_ref().map(|o| o.status.success()).unwrap_or(false) {
+        let stderr = match &build_output { Ok(o) => String::from_utf8_lossy(&o.stderr).to_string(), Err(e) => e.to_string() };
+        let _ = fs::remove_dir_all(&temp_dir);
+        return (StatusCode::OK, RespJson(DeployEvmWorkspaceResponse {
+            success: false, contracts: vec![], rpc_url: Some(rpc_url), chain_id: None,
+            errors: vec!["Forge build failed: ".to_string() + &stderr], warnings: vec![],
+        }));
+    }
+
+    // ── Determine dependency order (topological sort) ──────────────────
+    let mut deps: HashMap<String, HashSet<String>> = HashMap::new();
+    for c in &req.contracts {
+        let mut d = HashSet::new();
+        for part in c.solidity_source.split("_extern_").skip(1) {
+            if let Some(underscore) = part.find('_') {
+                let dep_name = &part[..underscore];
+                if contract_names.contains(&dep_name.to_string()) {
+                    d.insert(dep_name.to_string());
+                }
+            }
+        }
+        deps.insert(c.contract_name.clone(), d);
+    }
+
+    let mut deployed_order: Vec<String> = Vec::new();
+    let mut remaining: Vec<String> = contract_names.clone();
+    let mut deployed_set: HashSet<String> = HashSet::new();
+    loop {
+        let ready: Vec<String> = remaining.iter()
+            .filter(|name| {
+                let d = deps.get(*name).cloned().unwrap_or_default();
+                d.is_empty() || d.iter().all(|dep| deployed_set.contains(dep))
+            })
+            .cloned()
+            .collect();
+        if ready.is_empty() {
+            if remaining.is_empty() { break; }
+            // Circular or missing dep — deploy remaining in order
+            deployed_order.extend(remaining.clone());
+            break;
+        }
+        for name in &ready {
+            deployed_order.push(name.clone());
+            deployed_set.insert(name.clone());
+        }
+        remaining.retain(|n| !deployed_set.contains(n));
+    }
+
+    // ── Deploy in order + wire up addresses ────────────────────────────
+    let mut deployed: HashMap<String, String> = HashMap::new();
+    let mut results: Vec<DeployedContractInfo> = Vec::new();
+
+    for name in &deployed_order {
+        let contract_spec = format!("src/{}.sol:{}", name, name);
+        let deploy_args = if let Some(ref wallet) = use_wallet {
+            vec!["--rpc-url".into(), rpc_url.clone(), "--from".into(), wallet.to_string(), "--unlocked".into(), "--broadcast".into()]
+        } else {
+            vec!["--rpc-url".into(), rpc_url.clone(), "--private-key".into(), anvil_pk.to_string(), "--broadcast".into()]
+        };
+
+        let deploy_output = Command::new(&forge_bin)
+            .arg("create").arg(&contract_spec)
+            .args(&deploy_args)
+            .current_dir(&temp_dir)
+            .output();
+
+        let (addr, tx_hash) = match deploy_output {
+            Ok(o) if o.status.success() => {
+                let combined = format!("{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+                let addr = combined.lines()
+                    .find(|l| l.contains("Deployed to:"))
+                    .and_then(|l| l.split(':').nth(1))
+                    .map(|s| s.trim().to_string());
+                let tx = combined.lines()
+                    .find(|l| l.contains("Transaction hash:"))
+                    .and_then(|l| l.split(':').nth(1))
+                    .map(|s| s.trim().to_string());
+                (addr, tx)
+            }
+            _ => {
+                let err = match deploy_output { Ok(ref o) => String::from_utf8_lossy(&o.stderr).to_string(), Err(ref e) => e.to_string() };
+                let _ = fs::remove_dir_all(&temp_dir);
+                return (StatusCode::OK, RespJson(DeployEvmWorkspaceResponse {
+                    success: false, contracts: results, rpc_url: Some(rpc_url), chain_id: None,
+                    errors: vec![format!("Failed to deploy {}: {}", name, err)], warnings: vec![],
+                }));
+            }
+        };
+
+        let addr = match addr { Some(a) => a, None => {
+            let _ = fs::remove_dir_all(&temp_dir);
+            return (StatusCode::OK, RespJson(DeployEvmWorkspaceResponse {
+                success: false, contracts: results, rpc_url: Some(rpc_url), chain_id: None,
+                errors: vec![format!("Could not parse deploy address for {}", name)], warnings: vec![],
+            }));
+        }};
+
+        deployed.insert(name.clone(), addr.clone());
+        results.push(DeployedContractInfo {
+            name: name.clone(),
+            address: addr.clone(),
+            transaction_hash: tx_hash,
+        });
+
+        eprintln!("[deploy-evm-ws] Deployed {} to {}", name, addr);
+
+        // ── Wire up dependencies: call _set<Dep>Addr(<addr>) ─────────────
+        let d = deps.get(name).cloned().unwrap_or_default();
+        for dep in &d {
+            if let Some(dep_addr) = deployed.get(dep) {
+                let setter = format!("_set{}Addr(address)", dep);
+                let setter_args = if let Some(ref wallet) = use_wallet {
+                    vec!["--rpc-url".into(), rpc_url.clone(), "--from".into(), wallet.to_string(), "--unlocked".into()]
+                } else {
+                    vec!["--rpc-url".into(), rpc_url.clone(), "--private-key".into(), anvil_pk.to_string()]
+                };
+                let _ = Command::new(&cast_bin)
+                    .arg("send").arg(&addr).arg(&setter).arg(dep_addr)
+                    .args(&setter_args)
+                    .output();
+                eprintln!("[deploy-evm-ws] Wired {}._set{}Addr({})", name, dep, dep_addr);
+            }
+        }
+
+        // ── Auto-call init() if present ────────────────────────────────
+        let init_args = if let Some(ref wallet) = use_wallet {
+            vec!["--rpc-url".into(), rpc_url.clone(), "--from".into(), wallet.to_string(), "--unlocked".into()]
+        } else {
+            vec!["--rpc-url".into(), rpc_url.clone(), "--private-key".into(), anvil_pk.to_string()]
+        };
+        let init_output = Command::new(&cast_bin)
+            .arg("send").arg(&addr).arg("init()")
+            .args(&init_args)
+            .output();
+        match init_output {
+            Ok(o) if o.status.success() => eprintln!("[deploy-evm-ws] Auto-called init() on {}", name),
+            _ => eprintln!("[deploy-evm-ws] init() on {} non-fatal or absent", name),
+        }
+    }
+
+    // Get chain id
+    let chain_id = Command::new(&cast_bin)
+        .args(["chain-id", "--rpc-url", &rpc_url])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(31337);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    (StatusCode::OK, RespJson(DeployEvmWorkspaceResponse {
+        success: true,
+        contracts: results,
+        rpc_url: Some(rpc_url),
+        chain_id: Some(chain_id),
+        errors: vec![],
+        warnings: vec![],
+    }))
+}
+
 // ── POST /evm-call ──────────────────────────────────────────────────────────────────────────
 //
 // Calls a function on a deployed EVM contract (Anvil) using cast.
@@ -5686,6 +5961,7 @@ async fn list_contracts_handler(
         .route("/decompile",         post(decompile_handler))
         .route("/verify-sol",        post(verify_sol_handler))
         .route("/deploy-evm",         post(deploy_evm_handler))
+        .route("/deploy-evm-workspace", post(deploy_evm_workspace_handler))
         .route("/evm-call",          post(evm_call_handler))
         .route("/save-contract",    post(save_contract_handler))
         .route("/list-user-contracts", get(list_user_contracts_handler))

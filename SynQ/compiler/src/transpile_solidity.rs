@@ -31,6 +31,62 @@ struct BuiltinFlags {
     needs_from_tsynq: bool,
     needs_contract_addr: bool,
     needs_asset: bool,
+    needs_extern: bool,
+}
+
+#[derive(Clone, PartialEq)]
+struct ExternCallInfo {
+    contract: String,
+    function: String,
+    arg_types: Vec<String>,
+    has_return: bool,
+}
+
+thread_local! {
+    static EXTERN_REFS: RefCell<Vec<ExternCallInfo>> = RefCell::new(Vec::new());
+}
+
+fn sol_type_for_expr(expr: &Expression) -> String {
+    match expr {
+        Expression::Caller => "uint256".to_string(),
+        Expression::Literal(Literal::String(_)) => "string".to_string(),
+        Expression::Literal(Literal::Bool(_)) => "bool".to_string(),
+        Expression::Literal(Literal::Number(_)) => "uint256".to_string(),
+        Expression::Literal(Literal::BigNumber(_)) => "uint256".to_string(),
+        Expression::Identifier(name) => {
+            if name == "caller" { "uint256".to_string() } else {
+                TYPE_CTX.with(|ctx| {
+                    let ctx = ctx.borrow();
+                    ctx.get(name).map(|t| type_to_solidity(t)).unwrap_or_else(|| "uint256".to_string())
+                })
+            }
+        }
+        _ => "uint256".to_string(),
+    }
+}
+
+fn type_to_solidity(t: &Type) -> String {
+    match t {
+        Type::UInt256 | Type::UInt128 | Type::UInt64 | Type::UInt32 | Type::UInt16 | Type::UInt8 => "uint256".to_string(),
+        Type::Int256 | Type::Int128 | Type::Int64 | Type::Int32 | Type::Int16 | Type::Int8 => "int256".to_string(),
+        Type::Bool => "bool".to_string(),
+        Type::Str => "string".to_string(),
+        Type::Bytes => "bytes".to_string(),
+        Type::Address => "uint256".to_string(),
+        _ => "uint256".to_string(),
+    }
+}
+
+fn register_extern_call(contract: &str, function: &str, args: &[Expression], has_return: bool) {
+    let arg_types: Vec<String> = args.iter().map(sol_type_for_expr).collect();
+    EXTERN_REFS.with(|refs| {
+        let mut refs = refs.borrow_mut();
+        let exists = refs.iter().any(|r| r.contract == contract && r.function == function && r.arg_types == arg_types && r.has_return == has_return);
+        if !exists {
+            refs.push(ExternCallInfo { contract: contract.to_string(), function: function.to_string(), arg_types, has_return });
+        }
+    });
+    BUILTIN_FLAGS.with(|f| f.borrow_mut().needs_extern = true);
 }
 
 fn set_type(name: &str, ty: Type) {
@@ -167,8 +223,9 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
     };
     let mut out = String::new();
 
-    // Reset builtin flags
+    // Reset builtin flags and extern refs
     BUILTIN_FLAGS.with(|f| *f.borrow_mut() = BuiltinFlags::default());
+    EXTERN_REFS.with(|r| r.borrow_mut().clear());
 
     // Header
     writeln!(out, "// ═════════════════════════════════════════════════════════════════").unwrap();
@@ -473,6 +530,59 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
         }
     });
 
+    // Generate extern_call helpers if any were used
+    EXTERN_REFS.with(|refs| {
+        let refs = refs.borrow();
+        if !refs.is_empty() {
+            let mut contracts: Vec<String> = Vec::new();
+            for r in &*refs {
+                if !contracts.contains(&r.contract) {
+                    contracts.push(r.contract.clone());
+                }
+            }
+
+            // State variables for contract addresses
+            for c in &contracts {
+                writeln!(out, "").unwrap();
+                writeln!(out, "    // Extern contract address").unwrap();
+                writeln!(out, "    address internal _{}_addr;", c).unwrap();
+            }
+
+            // Setter functions
+            for c in &contracts {
+                writeln!(out, "").unwrap();
+                writeln!(out, "    function _set{}Addr(address _addr) public {{", c).unwrap();
+                writeln!(out, "        _{}_addr = _addr;", c).unwrap();
+                writeln!(out, "    }}").unwrap();
+            }
+
+            // Helper functions for each extern_call
+            for r in &*refs {
+                let sig_types = r.arg_types.join(",");
+                let helper_name = format!("_extern_{}_{}", r.contract, r.function);
+                let arg_names: Vec<String> = (0..r.arg_types.len()).map(|i| format!("a{}", i)).collect();
+                let params: Vec<String> = r.arg_types.iter().zip(arg_names.iter())
+                    .map(|(t, n)| format!("{} {}", t, n))
+                    .collect();
+
+                writeln!(out, "").unwrap();
+                if r.has_return {
+                    writeln!(out, "    function {}({}) internal returns (uint256) {{", helper_name, params.join(", ")).unwrap();
+                    writeln!(out, "        (bool _ok, bytes memory _data) = _{}_addr.call(abi.encodeWithSignature(\"{}({})\", {}));", r.contract, r.function, sig_types, arg_names.join(", ")).unwrap();
+                    writeln!(out, "        require(_ok, \"extern_call {}.{} failed\");", r.contract, r.function).unwrap();
+                    writeln!(out, "        return abi.decode(_data, (uint256));").unwrap();
+                    writeln!(out, "    }}").unwrap();
+                } else {
+                    writeln!(out, "    function {}({}) internal {{", helper_name, params.join(", ")).unwrap();
+                    writeln!(out, "        (bool _ok, ) = _{}_addr.call(abi.encodeWithSignature(\"{}({})\", {}));", r.contract, r.function, sig_types, arg_names.join(", ")).unwrap();
+                    writeln!(out, "        require(_ok, \"extern_call {}.{} failed\");", r.contract, r.function).unwrap();
+                    writeln!(out, "    }}").unwrap();
+                }
+            }
+        }
+    });
+
+    EXTERN_REFS.with(|r| r.borrow_mut().clear());
     // Reset flags for next compilation
     BUILTIN_FLAGS.with(|f| *f.borrow_mut() = BuiltinFlags::default());
 
@@ -975,8 +1085,9 @@ fn transpile_statement(out: &mut String, stmt: &Statement, indent: usize) {
             writeln!(out, "{}return {};", pad, cast_val).unwrap();
         }
         Statement::ExternCall { contract, function, args } => {
+            register_extern_call(contract, function, args, false);
             let a: Vec<String> = args.iter().map(transpile_expr).collect();
-            writeln!(out, "{}// extern_call {}.{}({}) — requires SXCP cross-contract bridge", pad, contract, function, a.join(", ")).unwrap();
+            writeln!(out, "{}_extern_{}_{}({});", pad, contract, function, a.join(", ")).unwrap();
         }
         Statement::Emit { event, args } => {
             let a: Vec<String> = args.iter().map(transpile_expr).collect();
@@ -1047,7 +1158,6 @@ fn transpile_expr(expr: &Expression) -> String {
                     format!("_fromSyna({})", transpile_expr(&args[0]))
                 },
                 "extern_call" => {
-                    // extern_call in expression context — comment for SXCP bridge
                     let contract = match &args[0] {
                         Expression::Literal(Literal::String(s)) => s.as_str(),
                         _ => "unknown",
@@ -1056,8 +1166,10 @@ fn transpile_expr(expr: &Expression) -> String {
                         Expression::Literal(Literal::String(s)) => s.as_str(),
                         _ => "unknown",
                     };
-                    let call_args: Vec<String> = args[2..].iter().map(transpile_expr).collect();
-                    format!("uint256(0) /* extern_call {}.{}({}) — SXCP bridge */", contract, function, call_args.join(", "))
+                    let call_args = &args[2..];
+                    register_extern_call(contract, function, call_args, true);
+                    let a: Vec<String> = call_args.iter().map(transpile_expr).collect();
+                    format!("_extern_{}_{}({})", contract, function, a.join(", "))
                 }
                 "map_get" => {
                     // map_get(map_name, key) — transpile to map_name[key]
