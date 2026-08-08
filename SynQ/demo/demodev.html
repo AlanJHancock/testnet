@@ -6349,6 +6349,52 @@
     syncInitPillHint();
   }
 
+  // ── Per-function hints: description + suggested inputs ──
+  var FUNCTION_HINTS = {
+    'init':            'Initialize contract state. Call first — sets ready=true.',
+    'testArith':       'Arithmetic ops: a+b, a-b, a*b, a/b. Try a=10, b=3 → returns 13.',
+    'testCompare':     'All 6 comparison operators. ok=(eq==!ne) is always true. Try a=5, b=5 or a=3, b=7.',
+    'testRequireFail': 'Intentionally reverts with require(false). Expect: "intentional revert".',
+    'testBool':        'Logical AND/OR/NOT. Try flag=1 → returns true.',
+    'testEnum':        'Enum casting + matching. Returns an enum value.',
+    'testBytes':       'Bytes encoding/decoding. Pass hex e.g. 48656c6c6f.',
+    'testString':      'String storage + retrieval. Pass any text.',
+    'testTuple':       'Tuple packing/unpacking. Returns (a, b) as a struct.',
+    'testStruct':      'Struct field access. Pass a struct value.',
+    'testMapGet':      'Map read. Pass any key — returns 0 if unset.',
+    'testMapSet':      'Map write. Pass key + value, then testMapGet to verify.',
+    'testNestedMap':   'Nested map<K,map<K,V>>. Pass outer + inner key + value.',
+    'testSetAdd':      'Set insertion. Pass a value to add.',
+    'testSetContains': 'Set membership check. Pass a value — returns bool.',
+    'testOverflow':    'Overflow guard on u256 arithmetic. Try large values.',
+    'testUnderflow':   'Underflow guard. Try a < b for subtraction.',
+    'testIfElse':      'Conditional branching. Try a=5 → returns 100, else 200.',
+    'testWhileLoop':   'While loop accumulator. Try n=5 → returns 15 (1+2+3+4+5).',
+    'testForLoop':     'For loop counter. Try n=10 → returns 55.',
+    'testSwitch':      'Multi-branch dispatch. Try val=1, 2, or 3.',
+    'testEvents':      'Emits an event. Try any value.',
+    'adminOnly':       'Admin-gated. Requires caller==admin. Non-admin reverts.',
+    'setPaused':       'Toggle pause. Pass 0 (unpause) or 1 (pause).',
+    'getUVal':         'Read u_val state var. No args needed.',
+    'getIVal':         'Read i_val state var. No args needed.',
+    'getBVal':         'Read b_val state var. No args needed.',
+    'getSVal':         'Read s_val state var. No args needed.',
+    'getOpCount':      'Read op_count. No args needed.',
+    'getOwner':        'Read owner address. No args needed.',
+    'mint':            'Mint tokens. Pass amount (e.g. 100). Increases totalSupply.',
+    'burn':            'Burn tokens. Pass amount (e.g. 50). Decreases totalSupply.',
+    'transfer':        'Transfer tokens. Pass to_address + amount.',
+    'getTotal':        'Read totalSupply. No args needed.',
+    'getBalance':      'Read balance. Pass an account address.',
+    'deposit':         'Deposit tokens to vault. Pass amount.',
+    'withdraw':        'Withdraw from vault. Pass amount.',
+    'checkBalance':    'Read asset balance. Pass asset ID.',
+    'checkOwner':      'Read asset owner. Pass asset ID.',
+    'createAsset':     'Create a new asset. Pass initial value (e.g. 100).',
+    'transferAsset':   'Transfer asset ownership. Pass asset ID + new owner.',
+    'burnAsset':       'Burn an asset. Pass asset ID.',
+  };
+
   // ── QVM Call Panel: per-function rows with inline inputs + results ──
   function populateQvmCallPanel() {
     var panel = document.getElementById('qvmCallPanel');
@@ -6439,6 +6485,11 @@
         paramsHtml + ' ' + btnHtml + capHtml +
         '<span class="qvmResult" style="font-family:ui-monospace,monospace;font-size:0.68rem;color:rgba(255,255,255,0.6);margin-left:4px;flex-grow:1;"></span>' +
         '</div>';
+      // Add hint line below the row
+      var _hint = FUNCTION_HINTS[fn.name];
+      if (_hint) {
+        html += '<div style="margin:-2px 0 6px 106px;font-size:0.62rem;color:rgba(255,255,255,0.28);font-style:italic;letter-spacing:0.01em;">' + _hint + '</div>';
+      }
     });
 
     panel.innerHTML = html;
