@@ -895,6 +895,17 @@ impl QuantumVM {
                 let b = self.call_context.caller_value();
                 self.stack.push(Value::U256(U256::from_be_bytes::<32>(b)));
             }
+            OpCode::LoadCallSender => {
+                let b = match &self.call_context.calling_contract_addr {
+                    Some(addr) => {
+                        let mut b = [0u8; 32];
+                        b[12..32].copy_from_slice(addr);
+                        b
+                    }
+                    None => [0u8; 32],
+                };
+                self.stack.push(Value::U256(U256::from_be_bytes::<32>(b)));
+            }
 
             // ── LoadAuthority (0x51): push current call's authority envelope ──
             OpCode::LoadAuthority => {
@@ -1690,31 +1701,33 @@ pub struct CallContext {
     /// Format: identity(32) + scope_hash(32) + nonce(8) + expiry(8) + caps(8) + reserved(16) = 104 bytes
     /// Empty on devnet unless the server constructs it.
     pub authority_envelope: Vec<u8>,
+    /// Immediate calling contract address. None for direct calls.
+    pub calling_contract_addr: Option<[u8; 20]>,
 }
 
 impl CallContext {
     /// Construct a devnet call context from a recovered EVM address.
     /// `uma_ref` is set to `None` — UMA resolution is not yet wired.
     pub fn from_address(addr: [u8; 20]) -> Self {
-        Self { signing_key: addr, uma_ref: None, authority_envelope: Vec::new() }
+        Self { signing_key: addr, uma_ref: None, authority_envelope: Vec::new(), calling_contract_addr: None }
     }
 
     /// Construct a mainnet-ready call context with a resolved UMA reference.
     /// The signing key is retained for audit / logging purposes.
     pub fn from_uma(uma: [u8; 32], signing_key: [u8; 20]) -> Self {
-        Self { signing_key, uma_ref: Some(uma), authority_envelope: Vec::new() }
+        Self { signing_key, uma_ref: Some(uma), authority_envelope: Vec::new(), calling_contract_addr: None }
     }
 
     /// Anonymous context — no authenticated caller.
     pub fn anonymous() -> Self {
-        Self { signing_key: [0u8; 20], uma_ref: None, authority_envelope: Vec::new() }
+        Self { signing_key: [0u8; 20], uma_ref: None, authority_envelope: Vec::new(), calling_contract_addr: None }
     }
 
     /// Construct a call context with a pre-built authority envelope.
     /// Used by the server when it has constructed the envelope from the
     /// EIP-712 signature, nonce, and consensus state.
     pub fn with_authority(addr: [u8; 20], uma: Option<[u8; 32]>, envelope: Vec<u8>) -> Self {
-        Self { signing_key: addr, uma_ref: uma, authority_envelope: envelope }
+        Self { signing_key: addr, uma_ref: uma, authority_envelope: envelope, calling_contract_addr: None }
     }
 
     /// Returns the 32-byte value that `LoadCaller` pushes onto the stack.

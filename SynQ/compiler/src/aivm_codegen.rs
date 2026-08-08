@@ -464,6 +464,9 @@ impl<'a> CodegenContext<'a> {
             Expression::Caller => {
                 self.emit(Instruction::HostCall(5)); // context.caller
             }
+            Expression::CallSender => {
+                self.emit(Instruction::HostCall(6)); // context.call_sender (immediate calling contract)
+            }
             Expression::Call(name, args) => {
                 for arg in args {
                     self.gen_expr(arg)?;

@@ -156,6 +156,7 @@ fn decompile_instruction(inst: &Instruction, names: &[String]) -> String {
         IrOp::Load(n) => format!("{}load {}", r, n),
         IrOp::Store(n, val) => format!("store {} = {}", n, v(names, *val)),
         IrOp::Caller => format!("{}caller", r),
+        IrOp::CallSender => format!("{}call_sender", r),
         IrOp::LoadAuthority => format!("{}authority_envelope", r),
         IrOp::AuthIdentity(val) => format!("{}uma_identity({})", r, v(names, *val)),
         IrOp::AuthRequire(val, s) => format!("{}auth_require({}, \"{}\")", r, v(names, *val), s),

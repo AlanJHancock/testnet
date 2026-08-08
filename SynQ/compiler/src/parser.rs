@@ -727,6 +727,7 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
         }
         Rule::IDENT => match pair.as_str() {
             "caller" => Expression::Caller,
+            "call_sender" => Expression::CallSender,
             "None"   => Expression::None,
             name     => Expression::Identifier(name.to_string()),
         }

@@ -399,3 +399,41 @@ fn ir_backend_gap_analysis() {
         }
     }
 }
+
+
+// ── call_sender expression test ──────────────────────────────────────────────
+#[test]
+fn test_call_sender_expression() {
+    let source = r#"contract TestSender {
+  state {
+    initialised: bool;
+    sender_seen: u256;
+  }
+  impl {
+    @public
+    function init() -> bool {
+      if (!initialised) { initialised = true; sender_seen = 0; }
+      return true;
+    }
+
+    @public
+    function record_sender() as caller -> bool {
+      let s = call_sender;
+      sender_seen = s;
+      return true;
+    }
+
+    @public
+    function get_sender() -> u256 {
+      return sender_seen;
+    }
+  }
+}"#;
+
+    let result = synq_compiler::compile_ir(source);
+    assert!(result.is_ok(), "call_sender should compile: {:?}", result.err());
+    let cr = result.unwrap();
+    assert!(cr.bytecode.len() > 0, "should produce bytecode");
+    // Verify call_sender opcode (0x5C) is in the bytecode
+    assert!(cr.bytecode.contains(&0x5C), "bytecode should contain LoadCallSender (0x5C)");
+}

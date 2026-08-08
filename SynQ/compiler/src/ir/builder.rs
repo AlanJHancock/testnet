@@ -782,6 +782,9 @@ impl<'a> BuildContext<'a> {
             Expression::Caller => {
                 Ok(self.push_value(IrOp::Caller, IrType::Address))
             }
+            Expression::CallSender => {
+                Ok(self.push_value(IrOp::CallSender, IrType::Address))
+            }
 
             Expression::Call(name, args) => {
                 let arg_vals: Result<Vec<ValueId>, String> = args.iter()

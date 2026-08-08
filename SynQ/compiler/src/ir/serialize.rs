@@ -276,6 +276,7 @@ impl Writer {
             IrOp::Load(name) => { self.u8(0x04); self.str(name); }
             IrOp::Store(name, v) => { self.u8(0x05); self.str(name); self.u32(*v); }
             IrOp::Caller => self.u8(0x06),
+            IrOp::CallSender => self.u8(0x07),
             IrOp::LoadAuthority => self.u8(0x07),
             IrOp::AuthIdentity(a) => { self.u8(0x08); self.u32(*a); }
             IrOp::AuthRequire(env, scope) => { self.u8(0x09); self.u32(*env); self.str(scope); }
@@ -742,6 +743,7 @@ impl<'a> Reader<'a> {
             0x04 => Ok(IrOp::Load(self.str()?)),
             0x05 => { let name = self.str()?; let v = self.u32()?; Ok(IrOp::Store(name, v)) }
             0x06 => Ok(IrOp::Caller),
+            0x07 => Ok(IrOp::CallSender),
             0x07 => Ok(IrOp::LoadAuthority),
             0x08 => { let a = self.u32()?; Ok(IrOp::AuthIdentity(a)) }
             0x09 => { let env = self.u32()?; let scope = self.str()?; Ok(IrOp::AuthRequire(env, scope)) }

@@ -36,6 +36,7 @@ pub enum IrOp {
     Load(String),
     /// Load the authenticated caller address.
     Caller,
+    CallSender,
     /// Load the authority envelope for this call.
     LoadAuthority,
     /// Load the UMA identity from the authority envelope.
@@ -177,7 +178,7 @@ impl Instruction {
     /// Get all ValueIds this instruction references as inputs.
     pub fn input_values(&self) -> Vec<ValueId> {
         match &self.op {
-            IrOp::Const(_) | IrOp::Load(_) | IrOp::Caller | IrOp::LoadAuthority
+            IrOp::Const(_) | IrOp::Load(_) | IrOp::Caller | IrOp::CallSender | IrOp::LoadAuthority
             | IrOp::EnumAccess(_, _) | IrOp::None | IrOp::Jump(_)
             | IrOp::Revert(_) => vec![],
             IrOp::BinOp(_, a, b) => vec![*a, *b],

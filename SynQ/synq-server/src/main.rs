@@ -5231,6 +5231,18 @@ async fn session_run_handler(
         let workspaces_arc = state.workspaces.clone();
         let wid_clone = wid.clone();
         let caller_clone = effective_caller;
+        // Compute this contract address for call_sender (0x5C) support
+        let current_contract_addr: [u8; 20] = match &session.contract_name {
+            Some(name) => {
+                let input = format!("SynQ:{}", name);
+                let hash = keccak256(input.as_bytes());
+                let mut addr = [0u8; 20];
+                addr.copy_from_slice(&hash[12..32]);
+                addr
+            }
+            None => [0u8; 20],
+        };
+        let current_contract_addr_clone = current_contract_addr;
         session.vm.extern_call_handler = Some(std::sync::Arc::new(move |contract: &str, func: &str, args: &[synq_vm::Value]| {
             let wmap = workspaces_arc.lock().unwrap();
             let ws = wmap.get(&wid_clone)
@@ -5242,7 +5254,9 @@ async fn session_run_handler(
             let mut smap = sessions_arc.lock().unwrap();
             let target = smap.get_mut(&target_sid)
                 .ok_or_else(|| synq_vm::VMError::RuntimeError(format!("extern_call: session for '{}' not found", contract)))?;
-            target.vm.call_context = synq_vm::CallContext::from_address(caller_clone);
+            let mut ctx = synq_vm::CallContext::from_address(caller_clone);
+            ctx.calling_contract_addr = Some(current_contract_addr_clone);
+            target.vm.call_context = ctx;
             let result = target.vm.call_function(func, args);
             if let Err(ref e) = result {
                 eprintln!("[EC-ERR] {}.{}({:?}) -> {:?}  memory_snapshot: total@0={:?} param@1008000={:?}",

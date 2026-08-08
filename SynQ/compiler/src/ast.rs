@@ -228,6 +228,7 @@ pub enum Expression {
     BinaryOp(Box<Expression>, BinaryOperator, Box<Expression>),
     UnaryOp(UnaryOperator, Box<Expression>),
     Caller,   // `caller` builtin — authenticated EVM address
+    CallSender, // `call_sender` builtin — immediate calling contract address (0 for direct calls)
     /// `map[key]` — indexed read from a map state variable
     MapIndex(String, Vec<Expression>),
     /// `map.get(key)` / `map.contains(key)` / `map.len()` method calls

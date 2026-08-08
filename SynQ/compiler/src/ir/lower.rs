@@ -578,6 +578,9 @@ impl IrLowerer {
             IrOp::Caller => {
                 self.asm.emit_op(OpCode::LoadCaller);
             }
+            IrOp::CallSender => {
+                self.asm.emit_op(OpCode::LoadCallSender);
+            }
 
             IrOp::LoadAuthority => {
                 self.asm.emit_op(OpCode::LoadAuthority);

@@ -73,6 +73,7 @@ SynQ VM (QVM) is a stack-based virtual machine for executing post-quantum smart 
 | Opcode | Name          | Description |
 |--------|---------------|-------------|
 | 0x50   | LoadCaller    | Push caller address onto stack |
+| 0x5C   | LoadCallSender | Push immediate calling contract address (zero for direct calls) |
 | 0x51   | LoadAuthority | Push current AuthorityEnvelope (104B) |
 | 0x52   | AuthRequire  | Pop envelope + scope_hash, verify authority. All-zeros scope = devnet wildcard |
 | 0x53   | AuthIdentity | Pop envelope, push identity (32B) |

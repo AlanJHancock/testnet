@@ -90,6 +90,7 @@ pub enum OpCode {
     AssetBurn     = 0x59,  // pop asset_id(U256) → push value(U256)
     AssetBalance  = 0x5A,  // pop asset_id(U256) → push value(U256)
     AssetOwner    = 0x5B,  // pop asset_id(U256) → push owner(U256)
+    LoadCallSender = 0x5C,  // push immediate calling contract address as U256 (zero for direct calls)
     ExternCall = 0x60,   // call a function on another contract in the same workspace
 
     // Map operations (0x90-0x96)
@@ -184,6 +185,7 @@ impl TryFrom<u8> for OpCode {
             0x59 => Ok(OpCode::AssetBurn),
             0x5A => Ok(OpCode::AssetBalance),
             0x5B => Ok(OpCode::AssetOwner),
+            0x5C => Ok(OpCode::LoadCallSender),
             0x60 => Ok(OpCode::ExternCall),
             // Map ops
             0x90 => Ok(OpCode::MapNew),

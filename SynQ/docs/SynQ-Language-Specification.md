@@ -74,6 +74,7 @@ SynQ supports declarative attributes for function-level execution guards and sta
 - Governance: SHA3-256(`SYNQ-GOVERNANCE-SCOPE-v1:` + scope_name)
 
 **Backward compatibility:** Legacy `as caller` syntax is retained alongside the attribute-based model. Both `-> T as caller` and `as caller -> T` orderings are supported.
+- `call_sender` — immediate calling contract address (zero for direct calls)
 
 ---
 

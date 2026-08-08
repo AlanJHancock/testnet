@@ -85,6 +85,7 @@ fn stack_effect(op: OpCode, extern_arg_count: Option<u8>) -> Option<(i32, i32)> 
 
         // Authority
         OpCode::LoadCaller   => Some((0, 1)),
+        OpCode::LoadCallSender => Some((0, 1)),
         OpCode::LoadAuthority => Some((0, 1)),
         OpCode::AuthRequire  => Some((2, 1)),  // pops envelope + scope_hash, pushes bool
         OpCode::AuthIdentity  => Some((1, 1)),

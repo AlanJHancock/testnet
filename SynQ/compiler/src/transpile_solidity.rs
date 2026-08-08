@@ -49,6 +49,7 @@ thread_local! {
 fn sol_type_for_expr(expr: &Expression) -> String {
     match expr {
         Expression::Caller => "uint256".to_string(),
+        Expression::CallSender => "uint256".to_string(),
         Expression::Literal(Literal::String(_)) => "string".to_string(),
         Expression::Literal(Literal::Bool(_)) => "bool".to_string(),
         Expression::Literal(Literal::Number(_)) => "uint256".to_string(),
@@ -132,6 +133,7 @@ fn infer_expr_type(expr: &Expression) -> Type {
             }
         },
         Expression::Caller => Type::UInt256,
+            Expression::CallSender => Type::UInt256,
         Expression::FieldAccess { object, .. } => infer_expr_type(object),
         Expression::StructLiteral { type_name, .. } => Type::Named(type_name.clone()),
         _ => Type::UInt256,
@@ -1011,6 +1013,7 @@ fn transpile_statement(out: &mut String, stmt: &Statement, indent: usize) {
                     Some(Type::Mapping(k, _)) if matches!(k.as_ref(), Type::Address) => {
                         match key {
                             Expression::Caller => "address(uint160(tx.origin))".to_string(),
+                            Expression::CallSender => "address(uint160(msg.sender))".to_string(),
                             _ => format!("address(uint160({}))", key_str)
                         }
                     }
@@ -1212,6 +1215,7 @@ fn transpile_expr(expr: &Expression) -> String {
             format!("{}{}", unop_to_sol(op), transpile_expr(val))
         }
         Expression::Caller => "uint256(uint160(tx.origin))".to_string(),
+                    Expression::CallSender => "uint256(uint160(msg.sender))".to_string(),
         Expression::MapIndex(map, keys) => {
             let mut index_str = String::new();
             let mut current_type = get_type(map);
@@ -1224,6 +1228,7 @@ fn transpile_expr(expr: &Expression) -> String {
                 if is_address_key {
                     match key {
                         Expression::Caller => index_str.push_str("[address(uint160(tx.origin))]"),
+                        Expression::CallSender => index_str.push_str("[address(uint160(msg.sender))]"),
                         _ => index_str.push_str(&format!("[address(uint160({}))]", key_str)),
                     }
                 } else {
