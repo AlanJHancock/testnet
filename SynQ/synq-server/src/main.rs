@@ -2351,7 +2351,8 @@ async fn evm_call_handler(
         for arg in &converted_args {
             cmd.arg(arg);
         }
-        cmd.args(["--rpc-url", rpc_url]);
+        cmd.args(["--rpc-url", rpc_url,
+            "--from", "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"]);
 
         let output = cmd.output();
 
