@@ -5098,7 +5098,7 @@
       var _rv = stateSnapshot['ready'];
       var _av = stateSnapshot['active'];
       var _alreadyDone = (_iv === '1' || _iv === 'true' || _iv === 1 || _iv === true)
-                     || (_av === '1' || _av === 1 || _av === 'true' || _av === true);
+                     || (_av === '1' || _av === 1 || _av === 'true' || _av === true)
                      || (_rv === '1' || _rv === 'true' || _rv === 1 || _rv === true);
       if (_alreadyDone) {
         document.getElementById('vmOutput').innerHTML =
@@ -6187,12 +6187,12 @@
       }
     }
     if (!initPill) return;
-    // Check: does state have an 'initialised' or 'active' slot?
+    // Check: does state have an 'initialised', 'active', or 'ready' slot?
     var initVal = stateSnapshot['initialised'];
     var activeVal = stateSnapshot['active'];
     var readyVal = stateSnapshot['ready'];
     var isInitialised = (initVal === '1' || initVal === 'true' || initVal === 1 || initVal === true)
-                     || (activeVal === '1' || activeVal === 1 || activeVal === 'true' || activeVal === true);
+                     || (activeVal === '1' || activeVal === 1 || activeVal === 'true' || activeVal === true)
                      || (readyVal === '1' || readyVal === 'true' || readyVal === 1 || readyVal === true);
     var hasInitSlot   = ('initialised' in stateSnapshot) || ('active' in stateSnapshot) || ('ready' in stateSnapshot);
     if (hasInitSlot && isInitialised) {
@@ -6462,7 +6462,7 @@
       var _rv = stateSnapshot['ready'];
       var _av = stateSnapshot['active'];
       var _alreadyDone = (_iv === '1' || _iv === 'true' || _iv === 1 || _iv === true)
-                     || (_av === '1' || _av === 1 || _av === 'true' || _av === true);
+                     || (_av === '1' || _av === 1 || _av === 'true' || _av === true)
                      || (_rv === '1' || _rv === 'true' || _rv === 1 || _rv === true);
       if (_alreadyDone) {
         resultSpan.innerHTML = '<span style="color:#f87171;">Already initialised. Reset VM to start fresh.</span>';
