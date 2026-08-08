@@ -4778,13 +4778,11 @@ async fn session_run_handler(
             eprintln!("[RUN] display_tsynq decode failed for: {}", synw);
         }
     }
-    // Devnet: if no wallet connected (caller is all-zeros) and this is an
-    // @authority or @governance function, inject a non-zero devnet caller
-    // so the "as caller" unauthenticated check passes.
+    // Devnet: if no wallet connected (caller is all-zeros), inject a non-zero
+    // devnet caller for ALL functions. Authority/governance functions need it
+    // to pass identity checks; regular functions need it so `caller` returns a
+    // meaningful address instead of address(0).
     if effective_caller == [0u8; 20]
-        && (session.authority_scopes.contains_key(&req.function)
-            || session.governance_scopes.contains_key(&req.function)
-            || session.caller_fns.contains(&req.function))
     {
         // Use first 20 bytes of the devnet authority identity as caller
         use sha3::Digest;
@@ -4792,7 +4790,11 @@ async fn session_run_handler(
         let mut devnet_caller = [0u8; 20];
         devnet_caller.copy_from_slice(&devnet_id[0..20]);
         effective_caller = devnet_caller;
-        eprintln!("[RUN] injected devnet caller for {} (authority/governance function)", req.function);
+        let is_auth = session.authority_scopes.contains_key(&req.function)
+            || session.governance_scopes.contains_key(&req.function)
+            || session.caller_fns.contains(&req.function);
+        eprintln!("[RUN] injected devnet caller for {} ({})",
+            req.function, if is_auth { "authority/governance" } else { "unauthenticated" });
     }
 
     session.vm.call_context = synq_vm::CallContext::with_authority(
