@@ -160,13 +160,29 @@
   .aivm-delta { font-size: 0.66rem; font-family: ui-monospace,monospace; padding: 5px 10px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.04); border-radius: 6px; margin-bottom: 8px; color: rgba(255,255,255,0.5); }
   .aivm-delta .pos { color: #6ee7b7; }
   .aivm-delta .neg { color: #f87171; }
-  .aivm-fn-table { width: 100%; font-family: ui-monospace,monospace; font-size: 0.64rem; border-collapse: collapse; }
-  .aivm-fn-table th { text-align: left; padding: 2px 8px; color: rgba(255,255,255,0.3); font-weight: 500; border-bottom: 1px solid rgba(255,255,255,0.06); }
-  .aivm-fn-table td { padding: 2px 8px; color: rgba(255,255,255,0.6); }
+  .aivm-section { margin-top: 8px; }
+  .aivm-section-header { font-size: 0.62rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: rgba(255,255,255,0.35); margin-bottom: 4px; display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; }
+  .aivm-section-header:hover { color: rgba(255,255,255,0.5); }
+  .aivm-section-header .chevron { transition: transform 0.15s; font-size: 0.5rem; }
+  .aivm-section.collapsed .chevron { transform: rotate(-90deg); }
+  .aivm-section.collapsed .aivm-section-body { display: none; }
+  .aivm-section-body { max-height: 180px; overflow-y: auto; }
+  .aivm-fn-table { width: 100%; font-family: ui-monospace,monospace; font-size: 0.63rem; border-collapse: collapse; }
+  .aivm-fn-table th { text-align: left; padding: 2px 8px; color: rgba(255,255,255,0.25); font-weight: 500; border-bottom: 1px solid rgba(255,255,255,0.06); position: sticky; top: 0; background: rgba(0,0,0,0.3); }
+  .aivm-fn-table td { padding: 2px 8px; color: rgba(255,255,255,0.55); }
   .aivm-fn-table tr:hover td { background: rgba(124,58,237,0.06); }
-  .aivm-state-list { font-family: ui-monospace,monospace; font-size: 0.64rem; color: rgba(255,255,255,0.45); margin-top: 4px; }
+  .aivm-fn-name { color: #c4b5fd; }
+  .aivm-fn-sel { color: rgba(255,255,255,0.35); font-size: 0.58rem; }
+  .aivm-mut-view { color: #60a5fa; font-size: 0.58rem; }
+  .aivm-mut-mutate { color: #fbbf24; font-size: 0.58rem; }
+  .aivm-mut-init { color: #6ee7b7; font-size: 0.58rem; }
+  .aivm-state-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px; margin-top: 2px; }
+  .aivm-state-item { font-family: ui-monospace,monospace; font-size: 0.6rem; padding: 2px 8px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.04); border-radius: 4px; color: rgba(255,255,255,0.5); display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+  .aivm-state-name { color: #c4b5fd; }
+  .aivm-state-type { color: rgba(255,255,255,0.3); font-size: 0.55rem; }
+  .aivm-state-slot { color: rgba(255,255,255,0.2); font-size: 0.55rem; }
   .aivm-badge { font-size: 0.58rem; font-family: ui-monospace,monospace; background: rgba(124,58,237,0.15); border: 1px solid rgba(124,58,237,0.3); color: #c4b5fd; border-radius: 8px; padding: 1px 8px; }
-  .aivm-warnings { font-size: 0.64rem; font-family: ui-monospace,monospace; color: #fbbf24; margin-top: 6px; padding: 4px 8px; background: rgba(251,191,36,0.06); border-radius: 4px; }
+  .aivm-warnings { font-size: 0.62rem; font-family: ui-monospace,monospace; color: #fbbf24; margin-top: 6px; padding: 4px 8px; background: rgba(251,191,36,0.06); border-radius: 4px; }
 
   .results-title { font-size: 0.78rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: rgba(255,255,255,0.4); margin-bottom: 10px; }
   .results-title .fn-name { text-transform: none; color: rgba(0,245,255,0.9); font-weight: 700; }
@@ -429,13 +445,29 @@
   .aivm-delta { font-size: 0.66rem; font-family: ui-monospace,monospace; padding: 5px 10px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.04); border-radius: 6px; margin-bottom: 8px; color: rgba(255,255,255,0.5); }
   .aivm-delta .pos { color: #6ee7b7; }
   .aivm-delta .neg { color: #f87171; }
-  .aivm-fn-table { width: 100%; font-family: ui-monospace,monospace; font-size: 0.64rem; border-collapse: collapse; }
-  .aivm-fn-table th { text-align: left; padding: 2px 8px; color: rgba(255,255,255,0.3); font-weight: 500; border-bottom: 1px solid rgba(255,255,255,0.06); }
-  .aivm-fn-table td { padding: 2px 8px; color: rgba(255,255,255,0.6); }
+  .aivm-section { margin-top: 8px; }
+  .aivm-section-header { font-size: 0.62rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: rgba(255,255,255,0.35); margin-bottom: 4px; display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; }
+  .aivm-section-header:hover { color: rgba(255,255,255,0.5); }
+  .aivm-section-header .chevron { transition: transform 0.15s; font-size: 0.5rem; }
+  .aivm-section.collapsed .chevron { transform: rotate(-90deg); }
+  .aivm-section.collapsed .aivm-section-body { display: none; }
+  .aivm-section-body { max-height: 180px; overflow-y: auto; }
+  .aivm-fn-table { width: 100%; font-family: ui-monospace,monospace; font-size: 0.63rem; border-collapse: collapse; }
+  .aivm-fn-table th { text-align: left; padding: 2px 8px; color: rgba(255,255,255,0.25); font-weight: 500; border-bottom: 1px solid rgba(255,255,255,0.06); position: sticky; top: 0; background: rgba(0,0,0,0.3); }
+  .aivm-fn-table td { padding: 2px 8px; color: rgba(255,255,255,0.55); }
   .aivm-fn-table tr:hover td { background: rgba(124,58,237,0.06); }
-  .aivm-state-list { font-family: ui-monospace,monospace; font-size: 0.64rem; color: rgba(255,255,255,0.45); margin-top: 4px; }
+  .aivm-fn-name { color: #c4b5fd; }
+  .aivm-fn-sel { color: rgba(255,255,255,0.35); font-size: 0.58rem; }
+  .aivm-mut-view { color: #60a5fa; font-size: 0.58rem; }
+  .aivm-mut-mutate { color: #fbbf24; font-size: 0.58rem; }
+  .aivm-mut-init { color: #6ee7b7; font-size: 0.58rem; }
+  .aivm-state-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px; margin-top: 2px; }
+  .aivm-state-item { font-family: ui-monospace,monospace; font-size: 0.6rem; padding: 2px 8px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.04); border-radius: 4px; color: rgba(255,255,255,0.5); display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+  .aivm-state-name { color: #c4b5fd; }
+  .aivm-state-type { color: rgba(255,255,255,0.3); font-size: 0.55rem; }
+  .aivm-state-slot { color: rgba(255,255,255,0.2); font-size: 0.55rem; }
   .aivm-badge { font-size: 0.58rem; font-family: ui-monospace,monospace; background: rgba(124,58,237,0.15); border: 1px solid rgba(124,58,237,0.3); color: #c4b5fd; border-radius: 8px; padding: 1px 8px; }
-  .aivm-warnings { font-size: 0.64rem; font-family: ui-monospace,monospace; color: #fbbf24; margin-top: 6px; padding: 4px 8px; background: rgba(251,191,36,0.06); border-radius: 4px; }
+  .aivm-warnings { font-size: 0.62rem; font-family: ui-monospace,monospace; color: #fbbf24; margin-top: 6px; padding: 4px 8px; background: rgba(251,191,36,0.06); border-radius: 4px; }
 
   .results-title { font-size: 0.78rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: rgba(255,255,255,0.4); margin-bottom: 10px; }
   .bytecode-display { background: rgba(3,7,15,0.9); border: 1px solid rgba(0,206,209,0.15); border-radius: 8px; padding: 14px 16px; font-family: ui-monospace, monospace; font-size: 11.5px; line-height: 19px; color: #a5f3fc; white-space: pre; overflow-x: auto; max-height: 450px; overflow-y: auto; }
@@ -727,16 +759,27 @@
     </div>
   </div>
   <div class="aivm-delta" id="aivmDeltaRow">—</div>
-  <div id="aivmFnTableWrap" style="display:none;">
-    <div style="font-size:0.66rem;color:rgba(255,255,255,0.35);margin-bottom:4px;">AIVM Function Table</div>
-    <table class="aivm-fn-table" id="aivmFnTable">
-      <thead><tr><th>Name</th><th>Selector</th><th>Visibility</th><th>Mutability</th><th>Params</th></tr></thead>
-      <tbody id="aivmFnTableBody"></tbody>
-    </table>
+  <div class="aivm-section" id="aivmFnSection">
+    <div class="aivm-section-header" onclick="document.getElementById('aivmFnSection').classList.toggle('collapsed')">
+      <span class="chevron">&#9660;</span> AIVM Function Table <span id="aivmFnCountInline" style="color:rgba(255,255,255,0.2);font-weight:400;"></span>
+    </div>
+    <div class="aivm-section-body">
+      <table class="aivm-fn-table" id="aivmFnTable">
+        <thead><tr><th>Name</th><th>Selector</th><th>Mutability</th><th>Params</th></tr></thead>
+        <tbody id="aivmFnTableBody"></tbody>
+      </table>
+    </div>
   </div>
-  <div id="aivmStateList" class="aivm-state-list" style="display:none;"></div>
+  <div class="aivm-section" id="aivmStateSection">
+    <div class="aivm-section-header" onclick="document.getElementById('aivmStateSection').classList.toggle('collapsed')">
+      <span class="chevron">&#9660;</span> State Variables <span id="aivmStateCountInline" style="color:rgba(255,255,255,0.2);font-weight:400;"></span>
+    </div>
+    <div class="aivm-section-body">
+      <div class="aivm-state-grid" id="aivmStateGrid"></div>
+    </div>
+  </div>
   <div id="aivmWarnings"></div>
-  <div style="margin-top:8px;font-size:0.62rem;color:rgba(255,255,255,0.25);font-style:italic;">
+  <div style="margin-top:6px;font-size:0.58rem;color:rgba(255,255,255,0.2);font-style:italic;">
     AIVM is the v7.0 target execution engine. Side-by-side mode compiles to both QVM and AIVM for differential testing.
     QVM remains the active execution path; AIVM output is advisory until promoted.
   </div>
@@ -2409,33 +2452,42 @@
         '  ·  State vars: ' + (aivmState === qvmState ? '<span class="pos">✓ match</span>' : '<span class="neg">mismatch (' + aivmState + ' vs ' + qvmState + ')</span>');
     }
 
-    // Function table
-    var fnTableWrap = document.getElementById('aivmFnTableWrap');
+        // Function table
+    var fnSection = document.getElementById('aivmFnSection');
     var fnTableBody = document.getElementById('aivmFnTableBody');
-    if (fnTableWrap && fnTableBody && aivmData.functions && aivmData.functions.length > 0) {
-      fnTableWrap.style.display = 'block';
+    var fnCountInline = document.getElementById('aivmFnCountInline');
+    if (fnSection && fnTableBody && aivmData.functions && aivmData.functions.length > 0) {
+      fnSection.style.display = 'block';
+      if (fnCountInline) fnCountInline.textContent = '(' + aivmData.functions.length + ')';
+      var mutClass = { 'view': 'aivm-mut-view', 'mutate': 'aivm-mut-mutate', 'init': 'aivm-mut-init' };
       fnTableBody.innerHTML = aivmData.functions.map(function(f) {
+        var mc = mutClass[f.mutability] || 'aivm-mut-view';
         return '<tr>' +
-          '<td style="color:#c4b5fd;">' + f.name + '</td>' +
-          '<td>' + f.selector + '</td>' +
-          '<td>' + f.visibility + '</td>' +
-          '<td>' + f.mutability + '</td>' +
+          '<td class="aivm-fn-name">' + f.name + '</td>' +
+          '<td class="aivm-fn-sel">' + f.selector + '</td>' +
+          '<td class="' + mc + '">' + f.mutability + '</td>' +
           '<td>' + f.param_count + '</td>' +
           '</tr>';
       }).join('');
-    } else if (fnTableWrap) {
-      fnTableWrap.style.display = 'none';
+    } else if (fnSection) {
+      fnSection.style.display = 'none';
     }
 
     // State vars
-    var stateList = document.getElementById('aivmStateList');
-    if (stateList && aivmData.state_vars && aivmData.state_vars.length > 0) {
-      stateList.style.display = 'block';
-      stateList.textContent = 'State: ' + aivmData.state_vars.map(function(s) {
-        return s.name + ':' + s.abi_type + ' (slot ' + s.key_index + ')';
-      }).join('  ·  ');
-    } else if (stateList) {
-      stateList.style.display = 'none';
+    var stateSection = document.getElementById('aivmStateSection');
+    var stateGrid = document.getElementById('aivmStateGrid');
+    var stateCountInline = document.getElementById('aivmStateCountInline');
+    if (stateSection && stateGrid && aivmData.state_vars && aivmData.state_vars.length > 0) {
+      stateSection.style.display = 'block';
+      if (stateCountInline) stateCountInline.textContent = '(' + aivmData.state_vars.length + ')';
+      stateGrid.innerHTML = aivmData.state_vars.map(function(s) {
+        return '<div class="aivm-state-item">' +
+          '<span><span class="aivm-state-name">' + s.name + '</span> <span class="aivm-state-type">' + s.abi_type + '</span></span>' +
+          '<span class="aivm-state-slot">slot ' + s.key_index + '</span>' +
+          '</div>';
+      }).join('');
+    } else if (stateSection) {
+      stateSection.style.display = 'none';
     }
 
     // Hashes
