@@ -890,6 +890,7 @@
   var SOURCE_NONCE_URL  = 'https://hanksweb.co.uk/synq/source-nonce';
   var ATTEST_URL      = 'https://hanksweb.co.uk/synq/attest';
   var SESSION_NEW_URL  = 'https://hanksweb.co.uk/synq/session/new';
+  var _autoInitCalled   = false;  // server auto-calls init() on session/new
   var WORKSPACE_URL    = 'https://hanksweb.co.uk/synq/workspace';
   var PUBKEY_URL      = 'https://hanksweb.co.uk/synq/pubkey';
 
@@ -1374,6 +1375,7 @@
         var data = await res.json();
         if (data.success) {
           var newSid = data.session_id;
+          _autoInitCalled = (data.init_called === true);  // server auto-calls init()
           // 3. Re-register into workspace
           if (workspaceId && c.name) {
             try {
@@ -1418,6 +1420,7 @@
         stateVarNames.forEach(function(n) { stateSnapshot[n] = '0'; });
       }
       window._sessionLostHinted = false;
+      _autoInitCalled = false;  // fresh session, init not yet called
       updateStateDisplay();
       syncInitPillHint();
 
@@ -4433,6 +4436,7 @@
       }
 
       const deployedSessionId  = data.session_id;
+      _autoInitCalled = (data.init_called === true);  // server auto-calls init()
 
       // ── Auto-create session grant (blocking) ──
       // Sign once at deploy, then no per-call signing for 1 hour.
@@ -6013,7 +6017,7 @@
       out.innerHTML = '<span class="err">Reset partial — failed: ' + failed.join(', ') + '</span>';
     } else {
       var names = toReset.map(function(c){ return c.name; }).join(', ');
-      out.innerHTML = '<span class="ok">All sessions reset (' + names + '). All state back to zero — call init() to reinitialise.</span>';
+      out.innerHTML = '<span class="ok">All sessions reset (' + names + '). All state back to zero — init() auto-called on new session.</span>';
     }
 
       // Immediately zero stateSnapshot so panel shows clean VM, not stale '?'
@@ -6022,6 +6026,7 @@
         stateVarNames.forEach(function(n) { stateSnapshot[n] = '0'; });
       }
       window._sessionLostHinted = false;
+      _autoInitCalled = false;  // fresh session, init not yet called
       updateStateDisplay();
       syncInitPillHint();
 
@@ -6192,6 +6197,22 @@
       }
     }
     if (!initPill) return;
+    // If the server auto-called init() on deploy, grey out immediately
+    // regardless of whether stateSnapshot has caught up yet.
+    if (_autoInitCalled) {
+      initPill.style.opacity       = '0.35';
+      initPill.style.cursor        = 'not-allowed';
+      initPill.style.pointerEvents = 'none';
+      initPill.style.outline       = '';
+      initPill.dataset.blocked     = '1';
+      // Update the result span to show auto-init status
+      var _rs = initPill.querySelector('.qvmResult');
+      if (_rs && !_rs.innerHTML) {
+        _rs.innerHTML = '<span style="color:rgba(100,220,180,0.6);font-size:0.65rem;">\u2713 auto-initialised on deploy</span>';
+      }
+      initPill.title = 'Contract was auto-initialised on deploy — click Reset VM to start fresh';
+      return;
+    }
     // Check: does state have an 'initialised', 'active', or 'ready' slot?
     var initVal = stateSnapshot['initialised'];
     var activeVal = stateSnapshot['active'];
@@ -6356,7 +6377,7 @@
 
   // ── Per-function hints: description + suggested inputs ──
   var FUNCTION_HINTS = {
-    'init':            'Initialize contract state. Call first — sets ready=true.',
+    'init':            'Auto-called on deploy. Sets ready=true. Click Reset VM to re-initialise.',
     'testArithmetic':  'Computes quot+rem from a mix of +,-,*,/,%. Try a=7, b=8 → returns 9.',
     'testCompare':     'All 6 comparison operators. ok=(eq==!ne) is always true. Try a=5, b=5 or a=3, b=7.',
     'testRequireFail': 'Intentionally reverts with require(false). Expect: "intentional revert".',
