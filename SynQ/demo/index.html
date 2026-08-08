@@ -5452,7 +5452,7 @@
               // slot index > 0 AND /state returns that index as the value
               // OR name contains 'balance','role','map','set' as a strong hint
               var n = sv[0], slot = String(sv[1]);
-              if (/balance|_role|map|set|roles/i.test(n)) mappingSlotNames[n] = true;
+              if (/balance|_role|map|set|roles|admin|ready|labelled|initialised|active/i.test(n)) mappingSlotNames[n] = true;
             });
           }
           stateVarNames.forEach(function(n) {
@@ -6689,7 +6689,7 @@
         if (currentStateVars) {
           currentStateVars.forEach(function(sv) {
             var n = sv[0], slot = String(sv[1]);
-            if (/balance|_role|map|set|roles/i.test(n)) mappingSlotNames[n] = true;
+            if (/balance|_role|map|set|roles|admin|ready|labelled|initialised|active/i.test(n)) mappingSlotNames[n] = true;
           });
         }
         stateVarNames.forEach(function(n) {
@@ -6717,7 +6717,7 @@
         if (currentStateVars) {
           currentStateVars.forEach(function(sv) {
             var n = sv[0], slot = String(sv[1]);
-            if (/balance|_role|map|set|roles/i.test(n)) mappingSlotNames[n] = true;
+            if (/balance|_role|map|set|roles|admin|ready|labelled|initialised|active/i.test(n)) mappingSlotNames[n] = true;
           });
         }
         stateVarNames.forEach(function(n) {
