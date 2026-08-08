@@ -5471,8 +5471,7 @@
             }
           });
           if (diffLines.length > 0) {
-            display += '<span style="display:block;margin-top:2px;font-size:0.72rem;font-family:ui-monospace,monospace;white-space:nowrap;overflow-x:auto;">'
-              + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ') + '</span>';
+            display += '  <span style="color:rgba(255,255,255,0.15);">|</span>  ' + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ');
           } else {
             display += '<span class="ok" style="font-size:0.85rem;">void</span>';
           }
@@ -6087,8 +6086,7 @@
       initPill.style.outline       = '';
       initPill.dataset.blocked     = '1';
       // Update the result span to show auto-init status
-      var _rs = initPill.nextElementSibling;
-      if (!_rs || !_rs.classList.contains('qvmResult')) _rs = initPill.querySelector('.qvmResult');
+      var _rs = initPill.querySelector('.qvmResult');
       if (_rs && !_rs.innerHTML) {
         _rs.innerHTML = '<span style="color:rgba(100,220,180,0.6);font-size:0.65rem;">\u2713 auto-initialised on deploy</span>';
       }
@@ -6387,12 +6385,12 @@
         ? '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink:0;margin-right:3px;opacity:0.6;"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>'
         : '';
 
-      html += '<div id="' + rowId + '" style="display:flex;align-items:center;gap:8px;margin:6px 0;padding:6px 8px;background:rgba(0,0,0,0.2);border-radius:6px;flex-wrap:wrap;" ' +
+      html += '<div id="' + rowId + '" style="display:flex;align-items:center;gap:6px;margin:4px 0;padding:4px 8px;background:rgba(0,0,0,0.2);border-radius:6px;flex-wrap:nowrap;overflow:hidden;" ' +
         'data-fidx="' + idx + '" data-fname="' + fn.name + '">' +
         '<span style="font-family:ui-monospace,monospace;font-size:0.7rem;color:#e2e8f0;flex-shrink:0;display:flex;align-items:center;">' + lockIcon + fn.name + '</span>' +
         paramsHtml + ' ' + btnHtml + capHtml +
-        '</div>' +
-        '<div class="qvmResult" style="font-family:ui-monospace,monospace;font-size:0.72rem;color:rgba(255,255,255,0.6);margin:0 0 6px 8px;padding:2px 8px;min-height:0;"></div>';
+        '<span class="qvmResult" style="font-family:ui-monospace,monospace;font-size:0.68rem;color:rgba(255,255,255,0.6);margin-left:2px;flex:1;min-width:0;white-space:nowrap;overflow-x:auto;overflow-y:hidden;"></span>' +
+        '</div>';
       // Hint line — always its own full-width line directly under the row,
       // indented to line up with the params (not the function name column).
       var _hint = FUNCTION_HINTS[fn.name];
@@ -6412,11 +6410,7 @@
 
     var row = document.getElementById('qvmFunc_' + idx);
     if (!row) return;
-    // qvmResult is now a sibling div after the row (not a child)
-    var resultSpan = row.nextElementSibling;
-    if (!resultSpan || !resultSpan.classList.contains('qvmResult')) {
-      resultSpan = row.querySelector('.qvmResult'); // fallback
-    }
+    var resultSpan = row.querySelector('.qvmResult');
     var btn = row.querySelector('button');
     if (!resultSpan || !btn) return;
 
@@ -6710,7 +6704,7 @@
           }
         });
         if (diffLines.length > 0) {
-          display += '<span style="display:block;margin-top:4px;font-size:0.72rem;border-top:1px solid rgba(255,255,255,0.08);padding-top:3px;white-space:nowrap;overflow-x:auto;">' + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ') + '</span>';
+          display += '  <span style="color:rgba(255,255,255,0.15);">|</span>  ' + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ');
         }
       } else {
         // void return — show state diff (state already probed above)
@@ -6735,7 +6729,7 @@
           }
         });
         if (diffLines.length > 0) {
-          display += '<span style="display:block;font-size:0.72rem;white-space:nowrap;overflow-x:auto;">' + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ') + '</span>';
+          display += diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ');
         } else {
           display += '<span style="color:#34d399;font-size:0.85rem;">\u2713 void</span>';
         }
@@ -6743,11 +6737,10 @@
 
       // Events
       if (data.events && data.events.length > 0) {
-        display += '<span style="display:block;margin-top:4px;">';
+        display += '  <span style="color:rgba(255,255,255,0.15);">|</span>  ';
         data.events.forEach(function(ev) {
-          display += '<span style="display:block;font-size:0.72rem;color:rgba(150,220,255,0.85);">\u2605 ' + ev.name + '</span>';
+          display += '<span style="font-size:0.72rem;color:rgba(150,220,255,0.85);">\u2605 ' + ev.name + '</span>';
         });
-        display += '</span>';
       }
 
       resultSpan.innerHTML = display;
