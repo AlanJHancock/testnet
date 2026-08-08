@@ -44,6 +44,7 @@ struct ExternCallInfo {
 
 thread_local! {
     static EXTERN_REFS: RefCell<Vec<ExternCallInfo>> = RefCell::new(Vec::new());
+    static STATE_VAR_RENAMES: RefCell<std::collections::HashMap<String, String>> = RefCell::new(std::collections::HashMap::new());
 }
 
 fn sol_type_for_expr(expr: &Expression) -> String {
@@ -327,8 +328,33 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
     writeln!(out, "contract {} {{", contract.name).unwrap();
     writeln!(out).unwrap();
 
-    // State variables
+    // State variables — detect name collisions with functions and rename
     let set_vars = detect_set_vars(contract);
+
+    // Build set of function names in this contract
+    let func_names: std::collections::HashSet<String> = contract.parts.iter()
+        .filter_map(|p| {
+            if let ContractPart::Function(f) = p { Some(f.name.clone()) } else { None }
+        })
+        .collect();
+
+    // Build rename map: state var name -> _name if it collides with a function
+    let mut rename_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for part in &contract.parts {
+        if let ContractPart::StateVariable(sv) = part {
+            if func_names.contains(&sv.name) {
+                rename_map.insert(sv.name.clone(), format!("_{}", sv.name));
+            }
+        }
+    }
+    STATE_VAR_RENAMES.with(|m| {
+        let mut m = m.borrow_mut();
+        m.clear();
+        for (k, v) in &rename_map {
+            m.insert(k.clone(), v.clone());
+        }
+    });
+
     let mut has_state = false;
     for part in &contract.parts {
         if let ContractPart::StateVariable(sv) = part {
@@ -585,6 +611,7 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
     });
 
     EXTERN_REFS.with(|r| r.borrow_mut().clear());
+    STATE_VAR_RENAMES.with(|r| r.borrow_mut().clear());
     // Reset flags for next compilation
     BUILTIN_FLAGS.with(|f| *f.borrow_mut() = BuiltinFlags::default());
 
@@ -1400,6 +1427,11 @@ fn simplify_redundant_casts(s: &str) -> String {
 
 /// Rename SynQ identifiers that conflict with Solidity reserved words.
 fn sol_identifier(name: &str) -> String {
+    // Check if this state var was renamed due to function name collision
+    let renamed = STATE_VAR_RENAMES.with(|m| m.borrow().get(name).cloned());
+    if let Some(rn) = renamed {
+        return rn;
+    }
     match name {
         "msg" => "msg_".to_string(),      // msg is a global in Solidity
         "this" => "this_".to_string(),     // this is a keyword
