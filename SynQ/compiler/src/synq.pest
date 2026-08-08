@@ -37,6 +37,7 @@ contract_section = { state_section
                    | errors_section
                    | roles_section
                    | metadata_section
+                   | security_section
                    | impl_section
                    | tests_section
                    | enum_definition
@@ -50,6 +51,8 @@ errors_section   = { "errors"   ~ "{" ~ error_definition* ~ "}" }
 roles_section    = { "roles"    ~ "{" ~ role_definition* ~ "}" }
 metadata_section = { "metadata" ~ "{" ~ metadata_entry* ~ "}" }
 impl_section     = { "impl"     ~ "{" ~ function_definition* ~ "}" }
+security_section  = { "security" ~ "{" ~ security_entry* ~ "}" }
+security_entry   = { IDENT ~ ":" ~ (string_literal | bool_literal | number_literal) ~ ";" }
 tests_section    = { "tests"    ~ "{" ~ function_definition* ~ "}" }
 
 // ── State variables ──────────────────────────────────────────────────────────
@@ -74,6 +77,7 @@ metadata_entry  = { IDENT ~ "=" ~ (string_literal | number_literal) ~ ";" }
 
 // ── Functions ────────────────────────────────────────────────────────────────
 function_keyword = _{ "function" | "fn" }
+visibility_keyword = { "pub" | "priv" | "view" | "external" | "internal" }
 return_type      = _{ "->" ~ type_decl }
 
 identity_clause   = { "as" ~ "caller" }
@@ -116,7 +120,7 @@ attribute_args      = { (!")" ~ ANY)+ }
 
 // identity_clause? ~ return_type? ~ identity_clause? — supports both
 // `as caller -> T` and `-> T as caller` orderings (either clause is optional)
-function_definition = { attribute_list? ~ function_keyword ~ IDENT ~ "(" ~ param_list? ~ ")"
+function_definition = { attribute_list? ~ visibility_keyword? ~ function_keyword ~ IDENT ~ "(" ~ param_list? ~ ")"
                         ~ identity_clause? ~ return_type? ~ identity_clause?
                         ~ requires_clauses? ~ modifies_clauses? ~ block }
 param_list = { param ~ ("," ~ param)* }
@@ -127,6 +131,7 @@ block = { "{" ~ statement* ~ "}" }
 
 statement = { return_statement
             | require_statement
+            | trap_statement
             | revert_enum_statement
             | revert_statement
             | emit_statement
@@ -147,6 +152,7 @@ return_statement      = { "return" ~ expression? ~ ";" }
 require_statement     = { "require" ~ "(" ~ expression ~ "," ~ string_literal ~ ")" ~ ";" }
 revert_statement      = { "revert" ~ IDENT ~ ("(" ~ arg_list? ~ ")")? ~ ";" }
 revert_enum_statement = { "revert" ~ IDENT ~ "::" ~ IDENT ~ ("(" ~ arg_list? ~ ")")? ~ ";" }
+trap_statement       = { "trap" ~ (number_literal | IDENT)? ~ ";" }
 emit_statement        = { "emit" ~ IDENT ~ "(" ~ arg_list? ~ ")" ~ ";" }
 extern_call_statement = { "extern_call" ~ "(" ~ string_literal ~ "," ~ string_literal
                           ~ ("," ~ expression)* ~ ")" ~ ";" }
@@ -181,10 +187,11 @@ mul_op         = { "*" | "/" | "%" }
 unary   = { ("-" ~ unary) | ("!" ~ unary) | postfix }
 postfix = { primary ~ postfix_suffix* }
 postfix_suffix = { "." ~ (IDENT ~ ("(" ~ arg_list? ~ ")")? | number_literal) }
-primary = { map_index_expr | enum_access_expr | struct_literal
+primary = { self_access | map_index_expr | enum_access_expr | struct_literal
              | some_expr | none_expr | ok_expr | err_expr | call_expr
              | tuple_literal | literal | "(" ~ expression ~ ")" | IDENT }
 map_index_expr  = { IDENT ~ ("[" ~ expression ~ "]")+ }
+self_access = { "self" ~ "." ~ IDENT }
 
 
 call_expr = { IDENT ~ "(" ~ arg_list? ~ ")" }

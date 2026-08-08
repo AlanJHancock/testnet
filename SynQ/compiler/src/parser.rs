@@ -43,14 +43,25 @@ fn parse_struct(pair: Pair<Rule>) -> StructDefinition {
     // The first inner pair may be attribute_list (if present) or IDENT (if not).
     // We need to save attribute_list for processing in the loop below.
     let mut saved_attr_list: Option<Pair<Rule>> = None;
+    let mut visibility_kw: Option<String> = None;
     let name = {
         let first = inner.next().unwrap();
         match first.as_rule() {
             Rule::attribute_list => {
-                // Save it for later processing, get the next pair (IDENT)
-                let name = inner.next().unwrap().as_str().to_string();
                 saved_attr_list = Some(first);
-                name
+                // After attributes, we might have visibility_keyword or IDENT
+                let second = inner.next().unwrap();
+                match second.as_rule() {
+                    Rule::visibility_keyword => {
+                        visibility_kw = Some(second.as_str().to_string());
+                        inner.next().unwrap().as_str().to_string() // IDENT
+                    }
+                    _ => second.as_str().to_string()
+                }
+            }
+            Rule::visibility_keyword => {
+                visibility_kw = Some(first.as_str().to_string());
+                inner.next().unwrap().as_str().to_string() // IDENT
             }
             _ => first.as_str().to_string()
         }
@@ -99,14 +110,25 @@ fn parse_contract(pair: Pair<Rule>) -> Result<ContractDefinition, String> {
     // The first inner pair may be attribute_list (if present) or IDENT (if not).
     // We need to save attribute_list for processing in the loop below.
     let mut saved_attr_list: Option<Pair<Rule>> = None;
+    let mut visibility_kw: Option<String> = None;
     let name = {
         let first = inner.next().unwrap();
         match first.as_rule() {
             Rule::attribute_list => {
-                // Save it for later processing, get the next pair (IDENT)
-                let name = inner.next().unwrap().as_str().to_string();
                 saved_attr_list = Some(first);
-                name
+                // After attributes, we might have visibility_keyword or IDENT
+                let second = inner.next().unwrap();
+                match second.as_rule() {
+                    Rule::visibility_keyword => {
+                        visibility_kw = Some(second.as_str().to_string());
+                        inner.next().unwrap().as_str().to_string() // IDENT
+                    }
+                    _ => second.as_str().to_string()
+                }
+            }
+            Rule::visibility_keyword => {
+                visibility_kw = Some(first.as_str().to_string());
+                inner.next().unwrap().as_str().to_string() // IDENT
             }
             _ => first.as_str().to_string()
         }
@@ -170,6 +192,10 @@ fn parse_contract(pair: Pair<Rule>) -> Result<ContractDefinition, String> {
                     }
                 }
             }
+            Rule::security_section => {
+                // Security section is metadata-only — parsed but not compiled
+                // Could store on contract in the future
+            }
             Rule::enum_definition => {
                 contract_enums.push(parse_enum(p));
             }
@@ -195,14 +221,25 @@ fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
     // The first inner pair may be attribute_list (if present) or IDENT (if not).
     // We need to save attribute_list for processing in the loop below.
     let mut saved_attr_list: Option<Pair<Rule>> = None;
+    let mut visibility_kw: Option<String> = None;
     let name = {
         let first = inner.next().unwrap();
         match first.as_rule() {
             Rule::attribute_list => {
-                // Save it for later processing, get the next pair (IDENT)
-                let name = inner.next().unwrap().as_str().to_string();
                 saved_attr_list = Some(first);
-                name
+                // After attributes, we might have visibility_keyword or IDENT
+                let second = inner.next().unwrap();
+                match second.as_rule() {
+                    Rule::visibility_keyword => {
+                        visibility_kw = Some(second.as_str().to_string());
+                        inner.next().unwrap().as_str().to_string() // IDENT
+                    }
+                    _ => second.as_str().to_string()
+                }
+            }
+            Rule::visibility_keyword => {
+                visibility_kw = Some(first.as_str().to_string());
+                inner.next().unwrap().as_str().to_string() // IDENT
             }
             _ => first.as_str().to_string()
         }
@@ -350,7 +387,30 @@ fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
     }
 
     // Process attributes: derive is_public, merge with legacy clauses
-    let is_public = attributes.iter().any(|a| matches!(a, Attribute::Public));
+    let mut is_public = attributes.iter().any(|a| matches!(a, Attribute::Public));
+
+    // Handle spec-style visibility keywords (pub/priv/view/external/internal)
+    if let Some(ref vis) = visibility_kw {
+        match vis.as_str() {
+            "pub" | "external" => {
+                is_public = true;
+                if !attributes.iter().any(|a| matches!(a, Attribute::Public)) {
+                    attributes.push(Attribute::Public);
+                }
+            }
+            "priv" | "internal" => {
+                is_public = false;
+            }
+            "view" => {
+                is_public = true;
+                if !attributes.iter().any(|a| matches!(a, Attribute::Public)) {
+                    attributes.push(Attribute::Public);
+                }
+                // view functions are read-only — could add a View attribute here
+            }
+            _ => {}
+        }
+    }
     // @effects merges with modifies
     for attr in &attributes {
         if let Attribute::Effects(vars) = attr {
@@ -473,6 +533,15 @@ fn parse_statement(pair: Pair<Rule>) -> Statement {
                 .map(|al| al.into_inner().map(parse_expression).collect())
                 .unwrap_or_default();
             Statement::RevertEnum { enum_name, error, args }
+        }
+        Rule::trap_statement => {
+            // trap is spec-style revert — maps to RevertNamed
+            let inner = pair.into_inner().next();
+            let code = inner.map(|p| p.as_str().to_string()).unwrap_or_default();
+            Statement::RevertNamed {
+                error: format!("Trap({})", code),
+                args: vec![],
+            }
         }
         Rule::emit_statement => {
             let mut inner = pair.into_inner();
@@ -638,6 +707,11 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
             Expression::Literal(Literal::Hex(bytes))
         }
         Rule::bool_literal    => Expression::Literal(Literal::Bool(pair.as_str() == "true")),
+        Rule::self_access => {
+            // self.field → identifier "field" (state variables are accessed by name)
+            let field = pair.into_inner().next().unwrap().as_str().to_string();
+            Expression::Identifier(field)
+        }
         Rule::map_index_expr  => {
             let mut inner = pair.into_inner();
             let map_name = inner.next().unwrap().as_str().to_string();
