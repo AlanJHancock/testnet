@@ -3524,6 +3524,11 @@ struct NewSessionRequest {
     /// The raw `bytecode` field is ignored when `sqb` is present.
     #[serde(default)]
     sqb: Option<String>,
+    /// Optional caller address (hex, 0x-prefixed) — used for auto-init().
+    /// When provided, init() runs with this address as the caller instead
+    /// of the devnet authority. When absent, falls back to devnet caller.
+    #[serde(default)]
+    caller_address: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -4226,12 +4231,36 @@ async fn session_new_handler(
         if let Some(session) = map.get_mut(&id) {
             let has_init = session.vm.list_functions().iter().any(|f| f == "init");
             if has_init {
-                use sha3::Digest;
-                let devnet_id = sha3::Sha3_256::digest(b"SYNQ-DEVNET-AUTHORITY");
-                let mut devnet_caller = [0u8; 20];
-                devnet_caller.copy_from_slice(&devnet_id[0..20]);
+                // Use caller_address from the request if provided (user wallet),
+                // otherwise fall back to the devnet authority identity.
+                let init_caller = if let Some(ref addr_hex) = req.caller_address {
+                    let clean = addr_hex.trim_start_matches("0x");
+                    match hex::decode(clean) {
+                        Ok(bytes) if bytes.len() == 20 => {
+                            let mut a = [0u8; 20];
+                            a.copy_from_slice(&bytes);
+                            eprintln!("[SESSION] Auto-init with wallet caller {} for session {}", addr_hex, id);
+                            a
+                        }
+                        _ => {
+                            use sha3::Digest;
+                            let devnet_id = sha3::Sha3_256::digest(b"SYNQ-DEVNET-AUTHORITY");
+                            let mut a = [0u8; 20];
+                            a.copy_from_slice(&devnet_id[0..20]);
+                            eprintln!("[SESSION] Invalid caller_address, falling back to devnet caller for session {}", id);
+                            a
+                        }
+                    }
+                } else {
+                    use sha3::Digest;
+                    let devnet_id = sha3::Sha3_256::digest(b"SYNQ-DEVNET-AUTHORITY");
+                    let mut a = [0u8; 20];
+                    a.copy_from_slice(&devnet_id[0..20]);
+                    eprintln!("[SESSION] Auto-init with devnet caller for session {}", id);
+                    a
+                };
                 session.vm.call_context = synq_vm::CallContext::with_authority(
-                    devnet_caller,
+                    init_caller,
                     None,
                     vec![0u8; 104],
                 );
