@@ -5459,16 +5459,16 @@
             if (mappingSlotNames[n]) return; // skip non-enumerable mapping slots
             var before = preCallSnapshot[n];
             var after  = stateSnapshot[n];
-            // Guard: skip if either value is an object (shouldn't happen but safety net)
-            if (typeof before === 'object' || typeof after === 'object') return;
-            if (before !== undefined && before !== after) {
-              diffLines.push(
-                '<span style="color:rgba(255,255,255,0.55);">' + n + '</span>'
-                + ' <span style="color:rgba(255,255,255,0.25);">→</span> '
-                + '<span style="font-weight:600;color:rgba(100,220,180,1);">' + formatStateVal(n, after) + '</span>'
-                + ' <span style="font-size:0.7rem;color:rgba(255,255,255,0.22);">(was ' + formatStateVal(n, before) + ')</span>'
-              );
+            if (typeof after === 'object') return;
+            if (after === undefined) return;
+            var changed = (before !== undefined && before !== after);
+            var line = '<span style="color:rgba(255,255,255,0.55);">' + n + '</span>'
+              + ' <span style="color:rgba(255,255,255,0.25);">→</span> '
+              + '<span style="font-weight:600;color:rgba(100,220,180,1);">' + formatStateVal(n, after) + '</span>';
+            if (changed) {
+              line += ' <span style="font-size:0.7rem;color:rgba(255,255,255,0.22);">(was ' + formatStateVal(n, before) + ')</span>';
             }
+            diffLines.push(line);
           });
           if (diffLines.length > 0) {
             display += '  <span style="color:rgba(255,255,255,0.15);">|</span>  ' + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ');
@@ -6682,7 +6682,8 @@
           }
           if (ri < _rvList.length - 1) display += ' ';
         });
-        // Show state diff for non-void calls too (state already probed above)
+        // Show ALL non-mapping state vars after each call (consistent output every time).
+        // Append "(was X)" only when the value actually changed on this call.
         var diffLines = [];
         var mappingSlotNames = {};
         if (currentStateVars) {
@@ -6695,19 +6696,22 @@
           if (mappingSlotNames[n]) return;
           var before = preCallSnapshot[n];
           var after = stateSnapshot[n];
-          if (typeof before === 'object' || typeof after === 'object') return;
-          if (before !== undefined && before !== after) {
-            diffLines.push('<span style="color:rgba(255,255,255,0.55);">' + n + '</span>'
-              + ' <span style="color:rgba(255,255,255,0.25);">\u2192</span> '
-              + '<span style="font-weight:600;color:rgba(100,220,180,1);">' + formatStateVal(n, after) + '</span>'
-              + ' <span style="font-size:0.7rem;color:rgba(255,255,255,0.22);">(was ' + formatStateVal(n, before) + ')</span>');
+          if (typeof after === 'object') return;
+          if (after === undefined) return;
+          var changed = (before !== undefined && before !== after);
+          var line = '<span style="color:rgba(255,255,255,0.55);">' + n + '</span>'
+            + ' <span style="color:rgba(255,255,255,0.25);">\u2192</span> '
+            + '<span style="font-weight:600;color:rgba(100,220,180,1);">' + formatStateVal(n, after) + '</span>';
+          if (changed) {
+            line += ' <span style="font-size:0.7rem;color:rgba(255,255,255,0.22);">(was ' + formatStateVal(n, before) + ')</span>';
           }
+          diffLines.push(line);
         });
         if (diffLines.length > 0) {
           display += '  <span style="color:rgba(255,255,255,0.15);">|</span>  ' + diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ');
         }
       } else {
-        // void return — show state diff (state already probed above)
+        // void return — show ALL non-mapping state vars (consistent output every time)
         var diffLines = [];
         var mappingSlotNames = {};
         if (currentStateVars) {
@@ -6720,13 +6724,16 @@
           if (mappingSlotNames[n]) return;
           var before = preCallSnapshot[n];
           var after = stateSnapshot[n];
-          if (typeof before === 'object' || typeof after === 'object') return;
-          if (before !== undefined && before !== after) {
-            diffLines.push('<span style="color:rgba(255,255,255,0.55);">' + n + '</span>'
-              + ' <span style="color:rgba(255,255,255,0.25);">\u2192</span> '
-              + '<span style="font-weight:600;color:rgba(100,220,180,1);">' + formatStateVal(n, after) + '</span>'
-              + ' <span style="font-size:0.7rem;color:rgba(255,255,255,0.22);">(was ' + formatStateVal(n, before) + ')</span>');
+          if (typeof after === 'object') return;
+          if (after === undefined) return;
+          var changed = (before !== undefined && before !== after);
+          var line = '<span style="color:rgba(255,255,255,0.55);">' + n + '</span>'
+            + ' <span style="color:rgba(255,255,255,0.25);">\u2192</span> '
+            + '<span style="font-weight:600;color:rgba(100,220,180,1);">' + formatStateVal(n, after) + '</span>';
+          if (changed) {
+            line += ' <span style="font-size:0.7rem;color:rgba(255,255,255,0.22);">(was ' + formatStateVal(n, before) + ')</span>';
           }
+          diffLines.push(line);
         });
         if (diffLines.length > 0) {
           display += diffLines.join('  <span style="color:rgba(255,255,255,0.15);">|</span>  ');
