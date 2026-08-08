@@ -1,0 +1,16 @@
+[package]
+name = "aivm"
+version = "0.1.0"
+edition = "2021"
+description = "Abstract Instruction Virtual Machine — spec-compliant SynQ execution engine"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+hex = { workspace = true }
+ruint = { workspace = true }
+
+[dev-dependencies]
+# tests will use the crate itself
