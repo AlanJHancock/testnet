@@ -1950,6 +1950,8 @@ solc_version = "0.8.20"
 struct DeployEvmRequest {
     solidity_source: String,
     contract_name:   Option<String>,
+    #[serde(default)]
+    wallet_address:  Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -2023,6 +2025,21 @@ async fn deploy_evm_handler(
                 warnings: vec![], forge_version: forge_ver,
             }));
         }
+    }
+
+    // ── Impersonate wallet address on Anvil if provided ─────────────────
+    let use_wallet = req.wallet_address.as_deref()
+        .filter(|s| s.starts_with("0x") && s.len() == 42)
+        .map(|s| s.to_lowercase())
+        .filter(|s| s != "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+    if let Some(ref wallet) = use_wallet {
+        let _ = Command::new(&cast_bin)
+            .args(["rpc", "--rpc-url", &rpc_url, "anvil_impersonateAccount", wallet])
+            .output();
+        let _ = Command::new(&cast_bin)
+            .args(["rpc", "--rpc-url", &rpc_url, "anvil_setBalance", wallet, "0x56BC75E2D63100000"])
+            .output();
+        eprintln!("[deploy-evm] Impersonated wallet {}", wallet);
     }
 
     // ── Step 2: Create temp Foundry project and compile ────────────────────
@@ -2119,13 +2136,24 @@ solc_version = "0.8.20"
 
     let contract_spec = format!("src/Contract.sol:{}", cname);
 
-    let deploy_output = Command::new(&forge_bin)
-        .args(["create", &contract_spec,
-               "--rpc-url", &rpc_url,
-               "--private-key", anvil_pk,
-               "--broadcast"])
-        .current_dir(&temp_dir)
-        .output();
+    let deploy_output = if let Some(ref wallet) = use_wallet {
+        Command::new(&forge_bin)
+            .args(["create", &contract_spec,
+                   "--rpc-url", &rpc_url,
+                   "--from", wallet,
+                   "--unlocked",
+                   "--broadcast"])
+            .current_dir(&temp_dir)
+            .output()
+    } else {
+        Command::new(&forge_bin)
+            .args(["create", &contract_spec,
+                   "--rpc-url", &rpc_url,
+                   "--private-key", anvil_pk,
+                   "--broadcast"])
+            .current_dir(&temp_dir)
+            .output()
+    };
 
     let (contract_address, transaction_hash, block_number, gas_used) = match deploy_output {
         Ok(out) => {
@@ -2203,6 +2231,31 @@ solc_version = "0.8.20"
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(31337);
 
+    // Auto-call init() if the contract has one (matches QVM auto-init behavior)
+    if let Some(ref contract_addr) = contract_address {
+        let init_args: Vec<String> = if let Some(ref wallet) = use_wallet {
+            vec!["--rpc-url".into(), rpc_url.clone(), "--from".into(), wallet.to_string(), "--unlocked".into()]
+        } else {
+            vec!["--rpc-url".into(), rpc_url.clone(), "--private-key".into(), anvil_pk.to_string()]
+        };
+        let init_output = Command::new(&cast_bin)
+            .arg("send").arg(contract_addr).arg("init()")
+            .args(&init_args)
+            .output();
+        match init_output {
+            Ok(o) if o.status.success() => {
+                eprintln!("[deploy-evm] Auto-called init()");
+            }
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                eprintln!("[deploy-evm] init() non-fatal: {}", err.lines().last().unwrap_or("?"));
+            }
+            Err(e) => {
+                eprintln!("[deploy-evm] init() error: {}", e);
+            }
+        }
+    }
+
     // Cleanup
     let _ = fs::remove_dir_all(&temp_dir);
 
@@ -2233,6 +2286,8 @@ struct EvmCallRequest {
     function_signature: String,   // e.g. "add(uint256)" or "get()"
     args:               Vec<String>,
     is_view:            bool,
+    #[serde(default)]
+    wallet_address:     Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -2333,6 +2388,21 @@ async fn evm_call_handler(
     let anvil_pk  = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
     let rpc_url   = "http://127.0.0.1:8546";
 
+    // Impersonate wallet address on Anvil if provided
+    let use_wallet = req.wallet_address.as_deref()
+        .filter(|s| s.starts_with("0x") && s.len() == 42)
+        .map(|s| s.to_lowercase())
+        .filter(|s| s != "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+    if let Some(ref wallet) = use_wallet {
+        let _ = Command::new(&cast_bin)
+            .args(["rpc", "--rpc-url", rpc_url, "anvil_impersonateAccount", wallet])
+            .output();
+        let _ = Command::new(&cast_bin)
+            .args(["rpc", "--rpc-url", rpc_url, "anvil_setBalance", wallet, "0x56BC75E2D63100000"])
+            .output();
+        eprintln!("[evm-call] Impersonated wallet {}", wallet);
+    }
+
     // The caller provides the full function signature with types (e.g. "add(uint256)")
     // cast expects: "funcName(types)" followed by args as separate CLI args
     let sig = req.function_signature.clone();
@@ -2351,8 +2421,8 @@ async fn evm_call_handler(
         for arg in &converted_args {
             cmd.arg(arg);
         }
-        cmd.args(["--rpc-url", rpc_url,
-            "--from", "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"]);
+        let from_addr = use_wallet.as_deref().unwrap_or("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266");
+        cmd.args(["--rpc-url", rpc_url, "--from", from_addr]);
 
         let output = cmd.output();
 
@@ -2396,7 +2466,11 @@ async fn evm_call_handler(
         for arg in &converted_args {
             cmd.arg(arg);
         }
-        cmd.args(["--rpc-url", rpc_url, "--private-key", anvil_pk]);
+        if let Some(ref wallet) = use_wallet {
+            cmd.args(["--rpc-url", rpc_url, "--from", wallet, "--unlocked"]);
+        } else {
+            cmd.args(["--rpc-url", rpc_url, "--private-key", anvil_pk]);
+        }
 
         let output = cmd.output();
 

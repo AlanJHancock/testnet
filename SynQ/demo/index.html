@@ -3546,7 +3546,8 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           solidity_source: solSource,
-          contract_name: contractName
+          contract_name: contractName,
+          wallet_address: walletAddress || undefined
         })
       });
       var data = await res.json();
@@ -3839,7 +3840,8 @@
           contract_address: window._evmContractAddress,
           function_signature: f.signature,
           args: args,
-          is_view: isView
+          is_view: isView,
+          wallet_address: walletAddress || undefined
         })
       });
       var data = await res.json();
