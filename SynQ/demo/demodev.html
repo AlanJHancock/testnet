@@ -6479,11 +6479,11 @@
         ? '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="flex-shrink:0;margin-right:3px;opacity:0.6;"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>'
         : '';
 
-      html += '<div id="' + rowId + '" style="display:flex;align-items:center;gap:8px;margin:6px 0;padding:6px 8px;background:rgba(0,0,0,0.2);border-radius:6px;flex-wrap:nowrap;overflow:visible;" ' +
+      html += '<div id="' + rowId + '" style="display:flex;align-items:center;gap:8px;margin:6px 0;padding:6px 8px;background:rgba(0,0,0,0.2);border-radius:6px;flex-wrap:wrap;" ' +
         'data-fidx="' + idx + '" data-fname="' + fn.name + '">' +
         '<span style="font-family:ui-monospace,monospace;font-size:0.7rem;color:#e2e8f0;flex-shrink:0;display:flex;align-items:center;">' + lockIcon + fn.name + '</span>' +
         paramsHtml + ' ' + btnHtml + capHtml +
-        '<span class="qvmResult" style="font-family:ui-monospace,monospace;font-size:0.68rem;color:rgba(255,255,255,0.6);margin-left:4px;flex-shrink:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>' +
+        '<span class="qvmResult" style="font-family:ui-monospace,monospace;font-size:0.68rem;color:rgba(255,255,255,0.6);margin-left:4px;flex-shrink:0;"></span>' +
         '</div>';
       // Hint line — always its own full-width line directly under the row,
       // indented to line up with the params (not the function name column).
