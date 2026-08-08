@@ -114,7 +114,7 @@ fn test_transpile_address_cast() {
         }
     "#);
     // caller -> bytes20 cast, should be clean (no double cast)
-    assert!(sol.contains("bytes20(uint160(msg.sender))"));
+    assert!(sol.contains("bytes20(uint160(tx.origin))"));
     // Should NOT have the redundant double-cast pattern
     assert!(!sol.contains("bytes20(uint160(uint256(uint160("));
 }
@@ -215,7 +215,7 @@ fn test_transpile_authority_stubs() {
             }
         }
     "#);
-    assert!(sol.contains("authority_identity"));
+    assert!(sol.contains("tx.origin"));
     assert!(sol.contains("SXCP"));
 }
 
@@ -396,7 +396,7 @@ fn test_transpile_comprehensive_contract() {
     assert!(sol.contains("function isActive()"));
 
     // Casts
-    assert!(sol.contains("bytes20(uint160(msg.sender))"));
+    assert!(sol.contains("bytes20(uint160(tx.origin))"));
     assert!(!sol.contains("bytes20(uint160(uint256(uint160("));
 
     // Struct literal

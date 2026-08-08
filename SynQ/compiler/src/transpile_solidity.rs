@@ -390,13 +390,13 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
             writeln!(out, "    function _asset_create(string memory /*symbol*/, uint256 value) internal returns (uint256) {{").unwrap();
             writeln!(out, "        uint256 id = ++_nextAssetId;").unwrap();
             writeln!(out, "        _assetBalance[id] = value;").unwrap();
-            writeln!(out, "        _assetOwner[id] = uint256(uint160(msg.sender));").unwrap();
+            writeln!(out, "        _assetOwner[id] = uint256(uint160(tx.origin));").unwrap();
             writeln!(out, "        return id;").unwrap();
             writeln!(out, "    }}").unwrap();
             writeln!(out, "").unwrap();
             writeln!(out, "    function _asset_transfer(uint256 asset_id, uint256 to) internal returns (uint256) {{").unwrap();
             writeln!(out, "        require(!_assetBurned[asset_id], \"asset burned\");").unwrap();
-            writeln!(out, "        require(_assetOwner[asset_id] == uint256(uint160(msg.sender)), \"not owner\");").unwrap();
+            writeln!(out, "        require(_assetOwner[asset_id] == uint256(uint160(tx.origin)), \"not owner\");").unwrap();
             writeln!(out, "        uint256 new_id = ++_nextAssetId;").unwrap();
             writeln!(out, "        _assetBalance[new_id] = _assetBalance[asset_id];").unwrap();
             writeln!(out, "        _assetOwner[new_id] = to;").unwrap();
@@ -406,7 +406,7 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
             writeln!(out, "").unwrap();
             writeln!(out, "    function _asset_burn(uint256 asset_id) internal returns (uint256) {{").unwrap();
             writeln!(out, "        require(!_assetBurned[asset_id], \"already burned\");").unwrap();
-            writeln!(out, "        require(_assetOwner[asset_id] == uint256(uint160(msg.sender)), \"not owner\");").unwrap();
+            writeln!(out, "        require(_assetOwner[asset_id] == uint256(uint160(tx.origin)), \"not owner\");").unwrap();
             writeln!(out, "        uint256 value = _assetBalance[asset_id];").unwrap();
             writeln!(out, "        _assetBurned[asset_id] = true;").unwrap();
             writeln!(out, "        _assetBalance[asset_id] = 0;").unwrap();
@@ -1010,7 +1010,7 @@ fn transpile_statement(out: &mut String, stmt: &Statement, indent: usize) {
                 let key_sol = match &current_type {
                     Some(Type::Mapping(k, _)) if matches!(k.as_ref(), Type::Address) => {
                         match key {
-                            Expression::Caller => "address(uint160(msg.sender))".to_string(),
+                            Expression::Caller => "address(uint160(tx.origin))".to_string(),
                             _ => format!("address(uint160({}))", key_str)
                         }
                     }
@@ -1141,7 +1141,7 @@ fn transpile_expr(expr: &Expression) -> String {
                 "ai_infer" =>
                     format!("uint256(0) /* SXCP bridge stub: {} */", name),
                 "authority_identity" =>
-                    format!("uint256(uint160(msg.sender)) /* EVM approximation: authority_identity = msg.sender */"),
+                    format!("uint256(uint160(tx.origin)) /* QVM caller = tx.origin, preserved through extern_call */"),
                 "to_tsynq" | "to_syna" => {
                     BUILTIN_FLAGS.with(|f| f.borrow_mut().needs_to_tsynq = true);
                     format!("_toSyna(address(uint160({})))", transpile_expr(&args[0]))
@@ -1211,7 +1211,7 @@ fn transpile_expr(expr: &Expression) -> String {
         Expression::UnaryOp(op, val) => {
             format!("{}{}", unop_to_sol(op), transpile_expr(val))
         }
-        Expression::Caller => "uint256(uint160(msg.sender))".to_string(),
+        Expression::Caller => "uint256(uint160(tx.origin))".to_string(),
         Expression::MapIndex(map, keys) => {
             let mut index_str = String::new();
             let mut current_type = get_type(map);
@@ -1223,7 +1223,7 @@ fn transpile_expr(expr: &Expression) -> String {
                 };
                 if is_address_key {
                     match key {
-                        Expression::Caller => index_str.push_str("[address(uint160(msg.sender))]"),
+                        Expression::Caller => index_str.push_str("[address(uint160(tx.origin))]"),
                         _ => index_str.push_str(&format!("[address(uint160({}))]", key_str)),
                     }
                 } else {
@@ -1346,7 +1346,7 @@ fn resolve_type_alias(ty: &Type) -> Type {
 
 /// Strip redundant nested Solidity casts produced when an expression already
 /// contains a cast that the assignment/return cast wraps again.
-/// e.g. bytes20(uint160(uint256(uint160(msg.sender)))) -> bytes20(uint160(msg.sender))
+/// e.g. bytes20(uint160(uint256(uint160(tx.origin)))) -> bytes20(uint160(tx.origin))
 fn simplify_redundant_casts(s: &str) -> String {
     // Strip T1(T2(T1(T2(X)))) -> T1(T2(X)) for known cast patterns.
     const PATTERNS: &[(&str, &str)] = &[
