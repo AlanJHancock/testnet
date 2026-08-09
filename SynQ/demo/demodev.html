@@ -4328,7 +4328,7 @@
     try {
       // v7.0: Deploy from SQB artifact when available (unified deployment unit)
       var deployBody = Object.assign(
-        { state_vars: currentStateVars, contract_name: currentContractName },
+        { state_vars: currentStateVars, contract_name: currentContractName, fn_return_types: currentFnReturnTypes },
         workspaceId ? { workspace_id: workspaceId } : {},
         walletAddress ? { caller_address: walletAddress } : {}
       );
@@ -5997,7 +5997,14 @@
 
   function updateSessionBadge() {
     var badge = document.getElementById('sessionBadge');
-    if (badge) badge.style.display = sessionId ? 'inline-block' : 'none';
+    if (badge) {
+      if (sessionId) {
+        badge.style.display = 'inline-block';
+        badge.textContent = currentContractName ? (currentContractName + '.sqb') : 'QVM active';
+      } else {
+        badge.style.display = 'none';
+      }
+    }
   }
 
   /* ── Compile button label sync ─────────────────────────────────────────── */
@@ -6233,7 +6240,8 @@
     if (!currentBytecode) return;
     // Update the contract name badge in the Execute Contract card
     var _cnb = document.getElementById('contractNameBadge');
-    if (_cnb) { _cnb.textContent = currentContractName || ''; _cnb.style.display = currentContractName ? 'inline' : 'none'; }
+    var _ext2 = currentSqb ? '.sqb' : '.synq';
+    if (_cnb) { _cnb.textContent = currentContractName ? currentContractName + _ext2 : ''; _cnb.style.display = currentContractName ? 'inline' : 'none'; }
     var _ext = currentSqb ? 'sqb' : 'synq';
     var _eb = document.getElementById('editorContractBadge');
     if (_eb) { _eb.textContent = currentContractName ? currentContractName + '.' + _ext : ''; _eb.style.display = currentContractName ? 'inline-block' : 'none'; }
@@ -7154,12 +7162,14 @@
         compileFunctions = cfns;
         currentManifest = manifestJson;
         currentSidecar = null;
+        // Build fn_return_types from ABI for typed return values
+        currentFnReturnTypes = (cfns || []).reduce(function(m,f){ if(f.return_type) m[f.name]=f.return_type; return m; }, {});
 
         // Show contract name badge in editor with .sqb extension
         setEditorBadges(contractName, 'sqb');
-        // Also update the contractNameBadge in the Execute Contract card
+        // Also update the contractNameBadge in the Execute Contract card (with .sqb extension)
         var _cnbUpload = document.getElementById('contractNameBadge');
-        if (_cnbUpload) { _cnbUpload.textContent = contractName; _cnbUpload.style.display = 'inline'; }
+        if (_cnbUpload) { _cnbUpload.textContent = contractName + '.sqb'; _cnbUpload.style.display = 'inline'; }
 
         // Update the editor to reflect the uploaded SQB artifact
         var editorEl = document.getElementById('editor');
