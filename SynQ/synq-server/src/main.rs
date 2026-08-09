@@ -2696,9 +2696,14 @@ fn convert_evm_arg(raw: &str, sol_type: &str) -> String {
 }
 
 /// Parse parameter types from a Solidity function signature like "setSessionId(bytes32)"
+/// Handles return-type suffixes: "mint(uint256,uint256)(uint256)" → ["uint256", "uint256"]
 fn parse_sig_param_types(sig: &str) -> Vec<String> {
     if let Some(start) = sig.find("(") {
-        if let Some(end) = sig.rfind(")") {
+        // Find the matching ) for the first ( — not the last ) which
+        // might be part of a return-type suffix like "(uint256)"
+        let after_open = &sig[start+1..];
+        if let Some(end_rel) = after_open.find(")") {
+            let end = start + 1 + end_rel;
             if start < end {
                 let inner = &sig[start+1..end];
                 if inner.is_empty() { return vec![]; }
@@ -2707,6 +2712,22 @@ fn parse_sig_param_types(sig: &str) -> Vec<String> {
         }
     }
     vec![]
+}
+
+/// Strip the return-type suffix from a function signature.
+/// "mint(uint256,uint256)(uint256)" → "mint(uint256,uint256)"
+/// "init()(bool)" → "init()"
+/// "get()(uint256)" → "get()"
+fn strip_return_type(sig: &str) -> String {
+    // Find the first ( and its matching )
+    if let Some(start) = sig.find("(") {
+        let after_open = &sig[start+1..];
+        if let Some(end_rel) = after_open.find(")") {
+            let end = start + 1 + end_rel;
+            return sig[..=end].to_string();
+        }
+    }
+    sig.to_string()
 }
 
 async fn evm_call_handler(
@@ -2791,8 +2812,10 @@ async fn evm_call_handler(
         }
     } else {
         // State-changing call via `cast send`
+        // Strip return-type suffix from sig — cast send only needs the function selector
+        let send_sig = strip_return_type(&sig);
         let mut cmd = Command::new(&cast_bin);
-        cmd.arg("send").arg(&req.contract_address).arg(&sig);
+        cmd.arg("send").arg(&req.contract_address).arg(&send_sig);
         for arg in &converted_args {
             cmd.arg(arg);
         }
