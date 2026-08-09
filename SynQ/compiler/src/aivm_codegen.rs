@@ -58,7 +58,8 @@ impl<'a> FuncBody<'a> {
     fn is_public(&self) -> bool {
         match self {
             FuncBody::Constructor(_) => true,
-            FuncBody::Function(f) => f.is_public,
+            // @public OR `as caller` — both are externally callable
+            FuncBody::Function(f) => f.is_public || f.requires_caller,
         }
     }
 }
@@ -97,7 +98,7 @@ pub fn compile_to_aivm(contract: &ContractDefinition) -> Result<AivmCompileResul
     // Regular functions
     for part in &contract.parts {
         if let ContractPart::Function(f) = part {
-            let visibility = if f.is_public {
+            let visibility = if f.is_public || f.requires_caller {
                 FunctionVisibility::Public
             } else {
                 FunctionVisibility::Private
@@ -588,7 +589,7 @@ fn build_abi(
     for fdef in contract.parts.iter().filter_map(|p| {
         if let ContractPart::Function(f) = p { Some(f) } else { None }
     }) {
-        if !fdef.is_public { continue; }
+        if !fdef.is_public && !fdef.requires_caller { continue; }
 
         let params: Vec<AbiType> = fdef.params.iter()
             .map(|p| type_to_abi(&p.ty))
