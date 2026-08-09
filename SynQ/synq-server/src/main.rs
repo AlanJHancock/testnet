@@ -2760,6 +2760,22 @@ async fn evm_call_handler(
 
     // Convert args based on parameter types from the signature
     let param_types = parse_sig_param_types(&sig);
+
+    // Validate: reject empty args when the function expects parameters
+    for (i, raw) in req.args.iter().enumerate() {
+        if raw.trim().is_empty() {
+            let pname = format!("arg{}", i);
+            return (StatusCode::OK, RespJson(EvmCallResponse {
+                success: false,
+                output: None,
+                tx_hash: None,
+                gas_used: None,
+                block_num: None,
+                errors: vec![format!("Missing argument: {} (enter a value before calling)", pname)],
+            }));
+        }
+    }
+
     let converted_args: Vec<String> = req.args.iter().enumerate().map(|(i, raw)| {
         let ptype = param_types.get(i).map(|s| s.as_str()).unwrap_or("");
         convert_evm_arg(raw, ptype)
