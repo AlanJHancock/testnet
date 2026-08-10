@@ -709,10 +709,31 @@ fn parse_arg_typed(v: &serde_json::Value, ty_hint: &str) -> Result<Value, String
             if let Ok(u) = s.parse::<u128>() {
                 return Ok(if u <= i32::MAX as u128 { Value::I32(u as i32) } else { Value::U128(u) });
             }
-            // Hex addresses (0x...) → Bytes
+            // Hex addresses (0x...) → numeric for uint types, Bytes for everything else
             if s.starts_with("0x") || s.starts_with("0X") {
                 let hex = if s.len() > 2 { &s[2..] } else { "" };
-                // Pad to 32 bytes (64 hex chars) for addresses
+                let ty_lower = ty_hint.to_lowercase();
+                // For unsigned integer types, convert hex to numeric value
+                if ty_lower == "u256" || ty_lower == "uint256" || ty_lower == "u128" || ty_lower == "uint128" || ty_lower == "usize" {
+                    // Try u128 first (fits most cases)
+                    if let Ok(u) = u128::from_str_radix(hex, 16) {
+                        return Ok(if u <= i32::MAX as u128 { Value::I32(u as i32) } else { Value::U128(u) });
+                    }
+                    // Try U256 for large hex values (e.g. 160-bit Ethereum addresses)
+                    if let Ok(u256) = U256::from_str_radix(hex, 16) {
+                        return Ok(Value::U256(u256));
+                    }
+                    return Err(format!("Invalid hex value for {}: {}", ty_hint, s));
+                }
+                // For bytes type, decode to binary
+                if ty_lower == "bytes" {
+                    let padded = format!("{:0>64}", hex);
+                    return match hex::decode(&padded) {
+                        Ok(b)  => Ok(Value::Bytes(b)),
+                        Err(_) => Err(format!("Invalid hex address: {}", s)),
+                    };
+                }
+                // Default: treat as bytes (address-like)
                 let padded = format!("{:0>64}", hex);
                 return match hex::decode(&padded) {
                     Ok(b)  => Ok(Value::Bytes(b)),
@@ -2714,6 +2735,108 @@ fn parse_sig_param_types(sig: &str) -> Vec<String> {
     vec![]
 }
 
+/// Parse the return type from a Solidity function signature.
+/// "grantMinter(uint256)(bool)" → "bool"
+/// "get()(uint256)" → "uint256"
+/// "transfer(address,uint256)" → None (no return type suffix)
+fn parse_sig_return_type(sig: &str) -> Option<String> {
+    // Find the first '(' and its matching ')'
+    let first_open = sig.find('(')?;
+    let rest = &sig[first_open+1..];
+    let first_close_rel = rest.find(')')?;
+    let first_close = first_open + 1 + first_close_rel;
+
+    // Check if there's a second '(...)' after the first one
+    let after_first = sig.get(first_close+1..)?.trim_start();
+    if after_first.starts_with('(') {
+        // Extract the content of the second parens group
+        let second_open = first_close + 1 + (sig[first_close+1..].len() - after_first.len());
+        let after_second_open = &sig[second_open+1..];
+        let second_close_rel = after_second_open.find(')')?;
+        let ret_inner = &sig[second_open+1..second_open+1+second_close_rel];
+        if !ret_inner.is_empty() {
+            return Some(ret_inner.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Decode a raw hex return value based on the Solidity return type.
+/// "0x0000...0001" with return type "bool" → "true"
+/// "0x0000...0064" with return type "uint256" → "100"
+fn decode_return_value(hex: &str, ret_type: &str) -> String {
+    let hex = hex.trim();
+    if !hex.starts_with("0x") || hex.len() <= 2 {
+        return hex.to_string();
+    }
+
+    let ret_type = ret_type.trim();
+
+    // bool: last byte 0x01 = true, 0x00 = false
+    if ret_type == "bool" {
+        let bytes = hex::decode(&hex[2..]).unwrap_or_default();
+        let last = bytes.last().copied().unwrap_or(0);
+        return if last != 0 { "true".to_string() } else { "false".to_string() };
+    }
+
+    // uint256/int256 and variants: convert to decimal
+    if ret_type.starts_with("uint") || ret_type.starts_with("int") {
+        if let Ok(val) = U256::from_str_radix(&hex[2..], 16) {
+            return val.to_string();
+        }
+        // Fallback to BigInt-style parsing
+        if let Ok(val) = u128::from_str_radix(&hex[2..].get(..32).unwrap_or(&hex[2..]), 16) {
+            return val.to_string();
+        }
+        return hex.to_string();
+    }
+
+    // address: take last 20 bytes
+    if ret_type == "address" {
+        let hex_part = &hex[2..];
+        if hex_part.len() >= 40 {
+            return format!("0x{}", &hex_part[hex_part.len()-40..]);
+        }
+        return hex.to_string();
+    }
+
+    // string/bytes — try to decode as UTF-8 string
+    if ret_type == "string" {
+        if let Ok(bytes) = hex::decode(&hex[2..]) {
+            // Skip ABI encoding padding (first 32 bytes = offset, next 32 = length, then data)
+            if bytes.len() > 64 {
+                let len_start = 32;
+                if let Ok(str_len) = u128::from_str_radix(
+                    &hex::encode(&bytes[len_start..len_start+32]), 16
+                ) {
+                    let data_start = 64;
+                    let str_end = data_start + (str_len as usize).min(bytes.len() - data_start);
+                    if let Ok(s) = String::from_utf8(bytes[data_start..str_end].to_vec()) {
+                        return format!("\"{}\"", s);
+                    }
+                }
+            }
+            // Fallback: try raw UTF-8
+            if let Ok(s) = String::from_utf8(bytes) {
+                let trimmed = s.trim_matches('\0');
+                if !trimmed.is_empty() {
+                    return format!("\"{}\"", trimmed);
+                }
+            }
+        }
+        return hex.to_string();
+    }
+
+    // Default: if it's a clean hex number, show as decimal
+    if hex.len() > 10 && hex[2..].chars().all(|c| c.is_ascii_hexdigit()) {
+        if let Ok(val) = U256::from_str_radix(&hex[2..], 16) {
+            return val.to_string();
+        }
+    }
+
+    hex.to_string()
+}
+
 /// Strip the return-type suffix from a function signature.
 /// "mint(uint256,uint256)(uint256)" → "mint(uint256,uint256)"
 /// "init()(bool)" → "init()"
@@ -2796,9 +2919,20 @@ async fn evm_call_handler(
         match output {
             Ok(out) if out.status.success() => {
                 let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                // Decode the return value based on the function's return type
+                let decoded = if stdout.starts_with("0x") && !stdout.is_empty() {
+                    let ret_type = parse_sig_return_type(&sig).unwrap_or_default();
+                    if ret_type.is_empty() {
+                        stdout.to_string()
+                    } else {
+                        decode_return_value(&stdout, &ret_type)
+                    }
+                } else {
+                    stdout.to_string()
+                };
                 (StatusCode::OK, RespJson(EvmCallResponse {
                     success: true,
-                    output: Some(stdout),
+                    output: Some(decoded),
                     tx_hash: None,
                     gas_used: None,
                     block_num: None,
@@ -2908,7 +3042,12 @@ async fn evm_call_handler(
                                         if let Some(trace_obj) = first.get("trace") {
                                             if let Some(out) = trace_obj.get("output").and_then(|o| o.as_str()) {
                                                 if out != "0x" && !out.is_empty() {
-                                                    Some(out.to_string())
+                                                    let ret_type = parse_sig_return_type(&sig).unwrap_or_default();
+                                                    Some(if ret_type.is_empty() {
+                                                        out.to_string()
+                                                    } else {
+                                                        decode_return_value(out, &ret_type)
+                                                    })
                                                 } else { None }
                                             } else { None }
                                         } else { None }
