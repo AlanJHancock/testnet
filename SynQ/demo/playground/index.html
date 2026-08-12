@@ -58,7 +58,7 @@
     display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);
     border-radius:var(--radius) var(--radius) 0 0;overflow:hidden;
   }
-  .pane{display:flex;flex-direction:column;min-height:420px}
+  .pane{display:flex;flex-direction:column}
   .pane + .pane{border-left:1px solid var(--line)}
   .pane-head{
     display:flex;align-items:center;justify-content:space-between;
@@ -67,8 +67,8 @@
     background:rgba(255,255,255,0.02);
   }
   .pane-head .reset{color:var(--green-bright);font-size:12.5px;cursor:pointer;background:none;border:none;font-family:inherit;}
-  .pane-body{flex:1;position:relative;overflow:auto}
-  .editor-wrap{position:relative;flex:1;overflow:auto}
+  .pane-body{height:420px;position:relative;overflow:auto}
+  .editor-wrap{position:relative;height:100%;overflow:auto}
   .editor-wrap pre.hl, .editor-wrap textarea{
     position:absolute;inset:0;margin:0;padding:16px;
     font-family:var(--font-mono);font-size:13.5px;line-height:1.55;
@@ -124,9 +124,7 @@
     <a href="/forge">Forge</a>
     <a href="#" style="color:#fff">SynQ Playground</a>
   </nav>
-  <div class="nav-right">
-    <span class="pill-btn">Chain 1266</span>
-  </div>
+  <div class="nav-right"></div>
 </header>
 
 <div class="hero">
@@ -134,7 +132,7 @@
   <h1>SynQ Playground</h1>
   <p class="sub">Edit and compile SynQ against the real, always-current compiler backend &mdash; the
   same IR-backend that runs the SynQ Studio / EVM Deploy pipeline. No cached WASM snapshot, no
-  simulated results: every artifact below comes straight from <code>hanksweb.co.uk/synq/compile</code>.</p>
+  simulated results: every artifact below is a live compiler-attested build.</p>
   <div class="badges">
     <span class="badge">Synergy Testnet v3</span>
     <span class="badge">Chain 1266</span>
