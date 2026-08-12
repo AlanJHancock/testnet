@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>SynQ Playground | Synergy Forge (dev)</title>
+<style>
+  :root{
+    --bg-deep:#010604;
+    --bg:#020907;
+    --line:#203c31;
+    --line-soft:#53836838;
+    --green:#53ee3d;
+    --green-bright:#71ff54;
+    --muted:#a0ada7;
+    --muted-2:#73847c;
+    --danger:#ff8f7a;
+    --radius:8px;
+    --font-mono:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    --font-sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:#e7f0ea;font-family:var(--font-sans);}
+  a{color:inherit;text-decoration:none}
+
+  header{
+    display:flex;align-items:center;gap:24px;
+    padding:14px 28px;border-bottom:1px solid var(--line);
+    background:var(--bg-deep);
+  }
+  .logo{display:flex;align-items:center;gap:8px;font-size:19px;font-weight:700;letter-spacing:-0.01em;}
+  .logo .bracket{color:var(--green-bright)}
+  .logo .accent{color:var(--green-bright)}
+  nav.main-nav{display:flex;gap:22px;font-size:14px;color:var(--muted);flex:1}
+  nav.main-nav a:hover{color:#fff}
+  .nav-right{display:flex;align-items:center;gap:12px}
+  .pill-btn{
+    border:1px solid var(--line);border-radius:999px;padding:8px 16px;font-size:13px;
+    color:#e7f0ea;background:transparent;cursor:pointer;
+  }
+  .pill-btn.primary{background:var(--green-bright);color:#04180c;border-color:transparent;font-weight:600}
+
+  .hero{padding:56px 28px 32px;max-width:1180px;margin:0 auto;}
+  .hero .eyebrow{
+    color:var(--green-bright);font-size:12px;font-weight:700;letter-spacing:0.12em;
+    text-transform:uppercase;margin-bottom:14px;
+  }
+  .hero h1{font-size:52px;line-height:1.05;margin:0 0 16px;font-weight:700;letter-spacing:-0.02em;}
+  .hero p.sub{color:var(--muted);font-size:17px;max-width:720px;line-height:1.5;margin:0 0 22px;}
+  .badges{display:flex;gap:10px;flex-wrap:wrap}
+  .badge{
+    border:1px solid var(--line-soft);border-radius:6px;padding:6px 12px;
+    font-family:var(--font-mono);font-size:12.5px;color:var(--green-bright);
+  }
+
+  .playground{max-width:1180px;margin:0 auto;padding:0 28px 12px;}
+  .panes{
+    display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);
+    border-radius:var(--radius) var(--radius) 0 0;overflow:hidden;
+  }
+  .pane{display:flex;flex-direction:column;min-height:420px}
+  .pane + .pane{border-left:1px solid var(--line)}
+  .pane-head{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:12px 16px;border-bottom:1px solid var(--line);
+    font-family:var(--font-mono);font-size:13px;color:#e7f0ea;
+    background:rgba(255,255,255,0.02);
+  }
+  .pane-head .reset{color:var(--green-bright);font-size:12.5px;cursor:pointer;background:none;border:none;font-family:inherit;}
+  .pane-body{flex:1;position:relative;overflow:auto}
+  .editor-wrap{position:relative;flex:1;overflow:auto}
+  .editor-wrap pre.hl, .editor-wrap textarea{
+    position:absolute;inset:0;margin:0;padding:16px;
+    font-family:var(--font-mono);font-size:13.5px;line-height:1.55;
+    white-space:pre;overflow:auto;
+  }
+  .editor-wrap pre.hl{color:#dfe8e2;pointer-events:none;background:transparent;}
+  .editor-wrap textarea{
+    color:transparent;background:transparent;caret-color:#fff;
+    border:none;resize:none;outline:none;-webkit-text-fill-color:transparent;
+  }
+  .tok-kw{color:var(--green-bright);font-weight:600}
+  .tok-type{color:#7dd8ff}
+  .tok-str{color:#e8c766}
+  .tok-com{color:var(--muted-2);font-style:italic}
+  .tok-attr{color:#c99bff}
+  .tok-num{color:#ffb08a}
+
+  .evidence{padding:16px;font-family:var(--font-mono);font-size:12.5px;color:var(--muted);line-height:1.6}
+  .evidence .placeholder{color:var(--muted-2)}
+  .evidence h4{color:#e7f0ea;font-size:12px;text-transform:uppercase;letter-spacing:0.06em;margin:16px 0 6px;}
+  .evidence h4:first-child{margin-top:0}
+  .evidence .kv{display:flex;justify-content:space-between;gap:12px;padding:2px 0;border-bottom:1px dashed var(--line-soft);}
+  .evidence .kv span:first-child{color:var(--muted-2)}
+  .evidence .kv span:last-child{color:#e7f0ea;word-break:break-all;text-align:right}
+  .evidence .warn{color:#e8c766}
+  .evidence .fn-row{display:flex;justify-content:space-between;padding:4px 0;}
+  .evidence .fn-row .name{color:var(--green-bright)}
+  .evidence .hash{font-size:11px;color:var(--muted-2)}
+
+  .actions{
+    display:flex;align-items:center;gap:12px;border:1px solid var(--line);border-top:none;
+    border-radius:0 0 var(--radius) var(--radius);padding:16px;background:rgba(255,255,255,0.01);
+  }
+  .btn{
+    display:flex;align-items:center;gap:8px;border-radius:6px;padding:11px 18px;
+    font-size:14px;font-weight:600;cursor:pointer;border:1px solid var(--line);
+    background:transparent;color:#e7f0ea;
+  }
+  .btn.primary{background:var(--green-bright);color:#04180c;border-color:transparent}
+  .btn.primary:disabled{opacity:0.55;cursor:default}
+  .actions .note{margin-left:auto;color:var(--muted-2);font-size:12.5px}
+
+  footer{max-width:1180px;margin:40px auto 0;padding:20px 28px 40px;color:var(--muted-2);font-size:12.5px;border-top:1px solid var(--line);}
+  footer .chain-tag{display:inline-flex;align-items:center;gap:6px;color:var(--green-bright);margin-top:8px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo"><span class="bracket">&lt;/&gt;</span>synergy<span class="accent">forge</span><span style="color:var(--muted-2);font-weight:400;font-size:12px;margin-left:6px">dev</span></div>
+  <nav class="main-nav">
+    <a href="/demo/">IDE</a>
+    <a href="/forge">Forge</a>
+    <a href="#" style="color:#fff">SynQ Playground</a>
+  </nav>
+  <div class="nav-right">
+    <span class="pill-btn">Chain 1266</span>
+  </div>
+</header>
+
+<div class="hero">
+  <div class="eyebrow">Live server compiler &middot; real IR backend</div>
+  <h1>SynQ Playground</h1>
+  <p class="sub">Edit and compile SynQ against the real, always-current compiler backend &mdash; the
+  same IR-backend that runs the SynQ Studio / EVM Deploy pipeline. No cached WASM snapshot, no
+  simulated results: every artifact below comes straight from <code>hanksweb.co.uk/synq/compile</code>.</p>
+  <div class="badges">
+    <span class="badge">Synergy Testnet v3</span>
+    <span class="badge">Chain 1266</span>
+    <span class="badge">synergy-testnet-v3</span>
+  </div>
+</div>
+
+<div class="playground">
+  <div class="panes">
+    <div class="pane">
+      <div class="pane-head">
+        <span id="fileLabel">Counter.synq</span>
+        <button class="reset" id="resetBtn">Reset example</button>
+      </div>
+      <div class="pane-body">
+        <div class="editor-wrap">
+          <pre class="hl" id="hl"></pre>
+          <textarea id="src" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+        </div>
+      </div>
+    </div>
+    <div class="pane">
+      <div class="pane-head"><span>Compiler evidence</span></div>
+      <div class="pane-body">
+        <div class="evidence" id="evidence">
+          <span class="placeholder">No build yet. Compile to produce real ABI, manifest, bytecode, and hashes.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="actions">
+    <button class="btn primary" id="compileBtn">&lt;/&gt; Compile</button>
+    <a class="btn" href="/demo/" target="_blank">Open in SynQ IDE &rarr;</a>
+    <span class="note" id="statusNote">Artifact generation only &middot; no transaction submitted</span>
+  </div>
+</div>
+
+<footer>
+  Compile, inspect, and prepare SynQ contracts for Synergy Testnet v3 with explicit launch boundaries.
+  <div class="chain-tag">&#9737; Chain 1266 &middot; Testnet v3 configuration</div>
+</footer>
+
+<script>
+const EXAMPLE = `contract Counter {
+  state {
+    counter: u256;
+  }
+  impl {
+    @public
+    function increment() -> u256 {
+      counter = counter + 1;
+      return counter;
+    }
+
+    @public
+    function get() -> u256 {
+      return counter;
+    }
+  }
+}
+`;
+
+const srcEl = document.getElementById('src');
+const hlEl = document.getElementById('hl');
+const evidenceEl = document.getElementById('evidence');
+const compileBtn = document.getElementById('compileBtn');
+const statusNote = document.getElementById('statusNote');
+
+const KEYWORDS = ['contract','state','impl','function','return','if','else','while','for','let','struct','enum','true','false','as','caller'];
+const TYPES = ['u256','u128','i32','bool','bytes','tuple'];
+
+function escapeHtml(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function highlight(line){
+  // strip-and-restore comment first
+  let out = escapeHtml(line);
+  out = out.replace(/(\/\/.*$)/, '\u0001$1\u0002');
+  out = out.replace(/"([^"]*)"/g, '\u0003"$1"\u0004');
+  out = out.replace(/@[a-zA-Z_]+/g, '\u0005$&\u0006');
+  out = out.replace(/\b\d+\b/g, '\u0007$&\u0008');
+  const kwPattern = new RegExp('\\b(' + KEYWORDS.join('|') + ')\\b', 'g');
+  out = out.replace(kwPattern, '\u0009$&\u000A');
+  const tyPattern = new RegExp('\\b(' + TYPES.join('|') + ')\\b', 'g');
+  out = out.replace(tyPattern, '\u000B$&\u000C');
+  out = out
+    .replace(/\u0001/g,'<span class="tok-com">').replace(/\u0002/g,'</span>')
+    .replace(/\u0003/g,'<span class="tok-str">').replace(/\u0004/g,'</span>')
+    .replace(/\u0005/g,'<span class="tok-attr">').replace(/\u0006/g,'</span>')
+    .replace(/\u0007/g,'<span class="tok-num">').replace(/\u0008/g,'</span>')
+    .replace(/\u0009/g,'<span class="tok-kw">').replace(/\u000A/g,'</span>')
+    .replace(/\u000B/g,'<span class="tok-type">').replace(/\u000C/g,'</span>');
+  return out;
+}
+
+function renderHighlight(){
+  const lines = srcEl.value.split('\n');
+  hlEl.innerHTML = lines.map(highlight).join('\n') + '\n';
+}
+
+srcEl.addEventListener('input', renderHighlight);
+srcEl.addEventListener('scroll', () => { hlEl.scrollTop = srcEl.scrollTop; hlEl.scrollLeft = srcEl.scrollLeft; });
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+  srcEl.value = EXAMPLE;
+  renderHighlight();
+  evidenceEl.innerHTML = '<span class="placeholder">No build yet. Compile to produce real ABI, manifest, bytecode, and hashes.</span>';
+});
+
+function kv(label, value){
+  return `<div class="kv"><span>${label}</span><span>${value}</span></div>`;
+}
+
+function shortHash(h){
+  if(!h) return '&mdash;';
+  return h.slice(0,16) + '&hellip;' + h.slice(-8);
+}
+
+async function compile(){
+  compileBtn.disabled = true;
+  compileBtn.textContent = 'Compiling…';
+  evidenceEl.innerHTML = '<span class="placeholder">Compiling against the live IR backend…</span>';
+  try {
+    const res = await fetch('/synq/compile', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ source: srcEl.value })
+    });
+    const data = await res.json();
+    if (!data.success) {
+      evidenceEl.innerHTML = '<h4>Compile error</h4>' +
+        '<div class="warn">' + escapeHtml((data.errors||['Unknown error']).join('\n')) + '</div>';
+      return;
+    }
+    let html = '';
+    html += '<h4>Contract</h4>';
+    html += kv('Name', escapeHtml(data.contract_name || '—'));
+    html += kv('Address (session-derived)', shortHash(data.contract_address));
+    html += kv('Bytecode size', (data.bytecode ? (data.bytecode.length - 2) / 2 : 0) + ' bytes');
+
+    html += '<h4>Functions</h4>';
+    (data.functions || []).forEach(fn => {
+      html += `<div class="fn-row"><span class="name">${escapeHtml(fn.name)}()</span><span>${fn.is_view ? 'view' : ''} &rarr; ${escapeHtml(fn.return_type || 'void')}</span></div>`;
+    });
+
+    html += '<h4>State</h4>';
+    Object.entries(data.state_var_types || {}).forEach(([name, ty]) => {
+      html += kv(escapeHtml(name), escapeHtml(ty));
+    });
+
+    if (data.manifest) {
+      html += '<h4>Manifest</h4>';
+      html += kv('Chain / network', data.manifest.chain_id + ' / ' + escapeHtml(data.manifest.network_id || ''));
+      html += kv('Signature algorithm', escapeHtml(data.manifest.required_signature_algorithm || ''));
+      html += kv('Artifact hash', '<span class="hash">' + shortHash(data.manifest.artifact_hash) + '</span>');
+      html += kv('Source hash', '<span class="hash">' + shortHash(data.manifest.source_hash) + '</span>');
+    }
+
+    if (data.warnings && data.warnings.length) {
+      html += '<h4>Warnings</h4>';
+      data.warnings.forEach(w => { html += `<div class="warn">&middot; ${escapeHtml(w)}</div>`; });
+    }
+
+    evidenceEl.innerHTML = html;
+    statusNote.textContent = 'Compiled ' + new Date().toLocaleTimeString() + ' · artifact generation only · no transaction submitted';
+  } catch (e) {
+    evidenceEl.innerHTML = '<span class="warn">Request failed: ' + escapeHtml(String(e)) + '</span>';
+  } finally {
+    compileBtn.disabled = false;
+    compileBtn.innerHTML = '&lt;/&gt; Compile';
+  }
+}
+
+compileBtn.addEventListener('click', compile);
+
+srcEl.value = EXAMPLE;
+renderHighlight();
+</script>
+
+</body>
+</html>
