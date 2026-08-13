@@ -181,7 +181,8 @@
   </div>
   <div class="actions">
     <button class="btn primary" id="compileBtn">&lt;/&gt; Compile</button>
-    <a class="btn" href="/demo/" target="_blank">Open in SynQ IDE &rarr;</a>
+    <a class="btn" id="openIdeLink" href="/demo/" target="_blank">Open in SynQ IDE &rarr;</a>
+    <a class="btn" id="openForgeLink" href="/forge/" target="_blank">Open in Forge IDE &rarr;</a>
     <span class="note" id="statusNote">Artifact generation only &middot; no transaction submitted</span>
   </div>
 </div>
@@ -427,6 +428,7 @@ async function compile(){
       return;
     }
 
+    lastCompiledName = data.contract_name || null;
     evidenceTabs = await buildEvidenceTabs(data);
     renderEvidenceShell(data, elapsedMs);
     statusNote.textContent = 'Compiled ' + new Date().toLocaleTimeString() + ' · artifact generation only · no transaction submitted';
@@ -439,6 +441,41 @@ async function compile(){
 }
 
 compileBtn.addEventListener('click', compile);
+
+let lastCompiledName = null;
+
+function extractContractName(src){
+  const stripped = (src || '').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const m = stripped.match(/\bcontract\s+([A-Za-z_][A-Za-z0-9_]*)/);
+  return m ? m[1] : null;
+}
+
+document.getElementById('openIdeLink').addEventListener('click', (e) => {
+  e.preventDefault();
+  const src = srcEl.value;
+  const name = lastCompiledName || extractContractName(src) || 'Playground';
+  try {
+    localStorage.setItem('synq_ide_handoff', JSON.stringify({ src, name, ts: Date.now() }));
+  } catch (err) {
+    console.warn('[HANDOFF] could not stage contract for IDE handoff', err);
+  }
+  window.open('/demo/', '_blank');
+});
+
+// Deep-links straight into ForgeIDE using the same URL convention as the
+// official forge.synergy-network.io (forge.synergy-network.io/workspace/project/
+// local-counter/file/contracts/Counter.synq), pointed at this local server.
+// The route on the Forge side fetches the named contract's source from
+// /synq-contracts/<Name>.synq, so this only works for contracts that exist
+// there under that name (not arbitrary unsaved edits in the textarea above).
+document.getElementById('openForgeLink').addEventListener('click', (e) => {
+  e.preventDefault();
+  const src = srcEl.value;
+  const name = lastCompiledName || extractContractName(src) || 'Counter';
+  const slug = 'local-' + name.toLowerCase();
+  const url = '/forge/workspace/project/' + encodeURIComponent(slug) + '/file/contracts/' + encodeURIComponent(name) + '.synq';
+  window.open(url, '_blank');
+});
 
 srcEl.value = EXAMPLE;
 renderHighlight();
