@@ -1110,7 +1110,7 @@ impl QuantumVM {
                 };
 
                 let constructor_hash = [0u8; 32];
-                let network = std::option_env!("SYNQ_NETWORK_ID").unwrap_or("synergy-testnet");
+                let network = std::option_env!("SYNQ_NETWORK_ID").unwrap_or("synergy-testnet-v3");
 
                 match crate::bech32::derive_contract_address(&deployer, nonce, &artifact_hash, &constructor_hash, network) {
                     Ok(encoded) => self.stack.push(Value::Bytes(encoded.into_bytes())),

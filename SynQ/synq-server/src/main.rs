@@ -111,8 +111,8 @@ fn authority_scope_hash(scope_name: &str) -> [u8; 32] {
 }
 
 // V3 chain parameters
-const V3_CHAIN_ID: u64 = 1264;
-const V3_NETWORK_ID: &str = "synergy-testnet";
+const V3_CHAIN_ID: u64 = 1266;
+const V3_NETWORK_ID: &str = "synergy-testnet-v3";
 
 
 // ─── PR-F Item 2: Per-IP rate limiting ───────────────────────────────────────
@@ -384,7 +384,7 @@ fn eip712_domain_separator(domain_name: &str, verifying_contract: &[u8; 20]) -> 
     );
     let name_hash    = keccak256_str(domain_name);
     let version_hash = keccak256_str("1");
-    // V3: chain ID 1264 (synergy-testnet). Per synq-address-format-spec v0.1.
+    // V3: chain ID 1266 (synergy-testnet-v3). Per synq-address-format-spec v0.1.
     let chain_id     = pad32(&V3_CHAIN_ID.to_be_bytes());
     let mut contract_slot = [0u8; 32];
     contract_slot[12..].copy_from_slice(verifying_contract);
@@ -866,7 +866,7 @@ struct ManifestInfo {
     required_signature_algorithm: String,
     /// Consensus signature algorithm (ML-DSA-65 for V3)
     consensus_signature_algorithm: String,
-    /// Chain ID (1264 for testnet per synq-address-format-spec)
+    /// Chain ID (1266 for testnet per synq-address-format-spec)
     chain_id: u64,
     /// Network ID
     network_id: String,
@@ -3835,7 +3835,7 @@ async fn sign_source_handler(
         "issued_at":       issued_at,
         "eip712_domain": {
             "name": "SynQ", "version": "3",
-            "chainId": 1264, "verifyingContract": vc_hex,
+            "chainId": V3_CHAIN_ID, "verifyingContract": vc_hex,
         },
         "pqc_signature":   pqc_sig_hex,
         "pqc_public_key":  pqc_pubkey_hex,

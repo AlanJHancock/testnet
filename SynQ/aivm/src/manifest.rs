@@ -49,8 +49,8 @@ impl Manifest {
                 "domain_separation": true
             }),
             required_signature_algorithm: "ML-DSA-65".to_string(),
-            required_chain_id: 1264,
-            required_network_id: "synergy-testnet".to_string(),
+            required_chain_id: 1266,
+            required_network_id: "synergy-testnet-v3".to_string(),
             required_aivm_version: "0.1".to_string(),
             permissions: vec![],
             host_functions: vec![
@@ -74,20 +74,23 @@ pub enum ManifestValidation {
     Invalid(crate::errors::AivmError),
 }
 
-/// Validate manifest against chain-1264 testnet requirements
+/// Validate manifest against chain-1266 (V3) testnet requirements.
+/// Accepts legacy network id strings for backward compatibility with
+/// manifests signed before the 1264 -> 1266 chain ID migration.
 pub fn validate_manifest(manifest: &Manifest) -> ManifestValidation {
-    if manifest.required_chain_id != 1264 {
+    if manifest.required_chain_id != 1266 {
         return ManifestValidation::Invalid(crate::errors::AivmError::ManifestChainIdMismatch {
-            expected: 1264,
+            expected: 1266,
             got: manifest.required_chain_id,
         });
     }
 
-    let network_valid = manifest.required_network_id == "synergy-testnet"
+    let network_valid = manifest.required_network_id == "synergy-testnet-v3"
+        || manifest.required_network_id == "synergy-testnet"
         || manifest.required_network_id == "synergy-testnet-v2";
     if !network_valid {
         return ManifestValidation::Invalid(crate::errors::AivmError::ManifestNetworkIdMismatch {
-            expected: "synergy-testnet".to_string(),
+            expected: "synergy-testnet-v3".to_string(),
             got: manifest.required_network_id.clone(),
         });
     }

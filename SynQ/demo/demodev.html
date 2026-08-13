@@ -1621,8 +1621,8 @@
     return {sig: '0x'+r+s+v, addr: _ephemeralAddress};
   }
 
-  /* ── Chain switch — ensure MetaMask is on chain 1264 before signing ─────── */
-  var V3_CHAIN_ID_HEX = '0x4f0'; // 1264 decimal
+  /* ── Chain switch — ensure MetaMask is on chain 1266 before signing ─────── */
+  var V3_CHAIN_ID_HEX = '0x4f2'; // 1266 decimal
   var _chainEnsured = false;
 
   async function _ensureChain() {
@@ -1631,17 +1631,17 @@
     if (!provider || _walletMode === 'ephemeral') return;
 
     try {
-      // Try switching to chain 1264
+      // Try switching to chain 1266
       await provider.request({
         method: 'wallet_switchEthereumChain',
         params: [{ chainId: V3_CHAIN_ID_HEX }]
       });
       _chainEnsured = true;
-      console.log('[SynQ Wallet] Switched to chain 1264 (synergy-testnet)');
+      console.log('[SynQ Wallet] Switched to chain 1266 (synergy-testnet-v3)');
     } catch(switchErr) {
       // 4902 = chain not added yet
       if (switchErr.code === 4902 || (switchErr.message && switchErr.message.includes('4902'))) {
-        console.log('[SynQ Wallet] Chain 1264 not in MetaMask — adding...');
+        console.log('[SynQ Wallet] Chain 1266 not in MetaMask — adding...');
         try {
           await provider.request({
             method: 'wallet_addEthereumChain',
@@ -1654,11 +1654,11 @@
             }]
           });
           _chainEnsured = true;
-          console.log('[SynQ Wallet] Added and switched to chain 1264');
+          console.log('[SynQ Wallet] Added and switched to chain 1266');
         } catch(addErr) {
-          console.warn('[SynQ Wallet] Could not add chain 1264:', addErr.message || addErr);
+          console.warn('[SynQ Wallet] Could not add chain 1266:', addErr.message || addErr);
           throw new Error('Could not add Synergy Testnet V3 to wallet. ' +
-            'Manually add chainId 1264 with RPC https://testnet-core-rpc.synergy-network.io and try again.');
+            'Manually add chainId 1266 with RPC https://testnet-core-rpc.synergy-network.io and try again.');
         }
       } else if (switchErr.code === 4001) {
         throw new Error('Chain switch rejected — approve in wallet to continue.');
@@ -1679,7 +1679,7 @@
         console.warn('[SynQ Wallet] No provider for ' + _walletMode + ' signing — falling back to ephemeral');
         return await signEIP712Ephemeral(typedData);
       }
-      // Ensure wallet is on chain 1264 before signing (MetaMask enforces domain chainId match)
+      // Ensure wallet is on chain 1266 before signing (MetaMask enforces domain chainId match)
       // Non-fatal: if chain switch fails, try signing anyway — some wallets
       // allow signing regardless of current chain
       try {
@@ -3280,7 +3280,7 @@
 
       // ── Rev-2 Source Signing (if wallet connected) ───────────────────────
       // SourceCommit EIP-712:
-      //   domain  : { name:'SynQ · <ContractName> · synergy-testnet', version:'1', chainId:1264,
+      //   domain  : { name:'SynQ · <ContractName> · synergy-testnet-v3', version:'1', chainId:1266,
       //               verifyingContract: keccak256(contractName)[0..20] }
       //   struct  : SourceCommit { string sourceHash, string contractName, string nonce }
       //   The server verifies the KMAC128 nonce, ecrecovers the author, compiles,
@@ -3329,9 +3329,9 @@
             },
             primaryType: 'SourceCommit',
             domain: {
-              name:              'SynQ · ' + _cnForDomain + ' · synergy-testnet',
+              name:              'SynQ · ' + _cnForDomain + ' · synergy-testnet-v3',
               version:           '1',
-              chainId:           1264,
+              chainId:           1266,
               verifyingContract: vcHex
             },
             message: {
@@ -3389,7 +3389,7 @@
             setStatus('Compiled ▶ ' + (currentContractName || 'contract') + ' (wallet signature declined)', 'success');
           } else if (we.code === 4902 || we.code === -32603 ||
                      (we.message && we.message.toLowerCase().includes('chain'))) {
-            setStatus('Wallet error: chain mismatch — switching to chain 1264 — SynQ uses chainId 1264 (synergy-testnet). Try again.', 'error');
+            setStatus('Wallet error: chain mismatch — switching to chain 1266 — SynQ uses chainId 1266 (synergy-testnet-v3). Try again.', 'error');
           } else {
             setStatus('Source signing error: ' + (we.message || we.toString()), 'error');
           }
@@ -4829,8 +4829,8 @@
       if (_gb) { _gb.innerHTML = '\u23F3\u2009Signing...'; }
       setStatus('[GRANT] Step 2/5: Nonce received. Building EIP-712 typed data...', 'info');
       var grantNonce   = nonceData.nonce;
-      var v3ChainId   = nonceData.chainId   || 1264;
-      var v3NetworkId = nonceData.networkId || 'synergy-testnet';
+      var v3ChainId   = nonceData.chainId   || 1266;
+      var v3NetworkId = nonceData.networkId || 'synergy-testnet-v3';
       var v3DomainTag = 'SYNQ-GRANT-v3';
 
       // 2. Compute expiry: 1 hour from now (server max is 3600s)
@@ -5217,8 +5217,8 @@
         }
         var callNonce   = nonceData.nonce;
         // V3 metadata from server — used for EIP-712 domain and domainTag
-        var v3ChainId   = nonceData.chainId   || 1264;
-        var v3NetworkId = nonceData.networkId || 'synergy-testnet';
+        var v3ChainId   = nonceData.chainId   || 1266;
+        var v3NetworkId = nonceData.networkId || 'synergy-testnet-v3';
         var v3DomainTag = nonceData.domainTag || 'SYNQ-CALL-v3';
         // EIP-712: build typed data for ContractCall
         // verifyingContract = contract-name-derived address (deterministic, not on-chain).
@@ -5278,7 +5278,7 @@
           if (sigErr.code === 4001 || sigErr.code === 'ACTION_REJECTED') {
             sigErrMsg = 'Signature declined — call not sent.';
           } else if (sigErr.code === 4902 || sigErr.code === -32603 || (sigErr.message && sigErr.message.toLowerCase().includes('chain'))) {
-            sigErrMsg = 'Wallet error: chain mismatch — switching to chain 1264 — SynQ uses chainId 1264 (synergy-testnet) for signing only, no network switch needed. Try again.';
+            sigErrMsg = 'Wallet error: chain mismatch — switching to chain 1266 — SynQ uses chainId 1266 (synergy-testnet-v3) for signing only, no network switch needed. Try again.';
           } else {
             sigErrMsg = 'Signing error: ' + (sigErr.message || sigErr.toString());
           }
@@ -6633,8 +6633,8 @@
           return;
         }
         var callNonce = nonceData.nonce;
-        var v3ChainId = nonceData.chainId || 1264;
-        var v3NetworkId = nonceData.networkId || 'synergy-testnet';
+        var v3ChainId = nonceData.chainId || 1266;
+        var v3NetworkId = nonceData.networkId || 'synergy-testnet-v3';
         var v3DomainTag = nonceData.domainTag || 'SYNQ-CALL-v3';
         var callSignature = fn.name + '(' + args.join(', ') + ')';
         var callTypedData = JSON.stringify({

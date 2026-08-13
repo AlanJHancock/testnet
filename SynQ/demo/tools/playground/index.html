@@ -39,6 +39,9 @@
     color:#e7f0ea;background:transparent;cursor:pointer;
   }
   .pill-btn.primary{background:var(--green-bright);color:#04180c;border-color:transparent;font-weight:600}
+  .pill-btn.wallet-connected{border-color:var(--line-soft);color:var(--green-bright);font-family:var(--font-mono);font-size:12.5px}
+  .pill-btn.wallet-connected:hover{border-color:var(--green-bright)}
+  .wallet-err{color:var(--danger);font-size:12px;margin-left:8px}
 
   .hero{padding:56px 28px 32px;max-width:1180px;margin:0 auto;}
   .hero .eyebrow{
@@ -140,7 +143,9 @@
     <a href="/forge">Forge</a>
     <a href="/tools/playground/" style="color:#fff">SynQ Playground</a>
   </nav>
-  <div class="nav-right"></div>
+  <div class="nav-right">
+    <button class="pill-btn" id="walletBtn" title="Connect a Synergy wallet so Playground saves follow your address, not this browser">Connect Wallet</button>
+  </div>
 </header>
 
 <div class="hero">
@@ -217,6 +222,200 @@ const hlEl = document.getElementById('hl');
 const evidenceEl = document.getElementById('evidence');
 const compileBtn = document.getElementById('compileBtn');
 const statusNote = document.getElementById('statusNote');
+const walletBtn = document.getElementById('walletBtn');
+
+/* ── Wallet connect (ported/lean from the main SynQ IDE) ──────────────────
+ * Playground only needs an identity string for the save/load namespace --
+ * it doesn't sign anything -- so this is intentionally a slimmed-down port:
+ * extension/injected wallet (EIP-6963 + window.ethereum/window.synergy) only.
+ * No device-link JSON tier, no ephemeral key generation -- if no wallet is
+ * detected, we just keep using the anonymous per-browser localStorage id.
+ */
+var walletAddress = null;   // EVM 0x... address from the connected provider
+var walletSyna     = null;  // Native V3 syna... Bech32 address (preferred owner id)
+
+var BECH32_CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+function bech32Polymod(values) {
+  var GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  var chk = 1;
+  for (var i = 0; i < values.length; i++) {
+    var b = chk >> 25; chk = ((chk & 0x1ffffff) << 5) ^ values[i];
+    for (var j = 0; j < 5; j++) { if ((b >> j) & 1) chk ^= GEN[j]; }
+  }
+  return chk;
+}
+function bech32HrpExpand(hrp) {
+  var ret = [];
+  for (var i = 0; i < hrp.length; i++) { ret.push(hrp.charCodeAt(i) >> 5); }
+  ret.push(0);
+  for (var i = 0; i < hrp.length; i++) { ret.push(hrp.charCodeAt(i) & 31); }
+  return ret;
+}
+function bech32CreateChecksum(hrp, data) {
+  var values = bech32HrpExpand(hrp).concat(data);
+  var polymod = bech32Polymod(values.concat([0,0,0,0,0,0])) ^ 1;
+  var ret = [];
+  for (var i = 0; i < 6; i++) ret.push((polymod >> 5 * (5 - i)) & 31);
+  return ret;
+}
+function convertbits(data, frombits, tobits, pad) {
+  var acc = 0, bits = 0, ret = [];
+  var maxv = (1 << tobits) - 1;
+  for (var i = 0; i < data.length; i++) {
+    var value = data[i];
+    if (value < 0 || (value >> frombits) !== 0) return null;
+    acc = (acc << frombits) | value; bits += frombits;
+    while (bits >= tobits) { bits -= tobits; ret.push((acc >> bits) & maxv); }
+  }
+  if (pad) { if (bits) ret.push((acc << (tobits - bits)) & maxv); }
+  else if (bits >= frombits || ((acc << (tobits - bits)) & maxv)) { return null; }
+  return ret;
+}
+function evmToSyna(evmHex) {
+  var hex = evmHex.replace(/^0x/i, '');
+  var bytes = [];
+  for (var i = 0; i < hex.length; i += 2) bytes.push(parseInt(hex.substr(i, 2), 16));
+  while (bytes.length < 20) bytes.unshift(0);
+  var data5 = convertbits(bytes, 8, 5, true);
+  if (!data5) return null;
+  var hrp = 'syna';
+  var checksum = bech32CreateChecksum(hrp, data5);
+  var combined = data5.concat(checksum);
+  return hrp + '1' + combined.map(function(v) { return BECH32_CHARSET[v]; }).join('');
+}
+
+function _checkSynergyExtension() {
+  if (typeof window.synergy === 'undefined') return false;
+  if (window.synergy.isSynergyWallet === true || window.synergy.isSynergyWallet === 1) return true;
+  if (typeof window.synergy.request === 'function') return true;
+  return false;
+}
+function _detectWalletType() {
+  if (_checkSynergyExtension()) return 'synergy';
+  if (typeof window.ethereum !== 'undefined' && window.ethereum && typeof window.ethereum.request === 'function') {
+    return 'ethereum';
+  }
+  return null;
+}
+function _walletProvider() {
+  if (typeof window.ethereum !== 'undefined' && window.ethereum && typeof window.ethereum.request === 'function') {
+    return window.ethereum;
+  }
+  if (typeof window.synergy !== 'undefined' && window.synergy && typeof window.synergy.request === 'function') {
+    return window.synergy;
+  }
+  return null;
+}
+async function _walletRequest(method, params) {
+  var provider = _walletProvider();
+  if (!provider) throw new Error('No wallet provider available');
+  try {
+    return await provider.request({ method: method, params: params || [] });
+  } catch(e) {
+    if (e.code === -32601 || (e.message && e.message.toLowerCase().includes('method'))) {
+      var synMethod = method.replace(/^eth_/, 'synergy_');
+      return await provider.request({ method: synMethod, params: params || [] });
+    }
+    throw e;
+  }
+}
+
+// EIP-6963: listen for multi-provider announcements (modern wallet injection)
+var _eip6963Providers = [];
+if (typeof window !== 'undefined') {
+  window.addEventListener('eip6963:announceProvider', function(ev) {
+    var detail = ev.detail || {};
+    if (detail.provider) _eip6963Providers.push(detail);
+    if (detail.info && (detail.info.rdns === 'synergy' || (detail.info.name && detail.info.name.toLowerCase().includes('synergy')))) {
+      if (typeof window.synergy === 'undefined') {
+        window.synergy = detail.provider;
+        window.synergy.isSynergyWallet = true;
+      }
+    }
+  });
+  window.dispatchEvent(new CustomEvent('eip6963:requestProvider'));
+}
+
+function updateWalletUI(){
+  if (!walletBtn) return;
+  if (walletSyna || walletAddress) {
+    var shown = walletSyna || (walletAddress.slice(0,6) + '\u2026' + walletAddress.slice(-4));
+    walletBtn.textContent = shown.length > 20 ? (shown.slice(0,10) + '\u2026' + shown.slice(-6)) : shown;
+    walletBtn.title = 'Connected: ' + shown + ' (click to disconnect)';
+    walletBtn.classList.add('wallet-connected');
+  } else {
+    walletBtn.textContent = 'Connect Wallet';
+    walletBtn.title = 'Connect a Synergy wallet so Playground saves follow your address, not this browser';
+    walletBtn.classList.remove('wallet-connected');
+  }
+}
+
+function disconnectWallet(){
+  walletAddress = null; walletSyna = null;
+  updateWalletUI();
+}
+
+async function connectWallet(){
+  if (walletSyna || walletAddress) { disconnectWallet(); return; }
+  var walletType = _detectWalletType();
+  if (walletType) {
+    try {
+      var accounts = await _walletRequest('eth_requestAccounts');
+      if (accounts && accounts.length) {
+        walletAddress = accounts[0];
+        walletSyna = null;
+        if (window.synergy) {
+          try {
+            if (typeof window.synergy.getAddress === 'function') {
+              walletSyna = await window.synergy.getAddress();
+            } else if (typeof window.synergy.request === 'function') {
+              walletSyna = await window.synergy.request({ method: 'synergy_getAddress' });
+            } else if (window.synergy.nativeAddress) {
+              walletSyna = window.synergy.nativeAddress;
+            }
+          } catch(synErr) { /* fall through to EVM-derived syna below */ }
+        }
+        if (!walletSyna && walletAddress) walletSyna = evmToSyna(walletAddress);
+        updateWalletUI();
+        return;
+      }
+    } catch(e) {
+      if (e && e.code === 4001) {
+        console.warn('[Playground Wallet] connection rejected by user');
+      } else {
+        console.warn('[Playground Wallet] connect failed:', e && (e.message || e.code || e));
+      }
+      return;
+    }
+  }
+  // No wallet extension detected -- keep using the anonymous per-browser id.
+  console.log('[Playground Wallet] no wallet extension detected, continuing with anonymous per-browser id');
+}
+window.connectWallet = connectWallet;
+if (walletBtn) walletBtn.addEventListener('click', connectWallet);
+
+// Silent auto-reconnect on load: eth_accounts never prompts, so if the
+// browser already granted this site permission, restore the session
+// without the user having to click Connect again.
+(async function _tryAutoReconnect(){
+  var provider = _walletProvider();
+  if (!provider) return;
+  try {
+    var accs = await _walletRequest('eth_accounts');
+    if (accs && accs.length) {
+      walletAddress = accs[0];
+      if (window.synergy) {
+        try {
+          if (typeof window.synergy.getAddress === 'function') walletSyna = await window.synergy.getAddress();
+          else if (window.synergy.nativeAddress) walletSyna = window.synergy.nativeAddress;
+        } catch(e) {}
+      }
+      if (!walletSyna && walletAddress) walletSyna = evmToSyna(walletAddress);
+      updateWalletUI();
+    }
+  } catch(e) { /* silent -- no prior grant, stay disconnected */ }
+})();
+
 
 const KEYWORDS = ['contract','state','impl','function','return','if','else','while','for','let','struct','enum','true','false','as','caller'];
 const TYPES = ['u256','u128','i32','bool','bytes','tuple'];
@@ -465,16 +664,48 @@ document.getElementById('openIdeLink').addEventListener('click', (e) => {
 // Deep-links straight into ForgeIDE using the same URL convention as the
 // official forge.synergy-network.io (forge.synergy-network.io/workspace/project/
 // local-counter/file/contracts/Counter.synq), pointed at this local server.
-// The route on the Forge side fetches the named contract's source from
-// /synq-contracts/<Name>.synq, so this only works for contracts that exist
-// there under that name (not arbitrary unsaved edits in the textarea above).
+//
+// Before opening, the current textarea contents are saved via the existing
+// wallet-scoped /synq/save-contract endpoint (the same one the SynQ IDE's
+// "Save to Server" button uses) under an owner id, and the Forge link is
+// tagged with ?wallet=<ownerId> so it loads that exact saved version via
+// /synq/load-contract. This avoids two playground users (or two tabs)
+// clobbering each other's same-named contract on the shared server. If a
+// wallet is connected (see getPlaygroundOwnerId above), the owner id is the
+// real syna/EVM address, so saves follow that person across devices; if not,
+// it falls back to an anonymous id pinned to this browser's localStorage.
+function getPlaygroundOwnerId(){
+  // Real connected wallet address takes priority -- saves then follow the
+  // person across devices/browsers instead of being pinned to one browser.
+  if (walletSyna) return walletSyna;
+  if (walletAddress) return walletAddress;
+  var key = 'synq_playground_wallet_id';
+  var id = null;
+  try { id = localStorage.getItem(key); } catch (err) {}
+  if (!id) {
+    id = 'anon_' + Array.from(crypto.getRandomValues(new Uint8Array(12)))
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+    try { localStorage.setItem(key, id); } catch (err) {}
+  }
+  return id;
+}
+
 document.getElementById('openForgeLink').addEventListener('click', (e) => {
   e.preventDefault();
   const src = srcEl.value;
   const name = lastCompiledName || extractContractName(src) || 'Counter';
   const slug = 'local-' + name.toLowerCase();
-  const url = '/forge/workspace/project/' + encodeURIComponent(slug) + '/file/contracts/' + encodeURIComponent(name) + '.synq';
-  window.open(url, '_blank');
+  const ownerId = getPlaygroundOwnerId();
+  const url = '/forge/workspace/project/' + encodeURIComponent(slug) + '/file/contracts/' + encodeURIComponent(name) + '.synq'
+    + '?wallet=' + encodeURIComponent(ownerId);
+
+  fetch('/synq/save-contract', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ wallet: ownerId, name, source: src })
+  })
+    .catch((err) => console.warn('[FORGE-HANDOFF] could not save contract before opening Forge', err))
+    .finally(() => window.open(url, '_blank'));
 });
 
 srcEl.value = EXAMPLE;

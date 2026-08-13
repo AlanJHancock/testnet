@@ -458,7 +458,7 @@ pub fn transpile_to_solidity(units: &[SourceUnit]) -> String {
             writeln!(out, "        // Build 41-byte internal address: version(1) + network_id(2) + algo_id(2) + pk_hash(32) + checksum(4)").unwrap();
             writeln!(out, "        bytes memory inner = new bytes(37);").unwrap();
             writeln!(out, "        inner[0] = 0x01;                       // version").unwrap();
-            writeln!(out, "        inner[1] = 0x04; inner[2] = 0xf0;      // network_id (chain 1264 testnet)").unwrap();
+            writeln!(out, "        inner[1] = 0x04; inner[2] = 0xf2;      // network_id (chain 1266 testnet)").unwrap();
             writeln!(out, "        inner[3] = 0x01; inner[4] = 0x02;      // algo_id (ML-DSA-65)").unwrap();
             writeln!(out, "        // pk_hash = 20-byte address zero-padded to 32 bytes").unwrap();
             writeln!(out, "        for (uint i = 0; i < 20; i++) inner[5 + i] = bytes20(addr)[i];").unwrap();

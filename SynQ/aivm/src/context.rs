@@ -6,10 +6,10 @@ use sha2::{Digest, Sha256};
 /// 32-byte hash
 pub type Hash32 = [u8; 32];
 
-/// Chain ID — u64, 1264 for testnet
+/// Chain ID — u64, 1266 for testnet
 pub type ChainId = u64;
 
-/// Network ID — e.g. "synergy-testnet"
+/// Network ID — e.g. "synergy-testnet-v3"
 pub type NetworkId = String;
 
 /// SynQ address — 41-byte canonical address bytes per address format spec
@@ -31,8 +31,8 @@ impl Default for SecurityPolicy {
             required_signature_algorithm: "ML-DSA-65".to_string(),
             chain_bound: true,
             domain_separation: true,
-            required_chain_id: 1264,
-            required_network_id: "synergy-testnet".to_string(),
+            required_chain_id: 1266,
+            required_network_id: "synergy-testnet-v3".to_string(),
         }
     }
 }
@@ -57,8 +57,8 @@ impl ExecutionContext {
     /// Create a testnet context for testing
     pub fn testnet(caller: SynQAddress, contract_address: SynQAddress) -> Self {
         Self {
-            chain_id: 1264,
-            network_id: "synergy-testnet".to_string(),
+            chain_id: 1266,
+            network_id: "synergy-testnet-v3".to_string(),
             block_height: 0,
             block_timestamp: 0,
             tx_hash: [0u8; 32],

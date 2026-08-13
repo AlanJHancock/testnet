@@ -45,8 +45,8 @@ impl EventRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Receipt {
     pub receipt_version: u16,       // 1
-    pub chain_id: u64,               // 1264
-    pub network_id: String,         // "synergy-testnet"
+    pub chain_id: u64,               // 1266
+    pub network_id: String,         // "synergy-testnet-v3"
     pub block_height: u64,
     pub tx_hash: [u8; 32],
     pub contract_address: Vec<u8>,  // SynQ address bytes

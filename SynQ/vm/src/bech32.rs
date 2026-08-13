@@ -2,7 +2,7 @@
 //!
 //! Internal address: 41 bytes
 //!   [0]    address version (0x01)
-//!   [1..3] network ID (0x04f0 for chain 1264)
+//!   [1..3] network ID (0x04f2 for chain 1266)
 //!   [3..5] algorithm ID (e.g. 0x0102 for ML-DSA-65)
 //!   [5..37] public key hash = SHA-256(public_key_bytes)
 //!   [37..41] checksum = first 4 bytes of SHA-256(version || network_id || algo_id || pk_hash)
@@ -22,8 +22,8 @@ pub const HRP_MAINNET: &str = "synq";
 /// Address version per spec.
 pub const ADDR_VERSION: u8 = 0x01;
 
-/// Network ID for chain 1264 (testnet).
-pub const NETWORK_ID_TESTNET: [u8; 2] = 0x04f0u16.to_be_bytes();
+/// Network ID for chain 1266 (testnet).
+pub const NETWORK_ID_TESTNET: [u8; 2] = 0x04f2u16.to_be_bytes();
 
 /// Algorithm ID for ML-DSA-65 (default).
 pub const ALGO_ML_DSA_65: [u8; 2] = 0x0102u16.to_be_bytes();
@@ -469,8 +469,8 @@ mod tests {
         let deployer = [0xABu8; 20];
         let artifact = [0xCDu8; 32];
         let constructor = [0xEFu8; 32];
-        let addr1 = derive_contract_address(&deployer, 0, &artifact, &constructor, "synergy-testnet").unwrap();
-        let addr2 = derive_contract_address(&deployer, 1, &artifact, &constructor, "synergy-testnet").unwrap();
+        let addr1 = derive_contract_address(&deployer, 0, &artifact, &constructor, "synergy-testnet-v3").unwrap();
+        let addr2 = derive_contract_address(&deployer, 1, &artifact, &constructor, "synergy-testnet-v3").unwrap();
         assert!(addr1.starts_with("tsynq1"));
         assert!(addr2.starts_with("tsynq1"));
         assert_ne!(addr1, addr2, "different nonces must produce different addresses");
@@ -505,12 +505,12 @@ mod tests {
 
         // Verify structure per spec
         assert_eq!(bytes[0], 0x01, "address version must be 0x01");
-        assert_eq!(&bytes[1..3], &[0x04, 0xf0], "network ID must be 0x04f0 for chain 1264");
+        assert_eq!(&bytes[1..3], &[0x04, 0xf2], "network ID must be 0x04f2 for chain 1266");
         assert_eq!(&bytes[3..5], &[0x01, 0x02], "algorithm ID must be 0x0102 for ML-DSA-65");
         assert_eq!(&bytes[5..37], hex::decode("039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81").unwrap(), "pk_hash must match spec test vector");
 
         // Verify checksum
-        let expected = SynqAddress::compute_checksum(0x01, &[0x04, 0xf0], &[0x01, 0x02], &addr.pk_hash);
+        let expected = SynqAddress::compute_checksum(0x01, &[0x04, 0xf2], &[0x01, 0x02], &addr.pk_hash);
         assert_eq!(&bytes[37..41], &expected, "checksum must be SHA-256 first 4 bytes");
     }
 }

@@ -31,7 +31,7 @@
 //     [4]      version         1
 //     [5]      flags           bit0=manifest, bit1=signature, bit2=ir_dump
 //     [6..8]   section_count   u16 LE
-//     [8..12]  chain_id        u32 LE  (1264 for testnet)
+//     [8..12]  chain_id        u32 LE  (1266 for testnet)
 //     [12..16] timestamp       u32 LE  (Unix epoch)
 //
 //   Sections (repeated section_count times):
@@ -582,9 +582,9 @@ mod tests {
     fn test_roundtrip_basic() {
         let bytecode = vec![0x51, 0x56, 0x4d, 0x00, 0x01, 0x10, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0xFF];
         let abi = br#"{"functions":[{"name":"init","params":[],"return_type":"bool"}]}"#;
-        let manifest = br#"{"artifact_hash":"abc123","source_hash":"def456","chain_id":1264}"#;
+        let manifest = br#"{"artifact_hash":"abc123","source_hash":"def456","chain_id":1266}"#;
 
-        let encoded = SqbEncoder::new(1264)
+        let encoded = SqbEncoder::new(1266)
             .code(bytecode.clone())
             .abi(abi.to_vec())
             .manifest(manifest.to_vec())
@@ -595,7 +595,7 @@ mod tests {
 
         let decoded = decode(&encoded).unwrap();
         assert_eq!(decoded.header.version, VERSION);
-        assert_eq!(decoded.header.chain_id, 1264);
+        assert_eq!(decoded.header.chain_id, 1266);
         assert_eq!(decoded.sections.len(), 3);
         assert_eq!(decoded.code(), Some(bytecode.as_slice()));
         assert!(decoded.manifest_json().is_some());
@@ -608,7 +608,7 @@ mod tests {
         let bytecode = vec![0x51, 0x56, 0x4d, 0x00, 0x01, 0x10, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF];
         let sig = vec![0xAA; 64]; // fake signature
 
-        let encoded = SqbEncoder::new(1264)
+        let encoded = SqbEncoder::new(1266)
             .code(bytecode.clone())
             .signature(sig.clone())
             .build()
@@ -621,7 +621,7 @@ mod tests {
 
     #[test]
     fn test_reject_bad_magic() {
-        let mut buf = SqbEncoder::new(1264)
+        let mut buf = SqbEncoder::new(1266)
             .code(vec![0xFF])
             .build()
             .unwrap();
@@ -636,7 +636,7 @@ mod tests {
 
     #[test]
     fn test_reject_truncated_section() {
-        let mut buf = SqbEncoder::new(1264)
+        let mut buf = SqbEncoder::new(1266)
             .code(vec![0xFF, 0x00])
             .build()
             .unwrap();
@@ -648,7 +648,7 @@ mod tests {
 
     #[test]
     fn test_reject_hash_mismatch() {
-        let mut buf = SqbEncoder::new(1264)
+        let mut buf = SqbEncoder::new(1266)
             .code(vec![0xFF, 0x00])
             .build()
             .unwrap();
@@ -659,7 +659,7 @@ mod tests {
 
     #[test]
     fn test_reject_root_hash_mismatch() {
-        let mut buf = SqbEncoder::new(1264)
+        let mut buf = SqbEncoder::new(1266)
             .code(vec![0xFF])
             .abi(vec![0x01])
             .build()
@@ -672,7 +672,7 @@ mod tests {
 
     #[test]
     fn test_reject_trailing_bytes() {
-        let mut buf = SqbEncoder::new(1264)
+        let mut buf = SqbEncoder::new(1266)
             .code(vec![0xFF])
             .build()
             .unwrap();
@@ -682,7 +682,7 @@ mod tests {
 
     #[test]
     fn test_reject_unknown_section_type() {
-        let mut buf = SqbEncoder::new(1264)
+        let mut buf = SqbEncoder::new(1266)
             .code(vec![0xFF])
             .build()
             .unwrap();
@@ -693,7 +693,7 @@ mod tests {
 
     #[test]
     fn test_all_section_types() {
-        let encoded = SqbEncoder::new(1264)
+        let encoded = SqbEncoder::new(1266)
             .code(vec![0x01, 0x02])
             .abi(br#"{"f":"init"}"#.to_vec())
             .manifest(br#"{"h":"abc"}"#.to_vec())
@@ -717,7 +717,7 @@ mod tests {
 
     #[test]
     fn test_flags_set_correctly() {
-        let encoded = SqbEncoder::new(1264)
+        let encoded = SqbEncoder::new(1266)
             .code(vec![0xFF])
             .manifest(vec![0x01])
             .ir_dump(vec![0x02])
@@ -733,7 +733,7 @@ mod tests {
 
     #[test]
     fn test_empty_sections() {
-        let encoded = SqbEncoder::new(1264)
+        let encoded = SqbEncoder::new(1266)
             .build()
             .unwrap();
         let decoded = decode(&encoded).unwrap();

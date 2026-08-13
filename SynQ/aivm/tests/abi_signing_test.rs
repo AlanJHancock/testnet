@@ -46,8 +46,8 @@ fn test_canonical_json_sorted_keys() {
 fn test_signing_payload_roundtrip() {
     let payload = SigningPayload {
         domain_id: domain::CONTRACT_CALL,
-        chain_id: 1264,
-        network_id: "synergy-testnet".to_string(),
+        chain_id: 1266,
+        network_id: "synergy-testnet-v3".to_string(),
         protocol_version: 1,
         algorithm_id: algorithm::ML_DSA_65,
         signature_purpose: 0,
@@ -62,8 +62,8 @@ fn test_signing_payload_roundtrip() {
     let decoded = SigningPayload::decode(&encoded).unwrap();
 
     assert_eq!(decoded.domain_id, domain::CONTRACT_CALL);
-    assert_eq!(decoded.chain_id, 1264);
-    assert_eq!(decoded.network_id, "synergy-testnet");
+    assert_eq!(decoded.chain_id, 1266);
+    assert_eq!(decoded.network_id, "synergy-testnet-v3");
     assert_eq!(decoded.algorithm_id, algorithm::ML_DSA_65);
     assert_eq!(decoded.nonce, 12345);
     assert_eq!(decoded.not_before, 1000);
@@ -136,7 +136,7 @@ fn test_manifest_rejects_wrong_chain_id() {
     let mut manifest = Manifest::testnet_default("TestContract", "0.1.0");
     manifest.required_chain_id = 9999;
     match validate_manifest(&manifest) {
-        ManifestValidation::Invalid(aivm::AivmError::ManifestChainIdMismatch { expected: 1264, got: 9999 }) => {}
+        ManifestValidation::Invalid(aivm::AivmError::ManifestChainIdMismatch { expected: 1266, got: 9999 }) => {}
         other => panic!("expected chain ID mismatch, got {:?}", other),
     }
 }

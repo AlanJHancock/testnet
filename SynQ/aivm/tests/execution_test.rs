@@ -218,7 +218,7 @@ fn test_division_by_zero_traps() {
 
 #[test]
 fn test_host_call_context() {
-    // Call context.chain_id, should push 1264
+    // Call context.chain_id, should push 1266
     let instructions = vec![
         Instruction::HostCall(3),    // 0 — context.chain_id
         Instruction::Ret,            // 1
@@ -237,7 +237,7 @@ fn test_host_call_context() {
     let mut state = StateOverlay::new();
 
     let result = avm.execute(0, vec![], &ctx, &mut state).unwrap();
-    assert_eq!(result.return_value, Some(Value::U64(1264)));
+    assert_eq!(result.return_value, Some(Value::U64(1266)));
 }
 
 #[test]
