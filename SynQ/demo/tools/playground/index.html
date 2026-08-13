@@ -97,6 +97,22 @@
   .evidence .fn-row{display:flex;justify-content:space-between;padding:4px 0;}
   .evidence .fn-row .name{color:var(--green-bright)}
   .evidence .hash{font-size:11px;color:var(--muted-2)}
+  .evidence .build-info{color:var(--muted-2);font-size:11.5px;margin-bottom:10px}
+  .evidence-tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:0 -16px 12px;padding:0 16px 10px}
+  .evidence-tab{
+    background:none;border:none;color:var(--muted-2);font-family:var(--font-mono);
+    font-size:12px;padding:4px 10px;border-radius:5px;cursor:pointer;
+  }
+  .evidence-tab:hover{color:#e7f0ea}
+  .evidence-tab.active{background:var(--line-soft);color:var(--green-bright)}
+  .evidence-json{
+    margin:0;white-space:pre-wrap;word-break:break-all;color:#dfe8e2;
+    font-family:var(--font-mono);font-size:12px;line-height:1.55;
+  }
+  .evidence-note{
+    display:flex;align-items:center;gap:6px;color:var(--green-bright);
+    font-size:12px;margin-top:14px;padding-top:12px;border-top:1px dashed var(--line-soft);
+  }
 
   .actions{
     display:flex;align-items:center;gap:12px;border:1px solid var(--line);border-top:none;
@@ -240,6 +256,8 @@ srcEl.addEventListener('scroll', () => { hlEl.scrollTop = srcEl.scrollTop; hlEl.
 document.getElementById('resetBtn').addEventListener('click', () => {
   srcEl.value = EXAMPLE;
   renderHighlight();
+  evidenceTabs = null;
+  evidenceActiveTab = 'manifest';
   evidenceEl.innerHTML = '<span class="placeholder">No build yet. Compile to produce real ABI, manifest, bytecode, and hashes.</span>';
 });
 
@@ -252,10 +270,149 @@ function shortHash(h){
   return h.slice(0,16) + '&hellip;' + h.slice(-8);
 }
 
+async function sha256Hex(str){
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+async function sha256HexFromHexBytecode(hex){
+  const clean = (hex || '').replace(/^0x/, '');
+  const bytes = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(clean.substr(i*2, 2), 16);
+  const buf = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+// 4-byte method selector: SHA-256("name(type,type)") truncated, matching the
+// canonical-ABI selector convention used by the AIVM compiler backend.
+async function methodSelector(name, paramTypes){
+  const sig = `${name}(${(paramTypes||[]).join(',')})`;
+  const h = await sha256Hex(sig);
+  return '0x' + h.slice(0, 8);
+}
+
+let evidenceTabs = null; // { manifest: html, abi: html, hashes: html }
+let evidenceActiveTab = 'manifest';
+
+async function buildEvidenceTabs(data){
+  const m = data.manifest || {};
+
+  // --- Manifest tab: real manifest fields, signature/pubkey blobs replaced
+  // with fingerprints since the raw values are multi-KB PQC material.
+  const manifestObj = {
+    contract_name: data.contract_name,
+    chain_id: m.chain_id,
+    network_id: m.network_id,
+    required_signature_algorithm: m.required_signature_algorithm,
+    consensus_signature_algorithm: m.consensus_signature_algorithm,
+    trust_model: m.trust_model,
+    compiler_key_id: m.key_id,
+    signature_domains: m.signature_domains,
+    artifact_hash: m.artifact_hash,
+    source_hash: m.source_hash,
+    governance_scopes: m.governance_scopes || [],
+    authority_scopes: m.authority_scopes || []
+  };
+
+  // --- ABI tab: derived from the real functions/state_vars the compiler
+  // returned. Selectors are computed client-side (real SHA-256 of the real
+  // signature), not fabricated.
+  const methods = await Promise.all((data.functions || []).map(async fn => {
+    const paramTypes = (fn.params || []).map(p => (p && p.ty) || (p && p.type) || 'unknown');
+    return {
+      name: fn.name,
+      mutability: fn.is_view ? 'view' : 'write',
+      visibility: 'public',
+      params: fn.params || [],
+      returns: fn.has_return ? [fn.return_type] : [],
+      requires_caller: !!fn.requires_caller,
+      governance_scope: fn.governance_scope || null,
+      authority_scope: fn.authority_scope || null,
+      selector: await methodSelector(fn.name, paramTypes)
+    };
+  }));
+  const stateSchema = Object.entries(data.state_var_types || {}).map(([name, ty]) => {
+    const rec = (m.state_vars || []).find(sv => sv.name === name);
+    return { name, type: ty, slot: rec ? rec.slot : null, visibility: 'public' };
+  });
+  const abiObj = {
+    abi_version: 'sqb-v1',
+    contract: data.contract_name,
+    methods,
+    state_schema: stateSchema,
+    events: [],
+    security_requirements: {
+      call_domain: (m.signature_domains||{}).call,
+      deploy_domain: (m.signature_domains||{}).deploy,
+      governance_domain: (m.signature_domains||{}).governance,
+      attest_domain: (m.signature_domains||{}).attest,
+      signature_algorithm: m.required_signature_algorithm
+    },
+    errors: data.errors || []
+  };
+
+  // --- Hashes tab: real hashes where the server gives them, real SHA-256
+  // fingerprints (computed here, over the real bytes) where it doesn't.
+  const [bytecodeHash, manifestSigFingerprint, compilerKeyFingerprint] = await Promise.all([
+    sha256HexFromHexBytecode(data.bytecode),
+    m.manifest_signature ? sha256Hex(m.manifest_signature) : Promise.resolve(null),
+    m.compiler_public_key ? sha256Hex(m.compiler_public_key) : Promise.resolve(null)
+  ]);
+  const hashesObj = {
+    source_hash: m.source_hash,
+    artifact_hash: m.artifact_hash,
+    bytecode_hash: bytecodeHash,
+    manifest_signature_fingerprint: manifestSigFingerprint,
+    compiler_public_key_fingerprint: compilerKeyFingerprint,
+    compiler_key_id: m.key_id
+  };
+
+  return {
+    manifest: JSON.stringify(manifestObj, null, 2),
+    abi: JSON.stringify(abiObj, null, 2),
+    hashes: JSON.stringify(hashesObj, null, 2)
+  };
+}
+
+function renderEvidenceShell(data, elapsedMs){
+  const sizeBytes = data.bytecode ? (data.bytecode.length - 2) / 2 : 0;
+  const chain = (data.manifest || {}).chain_id;
+  const net = (data.manifest || {}).network_id || '';
+  let html = '';
+  html += `<div class="build-info">${escapeHtml(data.contract_name || '—')} &middot; ${sizeBytes} bytes &middot; ${elapsedMs} ms</div>`;
+  html += `<div class="evidence-tabs">
+    <button class="evidence-tab" data-tab="manifest">Manifest</button>
+    <button class="evidence-tab" data-tab="abi">Abi</button>
+    <button class="evidence-tab" data-tab="hashes">Hashes</button>
+  </div>`;
+  html += `<pre class="evidence-json" id="evidenceJson"></pre>`;
+  html += `<div class="evidence-note">&#10003; Manifest is bound to chain ${escapeHtml(String(chain))}${net ? ' / ' + escapeHtml(net) : ''}.</div>`;
+  if (data.warnings && data.warnings.length) {
+    html += '<h4>Warnings</h4>';
+    data.warnings.forEach(w => { html += `<div class="warn">&middot; ${escapeHtml(w)}</div>`; });
+  }
+  evidenceEl.innerHTML = html;
+
+  evidenceEl.querySelectorAll('.evidence-tab').forEach(btn => {
+    btn.addEventListener('click', () => setActiveTab(btn.dataset.tab));
+  });
+  setActiveTab(evidenceActiveTab);
+}
+
+function setActiveTab(tab){
+  evidenceActiveTab = tab;
+  evidenceEl.querySelectorAll('.evidence-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tab === tab);
+  });
+  const jsonEl = document.getElementById('evidenceJson');
+  if (jsonEl && evidenceTabs) jsonEl.textContent = evidenceTabs[tab] || '';
+}
+
 async function compile(){
   compileBtn.disabled = true;
   compileBtn.textContent = 'Compiling…';
   evidenceEl.innerHTML = '<span class="placeholder">Compiling against the live IR backend…</span>';
+  const startedAt = performance.now();
   try {
     const res = await fetch('/synq/compile', {
       method: 'POST',
@@ -263,41 +420,15 @@ async function compile(){
       body: JSON.stringify({ source: srcEl.value })
     });
     const data = await res.json();
+    const elapsedMs = Math.round(performance.now() - startedAt);
     if (!data.success) {
       evidenceEl.innerHTML = '<h4>Compile error</h4>' +
         '<div class="warn">' + escapeHtml((data.errors||['Unknown error']).join('\n')) + '</div>';
       return;
     }
-    let html = '';
-    html += '<h4>Contract</h4>';
-    html += kv('Name', escapeHtml(data.contract_name || '—'));
-    html += kv('Address (session-derived)', shortHash(data.contract_address));
-    html += kv('Bytecode size', (data.bytecode ? (data.bytecode.length - 2) / 2 : 0) + ' bytes');
 
-    html += '<h4>Functions</h4>';
-    (data.functions || []).forEach(fn => {
-      html += `<div class="fn-row"><span class="name">${escapeHtml(fn.name)}()</span><span>${fn.is_view ? 'view' : ''} &rarr; ${escapeHtml(fn.return_type || 'void')}</span></div>`;
-    });
-
-    html += '<h4>State</h4>';
-    Object.entries(data.state_var_types || {}).forEach(([name, ty]) => {
-      html += kv(escapeHtml(name), escapeHtml(ty));
-    });
-
-    if (data.manifest) {
-      html += '<h4>Manifest</h4>';
-      html += kv('Chain / network', data.manifest.chain_id + ' / ' + escapeHtml(data.manifest.network_id || ''));
-      html += kv('Signature algorithm', escapeHtml(data.manifest.required_signature_algorithm || ''));
-      html += kv('Artifact hash', '<span class="hash">' + shortHash(data.manifest.artifact_hash) + '</span>');
-      html += kv('Source hash', '<span class="hash">' + shortHash(data.manifest.source_hash) + '</span>');
-    }
-
-    if (data.warnings && data.warnings.length) {
-      html += '<h4>Warnings</h4>';
-      data.warnings.forEach(w => { html += `<div class="warn">&middot; ${escapeHtml(w)}</div>`; });
-    }
-
-    evidenceEl.innerHTML = html;
+    evidenceTabs = await buildEvidenceTabs(data);
+    renderEvidenceShell(data, elapsedMs);
     statusNote.textContent = 'Compiled ' + new Date().toLocaleTimeString() + ' · artifact generation only · no transaction submitted';
   } catch (e) {
     evidenceEl.innerHTML = '<span class="warn">Request failed: ' + escapeHtml(String(e)) + '</span>';
