@@ -110,6 +110,73 @@ fn authority_scope_hash(scope_name: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Derive a canonical event topic hash (SHA3-256) from an event name, using the
+/// same domain-separated scope-hash convention as @authority/@governance. This
+/// gives QVM-path events a stable, name-derived identifier — analogous to the
+/// AIVM crate's EventRecord.topic_hash / Solidity's topic0 — instead of only a
+/// free-text name string. Name-only (not full "Name(type1,type2,...)" signature)
+/// for now, matching the existing scope-hash precedent; can be upgraded to a
+/// full signature hash once event param types are threaded through to this layer.
+fn event_topic_hash(event_name: &str) -> [u8; 32] {
+    use sha3::Digest;
+    let mut hasher = sha3::Sha3_256::new();
+    hasher.update(b"SYNQ-EVENT-SCOPE-v1:");
+    hasher.update(event_name.as_bytes());
+    hasher.finalize().into()
+}
+
+/// Canonically encode one event argument value into the event's "data" blob.
+/// Numbers become 32-byte big-endian two's-complement words (EVM-word-compatible);
+/// bools become a 32-byte word with the low bit set; everything else (strings,
+/// bech32 addresses, hex-fallback bytes) becomes a 4-byte BE length prefix + raw
+/// UTF-8 bytes. This mirrors the receipt-style structured encoding used elsewhere
+/// (length-prefixed TLV in SQB, length-prefixed fields in AuthorityEnvelope) so
+/// event data has the same "strictly defined" shape as the rest of server<->chain
+/// communication, rather than being purely a human-readable JSON string.
+fn encode_event_arg_word(v: &serde_json::Value) -> Vec<u8> {
+    match v {
+        serde_json::Value::Number(n) => {
+            let i = n.as_i64().unwrap_or(0);
+            let mut buf = [0u8; 32];
+            if i < 0 {
+                buf.fill(0xff);
+            }
+            buf[24..32].copy_from_slice(&i.to_be_bytes());
+            buf.to_vec()
+        }
+        serde_json::Value::Bool(b) => {
+            let mut buf = [0u8; 32];
+            buf[31] = if *b { 1 } else { 0 };
+            buf.to_vec()
+        }
+        serde_json::Value::String(s) => {
+            let bytes = s.as_bytes();
+            let mut out = Vec::with_capacity(4 + bytes.len());
+            out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            out.extend_from_slice(bytes);
+            out
+        }
+        other => {
+            let s = other.to_string();
+            let bytes = s.as_bytes();
+            let mut out = Vec::with_capacity(4 + bytes.len());
+            out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            out.extend_from_slice(bytes);
+            out
+        }
+    }
+}
+
+/// Encode a full event's argument list into its canonical "data" blob —
+/// the concatenation of each arg's encode_event_arg_word(), in declaration order.
+fn encode_event_data(args: &[serde_json::Value]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for arg in args {
+        buf.extend_from_slice(&encode_event_arg_word(arg));
+    }
+    buf
+}
+
 // V3 chain parameters
 const V3_CHAIN_ID: u64 = 1266;
 const V3_NETWORK_ID: &str = "synergy-testnet-v3";
@@ -284,10 +351,16 @@ struct Workspace {
 
 type WorkspaceStore = Arc<Mutex<HashMap<String, Workspace>>>;
 
+/// Maps a normalized wallet address to the workspace_id of that wallet's
+/// personal workspace, letting a browser rediscover its session(s) purely
+/// from the connected wallet — no client-persisted opaque token required.
+type WalletWorkspaceStore = Arc<Mutex<HashMap<String, String>>>;
+
 #[derive(Clone)]
 pub struct AppState {
     sessions:      SessionStore,
     workspaces:    WorkspaceStore,
+    wallet_workspaces: WalletWorkspaceStore,
     rate_limiter:  StdArc<IpLimiter>,
     compiler_key:  Arc<CompilerKey>,
     source_nonce_secret: Vec<u8>,  // Rev-2: HMAC key for source-nonce derivation
@@ -317,6 +390,36 @@ fn new_session_id() -> String {
 
 fn evict_stale(store: &mut HashMap<String, Session>) {
     store.retain(|_, s| s.last_used.elapsed() < SESSION_TTL);
+}
+
+/// Get the existing workspace for this wallet, or create one on first use.
+/// Returns the same workspace_id for the same wallet on every call, so a
+/// reconnecting browser can rediscover its contracts purely from the
+/// connected wallet address, with no client-persisted workspace_id needed.
+fn get_or_create_wallet_workspace(state: &AppState, wallet: &str) -> String {
+    let wallet_key = wallet.trim().to_string();
+    let mut wallet_map = state.wallet_workspaces.lock().unwrap();
+    if let Some(existing) = wallet_map.get(&wallet_key) {
+        let mut wmap = state.workspaces.lock().unwrap();
+        if let Some(ws) = wmap.get_mut(existing) {
+            ws.last_used = Instant::now();
+            return existing.clone();
+        }
+        // Workspace was evicted (TTL/restart) — fall through and recreate it
+        // under the same wallet key below.
+    }
+    let wid = new_session_id();
+    {
+        let mut wmap = state.workspaces.lock().unwrap();
+        if wmap.len() >= 50 {
+            if let Some(oldest) = wmap.iter().min_by_key(|(_, w)| w.last_used).map(|(k, _)| k.clone()) {
+                wmap.remove(&oldest);
+            }
+        }
+        wmap.insert(wid.clone(), Workspace { contracts: HashMap::new(), deploy_order: Vec::new(), last_used: Instant::now() });
+    }
+    wallet_map.insert(wallet_key, wid.clone());
+    wid
 }
 
 fn evict_oldest_if_full(store: &mut HashMap<String, Session>) {
@@ -4111,6 +4214,12 @@ struct NewSessionRequest {
     /// of the devnet authority. When absent, falls back to devnet caller.
     #[serde(default)]
     caller_address: Option<String>,
+    /// Optional wallet address (bech32 synw1.../syna1...). When provided together
+    /// with contract_name, the session is registered under (and, if one already
+    /// exists and is still alive, resumed from) this wallet's personal workspace
+    /// instead of a client-supplied workspace_id — see get_or_create_wallet_workspace().
+    #[serde(default)]
+    wallet: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -4141,6 +4250,12 @@ struct NewSessionResponse {
     /// Whether init() was auto-called on session creation (matches EVM constructor behavior).
     #[serde(skip_serializing_if = "Option::is_none")]
     init_called: Option<bool>,
+    /// True if an existing wallet session was handed back instead of creating a new one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    resumed: bool,
+    /// The wallet's personal workspace_id (present whenever `wallet` was provided in the request).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace_id: Option<String>,
 }
 
 /// Layer 3: Manifest + ML-DSA-87 signature verification result
@@ -4181,15 +4296,42 @@ async fn pqc_test_vector_handler(
 }
 
 // ─── POST /workspace/new ─────────────────────────────────────────────────────
+#[derive(serde::Deserialize, Default)]
+struct NewWorkspaceRequest {
+    /// Optional wallet address. When provided, returns (creating on first use)
+    /// that wallet's own personal workspace instead of always minting a fresh
+    /// random one — see get_or_create_wallet_workspace(). Omit for the old
+    /// always-random behavior (unchanged, fully backward compatible).
+    #[serde(default)]
+    wallet: Option<String>,
+}
+
 #[derive(serde::Serialize)]
-struct NewWorkspaceResponse { success: bool, workspace_id: Option<String>, error: Option<String> }
+struct NewWorkspaceResponse {
+    success: bool,
+    workspace_id: Option<String>,
+    error: Option<String>,
+    /// True if this wallet already had a workspace and it was handed back as-is.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    resumed: bool,
+}
 
 async fn workspace_new_handler(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    body: Option<Json<NewWorkspaceRequest>>,
 ) -> (StatusCode, RespJson<NewWorkspaceResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewWorkspaceResponse { success: false, workspace_id: None, error: Some("rate limited".into()) }));
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewWorkspaceResponse { success: false, workspace_id: None, error: Some("rate limited".into()), resumed: false }));
+    }
+    let wallet = body.and_then(|Json(req)| req.wallet);
+    if let Some(ref wallet) = wallet {
+        let already_existed = {
+            let wallet_map = state.wallet_workspaces.lock().unwrap();
+            wallet_map.contains_key(wallet.trim())
+        };
+        let wid = get_or_create_wallet_workspace(&state, wallet);
+        return (StatusCode::OK, RespJson(NewWorkspaceResponse { success: true, workspace_id: Some(wid), error: None, resumed: already_existed }));
     }
     let wid = new_session_id();
     let mut wmap = state.workspaces.lock().unwrap();
@@ -4201,7 +4343,44 @@ async fn workspace_new_handler(
         }
     }
     wmap.insert(wid.clone(), Workspace { contracts: HashMap::new(), deploy_order: Vec::new(), last_used: Instant::now() });
-    (StatusCode::OK, RespJson(NewWorkspaceResponse { success: true, workspace_id: Some(wid), error: None }))
+    (StatusCode::OK, RespJson(NewWorkspaceResponse { success: true, workspace_id: Some(wid), error: None, resumed: false }))
+}
+
+// ─── GET /workspace/by-wallet/:wallet ─────────────────────────────────────────
+// Lookup-only (never creates) — lets a browser check "do I already have a
+// workspace?" purely from its connected wallet, without side effects.
+async fn workspace_by_wallet_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(wallet): axum::extract::Path<String>,
+) -> (StatusCode, RespJson<WorkspaceInfoResponse>) {
+    let wid = {
+        let wallet_map = state.wallet_workspaces.lock().unwrap();
+        wallet_map.get(wallet.trim()).cloned()
+    };
+    match wid {
+        None => (StatusCode::NOT_FOUND, RespJson(WorkspaceInfoResponse {
+            success: false, workspace_id: String::new(), contracts: vec![],
+            error: Some("no workspace found for this wallet yet".into()),
+        })),
+        Some(wid) => {
+            let wmap = state.workspaces.lock().unwrap();
+            match wmap.get(&wid) {
+                None => (StatusCode::NOT_FOUND, RespJson(WorkspaceInfoResponse {
+                    success: false, workspace_id: wid, contracts: vec![],
+                    error: Some("workspace was evicted (TTL or server restart)".into()),
+                })),
+                Some(ws) => {
+                    let contracts: Vec<WorkspaceContract> = ws.deploy_order.iter().enumerate()
+                        .filter_map(|(idx, name)| ws.contracts.get(name).map(|sid|
+                            WorkspaceContract { name: name.clone(), session_id: sid.clone(), deploy_index: idx }))
+                        .collect();
+                    (StatusCode::OK, RespJson(WorkspaceInfoResponse {
+                        success: true, workspace_id: wid, contracts, error: None,
+                    }))
+                }
+            }
+        }
+    }
 }
 
 // ─── GET /workspace/:id ───────────────────────────────────────────────────────
@@ -4497,7 +4676,56 @@ async fn session_new_handler(
     Json(req): Json<NewSessionRequest>,
 ) -> (StatusCode, RespJson<NewSessionResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, contract_name: None, error: Some("rate limit exceeded — retry later".into()), layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None, sqb_verified: None, init_called: None }));
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, contract_name: None, error: Some("rate limit exceeded — retry later".into()), layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None, sqb_verified: None, init_called: None, resumed: false, workspace_id: None }));
+    }
+
+    // ── Wallet-addressed session resume ────────────────────────────────────
+    // If a wallet + contract_name are given, resolve (or create) that wallet's
+    // personal workspace and check whether it already has a live session for
+    // this exact contract. If so, hand back the SAME session_id — with its
+    // existing VM state intact — instead of deploying a fresh one. This lets a
+    // browser reconnecting with the same wallet (new tab, new device, cleared
+    // localStorage) resume exactly where it left off, using the wallet address
+    // itself as the only thing that needs to persist client-side.
+    let mut effective_workspace_id: Option<String> = req.workspace_id.clone();
+    if let Some(ref wallet) = req.wallet {
+        let wid = get_or_create_wallet_workspace(&state, wallet);
+        effective_workspace_id = Some(wid.clone());
+        if let Some(ref cname) = req.contract_name {
+            let existing_sid = {
+                let wmap = state.workspaces.lock().unwrap();
+                wmap.get(&wid).and_then(|ws| ws.contracts.get(cname).cloned())
+            };
+            if let Some(sid) = existing_sid {
+                let alive = {
+                    let mut smap = state.sessions.lock().unwrap();
+                    if let Some(session) = smap.get_mut(&sid) {
+                        session.last_used = Instant::now();
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if alive {
+                    eprintln!("[SESSION] wallet={} resuming existing session {} for contract {}", wallet, sid, cname);
+                    return (StatusCode::OK, RespJson(NewSessionResponse {
+                        success: true, session_id: Some(sid), contract_name: Some(cname.clone()), error: None,
+                        layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
+                        sqb_verified: None, init_called: None,
+                        resumed: true, workspace_id: Some(wid),
+                    }));
+                } else {
+                    // Stale pointer (session evicted by TTL or a server restart) —
+                    // clear it so a fresh session gets registered below instead of
+                    // silently dangling.
+                    let mut wmap = state.workspaces.lock().unwrap();
+                    if let Some(ws) = wmap.get_mut(&wid) {
+                        ws.contracts.remove(cname);
+                        ws.deploy_order.retain(|n| n != cname);
+                    }
+                }
+            }
+        }
     }
 
     // ── v7.0: SQB unified deployment path ────────────────────────────────────
@@ -4521,6 +4749,7 @@ async fn session_new_handler(
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
                 sqb_verified: None,
             init_called: None,
+        resumed: false, workspace_id: None,
             })),
         };
 
@@ -4532,6 +4761,7 @@ async fn session_new_handler(
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
                 sqb_verified: None,
             init_called: None,
+        resumed: false, workspace_id: None,
             })),
         };
 
@@ -4544,6 +4774,7 @@ async fn session_new_handler(
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
                 sqb_verified: None,
             init_called: None,
+        resumed: false, workspace_id: None,
             })),
         };
 
@@ -4583,6 +4814,7 @@ async fn session_new_handler(
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
                 sqb_verified: Some(false),
             init_called: None,
+        resumed: false, workspace_id: None,
             }));
         }
 
@@ -4626,6 +4858,7 @@ async fn session_new_handler(
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
                 sqb_verified: None,
             init_called: None,
+        resumed: false, workspace_id: None,
             })),
         }
     };
@@ -4638,6 +4871,7 @@ async fn session_new_handler(
             layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
             sqb_verified,
         init_called: None,
+        resumed: false, workspace_id: None,
         }));
     }
 
@@ -4657,6 +4891,7 @@ async fn session_new_handler(
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None,
                 steps_remaining: None, sqb_verified,
                 init_called: None,
+        resumed: false, workspace_id: None,
             })),
         }
     } else {
@@ -4690,6 +4925,7 @@ async fn session_new_handler(
                     layer3: layer3_result.clone(), fuel_budget: None, max_steps: None,
                     steps_used: None, steps_remaining: None, sqb_verified,
                 init_called: None,
+        resumed: false, workspace_id: None,
                 }));
             }
         }
@@ -4702,6 +4938,7 @@ async fn session_new_handler(
             layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
             sqb_verified,
         init_called: None,
+        resumed: false, workspace_id: None,
         }));
     }
     // Apply optional step limit override
@@ -4725,7 +4962,7 @@ async fn session_new_handler(
         let mut map = state.sessions.lock().unwrap();
         evict_stale(&mut map);
         evict_oldest_if_full(&mut map);
-        let wid = req.workspace_id.clone();
+        let wid = effective_workspace_id.clone();
         let cname = req.contract_name.clone();
         map.insert(id.clone(), Session {
             vm, last_used: Instant::now(),
@@ -4800,8 +5037,17 @@ async fn session_new_handler(
         if let (Some(wid), Some(cname)) = (wid, cname) {
             let mut wmap = state.workspaces.lock().unwrap();
             if let Some(ws) = wmap.get_mut(&wid) {
-                ws.contracts.insert(cname, id.clone());
+                let is_new_name = !ws.contracts.contains_key(&cname);
+                ws.contracts.insert(cname.clone(), id.clone());
                 ws.last_used = Instant::now();
+                // Keep deploy_order in sync with contracts — this used to only
+                // happen via the explicit /workspace/:id/join endpoint, so any
+                // contract auto-registered here (the common case) never showed
+                // up in workspace_info_handler / workspace_by_wallet_handler's
+                // listing even though it was really in the workspace.
+                if is_new_name {
+                    ws.deploy_order.push(cname);
+                }
             }
         }
     }
@@ -4867,6 +5113,8 @@ async fn session_new_handler(
         steps_remaining: if FUEL_REPORTING { Some(effective_max_steps) } else { None },
         sqb_verified,
         init_called,
+        resumed: false,
+        workspace_id: effective_workspace_id.clone(),
     }))
 }
 
@@ -5064,6 +5312,10 @@ struct SessionRunRequest {
 struct EventLog {
     name: String,
     args: Vec<serde_json::Value>,
+    /// SHA3-256 event topic hash — see event_topic_hash(). Hex-encoded, no 0x prefix.
+    topic_hash: String,
+    /// Canonical ABI-ish encoding of `args` — see encode_event_data(). Hex-encoded, no 0x prefix.
+    data: String,
 }
 
 #[derive(serde::Serialize)]
@@ -5116,7 +5368,9 @@ fn parse_event_logs(log: &[String]) -> Vec<EventLog> {
                 args.push(v);
                 i += 1;
             }
-            events.push(EventLog { name: event_name, args });
+            let topic_hash = hex_encode(&event_topic_hash(&event_name));
+            let data = hex_encode(&encode_event_data(&args));
+            events.push(EventLog { name: event_name, args, topic_hash, data });
         } else {
             i += 1;
         }
@@ -5852,6 +6106,7 @@ async fn debug_ecrecover_handler(
 #[tokio::main]
 async fn main() {
     let sessions:   SessionStore   = Arc::new(Mutex::new(HashMap::new()));
+    let wallet_workspaces: WalletWorkspaceStore = Arc::new(Mutex::new(HashMap::new()));
     let workspaces: WorkspaceStore = Arc::new(Mutex::new(HashMap::new()));
     let rate_limiter  = build_rate_limiter();
     let compiler_key  = Arc::new(load_compiler_key());
@@ -5879,7 +6134,7 @@ async fn main() {
             Err(e) => { eprintln!("  WASM runtime:   FAILED: {}", e); None }
         }
     };
-    let store = AppState { sessions, workspaces, rate_limiter, compiler_key, source_nonce_secret, wasm_runtime };
+    let store = AppState { sessions, workspaces, wallet_workspaces, rate_limiter, compiler_key, source_nonce_secret, wasm_runtime };
 
     let cors_origin = std::env::var("SYNQ_CORS_ORIGIN").unwrap_or_else(|_| "*".to_string());
     let cors = if cors_origin == "*" {
@@ -6195,6 +6450,7 @@ async fn list_contracts_handler(
         .route("/session/:id/grant", post(session_grant_handler))
         .route("/session/:id",       delete(session_delete_handler))
         .route("/workspace/new",     post(workspace_new_handler))
+        .route("/workspace/by-wallet/:wallet", get(workspace_by_wallet_handler))
         .route("/workspace/:id",     get(workspace_info_handler).delete(workspace_delete_handler))
         .route("/workspace/:id/join",   post(workspace_join_handler))
         .route("/workspace/:id/remove", post(workspace_remove_handler))
