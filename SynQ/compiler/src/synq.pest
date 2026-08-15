@@ -43,7 +43,8 @@ contract_section = { state_section
                    | enum_definition
                    // Flat (legacy) items inside contract body for backwards compat
                    | state_variable_declaration
-                   | function_definition }
+                   | function_definition
+                   | event_definition }
 
 state_section    = { "state"    ~ "{" ~ state_variable_declaration* ~ "}" }
 events_section   = { "events"   ~ "{" ~ event_definition* ~ "}" }

@@ -137,6 +137,7 @@ fn parse_contract(pair: Pair<Rule>) -> Result<ContractDefinition, String> {
     let mut contract_enums = vec![];
     let mut fn_names: HashSet<String> = HashSet::new();
     let mut sv_names: HashSet<String> = HashSet::new();
+    let mut ev_names: HashSet<String> = HashSet::new();
     for section in inner {
         // Peel contract_section wrapper; the inner rule is the actual content.
         let p = if section.as_rule() == Rule::contract_section {
@@ -165,6 +166,24 @@ fn parse_contract(pair: Pair<Rule>) -> Result<ContractDefinition, String> {
                     return Err(format!("duplicate function '{}' in contract '{}'", f.name, name));
                 }
                 parts.push(ContractPart::Function(f));
+            }
+            Rule::event_definition => {
+                let ev = parse_event(p);
+                if !ev_names.insert(ev.name.clone()) {
+                    return Err(format!("duplicate event '{}' in contract '{}'", ev.name, name));
+                }
+                parts.push(ContractPart::Event(ev));
+            }
+            Rule::events_section => {
+                for ev_pair in p.into_inner() {
+                    if ev_pair.as_rule() == Rule::event_definition {
+                        let ev = parse_event(ev_pair);
+                        if !ev_names.insert(ev.name.clone()) {
+                            return Err(format!("duplicate event '{}' in contract '{}'", ev.name, name));
+                        }
+                        parts.push(ContractPart::Event(ev));
+                    }
+                }
             }
             Rule::state_section => {
                 for sv_pair in p.into_inner() {
@@ -202,6 +221,9 @@ fn parse_contract(pair: Pair<Rule>) -> Result<ContractDefinition, String> {
             _ => {}
         }
     }
+    let event_defs: Vec<EventDefinition> = parts.iter()
+        .filter_map(|p| if let ContractPart::Event(e) = p { Some(e.clone()) } else { None })
+        .collect();
     Ok(ContractDefinition {
         name,
         parts,
@@ -210,9 +232,33 @@ fn parse_contract(pair: Pair<Rule>) -> Result<ContractDefinition, String> {
         roles:      vec![],
         error_defs: vec![],
         enums: contract_enums,
-        event_defs: vec![],
+        event_defs,
         test_fns:   vec![],
     })
+}
+
+/// Parses a single event_definition pair (whether it appeared flat in the
+/// contract body or nested inside an events-section) into an
+/// EventDefinition AST node. indexed_keyword is a silent (_) grammar rule,
+/// so we detect it via the raw source text of each event_param rather than
+/// as a child pair.
+fn parse_event(pair: Pair<Rule>) -> EventDefinition {
+    let mut inner = pair.into_inner();
+    let name = inner.next().unwrap().as_str().to_string(); // IDENT
+    let mut params = vec![];
+    if let Some(list) = inner.next() {
+        if list.as_rule() == Rule::event_param_list {
+            for param_pair in list.into_inner() {
+                let raw = param_pair.as_str().trim_start();
+                let is_indexed = raw.starts_with("indexed");
+                let mut pi = param_pair.into_inner();
+                let pname = pi.next().unwrap().as_str().to_string();
+                let ty = parse_type(pi.next().unwrap());
+                params.push(EventParam { name: pname, ty, is_indexed });
+            }
+        }
+    }
+    EventDefinition { name, params }
 }
 
 fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
