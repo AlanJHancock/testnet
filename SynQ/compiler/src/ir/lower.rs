@@ -922,13 +922,23 @@ impl IrLowerer {
             }
 
             // ── Effects ──
-            IrOp::Emit(name, _args) => {
+            IrOp::Emit(name, args) => {
+                // Server-side parse_event_logs() reconstructs structured events from
+                // print_log: a line "event:<Name>" followed by one line per argument
+                // value (in declaration order), terminated by the next "event:" line
+                // or end of log. Emit the name marker, then Push+Load+Print each arg
+                // in order so the args actually reach the event log instead of being
+                // silently dropped.
                 let msg = format!("event:{}", name);
                 let mb = msg.as_bytes();
                 self.asm.emit_op(OpCode::LoadImm);
                 self.asm.emit_u32(mb.len() as u32);
                 self.asm.emit_raw(mb);
                 self.asm.emit_op(OpCode::Print);
+                for arg in args {
+                    load_val!(self, *arg);
+                    self.asm.emit_op(OpCode::Print);
+                }
             }
 
             IrOp::Require(cond, msg) => {
