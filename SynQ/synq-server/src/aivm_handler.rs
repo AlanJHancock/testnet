@@ -178,3 +178,199 @@ pub async fn compile_aivm_handler(
         errors: vec![],
     }))
 }
+
+// ─── POST /aivm/estimate-gas ───────────────────────────────────────────────
+// Real dry-run gas estimate: compiles the contract, executes the target
+// function once against a throwaway StateOverlay via the real AIVM
+// interpreter (real per-opcode weighted GasMeter/PqGasMeter), and reports
+// gas_used / pq_gas_used. The overlay is never persisted anywhere — there is
+// no session, no commit path wired to storage — so "estimate" here means
+// exactly what it should: run it for real, measure it, throw the state away.
+// This deliberately does NOT try to estimate gas *price* — there is no gas
+// oracle on Synergy testnet (see atlas.synergy-network.io/gas methodology),
+// and price is an economic/fee-market question, not an execution-cost one.
+
+/// Request for a dry-run gas estimate
+#[derive(Debug, Deserialize)]
+pub struct EstimateGasRequest {
+    pub source: String,
+    pub function: String,
+    #[serde(default)]
+    pub args: Vec<serde_json::Value>,
+    /// Optional pre-seeded state, keyed by state slot index as a string, e.g. {"0": 42}
+    #[serde(default)]
+    pub state: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// Response for a dry-run gas estimate
+#[derive(Debug, Serialize)]
+pub struct EstimateGasResponse {
+    pub success: bool,
+    pub function: Option<String>,
+    pub status: Option<String>,
+    pub gas_used: Option<u64>,
+    pub pq_gas_used: Option<u64>,
+    pub gas_limit: Option<u64>,
+    pub pq_gas_limit: Option<u64>,
+    pub return_value: Option<serde_json::Value>,
+    pub events: Vec<serde_json::Value>,
+    pub state_discarded: bool,
+    pub note: String,
+    pub errors: Vec<String>,
+}
+
+fn json_to_aivm_value(v: &serde_json::Value) -> Result<aivm::host::Value, String> {
+    use aivm::host::Value;
+    match v {
+        serde_json::Value::Bool(b) => Ok(Value::Bool(*b)),
+        serde_json::Value::Number(n) => {
+            n.as_u64().map(Value::U64).ok_or_else(|| format!("unsupported number: {}", n))
+        }
+        serde_json::Value::String(s) => {
+            if let Some(hex_str) = s.strip_prefix("0x") {
+                let bytes = hex::decode(hex_str).map_err(|e| format!("invalid hex: {}", e))?;
+                if bytes.len() == 41 {
+                    let mut arr = [0u8; 41];
+                    arr.copy_from_slice(&bytes);
+                    Ok(Value::Address(arr))
+                } else if bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes);
+                    Ok(Value::Bytes32(arr))
+                } else {
+                    Ok(Value::Bytes(bytes))
+                }
+            } else {
+                Ok(Value::String(s.clone()))
+            }
+        }
+        other => Err(format!("unsupported arg type: {}", other)),
+    }
+}
+
+fn aivm_value_to_json(v: &aivm::host::Value) -> serde_json::Value {
+    use aivm::host::Value;
+    match v {
+        Value::U64(n) => serde_json::json!(n),
+        Value::U128(n) => serde_json::json!(n.to_string()),
+        Value::I64(n) => serde_json::json!(n),
+        Value::Bool(b) => serde_json::json!(b),
+        Value::Bytes(b) => serde_json::json!(format!("0x{}", hex::encode(b))),
+        Value::Bytes32(b) => serde_json::json!(format!("0x{}", hex::encode(b))),
+        Value::Address(b) => serde_json::json!(format!("0x{}", hex::encode(b))),
+        Value::String(s) => serde_json::json!(s),
+        Value::Array(arr) => serde_json::json!(arr.iter().map(aivm_value_to_json).collect::<Vec<_>>()),
+    }
+}
+
+pub async fn estimate_gas_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+    Json(req): Json<EstimateGasRequest>,
+) -> (StatusCode, RespJson<EstimateGasResponse>) {
+    let note = "Dry-run only: real AIVM execution + weighted gas metering, state never persisted. \
+This is an execution-cost estimate, not a gas price — Synergy testnet has no gas oracle.".to_string();
+
+    let err_resp = |errors: Vec<String>| -> (StatusCode, RespJson<EstimateGasResponse>) {
+        (StatusCode::OK, RespJson(EstimateGasResponse {
+            success: false,
+            function: None,
+            status: None,
+            gas_used: None,
+            pq_gas_used: None,
+            gas_limit: None,
+            pq_gas_limit: None,
+            return_value: None,
+            events: vec![],
+            state_discarded: true,
+            note: note.clone(),
+            errors,
+        }))
+    };
+
+    if let Err(wait) = check_rate_limit(&state.rate_limiter, addr.ip()) {
+        return err_resp(vec![format!("rate limit exceeded — retry in {}s", wait)]);
+    }
+    if req.source.len() > MAX_SOURCE_BYTES {
+        return err_resp(vec![format!("Source too large: {} bytes (max {})", req.source.len(), MAX_SOURCE_BYTES)]);
+    }
+
+    let ast = match parser::parse(&req.source) {
+        Ok(a) => a,
+        Err(e) => return err_resp(vec![format!("Parse error: {}", e)]),
+    };
+    let contract = match ast.iter().find_map(|u| if let SourceUnit::Contract(c) = u { Some(c) } else { None }) {
+        Some(c) => c,
+        None => return err_resp(vec!["No contract found in source".to_string()]),
+    };
+    let compiled = match compile_to_aivm(contract) {
+        Ok(r) => r,
+        Err(e) => return err_resp(vec![format!("AIVM compilation error: {}", e)]),
+    };
+
+    let host = aivm::host::HostFunctions::default_v01();
+    let avm = aivm::vm::Avm::new(compiled.instructions, compiled.functions, host);
+
+    let func_idx = match avm.find_function(&req.function) {
+        Some(i) => i,
+        None => return err_resp(vec![format!("function '{}' not found", req.function)]),
+    };
+
+    let mut args = Vec::with_capacity(req.args.len());
+    for a in &req.args {
+        match json_to_aivm_value(a) {
+            Ok(v) => args.push(v),
+            Err(e) => return err_resp(vec![format!("bad argument: {}", e)]),
+        }
+    }
+
+    let mut seeded: std::collections::HashMap<u16, aivm::host::Value> = std::collections::HashMap::new();
+    for (k, v) in &req.state {
+        let key: u16 = match k.parse() {
+            Ok(n) => n,
+            Err(_) => return err_resp(vec![format!("bad state key: {}", k)]),
+        };
+        match json_to_aivm_value(v) {
+            Ok(val) => { seeded.insert(key, val); }
+            Err(e) => return err_resp(vec![format!("bad state value: {}", e)]),
+        }
+    }
+
+    let ctx = aivm::context::ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    // This overlay is local to the request and is dropped at the end of this
+    // function. avm.execute() may internally .commit() it on success — that
+    // only merges staged writes into THIS in-memory overlay's own map, which
+    // is about to be discarded. Nothing is written to any session, file, or
+    // persistent store. That's the entire "dry run" mechanism.
+    let mut overlay = aivm::vm::StateOverlay::with_state(seeded);
+
+    match avm.execute(func_idx, args, &ctx, &mut overlay) {
+        Ok(result) => {
+            let status = match result.receipt.status {
+                aivm::receipt::ReceiptStatus::Success => "success",
+                aivm::receipt::ReceiptStatus::Reverted => "reverted",
+                aivm::receipt::ReceiptStatus::Failed => "failed",
+            };
+            let events: Vec<serde_json::Value> = result.receipt.events.iter().map(|e| serde_json::json!({
+                "event_index": e.event_index,
+                "topic_hash": format!("0x{}", hex::encode(e.topic_hash)),
+                "data": format!("0x{}", hex::encode(&e.data)),
+            })).collect();
+            (StatusCode::OK, RespJson(EstimateGasResponse {
+                success: true,
+                function: Some(req.function.clone()),
+                status: Some(status.to_string()),
+                gas_used: Some(result.receipt.gas_used),
+                pq_gas_used: Some(result.receipt.pq_gas_used),
+                gas_limit: Some(ctx.gas_limit),
+                pq_gas_limit: Some(ctx.pq_gas_limit),
+                return_value: result.return_value.as_ref().map(aivm_value_to_json),
+                events,
+                state_discarded: true,
+                note,
+                errors: vec![],
+            }))
+        }
+        Err(e) => err_resp(vec![format!("execution error: {}", e)]),
+    }
+}

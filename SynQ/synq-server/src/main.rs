@@ -4220,6 +4220,12 @@ struct NewSessionRequest {
     /// instead of a client-supplied workspace_id — see get_or_create_wallet_workspace().
     #[serde(default)]
     wallet: Option<String>,
+    /// When true, skip the wallet-resume check even if a live session already
+    /// exists for this wallet+contract_name — always deploy fresh (used by an
+    /// explicit "Reset VM" action). The fresh session still gets registered
+    /// into the wallet's workspace afterward, overwriting the old pointer.
+    #[serde(default)]
+    force_new: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -4691,7 +4697,10 @@ async fn session_new_handler(
     if let Some(ref wallet) = req.wallet {
         let wid = get_or_create_wallet_workspace(&state, wallet);
         effective_workspace_id = Some(wid.clone());
-        if let Some(ref cname) = req.contract_name {
+        if req.force_new {
+            eprintln!("[SESSION] wallet={} force_new=true — skipping resume, deploying fresh", wallet);
+        }
+        if !req.force_new { if let Some(ref cname) = req.contract_name {
             let existing_sid = {
                 let wmap = state.workspaces.lock().unwrap();
                 wmap.get(&wid).and_then(|ws| ws.contracts.get(cname).cloned())
@@ -4725,7 +4734,7 @@ async fn session_new_handler(
                     }
                 }
             }
-        }
+        } }
     }
 
     // ── v7.0: SQB unified deployment path ────────────────────────────────────
@@ -6441,6 +6450,7 @@ async fn list_contracts_handler(
         .route("/pubkey",            get(pubkey_handler))
         .route("/compile",           post(compile_handler))
         .route("/compile-aivm",       post(aivm_handler::compile_aivm_handler))
+        .route("/aivm/estimate-gas", post(aivm_handler::estimate_gas_handler))
         .route("/attest",            post(attest_handler))
         .route("/source-nonce",      post(source_nonce_handler))
         .route("/compile/sign-source", post(sign_source_handler))
