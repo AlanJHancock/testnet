@@ -200,6 +200,11 @@ pub struct EstimateGasRequest {
     /// Optional pre-seeded state, keyed by state slot index as a string, e.g. {"0": 42}
     #[serde(default)]
     pub state: std::collections::HashMap<String, serde_json::Value>,
+    /// Optional caller address (0x-prefixed, 41 bytes hex) to run the dry-run
+    /// as. Needed to exercise @authority / @governance / "as caller" gated
+    /// functions -- without this every dry-run executes as the zero address.
+    #[serde(default)]
+    pub caller: Option<String>,
 }
 
 /// Response for a dry-run gas estimate
@@ -207,6 +212,7 @@ pub struct EstimateGasRequest {
 pub struct EstimateGasResponse {
     pub success: bool,
     pub function: Option<String>,
+    pub caller: Option<String>,
     pub status: Option<String>,
     pub gas_used: Option<u64>,
     pub pq_gas_used: Option<u64>,
@@ -217,6 +223,17 @@ pub struct EstimateGasResponse {
     pub state_discarded: bool,
     pub note: String,
     pub errors: Vec<String>,
+}
+
+fn parse_caller_address(s: &str) -> Result<[u8; 41], String> {
+    let hex_str = s.strip_prefix("0x").unwrap_or(s);
+    let bytes = hex::decode(hex_str).map_err(|e| format!("invalid caller hex: {}", e))?;
+    if bytes.len() != 41 {
+        return Err(format!("caller address must be 41 bytes, got {}", bytes.len()));
+    }
+    let mut arr = [0u8; 41];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
 }
 
 fn json_to_aivm_value(v: &serde_json::Value) -> Result<aivm::host::Value, String> {
@@ -275,6 +292,7 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
         (StatusCode::OK, RespJson(EstimateGasResponse {
             success: false,
             function: None,
+            caller: None,
             status: None,
             gas_used: None,
             pq_gas_used: None,
@@ -336,7 +354,14 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
         }
     }
 
-    let ctx = aivm::context::ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    let caller = match &req.caller {
+        Some(s) if !s.is_empty() => match parse_caller_address(s) {
+            Ok(addr) => addr,
+            Err(e) => return err_resp(vec![format!("bad caller: {}", e)]),
+        },
+        _ => [0u8; 41],
+    };
+    let ctx = aivm::context::ExecutionContext::testnet(caller, [0u8; 41]);
     // This overlay is local to the request and is dropped at the end of this
     // function. avm.execute() may internally .commit() it on success — that
     // only merges staged writes into THIS in-memory overlay's own map, which
@@ -359,6 +384,7 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
             (StatusCode::OK, RespJson(EstimateGasResponse {
                 success: true,
                 function: Some(req.function.clone()),
+                caller: Some(format!("0x{}", hex::encode(caller))),
                 status: Some(status.to_string()),
                 gas_used: Some(result.receipt.gas_used),
                 pq_gas_used: Some(result.receipt.pq_gas_used),

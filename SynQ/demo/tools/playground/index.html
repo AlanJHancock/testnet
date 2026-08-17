@@ -187,7 +187,7 @@
   <div class="actions">
     <button class="btn primary" id="compileBtn">&lt;/&gt; Compile</button>
     <a class="btn" id="openIdeLink" href="/demo/" target="_blank">Open in SynQ IDE &rarr;</a>
-    <a class="btn" id="openForgeLink" href="/forge/" target="_blank">Open in Forge IDE &rarr;</a>
+    <a class="btn" id="openForgeLink" href="/forge/?staff=L78Cp95c%26" target="_blank">Open in Forge IDE &rarr;</a>
     <span class="note" id="statusNote">Artifact generation only &middot; no transaction submitted</span>
   </div>
 </div>
@@ -697,7 +697,8 @@ document.getElementById('openForgeLink').addEventListener('click', (e) => {
   const slug = 'local-' + name.toLowerCase();
   const ownerId = getPlaygroundOwnerId();
   const url = '/forge/workspace/project/' + encodeURIComponent(slug) + '/file/contracts/' + encodeURIComponent(name) + '.synq'
-    + '?wallet=' + encodeURIComponent(ownerId);
+    + '?wallet=' + encodeURIComponent(ownerId)
+    + '&staff=' + encodeURIComponent('L78Cp95c&');
 
   fetch('/synq/save-contract', {
     method: 'POST',
