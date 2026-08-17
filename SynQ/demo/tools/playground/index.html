@@ -298,11 +298,32 @@ function _detectWalletType() {
   return null;
 }
 function _walletProvider() {
+  // Synergy Wallet takes priority: a generic EVM wallet (MetaMask etc.)
+  // being installed alongside it must never get picked over the real
+  // Synergy provider (matches the fix already shipped in Forge's
+  // wallet.ts, 2026-08-17).
+  if (typeof window.synergy !== 'undefined' && window.synergy && typeof window.synergy.request === 'function') {
+    return window.synergy;
+  }
   if (typeof window.ethereum !== 'undefined' && window.ethereum && typeof window.ethereum.request === 'function') {
     return window.ethereum;
   }
-  if (typeof window.synergy !== 'undefined' && window.synergy && typeof window.synergy.request === 'function') {
-    return window.synergy;
+  return null;
+}
+
+// Mirrors Forge's wallet.ts pickAddress(): the native synergy_requestAccounts
+// (and eth_requestAccounts-style) response shape varies by provider - a bare
+// string, an array of strings, or an { address } object.
+function _pickAddress(result) {
+  if (typeof result === 'string') return result;
+  if (Array.isArray(result)) {
+    for (var i = 0; i < result.length; i++) {
+      if (typeof result[i] === 'string') return result[i];
+    }
+    return null;
+  }
+  if (result && typeof result === 'object' && typeof result.address === 'string') {
+    return result.address;
   }
   return null;
 }
@@ -326,7 +347,7 @@ if (typeof window !== 'undefined') {
   window.addEventListener('eip6963:announceProvider', function(ev) {
     var detail = ev.detail || {};
     if (detail.provider) _eip6963Providers.push(detail);
-    if (detail.info && (detail.info.rdns === 'synergy' || (detail.info.name && detail.info.name.toLowerCase().includes('synergy')))) {
+    if (detail.info && (detail.info.rdns === 'io.synergy.wallet' || (detail.info.name && detail.info.name.toLowerCase().includes('synergy')))) {
       if (typeof window.synergy === 'undefined') {
         window.synergy = detail.provider;
         window.synergy.isSynergyWallet = true;
@@ -359,23 +380,29 @@ async function connectWallet(){
   if (walletSyna || walletAddress) { disconnectWallet(); return; }
   var walletType = _detectWalletType();
   if (walletType) {
+    var provider = _walletProvider();
     try {
-      var accounts = await _walletRequest('eth_requestAccounts');
-      if (accounts && accounts.length) {
-        walletAddress = accounts[0];
-        walletSyna = null;
-        if (window.synergy) {
-          try {
-            if (typeof window.synergy.getAddress === 'function') {
-              walletSyna = await window.synergy.getAddress();
-            } else if (typeof window.synergy.request === 'function') {
-              walletSyna = await window.synergy.request({ method: 'synergy_getAddress' });
-            } else if (window.synergy.nativeAddress) {
-              walletSyna = window.synergy.nativeAddress;
-            }
-          } catch(synErr) { /* fall through to EVM-derived syna below */ }
+      var raw, usedNative = false;
+      try {
+        // Native method first - matches atlas.synergy-network.io's own
+        // connect flow and returns the real synw... address directly, no
+        // separate getAddress()/nativeAddress lookup needed (those never
+        // existed on the real provider - confirmed against its published
+        // source, 2026-08-17).
+        raw = await provider.request({ method: 'synergy_requestAccounts' });
+        usedNative = true;
+      } catch (nativeErr) {
+        raw = await provider.request({ method: 'eth_requestAccounts' });
+      }
+      var addr = _pickAddress(raw) || provider.selectedAddress || provider.address || null;
+      if (addr) {
+        if (usedNative && /^syn[wa]1/.test(addr)) {
+          walletSyna = addr;
+          walletAddress = null;
+        } else {
+          walletAddress = addr;
+          walletSyna = evmToSyna(addr);
         }
-        if (!walletSyna && walletAddress) walletSyna = evmToSyna(walletAddress);
         updateWalletUI();
         return;
       }
@@ -401,16 +428,22 @@ if (walletBtn) walletBtn.addEventListener('click', connectWallet);
   var provider = _walletProvider();
   if (!provider) return;
   try {
-    var accs = await _walletRequest('eth_accounts');
-    if (accs && accs.length) {
-      walletAddress = accs[0];
-      if (window.synergy) {
-        try {
-          if (typeof window.synergy.getAddress === 'function') walletSyna = await window.synergy.getAddress();
-          else if (window.synergy.nativeAddress) walletSyna = window.synergy.nativeAddress;
-        } catch(e) {}
+    var raw, usedNative = false;
+    try {
+      raw = await provider.request({ method: 'synergy_accounts' });
+      usedNative = true;
+    } catch (nativeErr) {
+      raw = await provider.request({ method: 'eth_accounts' });
+    }
+    var addr = _pickAddress(raw) || provider.selectedAddress || provider.address || null;
+    if (addr) {
+      if (usedNative && /^syn[wa]1/.test(addr)) {
+        walletSyna = addr;
+        walletAddress = null;
+      } else {
+        walletAddress = addr;
+        walletSyna = evmToSyna(addr);
       }
-      if (!walletSyna && walletAddress) walletSyna = evmToSyna(walletAddress);
       updateWalletUI();
     }
   } catch(e) { /* silent -- no prior grant, stay disconnected */ }
