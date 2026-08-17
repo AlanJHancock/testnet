@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use synq_compiler::{PQCCompiler, PQCSecurityLevel};
 use synq_vm::{QuantumVM, Value};
 
+mod deploy;
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -41,6 +43,68 @@ enum Commands {
         #[arg(short, long)]
         path: PathBuf,
     },
+    /// Generates a dev/test ML-DSA-65 deploy key (NOT for mainnet use)
+    DeployKeygen {
+        /// Where to write the keyfile JSON
+        #[arg(short, long)]
+        out: PathBuf,
+    },
+    /// Builds + locally self-verifies a pqsynq ContractDeployEnvelope JSON,
+    /// ready to hand to `synergy-node tx create-aegis --synq-deploy-envelope`.
+    DeployEnvelope {
+        /// Raw compiled bytecode file
+        #[arg(long)]
+        bytecode: PathBuf,
+        /// Compiled manifest JSON file
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Compiled ABI JSON file
+        #[arg(long)]
+        abi: PathBuf,
+        /// Deploy keyfile produced by `deploy-keygen`
+        #[arg(long)]
+        key: PathBuf,
+        /// Raw constructor args (hashed as-is; wire encoding TBD upstream)
+        #[arg(long)]
+        constructor_args: Option<String>,
+        /// Account nonce for this deploy
+        #[arg(long, default_value_t = 0)]
+        nonce: u64,
+        /// Signature validity window in seconds from now
+        #[arg(long, default_value_t = 600)]
+        ttl_seconds: u64,
+        /// Where to write the ContractDeployEnvelope JSON
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Builds + locally self-verifies a pqsynq ContractCallEnvelope JSON,
+    /// ready to hand to `synergy-node tx create-aegis --synq-call-envelope`.
+    CallEnvelope {
+        /// Deploy keyfile produced by `deploy-keygen`
+        #[arg(long)]
+        key: PathBuf,
+        /// Target contract address (debug string). If omitted or not yet
+        /// known (pre-deploy-receipt), defaults to the caller's own address
+        /// as a placeholder — patch the output JSON once the real deployed
+        /// contract address is known.
+        #[arg(long, default_value = "")]
+        contract_address: String,
+        /// 4-byte method selector, hex (with or without 0x prefix)
+        #[arg(long)]
+        method_selector: String,
+        /// Raw encoded args (hashed as-is; wire encoding TBD upstream)
+        #[arg(long)]
+        encoded_args: Option<String>,
+        /// Account nonce for this call
+        #[arg(long, default_value_t = 0)]
+        nonce: u64,
+        /// Signature validity window in seconds from now
+        #[arg(long, default_value_t = 600)]
+        ttl_seconds: u64,
+        /// Where to write the ContractCallEnvelope JSON
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 fn main() {
@@ -55,6 +119,60 @@ fn main() {
         }
         Commands::Verify { path } => {
             verify(path);
+        }
+        Commands::DeployKeygen { out } => {
+            if let Err(error) = deploy::keygen(out) {
+                eprintln!("Error: {error}");
+                std::process::exit(1);
+            }
+        }
+        Commands::DeployEnvelope {
+            bytecode,
+            manifest,
+            abi,
+            key,
+            constructor_args,
+            nonce,
+            ttl_seconds,
+            out,
+        } => {
+            let args = deploy::DeployEnvelopeArgs {
+                bytecode_path: bytecode.clone(),
+                manifest_path: manifest.clone(),
+                abi_path: abi.clone(),
+                key_path: key.clone(),
+                constructor_args: constructor_args.clone(),
+                nonce: *nonce,
+                ttl_seconds: *ttl_seconds,
+                out_path: out.clone(),
+            };
+            if let Err(error) = deploy::build_deploy_envelope(&args) {
+                eprintln!("Error: {error}");
+                std::process::exit(1);
+            }
+        }
+        Commands::CallEnvelope {
+            key,
+            contract_address,
+            method_selector,
+            encoded_args,
+            nonce,
+            ttl_seconds,
+            out,
+        } => {
+            let args = deploy::CallEnvelopeArgs {
+                key_path: key.clone(),
+                contract_address_debug: contract_address.clone(),
+                method_selector_hex: method_selector.clone(),
+                encoded_args: encoded_args.clone(),
+                nonce: *nonce,
+                ttl_seconds: *ttl_seconds,
+                out_path: out.clone(),
+            };
+            if let Err(error) = deploy::build_call_envelope(&args) {
+                eprintln!("Error: {error}");
+                std::process::exit(1);
+            }
         }
     }
 }

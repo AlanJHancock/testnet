@@ -8,6 +8,16 @@ clap = { version = "4.4.18", features = ["derive"] }
 synq-compiler = { path = "../compiler" }
 synq-vm = { path = "../vm" }
 serde_json = { workspace = true }
+serde = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+# Shared PQC/SynQ deploy-and-call envelope types owned by the aegis-pqsynq
+# crate (synergy-network-hq/aegis, vendored locally under synq-language/).
+# NOTE: this is a cross-repo filesystem path dependency — it only resolves
+# on a checkout that has synq-language/ cloned alongside testnet/ at the
+# same relative depth. Flagged to hootzluh as a follow-up: needs a git
+# submodule (or a published crate) before this can build from a fresh clone.
+pqsynq = { package = "aegis-pqsynq", path = "../../synq-language/aegis-pqsynq/pqsynq" }
 
 [dev-dependencies]
 assert_cmd = "2.0.14"

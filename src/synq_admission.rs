@@ -480,7 +480,7 @@ pub fn verify_synq_deploy_for_chain_admission(
         "decode SynQ deploy envelope",
     )?;
     let context = pqsynq_context(envelope.chain_id, &normalized.pqsynq_network_id, now_unix);
-    let verified = AegisSynQVerifier::testnet_1264()
+    let verified = AegisSynQVerifier::testnet_1266()
         .verify_contract_deploy(&deploy, &context)
         .map_err(pqsynq_error)?;
 
@@ -526,7 +526,7 @@ pub fn verify_synq_call_for_chain_admission(
         "decode SynQ call envelope",
     )?;
     let context = pqsynq_context(envelope.chain_id, &normalized.pqsynq_network_id, now_unix);
-    let verified = AegisSynQVerifier::testnet_1264()
+    let verified = AegisSynQVerifier::testnet_1266()
         .verify_contract_call(&call, &context)
         .map_err(pqsynq_error)?;
 
@@ -1295,7 +1295,7 @@ fn pqsynq_context(chain_id: u64, network_id: &str, now_unix: u64) -> Verificatio
         chain_id: ChainId(chain_id),
         network_id: NetworkId(network_id.to_string()),
         now_unix,
-        policy: SynQSecurityPolicy::testnet_1264_policy(),
+        policy: SynQSecurityPolicy::testnet_1266_policy(),
     }
 }
 
