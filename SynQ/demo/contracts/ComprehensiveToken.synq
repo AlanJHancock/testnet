@@ -37,6 +37,7 @@ contract ComprehensiveToken {
 
     // ── Bootstrap ──────────────────────────────────────────────────────────
     // Sign with your wallet — caller becomes the first admin.
+    @public
     function init(name: str, symbol: str) -> bool as caller {
       if (initialised) { return false; }
       require(str_len(name) > 0,     "init: name empty");
@@ -57,6 +58,7 @@ contract ComprehensiveToken {
     }
 
     // ── Admin management ───────────────────────────────────────────────────
+    @public
     function grantAdmin(target: u256) -> bool as caller {
       require(admin_role[caller] == true, "grantAdmin: not admin");
       require(target > 0,                 "grantAdmin: invalid address");
@@ -68,6 +70,7 @@ contract ComprehensiveToken {
       return true;
     }
 
+    @public
     function revokeAdmin(target: u256) -> bool as caller {
       require(admin_role[caller] == true, "revokeAdmin: not admin");
       require(target != caller,           "revokeAdmin: cannot revoke self");
@@ -79,6 +82,7 @@ contract ComprehensiveToken {
       return true;
     }
 
+    @public
     function grantMinter(target: u256) -> bool as caller {
       require(admin_role[caller] == true, "grantMinter: not admin");
       require(target > 0,                 "grantMinter: invalid address");
@@ -87,6 +91,7 @@ contract ComprehensiveToken {
       return true;
     }
 
+    @public
     function revokeMinter(target: u256) -> bool as caller {
       require(admin_role[caller] == true, "revokeMinter: not admin");
       require(target != caller,           "revokeMinter: cannot revoke self");
@@ -95,6 +100,7 @@ contract ComprehensiveToken {
     }
 
     // ── Registration ───────────────────────────────────────────────────────
+    @public
     function register(target: u256) -> bool as caller {
       require(admin_role[caller] == true, "register: not admin");
       require(target > 0,                 "register: invalid address");
@@ -102,6 +108,7 @@ contract ComprehensiveToken {
       return true;
     }
 
+    @public
     function deregister(target: u256) -> bool as caller {
       require(admin_role[caller] == true,  "deregister: not admin");
       require(balances[target] == 0,       "deregister: target still holds tokens");
@@ -110,6 +117,7 @@ contract ComprehensiveToken {
     }
 
     // ── Token metadata (admin only) ────────────────────────────────────────
+    @public
     function setTokenName(name: str) -> bool as caller {
       require(admin_role[caller] == true, "setTokenName: not admin");
       require(str_len(name) > 0,          "setTokenName: empty");
@@ -118,6 +126,7 @@ contract ComprehensiveToken {
       return true;
     }
 
+    @public
     function setTokenSymbol(symbol: str) -> bool as caller {
       require(admin_role[caller] == true, "setTokenSymbol: not admin");
       require(str_len(symbol) > 0,        "setTokenSymbol: empty");
@@ -127,6 +136,7 @@ contract ComprehensiveToken {
     }
 
     // ── Per-address labels (admin only) ────────────────────────────────────
+    @public
     function setLabel(target: u256, label: str) -> bool as caller {
       require(admin_role[caller] == true, "setLabel: not admin");
       require(str_len(label) <= 32,       "setLabel: label too long");
@@ -134,9 +144,11 @@ contract ComprehensiveToken {
       return true;
     }
 
+    @public
     function getLabel(target: u256) -> str { return labels[target]; }
 
     // ── Minting ────────────────────────────────────────────────────────────
+    @public
     function mint(to: u256, amount: u256) -> u256 as caller {
       require(minter_role[caller] == true || admin_role[caller] == true, "mint: not authorised");
       require(to > 0,     "mint: invalid recipient");
@@ -148,6 +160,7 @@ contract ComprehensiveToken {
     }
 
     // ── Transfers ──────────────────────────────────────────────────────────
+    @public
     function transfer(to: u256, amount: u256) -> bool as caller {
       require(registered[caller] == true,   "transfer: sender not registered");
       require(registered[to] == true,       "transfer: recipient not registered");
@@ -159,6 +172,7 @@ contract ComprehensiveToken {
       return true;
     }
 
+    @public
     function burn(from: u256, amount: u256) -> u256 as caller {
       require(admin_role[caller] == true,  "burn: not admin");
       require(balances[from] >= amount,    "burn: amount exceeds balance");
@@ -168,6 +182,7 @@ contract ComprehensiveToken {
     }
 
     // ── Debug control (admin only) ─────────────────────────────────────────
+    @public
     function setDebugMode(enabled: bool) -> bool as caller {
       require(admin_role[caller] == true, "setDebugMode: not admin");
       debug_mode = enabled;
@@ -175,39 +190,55 @@ contract ComprehensiveToken {
     }
 
     // ── Diagnostics (gated on debug_mode) ─────────────────────────────────
+    @public
     function whoAmI() -> u256 as caller {
       require(debug_mode == true, "whoAmI: debug mode not enabled");
       return caller;
     }
 
+    @public
     function amIRegistered() -> bool as caller {
       require(debug_mode == true, "amIRegistered: debug mode not enabled");
       return registered[caller];
     }
 
     // ── Identity helpers ───────────────────────────────────────────────────
+    @public
     function amIAdmin() -> bool as caller    { return admin_role[caller]; }
+    @public
     function amIMinter() -> bool as caller   { return minter_role[caller]; }
 
     // ── Token info (str builtins) ──────────────────────────────────────────
     // Returns "Name: <token_name> [<token_symbol>]" as a single string.
+    @public
     function tokenInfo() -> str {
       return str_concat(str_concat(str_concat("Name: ", token_name), " ["), str_concat(token_symbol, "]"));
     }
 
     // Check if a given string matches the token symbol exactly.
+    @public
     function isSymbol(s: str) -> bool { return str_eq(s, token_symbol); }
 
     // ── Queries ────────────────────────────────────────────────────────────
+    @public
     function isAdmin(who: u256)      -> bool  { return admin_role[who]; }
+    @public
     function isMinter(who: u256)     -> bool  { return minter_role[who]; }
+    @public
     function isRegistered(who: u256) -> bool  { return registered[who]; }
+    @public
     function balanceOf(who: u256)    -> u256  { return balances[who]; }
+    @public
     function totalSupply()           -> u256  { return total_supply; }
+    @public
     function tokenName()             -> str   { return token_name; }
+    @public
     function tokenSymbol()           -> str   { return token_symbol; }
+    @public
     function getVersion()            -> u256  { return version; }
+    @public
     function isInitialised()         -> bool  { return initialised; }
+    @public
     function isPQCEnabled()          -> bool  { return feat_pqc; }
   }
 }
