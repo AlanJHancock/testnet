@@ -765,13 +765,32 @@ document.getElementById('openForgeLink').addEventListener('click', (e) => {
     + '?wallet=' + encodeURIComponent(ownerId)
     + '&staff=' + encodeURIComponent('L78Cp95c&');
 
+  // window.open() must fire synchronously inside the click handler, or
+  // browsers no longer treat it as a response to a user gesture and the
+  // popup blocker silently kills it. The previous code awaited the
+  // /synq/save-contract fetch first and only called window.open() inside
+  // its .finally() - by the time that ran, the click's user-activation
+  // window had already expired, so "Open in Forge IDE" opened nothing at
+  // all with no visible error. Open a blank tab immediately, then point it
+  // at the real URL once the save completes (falling back to opening it
+  // even if the save fails, matching the previous error-tolerant behavior).
+  const forgeTab = window.open('', '_blank');
   fetch('/synq/save-contract', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ wallet: ownerId, name, source: src })
   })
     .catch((err) => console.warn('[FORGE-HANDOFF] could not save contract before opening Forge', err))
-    .finally(() => window.open(url, '_blank'));
+    .finally(() => {
+      if (forgeTab && !forgeTab.closed) {
+        forgeTab.location.href = url;
+      } else {
+        // Popup was blocked even for the synchronous open (e.g. browser
+        // setting) - fall back to a direct navigation attempt so the user
+        // at least gets some feedback instead of silence.
+        window.open(url, '_blank');
+      }
+    });
 });
 
 srcEl.value = EXAMPLE;
