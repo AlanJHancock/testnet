@@ -292,7 +292,19 @@ function _checkSynergyExtension() {
 }
 function _detectWalletType() {
   if (_checkSynergyExtension()) return 'synergy';
-  if (typeof window.ethereum !== 'undefined' && window.ethereum && typeof window.ethereum.request === 'function') {
+  // atlas.synergy-network.io's own connect flow is Synergy-only: it never
+  // falls back to a generic window.ethereum provider (MetaMask etc.) - if
+  // window.synergy isn't found, it shows "not detected" rather than
+  // silently connecting to whatever other wallet happens to be installed.
+  // Only trust window.ethereum here if it explicitly self-identifies as
+  // Synergy Wallet (the same isSynergyWallet flag EIP-6963 announcements
+  // are tagged with) - matches the guard already shipped in Forge's
+  // wallet.ts detectWalletExtension(), 2026-08-17.
+  if (
+    typeof window.ethereum !== 'undefined' && window.ethereum &&
+    typeof window.ethereum.request === 'function' &&
+    window.ethereum.isSynergyWallet
+  ) {
     return 'ethereum';
   }
   return null;
@@ -305,7 +317,15 @@ function _walletProvider() {
   if (typeof window.synergy !== 'undefined' && window.synergy && typeof window.synergy.request === 'function') {
     return window.synergy;
   }
-  if (typeof window.ethereum !== 'undefined' && window.ethereum && typeof window.ethereum.request === 'function') {
+  // Same isSynergyWallet guard as _detectWalletType() above - a bare,
+  // unflagged window.ethereum (plain MetaMask) must never be treated as
+  // the Synergy provider, or connect silently returns an 0x... EVM address
+  // instead of the native synw... one.
+  if (
+    typeof window.ethereum !== 'undefined' && window.ethereum &&
+    typeof window.ethereum.request === 'function' &&
+    window.ethereum.isSynergyWallet
+  ) {
     return window.ethereum;
   }
   return null;
@@ -423,8 +443,12 @@ async function connectWallet(){
       return;
     }
   }
-  // No wallet extension detected -- keep using the anonymous per-browser id.
-  console.log('[Playground Wallet] no wallet extension detected, continuing with anonymous per-browser id');
+  // atlas.synergy-network.io's own connect flow shows this exact message
+  // when window.synergy isn't found, rather than silently falling back to
+  // another installed wallet or staying on the anonymous per-browser id
+  // without telling the user why nothing happened.
+  alert('Synergy Wallet was not detected. Install or open Synergy Wallet, then try again.');
+  console.log('[Playground Wallet] Synergy Wallet not detected, continuing with anonymous per-browser id');
 }
 window.connectWallet = connectWallet;
 if (walletBtn) walletBtn.addEventListener('click', connectWallet);
