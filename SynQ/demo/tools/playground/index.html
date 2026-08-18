@@ -319,11 +319,19 @@ function _pickAddress(result) {
   if (Array.isArray(result)) {
     for (var i = 0; i < result.length; i++) {
       if (typeof result[i] === 'string') return result[i];
+      if (result[i] && typeof result[i] === 'object') return _pickAddress(result[i]);
     }
     return null;
   }
-  if (result && typeof result === 'object' && typeof result.address === 'string') {
-    return result.address;
+  if (result && typeof result === 'object') {
+    // Match the real extension's own normalizeSynergyAddress precedence
+    // (inpage.js): synergyAddress (native synw...) before address (a
+    // syna... mirror of the same account), before accountsByChain[chain].
+    // Checking .address first (previous bug) silently returned the wrong
+    // address type on every connect.
+    var candidate = result.synergyAddress || result.address ||
+      (result.accountsByChain && result.accountsByChain['0x4f2']);
+    return typeof candidate === 'string' ? candidate : null;
   }
   return null;
 }
