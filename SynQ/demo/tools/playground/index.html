@@ -755,15 +755,63 @@ function getPlaygroundOwnerId(){
   return id;
 }
 
+// Local wallet-flow testing: the Synergy Wallet extension only injects on
+// its allowlisted origins (localhost, synergy-network.io, etc.) - it does
+// NOT inject on hanksweb.co.uk yet, so "Connect Wallet" inside Forge fails
+// there even though the app itself works fine. To test the wallet flow you
+// have to reach Forge through an allowlisted origin (e.g. an SSH tunnel to
+// localhost:3900), but Playground's "Open in Forge IDE" link always points
+// at a path relative to its own origin (hanksweb.co.uk), so it can never
+// land on localhost by default.
+//
+// This override lets you point that link at a different Forge origin
+// without touching the relative-link default everyone else uses. Set it
+// once via ?forgeBase=http://localhost:3900 - it's saved to localStorage
+// and reused on every future visit until cleared. Clear it with
+// ?forgeBase=clear (or the empty string).
+var FORGE_BASE_OVERRIDE_KEY = 'synq_playground_forge_base_override';
+(function initForgeBaseOverride() {
+  try {
+    var params = new URLSearchParams(window.location.search);
+    if (params.has('forgeBase')) {
+      var requested = params.get('forgeBase');
+      if (!requested || requested === 'clear') {
+        localStorage.removeItem(FORGE_BASE_OVERRIDE_KEY);
+      } else {
+        localStorage.setItem(FORGE_BASE_OVERRIDE_KEY, requested.replace(/\/$/, ''));
+      }
+    }
+  } catch (err) {}
+})();
+(function reflectForgeBaseOverrideInUI() {
+  try {
+    var base = localStorage.getItem(FORGE_BASE_OVERRIDE_KEY);
+    var link = document.getElementById('openForgeLink');
+    if (base && link) {
+      link.textContent = 'Open in Forge IDE (local test: ' + base + ') \u2192';
+      link.title = 'Testing override active - opens against ' + base + ' instead of this domain. Clear with ?forgeBase=clear';
+    }
+  } catch (err) {}
+})();
+function getForgeBase() {
+  try {
+    return localStorage.getItem(FORGE_BASE_OVERRIDE_KEY) || '';
+  } catch (err) {
+    return '';
+  }
+}
+
 document.getElementById('openForgeLink').addEventListener('click', (e) => {
   e.preventDefault();
   const src = srcEl.value;
   const name = lastCompiledName || extractContractName(src) || 'Counter';
   const slug = 'local-' + name.toLowerCase();
   const ownerId = getPlaygroundOwnerId();
-  const url = '/forge/workspace/project/' + encodeURIComponent(slug) + '/file/contracts/' + encodeURIComponent(name) + '.synq'
+  const forgeBase = getForgeBase();
+  const url = forgeBase + '/forge/workspace/project/' + encodeURIComponent(slug) + '/file/contracts/' + encodeURIComponent(name) + '.synq'
     + '?wallet=' + encodeURIComponent(ownerId)
     + '&staff=' + encodeURIComponent('L78Cp95c&');
+  if (forgeBase) console.info('[FORGE-HANDOFF] using local test override, opening: ' + url);
 
   // window.open() must fire synchronously inside the click handler, or
   // browsers no longer treat it as a response to a user gesture and the
