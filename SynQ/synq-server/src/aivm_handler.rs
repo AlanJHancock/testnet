@@ -313,6 +313,17 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
         return err_resp(vec![format!("Source too large: {} bytes (max {})", req.source.len(), MAX_SOURCE_BYTES)]);
     }
 
+    // Backlog item 7: bound concurrent CPU-bound dry-runs independently of
+    // per-IP rate limiting (see AppState::estimate_gas_semaphore doc comment).
+    // try_acquire (not .acquire().await) so we fail fast with a clear error
+    // instead of queuing this request behind other CPU-bound work.
+    let _permit = match state.estimate_gas_semaphore.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => return err_resp(vec![
+            "server busy: too many concurrent gas estimations in flight — retry shortly".to_string()
+        ]),
+    };
+
     let ast = match parser::parse(&req.source) {
         Ok(a) => a,
         Err(e) => return err_resp(vec![format!("Parse error: {}", e)]),

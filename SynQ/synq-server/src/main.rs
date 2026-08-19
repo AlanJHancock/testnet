@@ -365,6 +365,18 @@ pub struct AppState {
     compiler_key:  Arc<CompilerKey>,
     source_nonce_secret: Vec<u8>,  // Rev-2: HMAC key for source-nonce derivation
     wasm_runtime:     Option<Arc<wasm_compiler::WasmRuntime>>,
+    /// Gas/fee estimator backlog item 7: caps concurrent in-flight
+    /// /aivm/estimate-gas dry-runs. The per-IP rate limiter (check_rate_limit)
+    /// bounds request *rate* from a single IP, but a distributed source
+    /// (many IPs, or one IP staying under the burst threshold) could still
+    /// send enough concurrent parse+compile+execute dry-runs to starve the
+    /// server's worker threads even though each individual run is
+    /// gas/depth/body-size bounded. This semaphore bounds concurrency
+    /// directly: once all permits are in use, new requests get an
+    /// immediate "server busy, retry" response instead of queuing behind
+    /// CPU-bound work. Sized conservatively (4) since this box also runs
+    /// nginx, the wallet RPC stub, and other synq-server endpoints.
+    pub estimate_gas_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 /// PR-F Item 2: check the per-IP rate limit.
@@ -6143,7 +6155,8 @@ async fn main() {
             Err(e) => { eprintln!("  WASM runtime:   FAILED: {}", e); None }
         }
     };
-    let store = AppState { sessions, workspaces, wallet_workspaces, rate_limiter, compiler_key, source_nonce_secret, wasm_runtime };
+    let estimate_gas_semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+    let store = AppState { sessions, workspaces, wallet_workspaces, rate_limiter, compiler_key, source_nonce_secret, wasm_runtime, estimate_gas_semaphore };
 
     let cors_origin = std::env::var("SYNQ_CORS_ORIGIN").unwrap_or_else(|_| "*".to_string());
     let cors = if cors_origin == "*" {
