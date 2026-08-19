@@ -524,6 +524,9 @@ document.getElementById('resetBtn').addEventListener('click', () => {
   evidenceTabs = null;
   evidenceActiveTab = 'manifest';
   evidenceEl.innerHTML = '<span class="placeholder">No build yet. Compile to produce real ABI, manifest, bytecode, and hashes.</span>';
+  lastCompiledName = null;
+  var fileLabelEl = document.getElementById('fileLabel');
+  if (fileLabelEl) fileLabelEl.textContent = 'Counter.synq';
 });
 
 function kv(label, value){
@@ -693,6 +696,15 @@ async function compile(){
     }
 
     lastCompiledName = data.contract_name || null;
+    if (lastCompiledName) {
+      // Keep the pane header in sync with what actually compiled - it used
+      // to stay hardcoded to "Counter.synq" forever, which was misleading
+      // as soon as you renamed the contract (the Forge deep link already
+      // used the real compiled name via lastCompiledName, so the header was
+      // the only thing left showing stale info).
+      var fileLabelEl = document.getElementById('fileLabel');
+      if (fileLabelEl) fileLabelEl.textContent = lastCompiledName + '.synq';
+    }
     evidenceTabs = await buildEvidenceTabs(data);
     renderEvidenceShell(data, elapsedMs);
     statusNote.textContent = 'Compiled ' + new Date().toLocaleTimeString() + ' · artifact generation only · no transaction submitted';
