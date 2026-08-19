@@ -187,7 +187,7 @@
   <div class="actions">
     <button class="btn primary" id="compileBtn">&lt;/&gt; Compile</button>
     <a class="btn" id="openIdeLink" href="/demo/" target="_blank">Open in SynQ IDE &rarr;</a>
-    <a class="btn" id="openForgeLink" href="/forge/?staff=L78Cp95c%26" target="_blank">Open in Forge IDE &rarr;</a>
+    <a class="btn" id="openForgeLink" href="/forge/?staff=L78Cp95c%26" target="_blank" rel="noopener">Open in Forge IDE &rarr;</a>
     <span class="note" id="statusNote">Artifact generation only &middot; no transaction submitted</span>
   </div>
 </div>
@@ -696,6 +696,7 @@ async function compile(){
     }
 
     lastCompiledName = data.contract_name || null;
+    if (typeof refreshOpenForgeLink === 'function') refreshOpenForgeLink();
     if (lastCompiledName) {
       // Keep the pane header in sync with what actually compiled - it used
       // to stay hardcoded to "Counter.synq" forever, which was misleading
@@ -795,16 +796,6 @@ var FORGE_BASE_OVERRIDE_KEY = 'synq_playground_forge_base_override';
     }
   } catch (err) {}
 })();
-(function reflectForgeBaseOverrideInUI() {
-  try {
-    var base = localStorage.getItem(FORGE_BASE_OVERRIDE_KEY);
-    var link = document.getElementById('openForgeLink');
-    if (base && link) {
-      link.textContent = 'Open in Forge IDE (local test: ' + base + ') \u2192';
-      link.title = 'Testing override active - opens against ' + base + ' instead of this domain. Clear with ?forgeBase=clear';
-    }
-  } catch (err) {}
-})();
 function getForgeBase() {
   try {
     return localStorage.getItem(FORGE_BASE_OVERRIDE_KEY) || '';
@@ -813,41 +804,74 @@ function getForgeBase() {
   }
 }
 
-document.getElementById('openForgeLink').addEventListener('click', (e) => {
-  e.preventDefault();
+// Builds the exact deep-link URL the "Open in Forge IDE" button should
+// point at right now, given whatever's currently compiled/typed. Used both
+// to keep the anchor's href attribute live (so hovering the button - or a
+// screen reader, or a middle-click, or a share/copy of the link - always
+// shows the real destination, not a stale placeholder) and by the click
+// handler as a fallback if something upstream is out of sync.
+function computeForgeDeepLinkUrl() {
   const src = srcEl.value;
   const name = lastCompiledName || extractContractName(src) || 'Counter';
   const slug = 'local-' + name.toLowerCase();
   const ownerId = getPlaygroundOwnerId();
   const forgeBase = getForgeBase();
-  const url = forgeBase + '/forge/workspace/project/' + encodeURIComponent(slug) + '/file/contracts/' + encodeURIComponent(name) + '.synq'
+  return forgeBase + '/forge/workspace/project/' + encodeURIComponent(slug) + '/file/contracts/' + encodeURIComponent(name) + '.synq'
     + '?wallet=' + encodeURIComponent(ownerId)
     + '&staff=' + encodeURIComponent('L78Cp95c&');
-  if (forgeBase) console.info('[FORGE-HANDOFF] using local test override, opening: ' + url);
+}
 
-  // Fire the tab-open and the save in the SAME tick, both synchronously in
-  // the click handler. The previous version opened a blank tab first, then
-  // patched its .location.href inside the save fetch's .finally() callback.
-  // That two-step "open blank, patch later" dance is fragile in practice -
-  // some browsers/extensions silently swallow the deferred navigation on a
-  // window handle that was already granted, landing on a stale/blank tab
-  // that never gets re-pointed (reported symptom: "opens Forge home, not
-  // the file"). A single window.open() call with the REAL target URL, made
-  // synchronously right here, is exactly the pattern browsers reliably
-  // treat as a direct response to the click - the same as a plain
-  // <a target="_blank"> - so it isn't subject to that failure mode. The
-  // save doesn't need to be awaited first: it's a same-origin POST that
-  // resolves in well under 100ms, while the new tab still has to load and
-  // boot the Forge app before it ever calls /synq/load-contract, so in
-  // practice the save is always done first anyway. keepalive keeps it
-  // completing even if this tab gets backgrounded right after the click.
-  window.open(url, '_blank');
+// Keeps the anchor's actual href attribute (and its visible label, when a
+// local-test override is active) in sync with computeForgeDeepLinkUrl().
+// This used to only run once on page load (to reflect the forgeBase
+// override in the button's *label*) while the href attribute itself was
+// left as a static, non-deep-linking fallback - the click handler computed
+// the real URL separately and navigated to it via JS. That split is exactly
+// why hovering the button (or anything else that reads href directly) never
+// matched what a click actually did. Now href is the single source of
+// truth: this refreshes it, and the click handler just fires the save and
+// lets the browser follow the href natively.
+function refreshOpenForgeLink() {
+  try {
+    const link = document.getElementById('openForgeLink');
+    if (!link) return;
+    const base = getForgeBase();
+    link.href = computeForgeDeepLinkUrl();
+    link.title = base
+      ? 'Testing override active - opens against ' + base + ' instead of this domain. Clear with ?forgeBase=clear'
+      : 'Opens this contract in Forge IDE.';
+    link.textContent = base ? 'Open in Forge IDE (local test: ' + base + ') →' : 'Open in Forge IDE →';
+  } catch (err) {}
+}
+
+refreshOpenForgeLink();
+
+document.getElementById('openForgeLink').addEventListener('click', () => {
+  // Refresh href one last time synchronously so the click always follows
+  // the freshest URL even if something changed since the last refresh
+  // call below (e.g. edited the source without recompiling).
+  refreshOpenForgeLink();
+  // Fire-and-forget save alongside the native navigation the browser is
+  // about to perform (this handler does NOT call preventDefault - the
+  // click proceeds to whatever href now points at, exactly like any other
+  // link, so it can't be broken by popup blockers or JS timing issues).
+  const src = srcEl.value;
+  const name = lastCompiledName || extractContractName(src) || 'Counter';
+  const ownerId = getPlaygroundOwnerId();
   fetch('/synq/save-contract', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     keepalive: true,
     body: JSON.stringify({ wallet: ownerId, name, source: src })
   }).catch((err) => console.warn('[FORGE-HANDOFF] could not save contract before opening Forge', err));
+});
+
+// Recompute the href whenever anything that feeds into it changes: typing
+// in the editor (debounced), a successful compile (which updates
+// lastCompiledName), or the forgeBase override being set/cleared.
+srcEl.addEventListener('input', () => {
+  clearTimeout(window.__forgeLinkRefreshTimer);
+  window.__forgeLinkRefreshTimer = setTimeout(refreshOpenForgeLink, 300);
 });
 
 srcEl.value = EXAMPLE;
