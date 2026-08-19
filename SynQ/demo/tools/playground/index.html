@@ -825,32 +825,29 @@ document.getElementById('openForgeLink').addEventListener('click', (e) => {
     + '&staff=' + encodeURIComponent('L78Cp95c&');
   if (forgeBase) console.info('[FORGE-HANDOFF] using local test override, opening: ' + url);
 
-  // window.open() must fire synchronously inside the click handler, or
-  // browsers no longer treat it as a response to a user gesture and the
-  // popup blocker silently kills it. The previous code awaited the
-  // /synq/save-contract fetch first and only called window.open() inside
-  // its .finally() - by the time that ran, the click's user-activation
-  // window had already expired, so "Open in Forge IDE" opened nothing at
-  // all with no visible error. Open a blank tab immediately, then point it
-  // at the real URL once the save completes (falling back to opening it
-  // even if the save fails, matching the previous error-tolerant behavior).
-  const forgeTab = window.open('', '_blank');
+  // Fire the tab-open and the save in the SAME tick, both synchronously in
+  // the click handler. The previous version opened a blank tab first, then
+  // patched its .location.href inside the save fetch's .finally() callback.
+  // That two-step "open blank, patch later" dance is fragile in practice -
+  // some browsers/extensions silently swallow the deferred navigation on a
+  // window handle that was already granted, landing on a stale/blank tab
+  // that never gets re-pointed (reported symptom: "opens Forge home, not
+  // the file"). A single window.open() call with the REAL target URL, made
+  // synchronously right here, is exactly the pattern browsers reliably
+  // treat as a direct response to the click - the same as a plain
+  // <a target="_blank"> - so it isn't subject to that failure mode. The
+  // save doesn't need to be awaited first: it's a same-origin POST that
+  // resolves in well under 100ms, while the new tab still has to load and
+  // boot the Forge app before it ever calls /synq/load-contract, so in
+  // practice the save is always done first anyway. keepalive keeps it
+  // completing even if this tab gets backgrounded right after the click.
+  window.open(url, '_blank');
   fetch('/synq/save-contract', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    keepalive: true,
     body: JSON.stringify({ wallet: ownerId, name, source: src })
-  })
-    .catch((err) => console.warn('[FORGE-HANDOFF] could not save contract before opening Forge', err))
-    .finally(() => {
-      if (forgeTab && !forgeTab.closed) {
-        forgeTab.location.href = url;
-      } else {
-        // Popup was blocked even for the synchronous open (e.g. browser
-        // setting) - fall back to a direct navigation attempt so the user
-        // at least gets some feedback instead of silence.
-        window.open(url, '_blank');
-      }
-    });
+  }).catch((err) => console.warn('[FORGE-HANDOFF] could not save contract before opening Forge', err));
 });
 
 srcEl.value = EXAMPLE;
