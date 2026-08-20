@@ -416,6 +416,39 @@ impl Avm {
                         &mut events,
                     )?;
                 }
+                Instruction::Pack(count) => {
+                    // Struct/array construction: pop `count` values (they were
+                    // pushed field-by-field in declaration order, so the LAST
+                    // push is on TOP of the stack) and repack them into a
+                    // single Value::Array in original field order.
+                    gas.charge(gas_cost::PACK_BASE + gas_cost::PACK_PER_FIELD * (*count as u64))?;
+                    let n = *count as usize;
+                    let mut items = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        items.push(stack.pop().ok_or(AivmError::StackUnderflow)?);
+                    }
+                    items.reverse();
+                    stack.push(Value::Array(items));
+                }
+                Instruction::ArrayGet(index) => {
+                    // Struct field access: pop an array value, push the
+                    // element at `index` (the field's position in the
+                    // struct's declared field order).
+                    gas.charge(gas_cost::ARRAY_GET)?;
+                    let top = stack.pop().ok_or(AivmError::StackUnderflow)?;
+                    match top {
+                        Value::Array(arr) => {
+                            let i = *index as usize;
+                            if i >= arr.len() {
+                                return Err(AivmError::OutOfBoundsAccess { index: i, len: arr.len() });
+                            }
+                            stack.push(arr[i].clone());
+                        }
+                        other => {
+                            return Err(AivmError::TypeMismatch { expected: "Array", got: other.type_name() });
+                        }
+                    }
+                }
             }
         }
 

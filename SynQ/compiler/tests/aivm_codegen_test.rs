@@ -39,7 +39,7 @@ fn test_aivm_codegen_new_opcodes() {
 
     let units = parse(source).unwrap();
     if let SourceUnit::Contract(def) = &units[0] {
-        let result = compile_to_aivm(def).unwrap();
+        let result = compile_to_aivm(def, &[]).unwrap();
 
         let instr_dbg: Vec<String> = result.instructions.iter()
             .map(|i| format!("{:?}", i))
@@ -89,7 +89,7 @@ fn test_aivm_codegen_function_call_resolution() {
 
     let units = parse(source).unwrap();
     if let SourceUnit::Contract(def) = &units[0] {
-        let result = compile_to_aivm(def).unwrap();
+        let result = compile_to_aivm(def, &[]).unwrap();
 
         // Find Call instructions — check none are Call(0) placeholders
         let call_warnings: Vec<_> = result.warnings.iter()

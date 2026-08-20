@@ -34,6 +34,10 @@ pub enum Opcode {
     Emit = 0x60,
     Trap = 0x70,
     HostCall = 0x80,
+    /// Pop N values, push a single Value::Array of them (struct/array construction)
+    Pack = 0x90,
+    /// Pop an array value, push its element at the given index (struct field access)
+    ArrayGet = 0x91,
 }
 
 impl Opcode {
@@ -65,6 +69,8 @@ impl Opcode {
             0x60 => Some(Opcode::Emit),
             0x70 => Some(Opcode::Trap),
             0x80 => Some(Opcode::HostCall),
+            0x90 => Some(Opcode::Pack),
+            0x91 => Some(Opcode::ArrayGet),
             _ => None,
         }
     }
@@ -87,6 +93,8 @@ impl Opcode {
             Opcode::Emit => 2,
             Opcode::Trap => 2,
             Opcode::HostCall => 2,
+            Opcode::Pack => 1,
+            Opcode::ArrayGet => 1,
         }
     }
 }
@@ -119,6 +127,10 @@ pub enum Instruction {
     Emit(u16),
     Trap(u16),
     HostCall(u16),
+    /// Pop N values (in push order), push Value::Array([v0, v1, ..., vN-1])
+    Pack(u8),
+    /// Pop a Value::Array, push element at index (errors if not an array or out of bounds)
+    ArrayGet(u8),
 }
 
 impl Instruction {
@@ -187,6 +199,14 @@ impl Instruction {
             Instruction::HostCall(import_idx) => {
                 buf.push(Opcode::HostCall as u8);
                 buf.extend_from_slice(&import_idx.to_be_bytes());
+            }
+            Instruction::Pack(count) => {
+                buf.push(Opcode::Pack as u8);
+                buf.push(*count);
+            }
+            Instruction::ArrayGet(index) => {
+                buf.push(Opcode::ArrayGet as u8);
+                buf.push(*index);
             }
         }
         buf
@@ -295,11 +315,28 @@ impl Instruction {
                     let import_idx = read_u16(bytes, &mut offset)?;
                     instructions.push(Instruction::HostCall(import_idx));
                 }
+                Opcode::Pack => {
+                    let count = read_u8(bytes, &mut offset)?;
+                    instructions.push(Instruction::Pack(count));
+                }
+                Opcode::ArrayGet => {
+                    let index = read_u8(bytes, &mut offset)?;
+                    instructions.push(Instruction::ArrayGet(index));
+                }
             }
         }
 
         Ok(instructions)
     }
+}
+
+fn read_u8(bytes: &[u8], offset: &mut usize) -> Result<u8, AivmError> {
+    if *offset + 1 > bytes.len() {
+        return Err(AivmError::OperandOutOfBounds { offset: *offset, needed: 1, available: bytes.len() - *offset });
+    }
+    let val = bytes[*offset];
+    *offset += 1;
+    Ok(val)
 }
 
 fn read_u16(bytes: &[u8], offset: &mut usize) -> Result<u16, AivmError> {

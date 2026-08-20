@@ -100,9 +100,12 @@ pub async fn compile_aivm_handler(
         Some(c) => c,
         None => return err_resp(vec!["No contract found in source".to_string()]),
     };
+    let struct_defs: Vec<synq_compiler::ast::StructDefinition> = ast.iter()
+        .filter_map(|u| if let SourceUnit::Struct(s) = u { Some(s.clone()) } else { None })
+        .collect();
 
     // Compile to AIVM
-    let result = match compile_to_aivm(contract) {
+    let result = match compile_to_aivm(contract, &struct_defs) {
         Ok(r) => r,
         Err(e) => return err_resp(vec![format!("AIVM compilation error: {}", e)]),
     };
@@ -265,6 +268,63 @@ fn json_to_aivm_value(v: &serde_json::Value) -> Result<aivm::host::Value, String
     }
 }
 
+/// Look up a function's (or the constructor's, for "init") declared
+/// parameter types, in order — used to decode struct-shaped JSON args
+/// (`{"x": 12, "y": 14}`) into the right field order instead of guessing.
+fn find_function_param_types(
+    contract: &synq_compiler::ast::ContractDefinition,
+    name: &str,
+) -> Option<Vec<synq_compiler::ast::Type>> {
+    use synq_compiler::ast::ContractPart;
+    for part in &contract.parts {
+        match part {
+            ContractPart::Function(f) if f.name == name => {
+                return Some(f.params.iter().map(|p| p.ty.clone()).collect());
+            }
+            ContractPart::Constructor(c) if name == "init" => {
+                return Some(c.params.iter().map(|p| p.ty.clone()).collect());
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Type-aware arg decoder — like `json_to_aivm_value`, but when the expected
+/// type is a known struct, decodes a JSON object into a `Value::Array` in
+/// the struct's DECLARED field order (matching what the AIVM codegen's
+/// StructLiteral/FieldAccess ArrayGet indices expect), instead of rejecting
+/// objects outright or trusting arbitrary JSON key order.
+fn json_to_aivm_value_typed(
+    v: &serde_json::Value,
+    ty: Option<&synq_compiler::ast::Type>,
+    structs: &std::collections::HashMap<String, &synq_compiler::ast::StructDefinition>,
+) -> Result<aivm::host::Value, String> {
+    use aivm::host::Value;
+    use synq_compiler::ast::Type;
+
+    if let (serde_json::Value::Object(map), Some(Type::Named(sname))) = (v, ty) {
+        if let Some(sdef) = structs.get(sname.as_str()) {
+            let mut vals = Vec::with_capacity(sdef.fields.len());
+            for f in &sdef.fields {
+                let fv = map.get(&f.name)
+                    .ok_or_else(|| format!("struct '{}' missing field '{}'", sname, f.name))?;
+                vals.push(json_to_aivm_value_typed(fv, Some(&f.ty), structs)?);
+            }
+            return Ok(Value::Array(vals));
+        }
+        return Err(format!("unknown struct type '{}' for object argument", sname));
+    }
+    if let serde_json::Value::Array(arr) = v {
+        let elem_ty = if let Some(Type::Array(inner)) = ty { Some(inner.as_ref()) } else { None };
+        let vals: Result<Vec<Value>, String> = arr.iter()
+            .map(|x| json_to_aivm_value_typed(x, elem_ty, structs))
+            .collect();
+        return Ok(Value::Array(vals?));
+    }
+    json_to_aivm_value(v)
+}
+
 fn aivm_value_to_json(v: &aivm::host::Value) -> serde_json::Value {
     use aivm::host::Value;
     match v {
@@ -332,7 +392,12 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
         Some(c) => c,
         None => return err_resp(vec!["No contract found in source".to_string()]),
     };
-    let compiled = match compile_to_aivm(contract) {
+    let struct_defs: Vec<synq_compiler::ast::StructDefinition> = ast.iter()
+        .filter_map(|u| if let SourceUnit::Struct(s) = u { Some(s.clone()) } else { None })
+        .collect();
+    let struct_map: std::collections::HashMap<String, &synq_compiler::ast::StructDefinition> =
+        struct_defs.iter().map(|s| (s.name.clone(), s)).collect();
+    let compiled = match compile_to_aivm(contract, &struct_defs) {
         Ok(r) => r,
         Err(e) => return err_resp(vec![format!("AIVM compilation error: {}", e)]),
     };
@@ -345,9 +410,11 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
         None => return err_resp(vec![format!("function '{}' not found", req.function)]),
     };
 
+    let param_types = find_function_param_types(contract, &req.function);
     let mut args = Vec::with_capacity(req.args.len());
-    for a in &req.args {
-        match json_to_aivm_value(a) {
+    for (i, a) in req.args.iter().enumerate() {
+        let expected_ty = param_types.as_ref().and_then(|v| v.get(i));
+        match json_to_aivm_value_typed(a, expected_ty, &struct_map) {
             Ok(v) => args.push(v),
             Err(e) => return err_resp(vec![format!("bad argument: {}", e)]),
         }
@@ -359,7 +426,10 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
             Ok(n) => n,
             Err(_) => return err_resp(vec![format!("bad state key: {}", k)]),
         };
-        match json_to_aivm_value(v) {
+        // Use the typed decoder (no expected type here — state is keyed by
+        // slot index, not name) so plain JSON arrays decode to Value::Array
+        // for seeding struct-typed state vars (e.g. [1, 2] for a Point).
+        match json_to_aivm_value_typed(v, None, &struct_map) {
             Ok(val) => { seeded.insert(key, val); }
             Err(e) => return err_resp(vec![format!("bad state value: {}", e)]),
         }

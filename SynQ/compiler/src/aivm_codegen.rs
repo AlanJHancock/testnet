@@ -16,6 +16,7 @@
 //! - Host functions → HOST_CALL(import_index)
 
 use crate::ast::*;
+use std::collections::HashMap;
 use aivm::instructions::Instruction;
 use aivm::vm::{FunctionEntry, FunctionVisibility, FunctionMutability};
 use aivm::abi::{Abi, AbiType, AbiMethod, AbiEvent, AbiError as AbiErrorDef, AbiStateField};
@@ -65,15 +66,35 @@ impl<'a> FuncBody<'a> {
 }
 
 /// Compile a SynQ contract AST to AIVM instructions
-pub fn compile_to_aivm(contract: &ContractDefinition) -> Result<AivmCompileResult, String> {
+pub fn compile_to_aivm(contract: &ContractDefinition, structs: &[StructDefinition]) -> Result<AivmCompileResult, String> {
     let mut warnings = Vec::new();
 
-    // 1. Build state variable map
+    // 1. Build state variable map (+ types, for struct field resolution)
     let mut state_var_map: Vec<(String, u16)> = Vec::new();
+    let mut state_var_types: HashMap<String, Type> = HashMap::new();
     for part in &contract.parts {
         if let ContractPart::StateVariable(sv) = part {
             let idx = state_var_map.len() as u16;
             state_var_map.push((sv.name.clone(), idx));
+            state_var_types.insert(sv.name.clone(), sv.ty.clone());
+        }
+    }
+
+    // Struct definitions, by name — lets codegen resolve field access
+    // (`p.x`, `box_val.origin.x`) to the correct array index instead of
+    // guessing. Passed in from the caller (top-level SourceUnit::Struct
+    // entries), since ContractDefinition alone doesn't carry them.
+    let struct_defs: HashMap<String, &StructDefinition> =
+        structs.iter().map(|s| (s.name.clone(), s)).collect();
+
+    // Function return types, by name — lets codegen know that e.g.
+    // `makePoint(...)` yields a `Point` so `.x` on its result resolves too.
+    let mut func_return_types: HashMap<String, Type> = HashMap::new();
+    for part in &contract.parts {
+        if let ContractPart::Function(f) = part {
+            if let Some(rt) = &f.returns {
+                func_return_types.insert(f.name.clone(), rt.clone());
+            }
         }
     }
 
@@ -137,17 +158,22 @@ pub fn compile_to_aivm(contract: &ContractDefinition) -> Result<AivmCompileResul
 
         let mut ctx = CodegenContext {
             state_var_map: &state_var_map,
+            state_var_types: &state_var_types,
+            struct_defs: &struct_defs,
+            func_return_types: &func_return_types,
             instructions: &mut all_instructions,
             local_map: std::collections::HashMap::new(),
+            local_types: HashMap::new(),
             next_local: 0,
             func_index: fidx as u32,
             warnings: &mut warnings,
             func_name_map: &func_name_map,
         };
 
-        // Map params to local slots
+        // Map params to local slots (+ types, for struct field resolution)
         for (i, param) in fbody.params().iter().enumerate() {
             ctx.local_map.insert(param.name.clone(), i as u16);
+            ctx.local_types.insert(param.name.clone(), param.ty.clone());
         }
         ctx.next_local = fbody.params().len() as u16;
 
@@ -220,8 +246,12 @@ fn function_writes_state(f: &FunctionDefinition) -> bool {
 /// Codegen context
 struct CodegenContext<'a> {
     state_var_map: &'a [(String, u16)],
+    state_var_types: &'a HashMap<String, Type>,
+    struct_defs: &'a HashMap<String, &'a StructDefinition>,
+    func_return_types: &'a HashMap<String, Type>,
     instructions: &'a mut Vec<Instruction>,
     local_map: std::collections::HashMap<String, u16>,
+    local_types: HashMap<String, Type>,
     next_local: u16,
     func_index: u32,
     warnings: &'a mut Vec<String>,
@@ -249,6 +279,36 @@ impl<'a> CodegenContext<'a> {
         self.local_map.insert(name.to_string(), idx);
         self.next_local += 1;
         idx
+    }
+
+    /// Look up the struct definition a `Type::Named(...)` refers to, if any.
+    fn resolve_struct(&self, ty: &Type) -> Option<&'a StructDefinition> {
+        if let Type::Named(name) = ty {
+            self.struct_defs.get(name.as_str()).copied()
+        } else {
+            None
+        }
+    }
+
+    /// Best-effort static type inference — only needs to be precise enough
+    /// to resolve struct field access (`.field`) to the right array index.
+    /// Returns None for anything it can't (or doesn't need to) type.
+    fn infer_type(&self, expr: &Expression) -> Option<Type> {
+        match expr {
+            Expression::Identifier(name) => {
+                self.local_types.get(name).cloned()
+                    .or_else(|| self.state_var_types.get(name).cloned())
+            }
+            Expression::FieldAccess { object, field } => {
+                let obj_ty = self.infer_type(object)?;
+                let sdef = self.resolve_struct(&obj_ty)?;
+                sdef.fields.iter().find(|f| &f.name == field).map(|f| f.ty.clone())
+            }
+            Expression::StructLiteral { type_name, .. } => Some(Type::Named(type_name.clone())),
+            Expression::Call(name, _) => self.func_return_types.get(name).cloned(),
+            Expression::TupleIndex { object, .. } => self.infer_type(object),
+            _ => None,
+        }
     }
 
     fn emit(&mut self, instr: Instruction) {
@@ -307,8 +367,12 @@ impl<'a> CodegenContext<'a> {
                     }
                 }
             }
-            Statement::Let { name, ty: _, value } => {
+            Statement::Let { name, ty, value } => {
                 let local_idx = self.local_index(name);
+                let inferred = ty.clone().or_else(|| self.infer_type(value));
+                if let Some(t) = inferred {
+                    self.local_types.insert(name.clone(), t);
+                }
                 self.gen_expr(value)?;
                 self.emit(Instruction::StoreLocal(local_idx));
             }
@@ -573,14 +637,24 @@ impl<'a> CodegenContext<'a> {
             Expression::Err(e) => {
                 self.gen_expr(e)?;
             }
-            Expression::FieldAccess { object, field: _ } => {
-                if let Expression::Identifier(name) = object.as_ref() {
-                    if let Some(idx) = self.state_index(name) {
-                        self.emit(Instruction::LoadState(idx));
-                        return Ok(());
+            Expression::FieldAccess { object, field } => {
+                let field_idx = self.infer_type(object)
+                    .as_ref()
+                    .and_then(|t| self.resolve_struct(t))
+                    .and_then(|sdef| sdef.fields.iter().position(|f| &f.name == field));
+                match field_idx {
+                    Some(idx) => {
+                        self.gen_expr(object)?;
+                        self.emit(Instruction::ArrayGet(idx as u8));
+                    }
+                    None => {
+                        self.warnings.push(format!(
+                            "AIVM codegen: could not statically resolve field '{}' — defaulting to 0 (struct type unknown)",
+                            field
+                        ));
+                        self.emit(Instruction::PushU64(0));
                     }
                 }
-                self.emit(Instruction::PushU64(0));
             }
             Expression::TupleIndex { object, index: _ } => {
                 self.gen_expr(object)?;
@@ -588,11 +662,38 @@ impl<'a> CodegenContext<'a> {
             Expression::EnumAccess { enum_name: _, variant_name: _ } => {
                 self.emit(Instruction::PushU64(0));
             }
-            Expression::StructLiteral { type_name: _, fields } => {
-                if let Some((_, val)) = fields.first() {
-                    self.gen_expr(val)?;
+            Expression::StructLiteral { type_name, fields } => {
+                if let Some(sdef) = self.struct_defs.get(type_name.as_str()).copied() {
+                    // Emit fields in the struct's DECLARED order (not the
+                    // literal's source order) so ArrayGet(index) — computed
+                    // from declared order in infer_type/resolve_struct —
+                    // always lines up. Recurses naturally for nested structs
+                    // (a field whose value is itself a StructLiteral).
+                    for decl_field in &sdef.fields {
+                        match fields.iter().find(|(n, _)| n == &decl_field.name) {
+                            Some((_, val)) => self.gen_expr(val)?,
+                            None => {
+                                self.warnings.push(format!(
+                                    "AIVM codegen: struct literal '{}' missing field '{}' — defaulting to 0",
+                                    type_name, decl_field.name
+                                ));
+                                self.emit(Instruction::PushU64(0));
+                            }
+                        }
+                    }
+                    self.emit(Instruction::Pack(sdef.fields.len() as u8));
                 } else {
-                    self.emit(Instruction::PushU64(0));
+                    // Unknown struct type (not in scope) — fall back to the
+                    // old single-value behavior rather than failing outright.
+                    self.warnings.push(format!(
+                        "AIVM codegen: unknown struct type '{}' in literal — only first field kept",
+                        type_name
+                    ));
+                    if let Some((_, val)) = fields.first() {
+                        self.gen_expr(val)?;
+                    } else {
+                        self.emit(Instruction::PushU64(0));
+                    }
                 }
             }
         }

@@ -22,7 +22,7 @@ fn test_compile_counter_to_aivm() {
     let contract = extract_contract(&ast);
     assert_eq!(contract.name, "Counter");
 
-    let result = compile_to_aivm(contract).unwrap();
+    let result = compile_to_aivm(contract, &[]).unwrap();
 
     // Should have 3 functions (init, increment, get)
     assert_eq!(result.functions.len(), 3);
@@ -50,7 +50,7 @@ fn test_compile_counter_to_aivm() {
 fn test_execute_counter_on_aivm() {
     let ast = parse(COUNTER_SOURCE).unwrap();
     let contract = extract_contract(&ast);
-    let result = compile_to_aivm(contract).unwrap();
+    let result = compile_to_aivm(contract, &[]).unwrap();
 
     let host = HostFunctions::default_v01();
     let avm = Avm::new(result.instructions, result.functions, host);
@@ -89,7 +89,7 @@ fn test_execute_counter_on_aivm() {
 fn test_aivm_abi_selectors() {
     let ast = parse(COUNTER_SOURCE).unwrap();
     let contract = extract_contract(&ast);
-    let result = compile_to_aivm(contract).unwrap();
+    let result = compile_to_aivm(contract, &[]).unwrap();
 
     // Each method should have a unique selector
     let selectors: Vec<&str> = result.abi.methods.iter()
