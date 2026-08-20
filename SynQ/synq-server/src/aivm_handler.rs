@@ -576,4 +576,117 @@ mod estimate_gas_handler_tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body.success, "expected success with a free permit: {body:?}");
     }
+
+    #[tokio::test]
+    async fn explicit_revert_reports_reverted_status_not_a_transport_error() {
+        // A controlled `revert IDENT;` compiles to Trap(0), which the VM
+        // turns into Ok(ExecutionResult{ receipt.status: Reverted, .. }) --
+        // not an Err. Confirms the estimator surfaces this as a genuine,
+        // successful dry run (success:true) that *reports* a revert via the
+        // `status` field, rather than conflating "the contract reverted"
+        // with "the estimator itself failed".
+        let src = "contract Reverter { state { dummy: u256; } impl { @public function always_reverts() -> u256 { revert Blocked; } } }";
+        let state = test_state();
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(req(src, "always_reverts")),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.success, "a controlled revert should still be success:true: {body:?}");
+        assert_eq!(body.status.as_deref(), Some("reverted"));
+        assert!(body.gas_used.unwrap_or(0) > 0, "gas up to the trap point should still be charged: {body:?}");
+        assert!(body.return_value.is_none());
+    }
+
+    #[tokio::test]
+    async fn out_of_gas_is_reported_as_a_clean_execution_failure_not_a_crash() {
+        // A while loop with no reachable exit condition within the default
+        // 1,000,000 gas_limit (aivm::context::ExecutionContext::testnet)
+        // must terminate the dry run via GasMeter::charge's bounds check
+        // (aivm/src/gas.rs) rather than looping forever or panicking the
+        // handler. Confirms item 7's "resource limits work" checklist
+        // entry for ordinary (non-PQ) gas.
+        let src = "contract Looper { state { counter: u256; } impl { @public function burn() -> u256 { while (counter < 999999999) { counter = counter + 1; } return counter; } } }";
+        let state = test_state();
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(req(src, "burn")),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "out-of-gas must still answer cleanly, not hang/crash");
+        assert!(!body.success, "exhausting the gas limit should be reported as a failure: {body:?}");
+        assert!(
+            body.errors.iter().any(|e| e.contains("exhaust")),
+            "expected a gas-exhaustion error, got: {:?}", body.errors
+        );
+    }
+
+    #[tokio::test]
+    async fn seeded_state_is_honored_by_the_dry_run() {
+        // The optional `state` request field lets a caller pre-seed a
+        // state slot (dev-mode convenience per backlog item 5's notes on
+        // the current shape vs a future canonical one). Confirms a read of
+        // a pre-seeded slot actually reflects the seeded value rather than
+        // silently defaulting to 0.
+        let src = "contract Reader { state { counter: u256; } impl { @public function read_counter() -> u256 { return counter; } } }";
+        let mut request = req(src, "read_counter");
+        request.state.insert("0".to_string(), serde_json::json!(42));
+        let state = test_state();
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(request),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.success, "{body:?}");
+        assert_eq!(body.return_value, Some(serde_json::json!(42)));
+    }
+
+    #[tokio::test]
+    async fn identical_inputs_produce_stable_gas_measurements() {
+        // Determinism check: the exact same source/function/args/state
+        // dry-run twice (fresh AppState each time, so there is zero shared
+        // mutable context) must report the identical gas_used both times.
+        // A weighted per-opcode GasMeter over a deterministic interpreter
+        // has no business varying run to run; if this ever flakes it means
+        // something non-deterministic (timing, uninitialized memory, map
+        // iteration order) leaked into the cost model.
+        let (_, RespJson(first)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(test_state()),
+            Json(req(COUNTER_SRC, "increment")),
+        ).await;
+        let (_, RespJson(second)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(test_state()),
+            Json(req(COUNTER_SRC, "increment")),
+        ).await;
+        assert!(first.success && second.success);
+        assert_eq!(first.gas_used, second.gas_used, "gas measurement is not stable across identical runs");
+        assert_eq!(first.pq_gas_used, second.pq_gas_used);
+    }
+
+    #[tokio::test]
+    async fn unimplemented_host_function_fails_closed_not_unsafely() {
+        // Item 6 audit finding (a): several builtins declared in the
+        // import table (asset.*, addr.*, auth.*, string.*) aren't wired up
+        // in execute_host_call yet and return HostFunctionNotDeclared.
+        // Regression guard: calling one of them through a real dry run
+        // must still come back as a clean success:false with a clear
+        // error -- not a panic, not a silently-wrong success, and
+        // critically not partial state changes made visible (state stays
+        // discarded regardless of where execution stopped).
+        let src = "contract AssetTest { state { dummy: u256; } impl { @public function create_asset() -> u256 { asset_create(100); return dummy; } } }";
+        let state = test_state();
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(req(src, "create_asset")),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.success, "an unimplemented host function must fail closed: {body:?}");
+        assert!(body.state_discarded);
+        assert!(!body.errors.is_empty());
+    }
 }

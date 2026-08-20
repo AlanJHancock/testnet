@@ -341,7 +341,23 @@ impl<'a> CodegenContext<'a> {
                 self.emit(Instruction::Emit(0));
             }
             Statement::If { condition, then_block, else_block } => {
+                // BUG FIX (2026-08-20): Instruction::JmpIf jumps to its
+                // target only when the popped condition is TRUE (see
+                // aivm::vm::Avm::execute's JmpIf arm). Emitting JmpIf
+                // directly on the raw condition here jumped to else_start
+                // whenever the condition was true -- i.e. it skipped the
+                // then-block exactly when it should have run it, and fell
+                // through into the then-block exactly when it should have
+                // skipped to else. Every `if` compiled through this AIVM
+                // backend ran its branches inverted. Fix: negate the
+                // condition first (same PushU64(1)-then-expr-then-SubU64
+                // pattern already used for UnaryOperator::Not below --
+                // pushing 1 *before* the expression so SubU64 computes
+                // 1 - cond, not cond - 1) so JmpIf fires on "condition was
+                // false", the correct time to jump to else_start/end.
+                self.emit(Instruction::PushU64(1));
                 self.gen_expr(condition)?;
+                self.emit(Instruction::SubU64);
                 let jmp_if_idx = self.instructions.len();
                 self.emit(Instruction::JmpIf(0)); // placeholder
                 for s in &then_block.statements {
@@ -360,8 +376,14 @@ impl<'a> CodegenContext<'a> {
                 self.instructions[jmp_end_idx] = Instruction::Jmp(end);
             }
             Statement::While { condition, body } => {
+                // Same inverted-JmpIf bug as the If arm above, same fix:
+                // negate the condition (1 - cond) before JmpIf so the loop
+                // exits when the condition is false instead of when it's
+                // true.
                 let loop_start = self.instructions.len() as u32;
+                self.emit(Instruction::PushU64(1));
                 self.gen_expr(condition)?;
+                self.emit(Instruction::SubU64);
                 let jmp_end_idx = self.instructions.len();
                 self.emit(Instruction::JmpIf(0)); // placeholder
                 for s in &body.statements {
