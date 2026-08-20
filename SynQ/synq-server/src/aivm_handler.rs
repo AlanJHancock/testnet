@@ -411,3 +411,169 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
         Err(e) => err_resp(vec![format!("execution error: {}", e)]),
     }
 }
+
+
+// ─── Unit/integration tests: estimate_gas_handler (gas/fee estimator backlog item 13) ─
+//
+// Calls the handler function directly (real extractors: ConnectInfo,
+// State, Json) rather than standing up the full axum Router -- main.rs's
+// router is built inline inside `main()` with dozens of handler fns
+// declared as local items scoped to that function body, so it can't be
+// reused from an external test harness without a much larger refactor.
+// Calling the handler directly still exercises all the real logic that
+// matters for regressions: rate limiting, size limits, the item-7
+// concurrency guard, real AIVM compilation + execution, gas/pq-gas
+// metering, and the no-persistence guarantee. It only skips the generic
+// axum middleware (CORS, body-size layer) that isn't estimator-specific.
+#[cfg(test)]
+mod estimate_gas_handler_tests {
+    use super::*;
+    use crate::{AppState, CompilerKey};
+    use std::collections::HashMap;
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+
+    const COUNTER_SRC: &str = "contract Counter { state { counter: u256; } impl { @public function increment() -> u256 { counter = counter + 1; return counter; } } }";
+
+    fn test_state() -> AppState {
+        AppState {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            workspaces: Arc::new(Mutex::new(HashMap::new())),
+            wallet_workspaces: Arc::new(Mutex::new(HashMap::new())),
+            rate_limiter: crate::build_rate_limiter(),
+            compiler_key: Arc::new(CompilerKey::Ephemeral),
+            source_nonce_secret: vec![0u8; 32],
+            wasm_runtime: None,
+            estimate_gas_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+        }
+    }
+
+    fn test_addr() -> SocketAddr {
+        "127.0.0.1:1".parse().unwrap()
+    }
+
+    fn req(source: &str, function: &str) -> EstimateGasRequest {
+        EstimateGasRequest {
+            source: source.to_string(),
+            function: function.to_string(),
+            args: vec![],
+            state: HashMap::new(),
+            caller: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn success_reports_gas_used_and_pq_gas_used_as_separate_numeric_fields() {
+        let state = test_state();
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(req(COUNTER_SRC, "increment")),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.success);
+        assert!(body.gas_used.is_some(), "gas_used should be populated: {body:?}");
+        assert!(body.pq_gas_used.is_some(), "pq_gas_used should be populated: {body:?}");
+        // Confirm they can genuinely diverge (separate meters, not one value
+        // mirrored into two fields) -- this contract does no PQ operations,
+        // so gas_used should be > 0 while pq_gas_used stays 0.
+        assert!(body.gas_used.unwrap() > 0);
+        assert_eq!(body.pq_gas_used.unwrap(), 0);
+        assert!(body.state_discarded);
+    }
+
+    #[tokio::test]
+    async fn unknown_function_is_a_clean_execution_failure() {
+        let state = test_state();
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(req(COUNTER_SRC, "does_not_exist")),
+        ).await;
+        // err_resp always answers 200 with success:false for
+        // request-shaped-but-semantically-rejected dry runs -- distinct
+        // from the endpoint itself being unreachable (that's a proxy-layer
+        // concern, see forge-v3's /api/estimate-gas route).
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.success);
+        assert!(!body.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn oversized_source_is_rejected_before_any_compilation() {
+        let state = test_state();
+        let huge_source = "a".repeat(MAX_SOURCE_BYTES + 1);
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(req(&huge_source, "increment")),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.success);
+        assert!(
+            body.errors.iter().any(|e| e.contains("too large")),
+            "expected a 'too large' error, got: {:?}", body.errors
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_dry_runs_never_persist_state_across_calls() {
+        // Backlog item 6/13: state changes are computed then discarded.
+        // Running the same increment() dry run twice in a row on the same
+        // AppState must return the identical result both times -- if state
+        // leaked between calls, the second would see counter=1 already.
+        let state = test_state();
+        let (_, RespJson(first)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state.clone()),
+            Json(req(COUNTER_SRC, "increment")),
+        ).await;
+        let (_, RespJson(second)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(req(COUNTER_SRC, "increment")),
+        ).await;
+        assert!(first.success && second.success);
+        assert_eq!(
+            first.return_value, second.return_value,
+            "state leaked between dry runs: {:?} vs {:?}", first.return_value, second.return_value
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrency_guard_rejects_when_semaphore_is_exhausted() {
+        // Backlog item 7 regression test. Deterministic: start the
+        // semaphore with zero permits so the very first call is guaranteed
+        // to observe exhaustion -- no need to race real concurrent calls
+        // (flaky, since a single dry run completes in well under a
+        // millisecond).
+        let mut state = test_state();
+        state.estimate_gas_semaphore = Arc::new(tokio::sync::Semaphore::new(0));
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(req(COUNTER_SRC, "increment")),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.success);
+        assert!(
+            body.errors.iter().any(|e| e.contains("server busy")),
+            "expected a 'server busy' error from the exhausted semaphore, got: {:?}", body.errors
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrency_guard_allows_requests_when_a_permit_is_free() {
+        // Sanity counterpart to the exhaustion test: a semaphore with
+        // capacity still lets a normal dry run through untouched.
+        let mut state = test_state();
+        state.estimate_gas_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(req(COUNTER_SRC, "increment")),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.success, "expected success with a free permit: {body:?}");
+    }
+}
