@@ -88,4 +88,14 @@ contract StructValue {
         box_val.origin = p;
         return true;
     }
+
+    @public
+    @effects(corner)
+    function setCornerX(newX: u256) -> bool {
+        // Nested field assignment variant where the assigned field is a
+        // scalar (u256), not a struct -- corner.y must be left untouched.
+        require(initialised, "StructValue.setCornerX: not initialised");
+        corner.x = newX;
+        return true;
+    }
 }
