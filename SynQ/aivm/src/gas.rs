@@ -41,6 +41,7 @@ pub mod gas_cost {
     pub const PACK_BASE: u64 = 3;
     pub const PACK_PER_FIELD: u64 = 2;
     pub const ARRAY_GET: u64 = 3;
+    pub const ARRAY_SET: u64 = 4;
 }
 
 /// Gas meter

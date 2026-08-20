@@ -339,11 +339,53 @@ impl<'a> CodegenContext<'a> {
                     self.emit(Instruction::StoreLocal(local_idx));
                 }
             }
-            Statement::FieldAssignment { object, field: _, value } => {
-                let idx = self.state_index(object)
-                    .ok_or_else(|| format!("unknown state variable: {}", object))?;
-                self.gen_expr(value)?;
-                self.emit(Instruction::StoreState(idx));
+            Statement::FieldAssignment { object, field, value } => {
+                // `object.field = value;` -- grammar only supports one level
+                // (field_assign_statement = IDENT "." IDENT "=" expr ";"),
+                // so `object` is always a plain local/state variable name,
+                // never a nested path. Resolve `field`'s position in
+                // object's struct type and read-modify-write just that slot
+                // via ArraySet, instead of clobbering the whole variable
+                // with a single field's value.
+                let obj_ty = self.state_var_types.get(object).cloned()
+                    .or_else(|| self.local_types.get(object).cloned());
+                let field_idx = obj_ty.as_ref()
+                    .and_then(|t| self.resolve_struct(t))
+                    .and_then(|sdef| sdef.fields.iter().position(|f| &f.name == field));
+
+                match field_idx {
+                    Some(idx) => {
+                        if let Some(sidx) = self.state_index(object) {
+                            self.emit(Instruction::LoadState(sidx));
+                            self.gen_expr(value)?;
+                            self.emit(Instruction::ArraySet(idx as u8));
+                            self.emit(Instruction::StoreState(sidx));
+                        } else {
+                            let lidx = self.local_index(object);
+                            self.emit(Instruction::LoadLocal(lidx));
+                            self.gen_expr(value)?;
+                            self.emit(Instruction::ArraySet(idx as u8));
+                            self.emit(Instruction::StoreLocal(lidx));
+                        }
+                    }
+                    None => {
+                        // Unknown struct type for `object` -- fall back to
+                        // the old (lossy but non-crashing) whole-variable
+                        // overwrite rather than failing compilation outright.
+                        self.warnings.push(format!(
+                            "AIVM codegen: could not resolve field '{}' on '{}' for assignment -- overwriting whole variable",
+                            field, object
+                        ));
+                        if let Some(sidx) = self.state_index(object) {
+                            self.gen_expr(value)?;
+                            self.emit(Instruction::StoreState(sidx));
+                        } else {
+                            let lidx = self.local_index(object);
+                            self.gen_expr(value)?;
+                            self.emit(Instruction::StoreLocal(lidx));
+                        }
+                    }
+                }
             }
             Statement::MapAssignment { map, keys, value } => {
                 let idx = self.state_index(map)

@@ -38,6 +38,8 @@ pub enum Opcode {
     Pack = 0x90,
     /// Pop an array value, push its element at the given index (struct field access)
     ArrayGet = 0x91,
+    /// Pop [value, array] (value on top), set array[index]=value, push updated array back (struct field assignment)
+    ArraySet = 0x92,
 }
 
 impl Opcode {
@@ -71,6 +73,7 @@ impl Opcode {
             0x80 => Some(Opcode::HostCall),
             0x90 => Some(Opcode::Pack),
             0x91 => Some(Opcode::ArrayGet),
+            0x92 => Some(Opcode::ArraySet),
             _ => None,
         }
     }
@@ -95,6 +98,7 @@ impl Opcode {
             Opcode::HostCall => 2,
             Opcode::Pack => 1,
             Opcode::ArrayGet => 1,
+            Opcode::ArraySet => 1,
         }
     }
 }
@@ -131,6 +135,8 @@ pub enum Instruction {
     Pack(u8),
     /// Pop a Value::Array, push element at index (errors if not an array or out of bounds)
     ArrayGet(u8),
+    /// Pop [value, array] (value on top), set array[index]=value, push updated array back
+    ArraySet(u8),
 }
 
 impl Instruction {
@@ -206,6 +212,10 @@ impl Instruction {
             }
             Instruction::ArrayGet(index) => {
                 buf.push(Opcode::ArrayGet as u8);
+                buf.push(*index);
+            }
+            Instruction::ArraySet(index) => {
+                buf.push(Opcode::ArraySet as u8);
                 buf.push(*index);
             }
         }
@@ -322,6 +332,10 @@ impl Instruction {
                 Opcode::ArrayGet => {
                     let index = read_u8(bytes, &mut offset)?;
                     instructions.push(Instruction::ArrayGet(index));
+                }
+                Opcode::ArraySet => {
+                    let index = read_u8(bytes, &mut offset)?;
+                    instructions.push(Instruction::ArraySet(index));
                 }
             }
         }

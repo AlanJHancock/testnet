@@ -80,4 +80,12 @@ contract StructValue {
         corner = translate(corner, dx, dy);
         return true;
     }
+
+    @public
+    @effects(box_val)
+    function setBoxOrigin(p: Point) -> bool {
+        require(initialised, "StructValue.setBoxOrigin: not initialised");
+        box_val.origin = p;
+        return true;
+    }
 }

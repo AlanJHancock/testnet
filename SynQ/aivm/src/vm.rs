@@ -449,6 +449,28 @@ impl Avm {
                         }
                     }
                 }
+                Instruction::ArraySet(index) => {
+                    // Struct field assignment: pop [value, array] (value on
+                    // top -- pushed after the array), set array[index] =
+                    // value, push the updated array back so the caller can
+                    // StoreState/StoreLocal it as a whole.
+                    gas.charge(gas_cost::ARRAY_SET)?;
+                    let value = stack.pop().ok_or(AivmError::StackUnderflow)?;
+                    let top = stack.pop().ok_or(AivmError::StackUnderflow)?;
+                    match top {
+                        Value::Array(mut arr) => {
+                            let i = *index as usize;
+                            if i >= arr.len() {
+                                return Err(AivmError::OutOfBoundsAccess { index: i, len: arr.len() });
+                            }
+                            arr[i] = value;
+                            stack.push(Value::Array(arr));
+                        }
+                        other => {
+                            return Err(AivmError::TypeMismatch { expected: "Array", got: other.type_name() });
+                        }
+                    }
+                }
             }
         }
 
