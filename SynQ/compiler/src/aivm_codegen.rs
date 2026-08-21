@@ -28,6 +28,11 @@ pub struct AivmCompileResult {
     pub functions: Vec<FunctionEntry>,
     pub abi: Abi,
     pub state_var_map: Vec<(String, u16)>,
+    /// Declared type of each state slot, by index -- lets callers (e.g. the
+    /// server's dry-run/estimate-gas handler) build a correctly-shaped zero
+    /// default (e.g. Value::Array([0, 0]) for a 2-field struct, not a bare
+    /// scalar 0) for any state slot the request didn't explicitly seed.
+    pub state_var_types: Vec<(u16, Type)>,
     pub warnings: Vec<String>,
 }
 
@@ -208,11 +213,16 @@ pub fn compile_to_aivm(contract: &ContractDefinition, structs: &[StructDefinitio
     // 5. Build ABI
     let abi = build_abi(contract, &state_var_map, &functions)?;
 
+    let state_var_types_out: Vec<(u16, Type)> = state_var_map.iter()
+        .filter_map(|(name, idx)| state_var_types.get(name).map(|ty| (*idx, ty.clone())))
+        .collect();
+
     Ok(AivmCompileResult {
         instructions: all_instructions,
         functions,
         abi,
         state_var_map,
+        state_var_types: state_var_types_out,
         warnings,
     })
 }

@@ -295,6 +295,49 @@ fn find_function_param_types(
 /// the struct's DECLARED field order (matching what the AIVM codegen's
 /// StructLiteral/FieldAccess ArrayGet indices expect), instead of rejecting
 /// objects outright or trusting arbitrary JSON key order.
+/// Builds a correctly-SHAPED zero default for a declared state-var type,
+/// recursing into struct fields (and tuple elements) so a never-seeded
+/// struct-typed state slot defaults to Value::Array([...zeroes...]) with
+/// the right field count -- not a bare Value::U64(0) -- matching what a
+/// freshly-deployed contract's storage would actually look like before
+/// any field is written. Without this, any FieldAccess (`x.field`) on an
+/// unset struct state var trips the VM's ArrayGet type check (expected
+/// Array, got u64) the moment a caller (Forge, Playground, a raw
+/// estimate-gas request) invokes a read function before calling init().
+fn default_aivm_value_for_type(
+    ty: &synq_compiler::ast::Type,
+    structs: &std::collections::HashMap<String, &synq_compiler::ast::StructDefinition>,
+) -> aivm::host::Value {
+    use aivm::host::Value;
+    use synq_compiler::ast::Type;
+
+    match ty {
+        Type::Named(sname) => {
+            if let Some(sdef) = structs.get(sname.as_str()) {
+                Value::Array(sdef.fields.iter()
+                    .map(|f| default_aivm_value_for_type(&f.ty, structs))
+                    .collect())
+            } else {
+                // Enum or unknown named type -- zero is a reasonable default
+                // (matches the VMs existing bare-scalar fallback).
+                Value::U64(0)
+            }
+        }
+        Type::Tuple(types) => Value::Array(
+            types.iter().map(|t| default_aivm_value_for_type(t, structs)).collect(),
+        ),
+        Type::Array(_) | Type::Mapping(_, _) => Value::Array(vec![]),
+        Type::Bool => Value::Bool(false),
+        Type::UInt128 | Type::Int128 => Value::U128(0),
+        Type::Str => Value::String(String::new()),
+        Type::Bytes | Type::BytesN(_) | Type::Hash32 | Type::Hash64
+        | Type::Address | Type::UMAIdentity
+        | Type::DilithiumPublicKey | Type::FalconPublicKey | Type::KyberPublicKey
+        | Type::DilithiumSignature | Type::FalconSignature => Value::Bytes(vec![]),
+        _ => Value::U64(0),
+    }
+}
+
 fn json_to_aivm_value_typed(
     v: &serde_json::Value,
     ty: Option<&synq_compiler::ast::Type>,
@@ -433,6 +476,16 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
             Ok(val) => { seeded.insert(key, val); }
             Err(e) => return err_resp(vec![format!("bad state value: {}", e)]),
         }
+    }
+
+    // Pre-populate every declared state slot the request didn't explicitly
+    // seed with a correctly-shaped zero default (see
+    // default_aivm_value_for_type doc comment) -- so reading a struct-typed
+    // state var before init() has run yields a properly-shaped zero struct
+    // instead of the VM's bare Value::U64(0) fallback tripping ArrayGet's
+    // type check on the very first FieldAccess.
+    for (idx, ty) in &compiled.state_var_types {
+        seeded.entry(*idx).or_insert_with(|| default_aivm_value_for_type(ty, &struct_map));
     }
 
     let caller = match &req.caller {
