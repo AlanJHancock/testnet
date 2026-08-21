@@ -210,6 +210,39 @@ pub struct EstimateGasRequest {
     pub caller: Option<String>,
 }
 
+/// Backlog item 9's target canonical `synergy_estimateGas` response shape
+/// (see synq-internal/docs/backlog/gas-fee-estimator-backlog.md), computed
+/// from this exact same dry-run rather than a separate call -- an early,
+/// additive preview so Forge/Atlas can start integrating against the
+/// eventual real field names now, without waiting on item 8's server
+/// migration. All existing flat fields above are unchanged; this is purely
+/// additive. `simulation_block` is deliberately `None` today: this
+/// dev-sandbox dry-run has no real chain height to attach to (see backlog
+/// items 5/8 -- no network-side contract state exists yet), and item 10's
+/// "never fabricate a number" rule extends to this field too. No SNRG
+/// price field on this struct on purpose -- gas usage (AJ) and gas price
+/// (Justin) stay structurally separate per the backlog's ownership split.
+#[derive(Debug, Serialize)]
+pub struct CanonicalEstimate {
+    pub gas_used: String,
+    pub pq_gas_used: String,
+    /// Heuristic dev-estimator margin (measured usage + 20%, min +1 for any
+    /// nonzero usage) -- NOT a protocol-defined gas-limit policy. Real
+    /// gas-limit policy is Justin's workstream; treat this purely as a
+    /// starting suggestion for a caller building a transaction today.
+    pub gas_limit_suggested: String,
+    pub pq_gas_limit_suggested: String,
+    pub simulation_block: Option<String>,
+    pub execution_status: String,
+    pub state_persisted: bool,
+}
+
+/// 20% headroom rounded up, +1 minimum bump so any nonzero measured cost
+/// gets some margin. See `CanonicalEstimate::gas_limit_suggested` doc.
+fn suggested_gas_limit(used: u64) -> u64 {
+    if used == 0 { 0 } else { used + (used / 5).max(1) }
+}
+
 /// Response for a dry-run gas estimate
 #[derive(Debug, Serialize)]
 pub struct EstimateGasResponse {
@@ -224,6 +257,21 @@ pub struct EstimateGasResponse {
     pub return_value: Option<serde_json::Value>,
     pub events: Vec<serde_json::Value>,
     pub state_discarded: bool,
+    /// Snapshot of every state slot after this call, keyed by slot index
+    /// as a string -- same JSON schema as the request-side `state` seed
+    /// field. Nothing here is persisted server-side (see state_discarded);
+    /// it exists purely so a client can pass it back as next call's `state`
+    /// to chain a sequence of dry-runs (e.g. init() then setCorner()) into
+    /// what feels like one debug session. Populated on both success and
+    /// revert (a revert still reflects rollback-to-seeded state, which is
+    /// useful for seeing exactly what precondition failed).
+    #[serde(default)]
+    pub final_state: std::collections::HashMap<String, serde_json::Value>,
+    /// Backlog item 9 preview -- see `CanonicalEstimate` doc comment.
+    /// `None` whenever there's no real execution result to compute it from
+    /// (validation/rate-limit/compile-error responses via `err_resp`).
+    #[serde(default)]
+    pub canonical: Option<CanonicalEstimate>,
     pub note: String,
     pub errors: Vec<String>,
 }
@@ -360,10 +408,48 @@ fn json_to_aivm_value_typed(
     }
     if let serde_json::Value::Array(arr) = v {
         let elem_ty = if let Some(Type::Array(inner)) = ty { Some(inner.as_ref()) } else { None };
+        // If the target type is a known struct, also validate arity against
+        // its declared field count (positional struct literal: [x, y] for
+        // Point) so a wrong-length array is rejected up front instead of
+        // silently building a mis-shapen Array the VM has to trip over
+        // later. Structs whose fields have their own concrete element
+        // types get those propagated positionally too.
+        if let Some(Type::Named(sname)) = ty {
+            if let Some(sdef) = structs.get(sname.as_str()) {
+                if arr.len() != sdef.fields.len() {
+                    return Err(format!(
+                        "struct '{}' expects {} field(s) ({}), got an array of length {}",
+                        sname, sdef.fields.len(),
+                        sdef.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", "),
+                        arr.len(),
+                    ));
+                }
+                let vals: Result<Vec<Value>, String> = arr.iter().zip(sdef.fields.iter())
+                    .map(|(x, f)| json_to_aivm_value_typed(x, Some(&f.ty), structs))
+                    .collect();
+                return Ok(Value::Array(vals?));
+            }
+        }
         let vals: Result<Vec<Value>, String> = arr.iter()
             .map(|x| json_to_aivm_value_typed(x, elem_ty, structs))
             .collect();
         return Ok(Value::Array(vals?));
+    }
+    // A scalar (number/bool/string/null) can never represent a struct --
+    // accepting one here would silently corrupt the value: e.g. setCorner
+    // called with a bare 10 instead of {x, y} would store corner as
+    // Value::U64(10), and the very next read of corner.x/.y would crash the
+    // VM with TypeMismatch { expected: Array, got: u64 } instead of this
+    // request failing with an honest, actionable error.
+    if let Some(Type::Named(sname)) = ty {
+        if let Some(sdef) = structs.get(sname.as_str()) {
+            return Err(format!(
+                "struct '{}' expects an object ({{{}}}) or a {}-element array, got a scalar value",
+                sname,
+                sdef.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", "),
+                sdef.fields.len(),
+            ));
+        }
     }
     json_to_aivm_value(v)
 }
@@ -404,6 +490,8 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
             return_value: None,
             events: vec![],
             state_discarded: true,
+            final_state: std::collections::HashMap::new(),
+            canonical: None,
             note: note.clone(),
             errors,
         }))
@@ -515,6 +603,20 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
                 "topic_hash": format!("0x{}", hex::encode(e.topic_hash)),
                 "data": format!("0x{}", hex::encode(&e.data)),
             })).collect();
+            let final_state: std::collections::HashMap<String, serde_json::Value> = overlay
+                .committed_snapshot()
+                .iter()
+                .map(|(slot, val)| (slot.to_string(), aivm_value_to_json(val)))
+                .collect();
+            let canonical = CanonicalEstimate {
+                gas_used: result.receipt.gas_used.to_string(),
+                pq_gas_used: result.receipt.pq_gas_used.to_string(),
+                gas_limit_suggested: suggested_gas_limit(result.receipt.gas_used).to_string(),
+                pq_gas_limit_suggested: suggested_gas_limit(result.receipt.pq_gas_used).to_string(),
+                simulation_block: None,
+                execution_status: status.to_string(),
+                state_persisted: false,
+            };
             (StatusCode::OK, RespJson(EstimateGasResponse {
                 success: true,
                 function: Some(req.function.clone()),
@@ -527,6 +629,8 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
                 return_value: result.return_value.as_ref().map(aivm_value_to_json),
                 events,
                 state_discarded: true,
+                final_state,
+                canonical: Some(canonical),
                 note,
                 errors: vec![],
             }))
@@ -788,6 +892,47 @@ mod estimate_gas_handler_tests {
         assert!(first.success && second.success);
         assert_eq!(first.gas_used, second.gas_used, "gas measurement is not stable across identical runs");
         assert_eq!(first.pq_gas_used, second.pq_gas_used);
+    }
+
+    #[tokio::test]
+    async fn canonical_preview_mirrors_the_flat_fields_and_never_persists() {
+        // Backlog item 9 regression guard: the additive `canonical` block
+        // must report the exact same numbers as the existing flat fields
+        // (it's a reshape of the same dry run, not a second execution),
+        // suggest a >= measured headroom on gas (never less than what was
+        // actually used), and always claim state_persisted:false since a
+        // dry run never writes anywhere durable regardless of receipt
+        // status. Also confirms canonical is present on success responses
+        // and absent on request-level rejections (item 10's "don't
+        // fabricate" spirit extended to the preview: no canonical block
+        // when there's no real execution to compute it from).
+        let state = test_state();
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(req(COUNTER_SRC, "increment")),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.success);
+        let canonical = body.canonical.as_ref().expect("canonical block missing on success");
+        assert_eq!(canonical.gas_used, body.gas_used.unwrap().to_string());
+        assert_eq!(canonical.pq_gas_used, body.pq_gas_used.unwrap().to_string());
+        assert_eq!(canonical.execution_status, body.status.clone().unwrap());
+        assert!(!canonical.state_persisted);
+        assert!(canonical.simulation_block.is_none(), "no real chain to attach a block to yet -- must not fabricate one");
+        let suggested: u64 = canonical.gas_limit_suggested.parse().unwrap();
+        assert!(suggested >= body.gas_used.unwrap(), "suggested limit must never undercut measured usage");
+
+        // Rejection path (oversized source) never executes anything, so
+        // there is nothing real to compute a canonical preview from.
+        let state2 = test_state();
+        let huge_source = "a".repeat(MAX_SOURCE_BYTES + 1);
+        let (_, RespJson(rejected)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state2),
+            Json(req(&huge_source, "increment")),
+        ).await;
+        assert!(rejected.canonical.is_none(), "no canonical preview for a request-level rejection");
     }
 
     #[tokio::test]
