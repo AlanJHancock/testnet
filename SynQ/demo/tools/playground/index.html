@@ -258,6 +258,12 @@ const EXAMPLE = `contract Counter {
 }
 `;
 
+// Tracks whichever contract is currently "loaded" (the default Counter
+// starter, or whatever was last picked from Open Example SynQ Contracts) so
+// Reset example restores THAT pristine source, instead of always jumping
+// back to the hardcoded Counter starter regardless of what is open.
+let currentExample = { source: EXAMPLE, label: "Counter.synq" };
+
 const srcEl = document.getElementById('src');
 const hlEl = document.getElementById('hl');
 const evidenceEl = document.getElementById('evidence');
@@ -560,14 +566,14 @@ srcEl.addEventListener('input', renderHighlight);
 srcEl.addEventListener('scroll', () => { hlEl.scrollTop = srcEl.scrollTop; hlEl.scrollLeft = srcEl.scrollLeft; });
 
 document.getElementById('resetBtn').addEventListener('click', () => {
-  srcEl.value = EXAMPLE;
+  srcEl.value = currentExample.source;
   renderHighlight();
   evidenceTabs = null;
   evidenceActiveTab = 'manifest';
   evidenceEl.innerHTML = '<span class="placeholder">No build yet. Compile to produce real ABI, manifest, bytecode, and hashes.</span>';
   lastCompiledName = null;
   var fileLabelEl = document.getElementById('fileLabel');
-  if (fileLabelEl) fileLabelEl.textContent = 'Counter.synq';
+  if (fileLabelEl) fileLabelEl.textContent = currentExample.label;
 });
 
 function kv(label, value){
@@ -806,6 +812,7 @@ async function loadExample(ex) {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const source = await res.text();
     srcEl.value = source;
+    currentExample = { source, label: ex.file };
     renderHighlight();
     evidenceTabs = null;
     evidenceActiveTab = 'manifest';
