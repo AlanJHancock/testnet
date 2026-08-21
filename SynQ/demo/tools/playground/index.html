@@ -697,6 +697,7 @@ async function compile(){
 
     lastCompiledName = data.contract_name || null;
     if (typeof refreshOpenForgeLink === 'function') refreshOpenForgeLink();
+    if (typeof saveCurrentContractToServer === 'function') saveCurrentContractToServer();
     if (lastCompiledName) {
       // Keep the pane header in sync with what actually compiled - it used
       // to stay hardcoded to "Counter.synq" forever, which was misleading
@@ -804,6 +805,38 @@ function getForgeBase() {
   }
 }
 
+// Persists the current textarea contents to the shared wallet-scoped
+// contract store, so that by the time the user clicks "Open in Forge IDE"
+// the file is already committed server-side and Forges /synq/load-contract
+// call on mount finds the real edited source instead of racing a fresh
+// save that has not landed yet.
+//
+// Root cause this fixes: the click handler used to be the ONLY place that
+// saved, firing the POST in parallel with the native <a target=_blank>
+// navigation. Load-tested empirically: /synq/load-contract fired
+// immediately after an unawaited /synq/save-contract returns the stale/
+// default template (is_user_save:false) in the large majority of cases -
+// the save almost never wins that race. Saving proactively here (right
+// after a successful compile, and again on debounced typing) means the
+// click-time save is just a final best-effort top-up, not the only copy,
+// so the deep link reliably lands on the actual edited contract.
+function saveCurrentContractToServer() {
+  try {
+    const src = srcEl.value;
+    const name = lastCompiledName || extractContractName(src) || "Counter";
+    const ownerId = getPlaygroundOwnerId();
+    return fetch("/synq/save-contract", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      keepalive: true,
+      body: JSON.stringify({ wallet: ownerId, name, source: src })
+    }).catch((err) => console.warn("[FORGE-HANDOFF] proactive save failed", err));
+  } catch (err) {
+    console.warn("[FORGE-HANDOFF] proactive save failed", err);
+    return Promise.resolve();
+  }
+}
+
 // Builds the exact deep-link URL the "Open in Forge IDE" button should
 // point at right now, given whatever's currently compiled/typed. Used both
 // to keep the anchor's href attribute live (so hovering the button - or a
@@ -851,19 +884,15 @@ document.getElementById('openForgeLink').addEventListener('click', () => {
   // the freshest URL even if something changed since the last refresh
   // call below (e.g. edited the source without recompiling).
   refreshOpenForgeLink();
-  // Fire-and-forget save alongside the native navigation the browser is
-  // about to perform (this handler does NOT call preventDefault - the
-  // click proceeds to whatever href now points at, exactly like any other
-  // link, so it can't be broken by popup blockers or JS timing issues).
-  const src = srcEl.value;
-  const name = lastCompiledName || extractContractName(src) || 'Counter';
-  const ownerId = getPlaygroundOwnerId();
-  fetch('/synq/save-contract', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    keepalive: true,
-    body: JSON.stringify({ wallet: ownerId, name, source: src })
-  }).catch((err) => console.warn('[FORGE-HANDOFF] could not save contract before opening Forge', err));
+  // Best-effort top-up save. This is deliberately NOT the only save
+  // anymore (see saveCurrentContractToServer) - it used to race the native
+  // navigation and lose most of the time. Proactive saves on compile and
+  // on debounced typing now do the real work; this just covers the case
+  // where the user never compiled and never paused typing before clicking.
+  // Does NOT preventDefault - the click proceeds to whatever href now
+  // points at, exactly like any other link, so it cant be broken by
+  // popup blockers or JS timing issues.
+  saveCurrentContractToServer();
 });
 
 // Recompute the href whenever anything that feeds into it changes: typing
@@ -871,7 +900,10 @@ document.getElementById('openForgeLink').addEventListener('click', () => {
 // lastCompiledName), or the forgeBase override being set/cleared.
 srcEl.addEventListener('input', () => {
   clearTimeout(window.__forgeLinkRefreshTimer);
-  window.__forgeLinkRefreshTimer = setTimeout(refreshOpenForgeLink, 300);
+  window.__forgeLinkRefreshTimer = setTimeout(() => {
+    refreshOpenForgeLink();
+    saveCurrentContractToServer();
+  }, 300);
 });
 
 srcEl.value = EXAMPLE;
