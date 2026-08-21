@@ -60,6 +60,17 @@ impl StateOverlay {
         self.staged.clear();
     }
 
+    /// Snapshot of all committed state after execution -- used by callers
+    /// (e.g. the estimate-gas dry-run handler) that want to hand the
+    /// resulting state back to the client so a *sequence* of dry-runs in
+    /// the same UI session (e.g. init() then setCorner()) can chain state
+    /// forward without a real deployment. This never touches disk or any
+    /// session store -- it is just a read of the in-memory map that is
+    /// about to be dropped when this StateOverlay goes out of scope.
+    pub fn committed_snapshot(&self) -> &std::collections::HashMap<u16, Value> {
+        &self.committed
+    }
+
     /// Compute state root (SHA-256 of sorted key-value pairs)
     pub fn state_root(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};

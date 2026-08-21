@@ -1,0 +1,79 @@
+pragma synq ^0.9;
+
+// TokenVault -- primary entry point.  Mints/burns SimpleToken via extern_call.
+// IMPORTANT: TokenVault tracks totalIn/totalOut (mint/burn flow) but cannot
+// see direct SimpleToken transfers. Calling transfer() on SimpleToken moves
+// tokens without TokenVault knowing. withdraw() pre-checks the actual balance
+// via extern_call balanceOf() to catch this and give a clear error.
+// Deploy this first, then deploy SimpleToken into the same workspace.
+contract TokenVault {
+
+  vaultOwner: UInt256;
+  active:     UInt256;
+  totalIn:    UInt256;
+  totalOut:   UInt256;
+
+  // Initialise the vault -- caller becomes vault owner.
+  function init() -> bool as caller {
+    if (active == 1) { return false; }
+    vaultOwner = caller;
+    active     = 1;
+    return true;
+  }
+
+  // Deposit: mint `amount` tokens into SimpleToken on behalf of the vault.
+  function deposit(amount: UInt256) -> UInt256 as caller {
+    require(active == 1, "TokenVault.deposit: vault not active");
+    require(amount > 0, "TokenVault.deposit: amount must be > 0");
+    extern_call("SimpleToken", "mint", caller, amount);
+    totalIn = totalIn + amount;
+    return totalIn;
+  }
+
+  // Withdraw: burn `amount` tokens from SimpleToken.
+  function withdraw(amount: UInt256) as caller requires cap::Withdrawer {
+    require(active == 1, "TokenVault.withdraw: vault not active");
+    require(caller == vaultOwner, "TokenVault.withdraw: caller is not vault owner");
+    require(amount > 0, "TokenVault.withdraw: amount must be > 0");
+    require(totalIn >= totalOut + amount, "TokenVault.withdraw: amount exceeds available balance");
+    // Pre-check: verify the caller actually holds enough SimpleToken balance.
+    // Direct transfers on SimpleToken can drain the balance without TokenVault knowing.
+    extern_call("SimpleToken", "checkBalance", caller, amount);
+    extern_call("SimpleToken", "burn", caller, amount);
+    totalOut = totalOut + amount;
+    return totalOut;
+  }
+
+  // Returns vault-tracked net inflow (totalIn - totalOut). Returns 0 if totalOut > totalIn.
+  function netFlow() {
+    require(totalIn >= totalOut, "TokenVault.netFlow: totalOut exceeds totalIn");
+    return totalIn - totalOut;
+  }
+
+  function getTotalIn()  { return totalIn; }
+  function getTotalOut() { return totalOut; }
+
+  // balance() -- vault-side net (totalIn - totalOut).
+  // How much is available to withdraw from the vault (totalIn - totalOut).
+// This is NOT the same as your SimpleToken balance — it is the vault's net flow.
+// Your actual token balance is shown by SimpleToken.balanceOf(), or call tokenBalance() below.
+  function available() -> u256 {
+    require(totalIn >= totalOut, "totalOut exceeds totalIn");
+    return totalIn - totalOut;
+  }
+
+  // Returns your ACTUAL SimpleToken balance via extern_call.
+  // This is the real token count — different from available() which tracks vault flow.
+  function tokenBalance() -> u256 as caller {
+    extern_call("SimpleToken", "balanceOf", caller);
+  }
+
+  // assertSync() -- cross-contract invariant check.
+  // Calls SimpleToken.assertBalance(totalIn - totalOut).
+  // Reverts if the two contracts have drifted out of sync.
+  function assertSync() -> bool as caller {
+    require(totalIn >= totalOut, "assertSync: totalOut exceeds totalIn");
+    extern_call("SimpleToken", "assertBalance", totalIn - totalOut);
+    return true;
+  }
+}

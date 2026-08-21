@@ -1,0 +1,64 @@
+{
+  "examples": [
+    {
+      "id": "Counter",
+      "title": "Counter",
+      "description": "Minimal state-changing contract -- increment/decrement a u256 counter. Good first contract to compile and run.",
+      "file": "Counter.synq"
+    },
+    {
+      "id": "LoopDemo",
+      "title": "Loop Demo",
+      "description": "While-loop control flow: accumulator/iteration patterns compiled through the SSA IR backend.",
+      "file": "LoopDemo.synq"
+    },
+    {
+      "id": "StructValue",
+      "title": "Struct Value",
+      "description": "Struct literals, nested field access/assignment, and functions that take/return structs (Point, Rect).",
+      "file": "StructValue.synq"
+    },
+    {
+      "id": "V3Types",
+      "title": "V3 Types",
+      "description": "V3 type aliases, enums, attributes (@public/@authority), and Bech32 address builtins.",
+      "file": "V3Types.synq"
+    },
+    {
+      "id": "AssetDemo",
+      "title": "Asset Demo",
+      "description": "Built-in asset lifecycle: asset_create / asset_transfer / asset_burn / balance and owner checks.",
+      "file": "AssetDemo.synq"
+    },
+    {
+      "id": "DomainRegistry",
+      "title": "Domain Registry",
+      "description": "3-level nested map<K, map<K, map<K,V>>> demo -- domain -> record_type -> record_name -> value.",
+      "file": "DomainRegistry.synq"
+    },
+    {
+      "id": "SimpleToken",
+      "title": "Simple Token",
+      "description": "ERC-20-style token contract. Deploy alongside TokenVault to see the controller/asset pattern.",
+      "file": "SimpleToken.synq"
+    },
+    {
+      "id": "TokenVault",
+      "title": "Token Vault",
+      "description": "Controller contract that mints/burns SimpleToken via extern_call -- shows cross-contract calls.",
+      "file": "TokenVault.synq"
+    },
+    {
+      "id": "ComprehensiveToken",
+      "title": "Comprehensive Token",
+      "description": "Full ERC-20-style surface plus bool/str/map<u256,bool>/map<u256,str> and str_concat/str_len/str_eq builtins. EIP-712 `as caller` auth on every mutator.",
+      "file": "ComprehensiveToken.synq"
+    },
+    {
+      "id": "PQCDemo",
+      "title": "PQC Demo",
+      "description": "Post-quantum crypto: ML-DSA-65 signature verification and ML-KEM-768 decapsulation via the AEG1 shim opcodes.",
+      "file": "PQCDemo.synq"
+    }
+  ]
+}

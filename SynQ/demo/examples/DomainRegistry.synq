@@ -1,0 +1,46 @@
+// 3-level nested map demo: domain => record_type => record_name => value
+pragma synq ^0.9;
+contract DomainRegistry {
+    state {
+        // Three levels of nested mapping — like a DNS registry:
+        // registry[domain][recordType][recordName] = value
+        registry: map<address, map<address, map<address, u256>>>;
+        initialised: bool;
+    }
+
+    @public
+    fn init() -> bool {
+        if (initialised) { return true; }
+        initialised = true;
+        return true;
+    }
+
+    // Write to the 3rd level: set a record value
+    @public
+    fn set_record(domain: address, record_type: address, record_name: address, value: u256) -> bool {
+        registry[domain][record_type][record_name] = value;
+        return true;
+    }
+
+    // Read from the 3rd level: get a record value
+    @public
+    fn get_record(domain: address, record_type: address, record_name: address) -> u256 {
+        return registry[domain][record_type][record_name];
+    }
+
+    // Zero out a record (logical delete)
+    @public
+    fn delete_record(domain: address, record_type: address, record_name: address) -> bool {
+        registry[domain][record_type][record_name] = 0;
+        return true;
+    }
+
+    // Update an existing record in place
+    @public
+    fn update_record(domain: address, record_type: address, record_name: address, new_value: u256) -> bool {
+        let current = registry[domain][record_type][record_name];
+        require(current != 0, "record does not exist");
+        registry[domain][record_type][record_name] = new_value;
+        return true;
+    }
+}

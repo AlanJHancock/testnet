@@ -130,6 +130,34 @@
   .btn.primary:disabled{opacity:0.55;cursor:default}
   .actions .note{margin-left:auto;color:var(--muted-2);font-size:12.5px}
 
+  .examples-overlay{
+    display:none;position:fixed;inset:0;background:rgba(1,6,4,0.72);
+    align-items:center;justify-content:center;z-index:50;padding:24px;
+  }
+  .examples-overlay.open{display:flex}
+  .examples-modal{
+    width:min(560px, 100%);max-height:min(640px, 85vh);overflow:auto;
+    background:var(--bg-deep);border:1px solid var(--line);border-radius:var(--radius);
+    padding:20px;
+  }
+  .examples-modal h2{margin:0 0 4px;font-size:16px;color:#e7f0ea}
+  .examples-modal .examples-sub{margin:0 0 16px;color:var(--muted-2);font-size:12.5px}
+  .examples-list{display:flex;flex-direction:column;gap:8px}
+  .examples-item{
+    display:block;width:100%;text-align:left;border:1px solid var(--line);
+    border-radius:6px;padding:10px 12px;background:transparent;color:#e7f0ea;
+    cursor:pointer;font-family:var(--font-sans);
+  }
+  .examples-item:hover{border-color:var(--green-bright);background:rgba(113,255,84,0.06)}
+  .examples-item .ex-title{font-weight:600;font-size:13.5px;color:var(--green-bright)}
+  .examples-item .ex-desc{margin-top:3px;font-size:11.5px;color:var(--muted);line-height:1.4}
+  .examples-footer{display:flex;justify-content:flex-end;margin-top:16px}
+  .examples-close{
+    border:1px solid var(--line);border-radius:6px;padding:8px 14px;background:transparent;
+    color:#e7f0ea;cursor:pointer;font-size:12.5px;
+  }
+  .examples-close:hover{border-color:var(--green-bright)}
+
   footer{max-width:1180px;margin:40px auto 0;padding:20px 28px 40px;color:var(--muted-2);font-size:12.5px;border-top:1px solid var(--line);}
   footer .chain-tag{display:inline-flex;align-items:center;gap:6px;color:var(--green-bright);margin-top:8px}
 </style>
@@ -186,7 +214,7 @@
   </div>
   <div class="actions">
     <button class="btn primary" id="compileBtn">&lt;/&gt; Compile</button>
-    <a class="btn" id="openIdeLink" href="/demo/" target="_blank">Open in SynQ IDE &rarr;</a>
+    <button class="btn" id="openExamplesBtn" type="button">Open Example SynQ Contracts &rarr;</button>
     <a class="btn" id="openForgeLink" href="/forge/?staff=L78Cp95c%26" target="_blank" rel="noopener">Open in Forge IDE &rarr;</a>
     <span class="note" id="statusNote">Artifact generation only &middot; no transaction submitted</span>
   </div>
@@ -196,6 +224,19 @@
   Compile, inspect, and prepare SynQ contracts for Synergy Testnet v3 with explicit launch boundaries.
   <div class="chain-tag">&#9737; Chain 1266 &middot; Testnet v3 configuration</div>
 </footer>
+
+<div class="examples-overlay" id="examplesOverlay">
+  <div class="examples-modal">
+    <h2>Open Example SynQ Contracts</h2>
+    <p class="examples-sub">Loaded fresh from the server (/demo/examples/) &mdash; replaces the current editor contents.</p>
+    <div class="examples-list" id="examplesList">
+      <span class="placeholder">Loading examples&hellip;</span>
+    </div>
+    <div class="examples-footer">
+      <button class="examples-close" id="examplesCloseBtn" type="button">Close</button>
+    </div>
+  </div>
+</div>
 
 <script>
 const EXAMPLE = `contract Counter {
@@ -728,16 +769,77 @@ function extractContractName(src){
   return m ? m[1] : null;
 }
 
-document.getElementById('openIdeLink').addEventListener('click', (e) => {
-  e.preventDefault();
-  const src = srcEl.value;
-  const name = lastCompiledName || extractContractName(src) || 'Playground';
+// "Open Example SynQ Contracts" -- fetches a curated list of working
+// example .synq files from the server (/demo/examples/index.json) and lets
+// the user load one straight into the editor. Replaces the old "Open in
+// SynQ IDE" link, which just pointed back into this same demo/playground
+// (and had gone 404 -- /demo/ alone no longer resolves to anything useful).
+const examplesOverlay = document.getElementById('examplesOverlay');
+const examplesList = document.getElementById('examplesList');
+let examplesManifestCache = null;
+
+async function loadExamplesManifest() {
+  if (examplesManifestCache) return examplesManifestCache;
+  const res = await fetch('/demo/examples/index.json');
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const data = await res.json();
+  examplesManifestCache = data.examples || [];
+  return examplesManifestCache;
+}
+
+function renderExamplesList(examples) {
+  examplesList.innerHTML = examples.map((ex, i) =>
+    `<button class="examples-item" type="button" data-index="${i}">
+       <div class="ex-title">${ex.title}</div>
+       <div class="ex-desc">${ex.description}</div>
+     </button>`
+  ).join('');
+  examplesList.querySelectorAll('.examples-item').forEach((btn) => {
+    btn.addEventListener('click', () => loadExample(examples[Number(btn.dataset.index)]));
+  });
+}
+
+async function loadExample(ex) {
+  examplesList.innerHTML = '<span class="placeholder">Loading ' + ex.title + '&hellip;</span>';
   try {
-    localStorage.setItem('synq_ide_handoff', JSON.stringify({ src, name, ts: Date.now() }));
+    const res = await fetch('/demo/examples/' + ex.file);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const source = await res.text();
+    srcEl.value = source;
+    renderHighlight();
+    evidenceTabs = null;
+    evidenceActiveTab = 'manifest';
+    evidenceEl.innerHTML = '<span class="placeholder">No build yet. Compile to produce real ABI, manifest, bytecode, and hashes.</span>';
+    lastCompiledName = ex.id;
+    const fileLabelEl = document.getElementById('fileLabel');
+    if (fileLabelEl) fileLabelEl.textContent = ex.file;
+    if (typeof refreshOpenForgeLink === 'function') refreshOpenForgeLink();
+    examplesOverlay.classList.remove('open');
   } catch (err) {
-    console.warn('[HANDOFF] could not stage contract for IDE handoff', err);
+    examplesList.innerHTML = '<span class="placeholder">Could not load ' + ex.title + ': ' + err.message + '</span>';
   }
-  window.open('/demo/', '_blank');
+}
+
+document.getElementById('openExamplesBtn').addEventListener('click', async () => {
+  examplesOverlay.classList.add('open');
+  if (examplesManifestCache) {
+    renderExamplesList(examplesManifestCache);
+    return;
+  }
+  examplesList.innerHTML = '<span class="placeholder">Loading examples&hellip;</span>';
+  try {
+    const examples = await loadExamplesManifest();
+    renderExamplesList(examples);
+  } catch (err) {
+    examplesList.innerHTML = '<span class="placeholder">Could not load example list: ' + err.message + '</span>';
+  }
+});
+
+document.getElementById('examplesCloseBtn').addEventListener('click', () => {
+  examplesOverlay.classList.remove('open');
+});
+examplesOverlay.addEventListener('click', (e) => {
+  if (e.target === examplesOverlay) examplesOverlay.classList.remove('open');
 });
 
 // Deep-links straight into ForgeIDE using the same URL convention as the

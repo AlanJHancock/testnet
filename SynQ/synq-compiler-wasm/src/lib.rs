@@ -40,7 +40,13 @@ pub use vm_inner::QuantumVM;
 // This wraps the compiler crate's CompileResult, adding IDE-specific metadata.
 
 /// Helper: convert AST Type to the string the IDE expects.
-fn type_name(ty: &Type) -> String {
+///
+/// `struct_names` is the set of struct names declared in the source unit --
+/// `Type::Named(name)` covers BOTH struct and enum references (see ast.rs),
+/// so this only formats as "struct<Name>" when `name` is a known struct;
+/// enum/unknown named types fall through to the pre-existing "u256"
+/// scalar-encoding behavior to avoid changing enum ABI shape.
+fn type_name(ty: &Type, struct_names: &std::collections::HashSet<String>) -> String {
     match ty {
         Type::Bool    => "bool".to_string(),
         Type::Str     => "str".to_string(),
@@ -52,6 +58,7 @@ fn type_name(ty: &Type) -> String {
         Type::UInt128 => "u128".to_string(),
         Type::UInt256 => "u256".to_string(),
         Type::Bytes   => "bytes".to_string(),
+        Type::Named(name) if struct_names.contains(name) => format!("struct<{}>", name),
         _             => "u256".to_string(),
     }
 }
@@ -209,6 +216,12 @@ pub fn compile_synq(source: &str) -> String {
             }
 
             // Extract function metadata from AST for IDE
+            let struct_names: std::collections::HashSet<String> = ast.iter()
+                .filter_map(|u| match u {
+                    SourceUnit::Struct(sd) => Some(sd.name.clone()),
+                    _ => None,
+                })
+                .collect();
             let mut functions: Vec<WasmFunctionInfo> = Vec::new();
             let mut state_var_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
             for unit in &ast {
@@ -217,18 +230,18 @@ pub fn compile_synq(source: &str) -> String {
                         if let ContractPart::Function(f) = part {
                             let params: Vec<WasmParamInfo> = f.params.iter().map(|p| WasmParamInfo {
                                 name: p.name.clone(),
-                                ty: type_name(&p.ty),
+                                ty: type_name(&p.ty, &struct_names),
                             }).collect();
                             let argc = params.len();
                             functions.push(WasmFunctionInfo {
                                 name: f.name.clone(),
                                 params,
-                                return_type: f.returns.as_ref().map(|t| type_name(t)),
+                                return_type: f.returns.as_ref().map(|t| type_name(t, &struct_names)),
                                 argc,
                             });
                         }
                         if let ContractPart::StateVariable(sv) = part {
-                            state_var_types.insert(sv.name.clone(), type_name(&sv.ty));
+                            state_var_types.insert(sv.name.clone(), type_name(&sv.ty, &struct_names));
                         }
                     }
                 }
@@ -327,8 +340,14 @@ pub fn compile_synq_ide(source: &str) -> JsValue {
             let mut warnings = cr.warnings.clone();
             add_pqc_warnings(&ast, &mut warnings);
             for w in &warnings {
+                // IR pipeline stats ("[IR] fn foo: N blocks, ...") are
+                // per-function diagnostic telemetry, not something the
+                // developer needs to act on - keep them out of the
+                // Problems panel by tagging them "info" instead of
+                // "warning". Real compiler warnings keep severity "warning".
+                let severity = if w.starts_with("[IR] fn ") { "info" } else { "warning" };
                 diagnostics.push(serde_json::json!({
-                    "severity": "warning",
+                    "severity": severity,
                     "message": w,
                     "line": null,
                     "column": null,
@@ -356,6 +375,16 @@ pub fn compile_synq_ide(source: &str) -> JsValue {
                 }
             }
 
+            // Collect declared struct names up-front so type_name() can tell
+            // a struct-typed Named("Point") apart from an enum-typed
+            // Named("Color") -- both use the same AST variant.
+            let struct_names: std::collections::HashSet<String> = ast.iter()
+                .filter_map(|u| match u {
+                    SourceUnit::Struct(sd) => Some(sd.name.clone()),
+                    _ => None,
+                })
+                .collect();
+
             let mut methods: Vec<serde_json::Value> = Vec::new();
             let mut state_schema: Vec<serde_json::Value> = Vec::new();
 
@@ -365,12 +394,12 @@ pub fn compile_synq_ide(source: &str) -> JsValue {
                         match part {
                             ContractPart::Function(f) if f.is_public => {
                                 let param_types: Vec<String> =
-                                    f.params.iter().map(|p| type_name(&p.ty)).collect();
+                                    f.params.iter().map(|p| type_name(&p.ty, &struct_names)).collect();
                                 let params: Vec<serde_json::Value> = f.params.iter().map(|p| {
-                                    serde_json::json!({ "name": p.name, "type": type_name(&p.ty) })
+                                    serde_json::json!({ "name": p.name, "type": type_name(&p.ty, &struct_names) })
                                 }).collect();
                                 let returns: Vec<String> = match &f.returns {
-                                    Some(t) => vec![type_name(t)],
+                                    Some(t) => vec![type_name(t, &struct_names)],
                                     None => vec![],
                                 };
                                 let mut writes = !f.modifies.is_empty();
@@ -390,13 +419,23 @@ pub fn compile_synq_ide(source: &str) -> JsValue {
                             ContractPart::StateVariable(sv) => {
                                 state_schema.push(serde_json::json!({
                                     "name": sv.name,
-                                    "type": type_name(&sv.ty),
+                                    "type": type_name(&sv.ty, &struct_names),
                                     "visibility": "internal",
                                 }));
                             }
                             _ => {}
                         }
                     }
+                }
+            }
+
+            let mut struct_defs: Vec<serde_json::Value> = Vec::new();
+            for unit in &ast {
+                if let SourceUnit::Struct(sd) = unit {
+                    let fields: Vec<serde_json::Value> = sd.fields.iter().map(|p| {
+                        serde_json::json!({ "name": p.name, "type": type_name(&p.ty, &struct_names) })
+                    }).collect();
+                    struct_defs.push(serde_json::json!({ "name": sd.name, "fields": fields }));
                 }
             }
 
@@ -408,6 +447,7 @@ pub fn compile_synq_ide(source: &str) -> JsValue {
                 "errors": [],
                 "security_requirements": {},
                 "state_schema": state_schema,
+                "structs": struct_defs,
             });
 
             let bytecode_hex = hex::encode(&cr.bytecode);
