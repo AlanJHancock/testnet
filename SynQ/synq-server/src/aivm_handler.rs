@@ -15,6 +15,7 @@ use aivm::manifest::Manifest;
 use aivm::instructions::Instruction;
 
 use crate::{AppState, check_rate_limit, RespJson, MAX_SOURCE_BYTES};
+use synq_vm::bech32::{bech32m_decode, SynqAddress, HRP_TESTNET, HRP_MAINNET};
 
 /// Request for AIVM compilation
 #[derive(Debug, Deserialize)]
@@ -277,7 +278,24 @@ pub struct EstimateGasResponse {
 }
 
 fn parse_caller_address(s: &str) -> Result<[u8; 41], String> {
-    let hex_str = s.strip_prefix("0x").unwrap_or(s);
+    let trimmed = s.trim();
+    // Bech32m SynQ address (`tsynq1...` testnet / `synq1...` mainnet) -- the
+    // same human-facing format used everywhere else in the toolchain (wallet
+    // display, /session/new caller_address, EIP-712 domain, etc). Accepting
+    // it here too means callers can paste a real address instead of having
+    // to hand-derive raw hex just for a dry-run.
+    if trimmed.starts_with("tsynq1") || trimmed.starts_with("synq1") {
+        let (hrp, data) = bech32m_decode(trimmed)
+            .map_err(|e| format!("invalid bech32 caller address: {}", e))?;
+        if hrp != HRP_TESTNET && hrp != HRP_MAINNET {
+            return Err(format!("unexpected caller address HRP {} (expected {} or {})", hrp, HRP_TESTNET, HRP_MAINNET));
+        }
+        let addr = SynqAddress::from_bytes(&data)
+            .map_err(|e| format!("invalid bech32 caller address: {}", e))?;
+        return Ok(addr.to_bytes());
+    }
+    // Fall back to raw hex (0x-prefixed or bare), the original format.
+    let hex_str = trimmed.strip_prefix("0x").unwrap_or(trimmed);
     let bytes = hex::decode(hex_str).map_err(|e| format!("invalid caller hex: {}", e))?;
     if bytes.len() != 41 {
         return Err(format!("caller address must be 41 bytes, got {}", bytes.len()));
