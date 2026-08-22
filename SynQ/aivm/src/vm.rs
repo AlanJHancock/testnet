@@ -224,6 +224,13 @@ impl Avm {
                     }
                     stack.push(Value::Bytes(data.clone()));
                 }
+                Instruction::PushString(s) => {
+                    gas.charge(gas_cost::PUSH_BYTES)?;
+                    if stack.len() >= self.stack_limit {
+                        return Err(AivmError::StackOverflow);
+                    }
+                    stack.push(Value::String(s.clone()));
+                }
                 Instruction::LoadState(key) => {
                     gas.charge(gas_cost::LOAD_STATE)?;
                     let val = state.read(*key).unwrap_or(Value::U64(0));

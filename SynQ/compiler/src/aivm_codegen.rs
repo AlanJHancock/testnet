@@ -569,7 +569,14 @@ impl<'a> CodegenContext<'a> {
                         self.emit(Instruction::PushU64(if *b { 1 } else { 0 }));
                     }
                     Literal::String(s) => {
-                        self.emit(Instruction::PushBytes(s.as_bytes().to_vec()));
+                        // BUG FIX (2026-08-22): string literals used to compile to
+                        // PushBytes, producing a Value::Bytes at runtime -- which
+                        // JSON-serializes as opaque "0x..." hex (see
+                        // aivm_value_to_json) instead of readable text. A real
+                        // Value::String already existed and already serializes
+                        // correctly; it just had no producing opcode. PushString
+                        // closes that gap.
+                        self.emit(Instruction::PushString(s.clone()));
                     }
                     Literal::Hex(data) => {
                         self.emit(Instruction::PushBytes(data.clone()));

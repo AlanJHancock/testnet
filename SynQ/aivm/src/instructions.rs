@@ -40,6 +40,12 @@ pub enum Opcode {
     ArrayGet = 0x91,
     /// Pop [value, array] (value on top), set array[index]=value, push updated array back (struct field assignment)
     ArraySet = 0x92,
+    /// Push a UTF-8 string literal, producing a real Value::String at
+    /// runtime (was previously routed through PushBytes, which produces
+    /// Value::Bytes -- JSON-serialized as opaque hex instead of text, so
+    /// any string literal return value showed up as "0x..." garbage
+    /// instead of the readable string).
+    PushString = 0x93,
 }
 
 impl Opcode {
@@ -74,6 +80,7 @@ impl Opcode {
             0x90 => Some(Opcode::Pack),
             0x91 => Some(Opcode::ArrayGet),
             0x92 => Some(Opcode::ArraySet),
+            0x93 => Some(Opcode::PushString),
             _ => None,
         }
     }
@@ -99,6 +106,7 @@ impl Opcode {
             Opcode::Pack => 1,
             Opcode::ArrayGet => 1,
             Opcode::ArraySet => 1,
+            Opcode::PushString => 4, // length prefix, same framing as PushBytes
         }
     }
 }
@@ -137,6 +145,8 @@ pub enum Instruction {
     ArrayGet(u8),
     /// Pop [value, array] (value on top), set array[index]=value, push updated array back
     ArraySet(u8),
+    /// Push a UTF-8 string literal as a real Value::String (see Opcode::PushString doc)
+    PushString(String),
 }
 
 impl Instruction {
@@ -217,6 +227,12 @@ impl Instruction {
             Instruction::ArraySet(index) => {
                 buf.push(Opcode::ArraySet as u8);
                 buf.push(*index);
+            }
+            Instruction::PushString(s) => {
+                buf.push(Opcode::PushString as u8);
+                let bytes = s.as_bytes();
+                buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                buf.extend_from_slice(bytes);
             }
         }
         buf
@@ -336,6 +352,26 @@ impl Instruction {
                 Opcode::ArraySet => {
                     let index = read_u8(bytes, &mut offset)?;
                     instructions.push(Instruction::ArraySet(index));
+                }
+                Opcode::PushString => {
+                    if offset + 4 > bytes.len() {
+                        return Err(AivmError::OperandOutOfBounds { offset, needed: 4, available: bytes.len() - offset });
+                    }
+                    let len = u32::from_be_bytes([
+                        bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    ]) as usize;
+                    offset += 4;
+                    if offset + len > bytes.len() {
+                        return Err(AivmError::OperandOutOfBounds { offset, needed: len, available: bytes.len() - offset });
+                    }
+                    let s = String::from_utf8(bytes[offset..offset+len].to_vec()).map_err(|_| {
+                        AivmError::MalformedSection {
+                            section_type: crate::bytecode::section_type::INSTRUCTIONS,
+                            reason: format!("PushString operand at offset {} is not valid UTF-8", offset),
+                        }
+                    })?;
+                    instructions.push(Instruction::PushString(s));
+                    offset += len;
                 }
             }
         }
