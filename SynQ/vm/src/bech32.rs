@@ -334,6 +334,205 @@ pub fn is_valid_address(s: &str) -> bool {
     decode_address(s).is_ok()
 }
 
+// ── Network-facing SNTS-01 addresses (synw/syna/etc.) ─────────────────────────
+//
+// The community-facing Synergy Address Engine (synergy-wts / L1 src/address.rs)
+// uses a DIFFERENT, shorter Bech32m format than this VM's own tsynq/synq
+// scheme above: SHA3-256(pubkey) truncated to a fixed number of leading bits
+// (chosen so the encoded string is exactly 41 characters including the HRP),
+// with no embedded version/network/algo/checksum-payload fields -- the
+// Bech32m checksum is the only integrity check. Prefixes: `synw` (primary
+// wallet), `syna` (standard account), `sync` (custom contract), etc.
+//
+// Decision (2026-08-22): tsynq/synq (this file's own scheme, above) is
+// deprecated for human-facing display. Forge and the wallet UI show/accept
+// synw-style addresses; tsynq/synq are kept only as a legacy-input fallback
+// for backward compatibility. The functions below let the VM's raw 20-byte
+// caller/owner identifiers round-trip through the synw format WITHOUT
+// needing the original public key: decoding a synw string recovers exactly
+// the leading hash bits that were extracted into it, and re-encoding those
+// same bits reproduces the byte-identical original string (verified via a
+// Python prototype against real derive_address_from_bytes output).
+
+/// Canonical all-zero / "no wallet" sentinel per the SNTS-01 address spec
+/// (`NETWORK_BURN_ADDRESS` in the L1 `src/address.rs`). NOT a real Bech32m
+/// string (no `1` separator) -- it's a literal reserved constant, so it's
+/// special-cased on both encode and decode rather than round-tripped.
+pub const NETWORK_ZERO_ADDRESS: &str = "syn00000000000000000000000000000000000000";
+
+/// Target total character length for SNTS-01 network addresses (HRP + '1' +
+/// data + 6-char checksum), per the L1 address spec (`TARGET_ADDRESS_LEN`).
+const NETWORK_ADDR_TARGET_LEN: usize = 41;
+
+/// Default HRP used when encoding a VM caller/owner identifier as a network
+/// wallet address (the common case: a caller/owner that came from a
+/// connected wallet). Callers that know the address represents a different
+/// kind (contract, multisig, etc.) should pass the right HRP explicitly.
+pub const HRP_WALLET: &str = "synw";
+
+/// Extracts `count` 5-bit groups from `bytes`, big-endian bit order --
+/// mirrors `extract_base32_values` in the L1 `src/address.rs` exactly (kept
+/// as a separate copy here since this VM crate doesn't depend on that
+/// binary crate). Forward direction (bytes -> 5-bit groups); `pack_base32_values`
+/// below is its exact inverse.
+fn extract_base32_values(bytes: &[u8], count: usize) -> Vec<u8> {
+    let mut values = Vec::with_capacity(count);
+    for i in 0..count {
+        let bit_offset = i * 5;
+        let byte_idx = bit_offset / 8;
+        let bit_idx = bit_offset % 8;
+        let val = if bit_idx <= 3 {
+            (bytes.get(byte_idx).copied().unwrap_or(0) >> (3 - bit_idx)) & 0x1f
+        } else {
+            let high_bits = (bytes.get(byte_idx).copied().unwrap_or(0) << (bit_idx - 3)) & 0x1f;
+            let low_bits = if byte_idx + 1 < bytes.len() {
+                bytes[byte_idx + 1] >> (11 - bit_idx)
+            } else {
+                0
+            };
+            high_bits | low_bits
+        };
+        values.push(val);
+    }
+    values
+}
+
+/// Inverse of `extract_base32_values`: packs 5-bit groups back into a byte
+/// buffer at the same bit offsets they were extracted from, so decoding a
+/// synw-style address and re-encoding it reproduces the identical string.
+/// Bits beyond the last full byte covered by `values` are left zero.
+fn pack_base32_values(values: &[u8]) -> Vec<u8> {
+    let total_bits = values.len() * 5;
+    let mut buf = vec![0u8; (total_bits + 7) / 8];
+    for (i, &v) in values.iter().enumerate() {
+        let bit_offset = i * 5;
+        let byte_idx = bit_offset / 8;
+        let bit_idx = bit_offset % 8;
+        let v = v & 0x1f;
+        if bit_idx <= 3 {
+            buf[byte_idx] |= v << (3 - bit_idx);
+        } else {
+            let high_bits = v >> (bit_idx - 3);
+            let low_bits = (v << (11 - bit_idx)) & 0xff;
+            buf[byte_idx] |= high_bits;
+            if byte_idx + 1 < buf.len() {
+                buf[byte_idx + 1] |= low_bits;
+            }
+        }
+    }
+    buf
+}
+
+/// Decodes a Bech32m string, returning (hrp, 5-bit data groups with the
+/// trailing 6-character checksum already stripped). Unlike `bech32m_decode`
+/// above, this does NOT run the byte-oriented `convert_bits(_, 5, 8, false)`
+/// step -- SNTS-01 addresses don't encode a whole number of bytes (e.g. a
+/// 30-group synw payload is 150 bits = 18.75 bytes), so the strict
+/// byte-padding check in `convert_bits` would reject every valid synw
+/// address. Callers that DO want whole bytes (tsynq/synq) use `bech32m_decode`.
+fn bech32m_decode_raw_groups(s: &str) -> Result<(String, Vec<u8>), String> {
+    if s.len() < 8 || s.len() > 90 {
+        return Err(format!("invalid length: {}", s.len()));
+    }
+    let lower = s.to_lowercase();
+    let pos = match lower.rfind('1') {
+        Some(p) if p >= 1 => p,
+        _ => return Err("no separator".into()),
+    };
+    let hrp = &lower[..pos];
+    let data_part = &lower[pos + 1..];
+    if hrp.is_empty() || data_part.len() < 6 {
+        return Err("invalid structure".into());
+    }
+    let mut data5 = Vec::with_capacity(data_part.len());
+    for c in data_part.bytes() {
+        match CHARSET.iter().position(|&x| x == c) {
+            Some(idx) => data5.push(idx as u8),
+            None => return Err(format!("invalid character: {}", c as char)),
+        }
+    }
+    if !verify_checksum(hrp, &data5) {
+        return Err("invalid Bech32m checksum".into());
+    }
+    let len = data5.len();
+    data5.truncate(len - 6);
+    Ok((hrp.to_string(), data5))
+}
+
+/// Decodes any SNTS-01 network address (`synw1...`, `syna1...`, etc., or the
+/// literal all-zero sentinel) into the VM's 20-byte internal identifier
+/// space. Recovers exactly the leading hash bits originally extracted into
+/// the address (150 bits / 18.75 bytes for a 4-char HRP like `synw`),
+/// zero-padded up to 20 bytes -- a byte-for-byte extraction (not a hash of
+/// the address string), so `encode_network_address` is its exact inverse.
+pub fn decode_network_address(s: &str) -> Result<[u8; 20], String> {
+    if s == NETWORK_ZERO_ADDRESS {
+        return Ok([0u8; 20]);
+    }
+    if s.len() != NETWORK_ADDR_TARGET_LEN {
+        return Err(format!(
+            "expected a {}-character network address, got {}",
+            NETWORK_ADDR_TARGET_LEN,
+            s.len()
+        ));
+    }
+    if !s.starts_with("syn") {
+        return Err("network addresses must start with 'syn'".into());
+    }
+    let (_hrp, data5) = bech32m_decode_raw_groups(s)?;
+    let mut bytes = pack_base32_values(&data5);
+    bytes.resize(20, 0);
+    let mut id = [0u8; 20];
+    id.copy_from_slice(&bytes[..20]);
+    Ok(id)
+}
+
+/// Encodes a VM 20-byte caller/owner identifier as an SNTS-01 network
+/// address with the given HRP (e.g. `synw` for a wallet). Returns the
+/// literal all-zero sentinel when `id` is all-zero (no wallet/no caller) --
+/// per spec that sentinel is a reserved constant, not a derived Bech32m
+/// string, so it's never round-tripped through the bit-packing below.
+pub fn encode_network_address(hrp: &str, id: &[u8; 20]) -> Result<String, String> {
+    if *id == [0u8; 20] {
+        return Ok(NETWORK_ZERO_ADDRESS.to_string());
+    }
+    let data_char_count = NETWORK_ADDR_TARGET_LEN
+        .checked_sub(hrp.len() + 1 + 6)
+        .ok_or_else(|| format!("HRP '{}' too long for a {}-char address", hrp, NETWORK_ADDR_TARGET_LEN))?;
+    let data5 = extract_base32_values(id, data_char_count);
+    let checksum = create_checksum(hrp, &data5);
+    let mut combined = data5;
+    combined.extend_from_slice(&checksum);
+    let mut result = String::with_capacity(hrp.len() + 1 + combined.len());
+    result.push_str(hrp);
+    result.push('1');
+    for v in &combined {
+        result.push(CHARSET[*v as usize] as char);
+    }
+    Ok(result)
+}
+
+/// Convenience: encode as a `synw` wallet address -- the common case for a
+/// caller/owner identifier, and the new default display HRP replacing
+/// `encode_address`'s tsynq output.
+pub fn encode_wallet_address(id: &[u8; 20]) -> Result<String, String> {
+    encode_network_address(HRP_WALLET, id)
+}
+
+/// Accepts either a real SNTS-01 network address (synw/syna/etc., or the
+/// all-zero sentinel) or a legacy tsynq/synq address, returning the VM's
+/// 20-byte internal identifier either way. Prefer this over `from_any_synq`
+/// for new input paths (session caller overrides, deep-link wallet params) --
+/// tsynq/synq are accepted here only for backward compatibility with older
+/// saved links/sessions that still carry a tsynq address.
+pub fn from_any_network_address(s: &str) -> Result<[u8; 20], String> {
+    let trimmed = s.trim();
+    if trimmed.starts_with("tsynq1") || trimmed.starts_with("synq1") {
+        return from_any_synq(trimmed);
+    }
+    decode_network_address(trimmed)
+}
+
 /// Derive a contract address from deployment parameters.
 ///
 /// pk_hash = SHA-256(deployer[20] || nonce_be[8] || artifact_hash[32] || constructor_hash[32] || network_id)
@@ -512,5 +711,97 @@ mod tests {
         // Verify checksum
         let expected = SynqAddress::compute_checksum(0x01, &[0x04, 0xf2], &[0x01, 0x02], &addr.pk_hash);
         assert_eq!(&bytes[37..41], &expected, "checksum must be SHA-256 first 4 bytes");
+    }
+}
+
+#[cfg(test)]
+mod network_address_tests {
+    use super::*;
+
+    #[test]
+    fn test_zero_address_encodes_to_sentinel() {
+        let id = [0u8; 20];
+        let encoded = encode_network_address(HRP_WALLET, &id).unwrap();
+        assert_eq!(encoded, NETWORK_ZERO_ADDRESS);
+        assert_eq!(encoded.len(), 41);
+    }
+
+    #[test]
+    fn test_sentinel_decodes_to_zero() {
+        let id = decode_network_address(NETWORK_ZERO_ADDRESS).unwrap();
+        assert_eq!(id, [0u8; 20]);
+    }
+
+    #[test]
+    fn test_roundtrip_arbitrary_id() {
+        // A non-zero, non-trivial 20-byte id (avoids the all-zero special case).
+        let id: [u8; 20] = [
+            0x9e, 0x62, 0x91, 0x97, 0x0c, 0xb4, 0x4d, 0xd9, 0x40, 0x08, 0xc7, 0x9b, 0xca, 0xf9,
+            0xd8, 0x6f, 0x18, 0xb4, 0xb4, 0x00,
+        ];
+        let encoded = encode_network_address(HRP_WALLET, &id).unwrap();
+        assert!(encoded.starts_with("synw1"), "got: {}", encoded);
+        assert_eq!(encoded.len(), 41);
+        let decoded = decode_network_address(&encoded).unwrap();
+        assert_eq!(decoded, id);
+        // Re-encoding the decoded bytes must reproduce the exact same string.
+        let reencoded = encode_network_address(HRP_WALLET, &decoded).unwrap();
+        assert_eq!(reencoded, encoded);
+    }
+
+    #[test]
+    fn test_matches_l1_address_engine_test_vector() {
+        // Cross-checked against L1 src/address.rs::generate_wallet_address()
+        // with ZERO_KEY_HEX (32 zero bytes) via a Python prototype of both
+        // sides -- this is the exact expected synw string for that key, so
+        // if the L1 hashing algorithm or bit-extraction ever drifts from
+        // this VM's copy, this test catches it.
+        let expected = "synw1ne3fr9cvk3xajsqgc7du47wcduvtfda2r2zr";
+        let decoded = decode_network_address(expected).unwrap();
+        assert_eq!(
+            hex::encode(decoded),
+            "9e6291970cb44dd94008c79bcaf9d86f18b4b400"
+        );
+        let reencoded = encode_network_address(HRP_WALLET, &decoded).unwrap();
+        assert_eq!(reencoded, expected);
+    }
+
+    #[test]
+    fn test_rejects_wrong_length() {
+        assert!(decode_network_address("synw1short").is_err());
+    }
+
+    #[test]
+    fn test_rejects_non_syn_prefix() {
+        // Right length, wrong prefix entirely.
+        let bogus = "abc1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+        assert!(decode_network_address(bogus).is_err());
+    }
+
+    #[test]
+    fn test_from_any_network_address_accepts_legacy_tsynq() {
+        // Backward compatibility: old tsynq deep links must keep working.
+        let addr = SynqAddress::from_20_bytes(&[0x11; 20], ALGO_ML_DSA_65, NETWORK_ID_TESTNET);
+        let tsynq_str = addr.to_tsynq().unwrap();
+        let decoded = from_any_network_address(&tsynq_str).unwrap();
+        assert_eq!(decoded, [0x11; 20]);
+    }
+
+    #[test]
+    fn test_from_any_network_address_accepts_synw() {
+        // Last 10 bits must be zero -- a synw address only encodes the
+        // leading 150 bits (18.75 bytes) of the 20-byte id by design.
+        let id_prefix = [0x22u8; 18];
+        let mut id = [0u8; 20];
+        id[..18].copy_from_slice(&id_prefix);
+        let synw_str = encode_wallet_address(&id).unwrap();
+        let decoded = from_any_network_address(&synw_str).unwrap();
+        assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn test_from_any_network_address_accepts_zero_sentinel() {
+        let decoded = from_any_network_address(NETWORK_ZERO_ADDRESS).unwrap();
+        assert_eq!(decoded, [0u8; 20]);
     }
 }
