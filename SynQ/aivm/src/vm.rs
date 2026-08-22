@@ -10,7 +10,7 @@ use crate::context::ExecutionContext;
 use sha2::Digest;
 use crate::errors::{AivmError, TrapCode};
 use crate::gas::{GasMeter, PqGasMeter, gas_cost};
-use crate::host::{HostFunctions, Value, execute_host_call};
+use crate::host::{HostFunctions, Value, execute_host_call, AssetLedger};
 use crate::instructions::{Instruction, Opcode};
 use crate::receipt::{EventRecord, Receipt, ReceiptStatus};
 
@@ -186,6 +186,7 @@ impl Avm {
         let mut gas = GasMeter::new(ctx.gas_limit);
         let mut pq_gas = PqGasMeter::new(ctx.pq_gas_limit);
         let mut events = Vec::new();
+        let mut assets = AssetLedger::new();
 
         // Set up initial frame with args as locals
         let mut frame = CallFrame {
@@ -425,6 +426,7 @@ impl Avm {
                         state,
                         &mut stack,
                         &mut events,
+                        &mut assets,
                     )?;
                 }
                 Instruction::Pack(count) => {

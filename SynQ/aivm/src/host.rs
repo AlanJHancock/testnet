@@ -9,6 +9,7 @@ use crate::context::ExecutionContext;
 use crate::errors::AivmError;
 use crate::receipt::EventRecord;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 /// Host function import index → name mapping
 /// Per spec, imports are manifest-declared host functions.
@@ -101,6 +102,31 @@ impl Value {
         }
     }
 
+    /// Convert to u128 (widest native integer AIVM carries -- used for
+    /// asset owner/recipient identifiers, which are u256 at the SynQ
+    /// language level but truncated to u128 in AIVM's simplified numeric
+    /// model, matching the existing u256 -> u128 downcast convention).
+    pub fn as_u128(&self) -> Result<u128, AivmError> {
+        match self {
+            Value::U128(v) => Ok(*v),
+            Value::U64(v) => Ok(*v as u128),
+            Value::I64(v) => {
+                if *v < 0 {
+                    Err(AivmError::TypeMismatch { expected: "u128", got: "i64_negative" })
+                } else {
+                    Ok(*v as u128)
+                }
+            }
+            Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
+            Value::Address(bytes) => {
+                let mut buf = [0u8; 16];
+                buf.copy_from_slice(&bytes[25..41]);
+                Ok(u128::from_be_bytes(buf))
+            }
+            other => Err(AivmError::TypeMismatch { expected: "u128", got: other.type_name() }),
+        }
+    }
+
     /// Convert to bool
     pub fn as_bool(&self) -> Result<bool, AivmError> {
         match self {
@@ -157,6 +183,43 @@ impl Value {
     }
 }
 
+/// A single tracked asset (per synq-language-spec.md linear asset model).
+/// Mirrors the QVM's AssetRecord (vm/src/vm.rs) semantics: assets are
+/// consumed-and-reissued on transfer (old id deactivated, new id minted),
+/// and burn/balance/owner all read as zero/inactive once burned.
+#[derive(Debug, Clone)]
+pub struct AssetRecord {
+    pub owner: u128,
+    pub value: u64,
+    pub type_tag: String,
+    pub active: bool,
+}
+
+/// Asset ledger scoped to a single `Avm::execute()` call. Per spec, AIVM
+/// today is used for stateless dry-runs (gas estimation, single-call
+/// execution) -- unlike `StateOverlay`, this ledger is not carried across
+/// separate execute() invocations. If/when AIVM needs assets to persist
+/// across chained dry-run calls the same way state does (see
+/// StateOverlay::committed_snapshot), this is the type to extend with an
+/// equivalent snapshot/restore pair.
+#[derive(Debug, Clone)]
+pub struct AssetLedger {
+    records: HashMap<u64, AssetRecord>,
+    next_id: u64,
+}
+
+impl AssetLedger {
+    pub fn new() -> Self {
+        Self { records: HashMap::new(), next_id: 1 }
+    }
+}
+
+impl Default for AssetLedger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Execute a host function call
 pub fn execute_host_call(
     import_index: u16,
@@ -165,6 +228,7 @@ pub fn execute_host_call(
     state: &mut crate::vm::StateOverlay,
     stack: &mut Vec<Value>,
     events: &mut Vec<EventRecord>,
+    assets: &mut AssetLedger,
 ) -> Result<(), AivmError> {
     let name = host.get(import_index)?;
 
@@ -217,6 +281,68 @@ pub fn execute_host_call(
             // Stub — real cross-contract calls need host runtime support
             let _ = stack.pop();
             stack.push(Value::U64(0));
+        }
+        // Linear asset model — see docs/SynQ-Language-Specification.md:
+        //   asset_create(type_name: string, value: u256) -> u256
+        //   asset_transfer(asset_id: u256, to: u256) -> u256 (new asset_id)
+        //   asset_burn(asset_id: u256) -> u256 (burned value)
+        //   asset_balance(asset_id: u256) -> u256
+        //   asset_owner(asset_id: u256) -> u256
+        // Args are pushed by aivm_codegen.rs in source-written order, so the
+        // LAST-listed parameter ends up on top of the stack (popped first).
+        "asset.create" => {
+            let value = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+            let type_tag_val = stack.pop().ok_or(AivmError::StackUnderflow)?;
+            let type_tag = match &type_tag_val {
+                Value::String(s) => s.clone(),
+                Value::Bytes(b) => String::from_utf8_lossy(b).to_string(),
+                other => other.type_name().to_string(),
+            };
+            let owner = {
+                let mut buf = [0u8; 16];
+                buf.copy_from_slice(&ctx.caller[25..41]);
+                u128::from_be_bytes(buf)
+            };
+            let id = assets.next_id;
+            assets.next_id += 1;
+            assets.records.insert(id, AssetRecord { owner, value, type_tag, active: true });
+            stack.push(Value::U64(id));
+        }
+        "asset.transfer" => {
+            let to = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
+            let asset_id = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+            let record = assets.records.get(&asset_id)
+                .filter(|r| r.active)
+                .ok_or_else(|| AivmError::HostFunctionFailed(format!("asset.transfer: asset {} not found or inactive", asset_id)))?
+                .clone();
+            if let Some(existing) = assets.records.get_mut(&asset_id) {
+                existing.active = false;
+            }
+            let new_id = assets.next_id;
+            assets.next_id += 1;
+            assets.records.insert(new_id, AssetRecord { owner: to, value: record.value, type_tag: record.type_tag, active: true });
+            stack.push(Value::U64(new_id));
+        }
+        "asset.burn" => {
+            let asset_id = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+            let record = assets.records.get(&asset_id)
+                .filter(|r| r.active)
+                .ok_or_else(|| AivmError::HostFunctionFailed(format!("asset.burn: asset {} not found or inactive", asset_id)))?
+                .clone();
+            if let Some(existing) = assets.records.get_mut(&asset_id) {
+                existing.active = false;
+            }
+            stack.push(Value::U64(record.value));
+        }
+        "asset.balance" => {
+            let asset_id = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+            let value = assets.records.get(&asset_id).filter(|r| r.active).map(|r| r.value).unwrap_or(0);
+            stack.push(Value::U64(value));
+        }
+        "asset.owner" => {
+            let asset_id = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+            let owner = assets.records.get(&asset_id).filter(|r| r.active).map(|r| r.owner).unwrap_or(0);
+            stack.push(Value::U128(owner));
         }
         other => {
             return Err(AivmError::HostFunctionNotDeclared(other.to_string()));

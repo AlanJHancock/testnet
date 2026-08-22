@@ -938,23 +938,52 @@ mod estimate_gas_handler_tests {
     #[tokio::test]
     async fn unimplemented_host_function_fails_closed_not_unsafely() {
         // Item 6 audit finding (a): several builtins declared in the
-        // import table (asset.*, addr.*, auth.*, string.*) aren't wired up
-        // in execute_host_call yet and return HostFunctionNotDeclared.
+        // import table (addr.*, auth.*, string.*) aren't wired up in
+        // execute_host_call yet and return HostFunctionNotDeclared.
+        // (asset.* used to be in this bucket too -- fixed 2026-08-22, see
+        // asset_lifecycle_create_transfer_balance_burn_round_trips below --
+        // str_len/string.length stands in as the still-unimplemented case.)
         // Regression guard: calling one of them through a real dry run
         // must still come back as a clean success:false with a clear
         // error -- not a panic, not a silently-wrong success, and
         // critically not partial state changes made visible (state stays
         // discarded regardless of where execution stopped).
-        let src = "contract AssetTest { state { dummy: u256; } impl { @public function create_asset() -> u256 { asset_create(100); return dummy; } } }";
+        let src = "contract StrTest { state { dummy: u256; } impl { @public function check_len() -> u256 { str_len(\"abc\"); return dummy; } } }";
         let state = test_state();
         let (status, RespJson(body)) = estimate_gas_handler(
             ConnectInfo(test_addr()),
             State(state),
-            Json(req(src, "create_asset")),
+            Json(req(src, "check_len")),
         ).await;
         assert_eq!(status, StatusCode::OK);
         assert!(!body.success, "an unimplemented host function must fail closed: {body:?}");
         assert!(body.state_discarded);
         assert!(!body.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn asset_lifecycle_create_transfer_balance_burn_round_trips() {
+        // Regression guard for the "forge run createAsset(123) ->
+        // HostFunctionNotDeclared(asset.create)" bug report (2026-08-22):
+        // asset.create/transfer/burn/balance/owner were declared in AIVM's
+        // host import table but never wired up in execute_host_call, so
+        // every SynQ contract calling any asset_* builtin under AIVM
+        // failed instantly. Exercises the full lifecycle in one dry run:
+        // create(value=100) -> balance reads 100 -> transfer reissues a
+        // new asset id with the same value -> burn returns that value.
+        let src = "contract AssetOpsTest { state { dummy: u256; } impl { @public function run_ops() -> u256 { let id: u256 = asset_create(\"Widget\", 100); let bal: u256 = asset_balance(id); dummy = bal; let new_id: u256 = asset_transfer(id, 999); let burned: u256 = asset_burn(new_id); return burned; } } }";
+        let state = test_state();
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(req(src, "run_ops")),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.success, "asset lifecycle dry run should succeed: {body:?}");
+        assert!(body.errors.is_empty(), "unexpected errors: {:?}", body.errors);
+        // balance was staged into `dummy` mid-function; the transfer +
+        // burn chain must preserve that same value (100) through to the
+        // final burn() return.
+        assert_eq!(body.return_value, Some(serde_json::json!(100)));
     }
 }
