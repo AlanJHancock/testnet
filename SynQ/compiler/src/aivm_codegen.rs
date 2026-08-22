@@ -173,6 +173,7 @@ pub fn compile_to_aivm(contract: &ContractDefinition, structs: &[StructDefinitio
             func_index: fidx as u32,
             warnings: &mut warnings,
             func_name_map: &func_name_map,
+            loop_stack: Vec::new(),
         };
 
         // Map params to local slots (+ types, for struct field resolution)
@@ -266,6 +267,10 @@ struct CodegenContext<'a> {
     func_index: u32,
     warnings: &'a mut Vec<String>,
     func_name_map: &'a [(String, u32)],
+    /// Stack of enclosing while-loops -- (loop_start index, pending Jmp
+    /// instruction indices from `break` that need to be patched to the
+    /// loop's end once it's known).
+    loop_stack: Vec<(u32, Vec<usize>)>,
 }
 
 impl<'a> CodegenContext<'a> {
@@ -502,20 +507,48 @@ impl<'a> CodegenContext<'a> {
                 self.emit(Instruction::SubU64);
                 let jmp_end_idx = self.instructions.len();
                 self.emit(Instruction::JmpIf(0)); // placeholder
+                // BUG FIX (2026-08-22): `break`/`continue` inside this body
+                // used to compile to an unconditional Ret -- i.e. they
+                // returned from the *whole function* instead of affecting
+                // just the loop, silently truncating any state/locals set
+                // after the loop and (worse) skipping the function's own
+                // `return`, which decoded as a null return value. Track this
+                // loop's start index + a list of `break` Jmp placeholders so
+                // `continue` can jump straight back to the re-check and
+                // `break` can be patched to the loop's end once known.
+                self.loop_stack.push((loop_start, Vec::new()));
                 for s in &body.statements {
                     self.gen_statement(s)?;
                 }
                 self.emit(Instruction::Jmp(loop_start));
                 let end = self.instructions.len() as u32;
                 self.instructions[jmp_end_idx] = Instruction::JmpIf(end);
+                let (_, break_patches) = self.loop_stack.pop().expect("loop_stack imbalance");
+                for idx in break_patches {
+                    self.instructions[idx] = Instruction::Jmp(end);
+                }
             }
             Statement::Break => {
-                self.warnings.push("Break not fully implemented in AIVM codegen".to_string());
-                self.emit(Instruction::Ret);
+                match self.loop_stack.last() {
+                    Some(_) => {
+                        let idx = self.instructions.len();
+                        self.emit(Instruction::Jmp(0)); // placeholder, patched to loop end
+                        self.loop_stack.last_mut().unwrap().1.push(idx);
+                    }
+                    None => {
+                        self.warnings.push("`break` used outside of a loop -- ignored".to_string());
+                    }
+                }
             }
             Statement::Continue => {
-                self.warnings.push("Continue not fully implemented in AIVM codegen".to_string());
-                self.emit(Instruction::Ret);
+                match self.loop_stack.last() {
+                    Some((loop_start, _)) => {
+                        self.emit(Instruction::Jmp(*loop_start));
+                    }
+                    None => {
+                        self.warnings.push("`continue` used outside of a loop -- ignored".to_string());
+                    }
+                }
             }
         }
         Ok(())

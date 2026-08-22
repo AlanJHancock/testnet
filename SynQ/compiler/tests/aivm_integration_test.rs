@@ -105,3 +105,76 @@ fn test_aivm_abi_selectors() {
         assert_eq!(s.len(), 10);
     }
 }
+// BUG FIX REGRESSION (2026-08-22): `continue`/`break` inside a while loop
+// used to compile to an unconditional `Ret`, i.e. they returned from the
+// *whole function* immediately instead of affecting only the loop. Any
+// function that used `continue` to skip an iteration silently exited with
+// no return value (decoded client-side as `null`) the first time it hit
+// the `continue`. Root cause: aivm_codegen.rs's `Statement::Continue` /
+// `Statement::Break` arms literally emitted `Instruction::Ret`. Fixed by
+// tracking a loop_stack of (loop_start, break_patch_indices) so `continue`
+// jumps back to the condition re-check and `break` jumps to the loop's end.
+
+const COUNT_EVEN_SOURCE: &str = "contract LoopDemo {\n  impl {\n    @public\n    function countEven(n: u256) -> u256 {\n      let count: u256 = 0;\n      let i: u256 = 1;\n      while (i <= n) {\n        let remainder: u256 = i % 2;\n        if (remainder != 0) {\n          i = i + 1;\n          continue;\n        }\n        count = count + 1;\n        i = i + 1;\n      }\n      return count;\n    }\n  }\n}\n";
+
+#[test]
+fn test_aivm_continue_does_not_abort_function() {
+    let ast = parse(COUNT_EVEN_SOURCE).unwrap();
+    let contract = extract_contract(&ast);
+    let result = compile_to_aivm(contract, &[]).unwrap();
+
+    let host = HostFunctions::default_v01();
+    let avm = Avm::new(result.instructions, result.functions, host);
+
+    let ctx = ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    let mut state = StateOverlay::new();
+
+    let idx = avm.find_function("countEven").expect("countEven function not found");
+    // n = 5 -> even numbers are {2, 4} -> count = 2. Before the fix, the
+    // first odd iteration's `continue` returned from the function
+    // immediately with no return value at all (None, decoded as null).
+    let r = avm.execute(idx, vec![Value::U64(5)], &ctx, &mut state).unwrap();
+    assert_eq!(r.receipt.status, ReceiptStatus::Success);
+    assert_eq!(r.return_value, Some(Value::U64(2)));
+
+    // n = 10 -> evens {2,4,6,8,10} -> count = 5. Exercises multiple
+    // continue/loop-back cycles, not just the very first one.
+    let r2 = avm.execute(idx, vec![Value::U64(10)], &ctx, &mut state).unwrap();
+    assert_eq!(r2.receipt.status, ReceiptStatus::Success);
+    assert_eq!(r2.return_value, Some(Value::U64(5)));
+
+    // n = 0 -> loop body never runs -> count = 0.
+    let r3 = avm.execute(idx, vec![Value::U64(0)], &ctx, &mut state).unwrap();
+    assert_eq!(r3.receipt.status, ReceiptStatus::Success);
+    assert_eq!(r3.return_value, Some(Value::U64(0)));
+}
+
+const BREAK_SOURCE: &str = "contract BreakDemo {\n  impl {\n    @public\n    function firstMultiple(n: u256, m: u256) -> u256 {\n      let i: u256 = 1;\n      let found: u256 = 0;\n      while (i <= n) {\n        if (i % m == 0) {\n          found = i;\n          break;\n        }\n        i = i + 1;\n      }\n      return found;\n    }\n  }\n}\n";
+
+#[test]
+fn test_aivm_break_exits_loop_not_function() {
+    let ast = parse(BREAK_SOURCE).unwrap();
+    let contract = extract_contract(&ast);
+    let result = compile_to_aivm(contract, &[]).unwrap();
+
+    let host = HostFunctions::default_v01();
+    let avm = Avm::new(result.instructions, result.functions, host);
+
+    let ctx = ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    let mut state = StateOverlay::new();
+
+    let idx = avm.find_function("firstMultiple").expect("firstMultiple function not found");
+    // First multiple of 3 in [1,20] is 3. Before the fix, `break` also
+    // compiled to an unconditional Ret, so this happened to still return
+    // early -- but the point of this test is `found` (set right before
+    // break) makes it out correctly, proving break targets the loop end
+    // and not a mid-function abort that skips the rest of the block.
+    let r = avm.execute(idx, vec![Value::U64(20), Value::U64(3)], &ctx, &mut state).unwrap();
+    assert_eq!(r.receipt.status, ReceiptStatus::Success);
+    assert_eq!(r.return_value, Some(Value::U64(3)));
+
+    // No multiple of 100 in [1,20] -> loop runs to completion -> found stays 0.
+    let r2 = avm.execute(idx, vec![Value::U64(20), Value::U64(100)], &ctx, &mut state).unwrap();
+    assert_eq!(r2.receipt.status, ReceiptStatus::Success);
+    assert_eq!(r2.return_value, Some(Value::U64(0)));
+}
