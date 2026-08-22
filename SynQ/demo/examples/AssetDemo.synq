@@ -12,9 +12,9 @@ contract AssetDemo {
   }
 
   @public
-  function createAsset(value: u256) as caller -> u256 {
-    let id = asset_create("SNRG", value);
-    return id;
+  function createAsset(quantity: u256) as caller -> (u256, u256) {
+    let id = asset_create("SNRG", quantity);
+    return (id, quantity);
   }
 
   @public
@@ -37,5 +37,10 @@ contract AssetDemo {
   @public
   function checkOwner(asset_id: u256) as caller -> u256 {
     return asset_owner(asset_id);
+  }
+
+  @public
+  function assetInfo(asset_id: u256) as caller -> (string, u256) {
+    return ("SNRG", asset_balance(asset_id));
   }
 }

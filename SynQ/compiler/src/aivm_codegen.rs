@@ -707,11 +707,17 @@ impl<'a> CodegenContext<'a> {
                 }
             }
             Expression::Tuple(exprs) => {
-                if let Some(last) = exprs.last() {
-                    self.gen_expr(last)?;
-                } else {
-                    self.emit(Instruction::PushU64(0));
+                // BUG FIX (2026-08-22): this used to generate code for only
+                // the LAST element and silently discard every other element
+                // -- a tuple return like `return (id, quantity);` compiled
+                // to just `quantity`, dropping `id` entirely with no error
+                // or warning. Pack all elements in declared order (mirrors
+                // StructLiteral's push-then-Pack(count) pattern) so the
+                // result decodes as a proper Value::Array on the way out.
+                for e in exprs {
+                    self.gen_expr(e)?;
                 }
+                self.emit(Instruction::Pack(exprs.len() as u8));
             }
             Expression::Some(e) | Expression::Ok(e) => {
                 self.gen_expr(e)?;
@@ -741,8 +747,15 @@ impl<'a> CodegenContext<'a> {
                     }
                 }
             }
-            Expression::TupleIndex { object, index: _ } => {
+            Expression::TupleIndex { object, index } => {
+                // BUG FIX (2026-08-22): this ignored `index` entirely and
+                // just re-evaluated the whole tuple expression, so `.0`/`.1`
+                // access on a destructured tuple always returned element 0
+                // (or the pre-fix single-value stand-in). Now that
+                // Expression::Tuple packs a real Value::Array, extract the
+                // right slot the same way struct field access does.
                 self.gen_expr(object)?;
+                self.emit(Instruction::ArrayGet(*index as u8));
             }
             Expression::EnumAccess { enum_name: _, variant_name: _ } => {
                 self.emit(Instruction::PushU64(0));
