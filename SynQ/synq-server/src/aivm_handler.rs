@@ -944,6 +944,34 @@ mod estimate_gas_handler_tests {
     }
 
     #[tokio::test]
+    async fn stack_overflow_is_reported_as_a_clean_execution_failure_not_a_crash() {
+        // Unbounded recursion (no base case) must be stopped by AIVM's
+        // call_depth_limit (64, aivm/src/vm.rs) well before the 1,000,000
+        // gas_limit would ever be reached, and reported the same clean way
+        // as out-of-gas above -- not a hang, not a panic, not a real stack
+        // overflow in the synq-server process itself. This was previously
+        // completely untested at every layer (no aivm/tests coverage, no
+        // handler coverage) -- backlog item 13's "resource-limit tests on
+        // the Rust side... not yet written" checklist entry. Verified live
+        // against the running server before writing this regression test.
+        let src = "contract Recur { state { } impl { @public function recurse(n: u256) -> u256 { return recurse(n + 1); } } }";
+        let mut request = req(src, "recurse");
+        request.args = vec![serde_json::json!(0)];
+        let state = test_state();
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(request),
+        ).await;
+        assert_eq!(status, StatusCode::OK, "unbounded recursion must still answer cleanly, not hang/crash");
+        assert!(!body.success, "unbounded recursion should be reported as a failure: {body:?}");
+        assert!(
+            body.errors.iter().any(|e| e.contains("StackOverflow")),
+            "expected a StackOverflow error (call_depth_limit), got: {:?}", body.errors
+        );
+    }
+
+    #[tokio::test]
     async fn seeded_state_is_honored_by_the_dry_run() {
         // The optional `state` request field lets a caller pre-seed a
         // state slot (dev-mode convenience per backlog item 5's notes on
