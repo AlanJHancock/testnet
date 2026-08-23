@@ -3,9 +3,8 @@
 // An IrFunction holds the complete SSA IR for one function: its CFG (basic blocks),
 // parameters, return type, attributes, and metadata (effects, authority, bounds).
 
-use crate::ast::{Attribute, Type as AstType};
+use crate::ast::Attribute;
 use super::types::*;
-use super::instructions::*;
 use super::blocks::*;
 
 /// IR representation of a single function.

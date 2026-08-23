@@ -8,14 +8,11 @@ mod native_impl {
     use pqcrypto::kem::mlkem768;
     use pqcrypto_traits::kem::{PublicKey, SecretKey, Ciphertext, SharedSecret};
     
-    /// Kyber-768 public key size in bytes
-    pub const KYBER_PUBLIC_KEY_BYTES: usize = 1184;
-    /// Kyber-768 secret key size in bytes
-    pub const KYBER_SECRET_KEY_BYTES: usize = 2400;
-    /// Kyber-768 ciphertext size in bytes
-    pub const KYBER_CIPHERTEXT_BYTES: usize = 1088;
-    /// Kyber-768 shared secret size in bytes
-    pub const KYBER_SHARED_SECRET_BYTES: usize = 32;
+    // KYBER_PUBLIC_KEY_BYTES/KYBER_SECRET_KEY_BYTES/KYBER_CIPHERTEXT_BYTES/
+    // KYBER_SHARED_SECRET_BYTES removed: unreachable (native_impl is private,
+    // not re-exported) and referenced nowhere in the workspace, including
+    // this file's own tests -- unlike hqc.rs/mceliece.rs's PUBLIC/SECRET
+    // pair, which their test modules do assert against.
     
     /// Generate a Kyber-768 keypair for key encapsulation
     pub fn keygen() -> Result<(Vec<u8>, Vec<u8>), String> {

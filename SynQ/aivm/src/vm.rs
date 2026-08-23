@@ -8,11 +8,11 @@
 
 use crate::context::ExecutionContext;
 use sha2::Digest;
-use crate::errors::{AivmError, TrapCode};
+use crate::errors::AivmError;
 use crate::gas::{GasMeter, PqGasMeter, gas_cost};
 use crate::host::{HostFunctions, Value, execute_host_call, AssetLedger};
-use crate::instructions::{Instruction, Opcode};
-use crate::receipt::{EventRecord, Receipt, ReceiptStatus};
+use crate::instructions::Instruction;
+use crate::receipt::{EventRecord, Receipt};
 
 /// State overlay — staged writes that commit on success, rollback on trap
 #[derive(Debug, Clone)]
@@ -203,7 +203,7 @@ impl Avm {
 
         let state_root_before = state.state_root();
         let mut gas = GasMeter::new(ctx.gas_limit);
-        let mut pq_gas = PqGasMeter::new(ctx.pq_gas_limit);
+        let pq_gas = PqGasMeter::new(ctx.pq_gas_limit);
         let mut events = Vec::new();
 
         // Set up initial frame with args as locals
@@ -435,7 +435,6 @@ impl Avm {
                 }
                 Instruction::Trap(code) => {
                     gas.charge(gas_cost::TRAP)?;
-                    let trap_code = TrapCode::from(*code);
                     state.rollback();
                     let receipt = Receipt::trap(
                         ctx,

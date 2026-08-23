@@ -15,7 +15,6 @@ use std::collections::HashMap;
 use crate::ast::*;
 use super::types::*;
 use super::instructions::*;
-use super::blocks::*;
 use super::function::*;
 use super::module::*;
 
@@ -107,7 +106,7 @@ impl IrBuilder {
                     match part {
                         ContractPart::StateVariable(_) => {}
                         ContractPart::Constructor(_) => {}
-                        ContractPart::Function(f) => {
+                        ContractPart::Function(_f) => {
                             // Scan for struct/enum defs in state{} — actually
                             // structs and enums are top-level SourceUnits in our grammar
                         }
@@ -184,11 +183,11 @@ impl IrBuilder {
         // In SSA, parameters are available as predefined values at the entry.
         // We represent them as special "param" instructions.
         let mut param_values: HashMap<String, ValueId> = HashMap::new();
-        for (i, (name, ty)) in params.iter().enumerate() {
+        for (name, ty) in params.iter() {
             // Param values are represented as Load instructions with special names
             // For simplicity, we use the param name as the value identifier
             let vid = ir_fn.alloc_value();
-            let mut inst = Instruction {
+            let inst = Instruction {
                 op: IrOp::Load(format!("__param_{}", name)),
                 result_type: ty.clone(),
                 value_id: vid,
@@ -215,7 +214,6 @@ impl IrBuilder {
             local_types: HashMap::new(),
             state_vars: &self.state_vars,
             struct_defs: &self.struct_defs,
-            enum_defs: &self.enum_defs,
             function_return_types: &self.function_return_types,
             current_block: 0,
             break_targets: Vec::new(),
@@ -267,8 +265,11 @@ struct BuildContext<'a> {
     state_vars: &'a HashMap<String, (IrType, u32)>,
     /// Struct definitions
     struct_defs: &'a HashMap<String, StructDefinition>,
-    /// Enum definitions
-    enum_defs: &'a HashMap<String, EnumDefinition>,
+    // enum_defs was a pass-through copy that BuildContext's own methods
+    // never read (unlike struct_defs, which field/literal resolution does
+    // use). Enum variant resolution is handled downstream via the
+    // module-level IrModule.enum_defs (populated separately, see below) --
+    // removed here as dead plumbing.
     /// Function return types for cross-function call type resolution
     function_return_types: &'a HashMap<String, IrType>,
     /// Current block ID being built.
@@ -303,17 +304,6 @@ impl<'a> BuildContext<'a> {
         self.ir_fn.block_mut(self.current_block).push_effect(inst);
     }
 
-    /// Terminate the current block and create a new one.
-    fn terminate_and_new(&mut self, terminator: Instruction) -> BlockId {
-        self.ir_fn.block_mut(self.current_block).set_terminator(terminator);
-        let new_id = self.ir_fn.new_block();
-        // The new block's predecessor is the current block
-        let old = self.current_block;
-        self.ir_fn.add_pred(new_id, old);
-        self.current_block = new_id;
-        new_id
-    }
-
     /// Look up a variable name and return its SSA value + type.
     /// Checks locals first, then params, then state vars.
     fn lookup_var(&self, name: &str) -> Result<(ValueId, IrType), String> {
@@ -323,7 +313,7 @@ impl<'a> BuildContext<'a> {
         } else if let Some(&vid) = self.param_values.get(name) {
             let ty = self.lookup_value_type(vid);
             Ok((vid, ty))
-        } else if let Some((ty, _addr)) = self.state_vars.get(name) {
+        } else if let Some((_ty, _addr)) = self.state_vars.get(name) {
             // State variable — we need to emit a Load instruction
             // Return a sentinel: the caller should use build_load instead
             Err(format!("__state_var__{}", name))
@@ -383,7 +373,6 @@ impl<'a> BuildContext<'a> {
 
                 // Check if it's a state variable
                 if self.state_vars.contains_key(name) {
-                    let (ty, _) = self.state_vars[name].clone();
                     self.push_effect(IrOp::Store(name.clone(), val));
                     // Record the write effect
                     self.ir_fn.collected_effects.push(EffectKind::Write(name.clone()));
@@ -971,7 +960,6 @@ impl<'a> BuildContext<'a> {
                         );
                     }
 
-                    let val_ty = self.map_value_type(map, keys.len() - 1);
                     Ok(current)
                 }
             }

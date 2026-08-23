@@ -3,7 +3,7 @@
 // IrType is the type carried by every SSA value. It mirrors the AST Type enum
 // but is simplified for analysis — no parsing concerns, no source-level sugar.
 
-use crate::ast::{Type as AstType, BinaryOperator};
+use crate::ast::Type as AstType;
 
 /// A value reference — unique within a function. In SSA, each value is assigned
 /// exactly once, so a ValueId uniquely identifies a definition point.

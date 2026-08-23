@@ -362,7 +362,7 @@ impl IrLowerer {
     fn lower_block(&mut self, block: &BasicBlock, func: &IrFunction, module: &IrModule) -> Result<(), String> {
         // Determine which instructions are terminators
         let n = block.insts.len();
-        for (i, inst) in block.insts.iter().enumerate() {
+        for inst in block.insts.iter() {
             let is_terminator = inst.is_terminator();
 
             // Before the terminator, emit phi stores for this block's successors
@@ -433,8 +433,12 @@ impl IrLowerer {
     fn lower_instruction(
         &mut self,
         inst: &Instruction,
-        block_id: BlockId,
-        func: &IrFunction,
+        // block_id/func aren't read inside this function -- the block-scoped
+        // work (phi stores, terminator handling) happens in the caller,
+        // lower_block. Kept as params (prefixed) for call-site symmetry /
+        // future use rather than reworking the signature.
+        _block_id: BlockId,
+        _func: &IrFunction,
         module: &IrModule,
     ) -> Result<(), String> {
         // Helper: load a value from its slot onto the stack

@@ -11,8 +11,9 @@ mod native_impl {
     use pqcrypto_mldsa::mldsa87;
     use pqcrypto_traits::sign::{PublicKey, SecretKey, SignedMessage};
     
-    pub const DILITHIUM_PUBLIC_KEY_BYTES: usize = mldsa65::public_key_bytes();
-    pub const DILITHIUM_SECRET_KEY_BYTES: usize = mldsa65::secret_key_bytes();
+    // DILITHIUM_PUBLIC_KEY_BYTES/DILITHIUM_SECRET_KEY_BYTES removed: they lived
+    // in this private inner module (not re-exported from dilithium.rs), so
+    // they were unreachable from outside pqc-shims and unused inside it.
     pub const DILITHIUM_SIGNATURE_BYTES: usize = mldsa65::signature_bytes();
     
     /// Generates a real ML-DSA-65 keypair.
@@ -100,9 +101,11 @@ mod native_impl {
 
     // ── ML-DSA-87 (Dilithium5 / NIST Level 5) — V3 account-domain ──────────
 
-    pub const MLDSA87_PUBLIC_KEY_BYTES: usize = mldsa87::public_key_bytes();
-    pub const MLDSA87_SECRET_KEY_BYTES: usize = mldsa87::secret_key_bytes();
-    pub const MLDSA87_SIGNATURE_BYTES: usize = mldsa87::signature_bytes();
+    // MLDSA87_PUBLIC_KEY_BYTES/MLDSA87_SECRET_KEY_BYTES/MLDSA87_SIGNATURE_BYTES
+    // all removed: same reason as the ML-DSA-65 pair above (unreachable from
+    // outside pqc-shims since native_impl is private and not re-exported,
+    // and unused within it -- unlike DILITHIUM_SIGNATURE_BYTES which a test
+    // does reference).
 
     /// Generates a real ML-DSA-87 keypair (V3 account-domain).
     pub fn keygen_87() -> (Vec<u8>, Vec<u8>) {

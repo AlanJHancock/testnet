@@ -11,7 +11,7 @@
 //
 // The analyzer produces an AnalysisReport with warnings and errors.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use super::types::*;
 use super::instructions::*;
 use super::blocks::*;

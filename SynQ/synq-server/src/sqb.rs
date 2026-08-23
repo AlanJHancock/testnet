@@ -212,10 +212,6 @@ impl SqbSection {
         buf
     }
 
-    /// Size of this section when serialized.
-    pub fn serialized_size(&self) -> usize {
-        SECTION_PREFIX_SIZE + self.data.len() + HASH_SIZE
-    }
 }
 
 // ── Errors (ACTS-VM-003: reject malformed) ───────────────────────────────────
@@ -232,8 +228,11 @@ pub enum SqbError {
     HashMismatch { section_type: u8, expected: [u8; 32], actual: [u8; 32] },
     RootHashMismatch { expected: [u8; 32], actual: [u8; 32] },
     TrailingBytes(usize),
-    SignatureInvalid,
-    SignatureMissing,
+    // NOTE: signature *validity* is checked downstream in main.rs's Layer 3
+    // (ML-DSA-87 manifest verification -> Layer3Result), not here -- decode()
+    // only extracts the raw signature bytes. SignatureInvalid/SignatureMissing
+    // variants that anticipated verifying in this module were never wired up
+    // and have been removed as dead code.
 }
 
 impl std::fmt::Display for SqbError {
@@ -251,8 +250,6 @@ impl std::fmt::Display for SqbError {
             Self::RootHashMismatch { .. } =>
                 write!(f, "SQB: artifact root hash mismatch — artifact is corrupt or tampered"),
             Self::TrailingBytes(n)   => write!(f, "SQB: {n} trailing bytes after signature (malformed)"),
-            Self::SignatureInvalid   => write!(f, "SQB: ML-DSA-87 signature invalid"),
-            Self::SignatureMissing   => write!(f, "SQB: signature expected but not present"),
         }
     }
 }
@@ -434,11 +431,21 @@ impl SqbArtifact {
             .and_then(|s| std::str::from_utf8(&s.data).ok())
     }
 
-    /// Get ABI section data as UTF-8 (convenience).
+    /// Get ABI section data as UTF-8 (convenience). Was missing entirely --
+    /// the builder side (SqbArtifactBuilder::abi()) and SectionType::Abi
+    /// existed, but no decode-side getter had ever been added, alongside
+    /// the same-shaped manifest_json()/code()/source_text() accessors.
+    /// Currently only exercised by the round-trip test below (no endpoint
+    /// needs the ABI back out of a decoded SQB yet, unlike manifest_json()
+    /// which /session/new uses for L3 signature checks) -- allow(dead_code)
+    /// so a plain (non-test) build doesn't warn on this intentional,
+    /// symmetric API surface method.
+    #[allow(dead_code)]
     pub fn abi_json(&self) -> Option<&str> {
         self.get(SectionType::Abi)
             .and_then(|s| std::str::from_utf8(&s.data).ok())
     }
+
 }
 
 /// Decode an SQB binary artifact (ACTS-VM-003: reject malformed/truncated).
@@ -495,12 +502,12 @@ pub fn decode(buf: &[u8]) -> Result<SqbArtifact, SqbError> {
             .try_into().unwrap();
 
         // ACTS-VM-009: verify per-section hash integrity.
-        let computed_hash = Sha3_256::digest(data);
-        if computed_hash.as_slice() != stored_hash {
+        let computed_hash: [u8; HASH_SIZE] = Sha3_256::digest(data).into();
+        if computed_hash != stored_hash {
             return Err(SqbError::HashMismatch {
                 section_type: section_type_raw,
                 expected: stored_hash,
-                actual: computed_hash.into(),
+                actual: computed_hash,
             });
         }
 
@@ -527,15 +534,15 @@ pub fn decode(buf: &[u8]) -> Result<SqbArtifact, SqbError> {
     for s in &sections {
         hash_concat.extend_from_slice(&s.hash);
     }
-    let computed_root = Sha3_256::digest(&hash_concat);
+    let computed_root: [u8; HASH_SIZE] = Sha3_256::digest(&hash_concat).into();
 
     // ACTS-VM-010: zeroize intermediate buffer.
     for b in hash_concat.iter_mut() { *b = 0; }
 
-    if computed_root.as_slice() != stored_root {
+    if computed_root != stored_root {
         return Err(SqbError::RootHashMismatch {
             expected: stored_root,
-            actual: computed_root.into(),
+            actual: computed_root,
         });
     }
 

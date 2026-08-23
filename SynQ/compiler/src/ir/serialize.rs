@@ -47,7 +47,7 @@
 // Note: dom_tree is NOT serialized — it's recomputed from the CFG on load.
 
 use std::collections::HashMap;
-use std::io::{self, Read, Write};
+use std::io;
 
 use crate::ast::{
     Literal, BinaryOperator, UnaryOperator, SetOpKind,
@@ -123,13 +123,6 @@ impl Writer {
     fn bytes(&mut self, b: &[u8]) {
         self.u32(b.len() as u32);
         self.buf.extend_from_slice(b);
-    }
-
-    fn opt_str(&mut self, s: &Option<String>) {
-        match s {
-            None => self.u8(0),
-            Some(s) => { self.u8(1); self.str(s); }
-        }
     }
 
     fn opt_type(&mut self, t: &Option<IrType>) {
@@ -277,7 +270,15 @@ impl Writer {
             IrOp::Store(name, v) => { self.u8(0x05); self.str(name); self.u32(*v); }
             IrOp::Caller => self.u8(0x06),
             IrOp::CallSender => self.u8(0x07),
-            IrOp::LoadAuthority => self.u8(0x07),
+            // NOTE: was self.u8(0x07) -- collided with CallSender above.
+            // Real bug: encoder wrote LoadAuthority with the SAME tag as
+            // CallSender, so decode() could never distinguish them (it
+            // always resolved 0x07 to CallSender per match-arm order,
+            // silently corrupting any serialized/deserialized LoadAuthority
+            // instruction -- security-relevant since LoadAuthority backs
+            // @authority/@governance checks). Fixed by giving it a unique
+            // tag in the unused 0x39-0x3B range.
+            IrOp::LoadAuthority => self.u8(0x39),
             IrOp::AuthIdentity(a) => { self.u8(0x08); self.u32(*a); }
             IrOp::AuthRequire(env, scope) => { self.u8(0x09); self.u32(*env); self.str(scope); }
             IrOp::Call(name, args) => {
@@ -294,13 +295,18 @@ impl Writer {
             IrOp::MapSet(name, k, v) => { self.u8(0x0D); self.str(name); self.u32(*k); self.u32(*v); }
             IrOp::MapGetVal(map, key) => { self.u8(0x0E); self.u32(*map); self.u32(*key); }
             IrOp::MapSetVal(map, k, v) => { self.u8(0x0F); self.u32(*map); self.u32(*k); self.u32(*v); }
+            // NOTE: MapMethod/SetMethod previously reused 0x0E/0x0F, the
+            // same tags as MapGetVal/MapSetVal above -- same class of bug
+            // as LoadAuthority/CallSender: decode() could never produce a
+            // MapMethod or SetMethod, only MapGetVal/MapSetVal. Fixed with
+            // unique tags in the unused 0x39-0x3B range.
             IrOp::MapMethod(name, method, args) => {
-                self.u8(0x0E); self.str(name); self.str(method);
+                self.u8(0x3A); self.str(name); self.str(method);
                 self.u32(args.len() as u32);
                 for a in args { self.u32(*a); }
             }
             IrOp::SetMethod(name, method, args) => {
-                self.u8(0x0F); self.str(name); self.str(method);
+                self.u8(0x3B); self.str(name); self.str(method);
                 self.u32(args.len() as u32);
                 for a in args { self.u32(*a); }
             }
@@ -744,7 +750,7 @@ impl<'a> Reader<'a> {
             0x05 => { let name = self.str()?; let v = self.u32()?; Ok(IrOp::Store(name, v)) }
             0x06 => Ok(IrOp::Caller),
             0x07 => Ok(IrOp::CallSender),
-            0x07 => Ok(IrOp::LoadAuthority),
+            0x39 => Ok(IrOp::LoadAuthority),
             0x08 => { let a = self.u32()?; Ok(IrOp::AuthIdentity(a)) }
             0x09 => { let env = self.u32()?; let scope = self.str()?; Ok(IrOp::AuthRequire(env, scope)) }
             0x0A => {
@@ -765,14 +771,14 @@ impl<'a> Reader<'a> {
             0x0D => { let name = self.str()?; let k = self.u32()?; let v = self.u32()?; Ok(IrOp::MapSet(name, k, v)) }
             0x0E => { let map = self.u32()?; let key = self.u32()?; Ok(IrOp::MapGetVal(map, key)) }
             0x0F => { let map = self.u32()?; let k = self.u32()?; let v = self.u32()?; Ok(IrOp::MapSetVal(map, k, v)) }
-            0x0E => {
+            0x3A => {
                 let name = self.str()?; let method = self.str()?;
                 let count = self.u32()? as usize;
                 let mut args = Vec::with_capacity(count);
                 for _ in 0..count { args.push(self.u32()?); }
                 Ok(IrOp::MapMethod(name, method, args))
             }
-            0x0F => {
+            0x3B => {
                 let name = self.str()?; let method = self.str()?;
                 let count = self.u32()? as usize;
                 let mut args = Vec::with_capacity(count);

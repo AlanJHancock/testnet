@@ -41,7 +41,6 @@ struct Instruction {
 #[derive(Debug, Clone)]
 struct BasicBlock {
     start:      usize,
-    end:        usize, // exclusive — offset of next block or code_end
     successors: Vec<usize>, // start offsets of successor blocks
     /// Entry stack depth: None = unknown (after dynamic opcode or Call return).
     entry_depth: Option<i32>,
@@ -172,6 +171,7 @@ fn is_block_terminator(op: OpCode) -> bool {
 fn parse_instructions(code: &[u8]) -> Result<Vec<Instruction>, VMError> {
     let mut instructions = Vec::new();
     let mut pc = 0usize;
+    #[allow(unused_assignments)]
     let mut cur_op_name = String::new();
 
     macro_rules! need {
@@ -392,46 +392,11 @@ pub fn verify_with_options(bytecode: &[u8], run_stack_safety: bool) -> Result<Ve
 
 // ── Layer 2: Stack safety analysis ──────────────────────────────────────
 
-/// Build the control flow graph from the instruction list.
-fn build_cfg(instructions: &[Instruction], code_len: usize) -> Vec<BasicBlock> {
-    // Identify block boundaries
-    let mut block_starts: HashSet<usize> = HashSet::new();
-    block_starts.insert(instructions[0].offset); // entry
-
-    for (i, inst) in instructions.iter().enumerate() {
-        if is_block_terminator(inst.opcode) {
-            // Next instruction starts a new block (if it exists)
-            if i + 1 < instructions.len() {
-                block_starts.insert(instructions[i + 1].offset);
-            }
-        }
-        // Jump/JumpIf/Call targets also start blocks
-        match inst.opcode {
-            OpCode::Jump | OpCode::JumpIf | OpCode::Call => {
-                let target_pos = inst.offset + 1;
-                if target_pos + 4 <= code_len {
-                    let target = u32::from_le_bytes([
-                        code_len as u8, 0, 0, 0, // placeholder — we'll use the actual code slice
-                    ]);
-                    // We need the actual code bytes... pass them in.
-                    // Actually, let's just look at the instruction list for targets.
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // We need the code bytes to read jump targets. Let me restructure.
-    // Instead, let's read targets from the instruction list directly.
-    // Each Jump/JumpIf/Call instruction's target is at offset+1 in the code.
-    // But we don't have the code here. Let me pass it in.
-
-    // This function signature needs the code bytes.
-    // Let me refactor: build_cfg takes code bytes too.
-    todo!("refactored below")
-}
-
 /// Build the CFG using the code bytes to read jump targets.
+/// (An earlier `build_cfg(instructions, code_len)` variant without access to
+/// the raw code bytes was abandoned mid-implementation — it could not read
+/// jump targets and ended in `todo!()`. It's been removed; this is the only
+/// CFG builder now, and it's the one every caller already uses.)
 fn build_cfg_from_code(instructions: &[Instruction], code: &[u8]) -> Vec<BasicBlock> {
     let code_len = code.len();
 
@@ -526,7 +491,6 @@ fn build_cfg_from_code(instructions: &[Instruction], code: &[u8]) -> Vec<BasicBl
 
         blocks.push(BasicBlock {
             start,
-            end,
             successors,
             entry_depth: None,
             instructions: block_insts,

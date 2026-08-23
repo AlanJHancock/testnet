@@ -44,7 +44,7 @@ pub fn decompile(module: &IrModule) -> String {
 
     if !module.struct_defs.is_empty() {
         let mut sorted: Vec<_> = module.struct_defs.iter().collect();
-        sorted.sort_by_key(|(k, _)| k.clone());
+        sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
         writeln!(out, "  // ── Struct Definitions ──").unwrap();
         for (name, def) in sorted {
             writeln!(out, "  struct {} {{", name).unwrap();
@@ -58,7 +58,7 @@ pub fn decompile(module: &IrModule) -> String {
 
     if !module.enum_defs.is_empty() {
         let mut sorted: Vec<_> = module.enum_defs.iter().collect();
-        sorted.sort_by_key(|(k, _)| k.clone());
+        sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
         writeln!(out, "  // ── Enum Definitions ──").unwrap();
         for (name, def) in sorted {
             writeln!(out, "  enum {} {{", name).unwrap();

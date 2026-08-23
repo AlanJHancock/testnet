@@ -55,7 +55,6 @@ pub enum Value {
 }
 
 /// Coerce any Value to a stable byte key for map/set indexing.
-fn hex_encode(b: &[u8]) -> String { b.iter().map(|x| format!("{:02x}", x)).collect() }
 
 fn value_to_key(v: &Value) -> Result<Vec<u8>, VMError> {
     // All key types normalised to 32-byte big-endian so that
@@ -150,16 +149,6 @@ impl Value {
                 }
             }
             _ => Err(VMError::RuntimeError(format!("Cannot coerce {:?} to UInt256", self))),
-        }
-    }
-
-    fn as_i64(&self) -> Result<i64, VMError> {
-        match self {
-            Value::I32(v)  => Ok(*v as i64),
-            Value::I64(v)  => Ok(*v),
-            Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
-            Value::U128(v) if *v <= i64::MAX as u128 => Ok(*v as i64),
-            _ => Err(VMError::RuntimeError(format!("Cannot coerce {:?} to i64", self))),
         }
     }
 

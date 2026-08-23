@@ -55,19 +55,6 @@ impl<'a> FuncBody<'a> {
             FuncBody::Function(f) => &f.body,
         }
     }
-    fn name(&self) -> &str {
-        match self {
-            FuncBody::Constructor(_) => "init",
-            FuncBody::Function(f) => &f.name,
-        }
-    }
-    fn is_public(&self) -> bool {
-        match self {
-            FuncBody::Constructor(_) => true,
-            // @public OR `as caller` — both are externally callable
-            FuncBody::Function(f) => f.is_public || f.requires_caller,
-        }
-    }
 }
 
 /// Compile a SynQ contract AST to AIVM instructions
@@ -153,6 +140,14 @@ pub fn compile_to_aivm(contract: &ContractDefinition, structs: &[StructDefinitio
         .map(|(i, f)| (f.name.clone(), i as u32))
         .collect();
 
+    // 3b. Build event name -> index map for Emit resolution. Index must match
+    // the order events are listed in build_abi() below (contract.event_defs
+    // iteration order) so EMIT(idx) lines up with the ABI's event list.
+    let event_name_map: Vec<(String, u32)> = contract.event_defs.iter()
+        .enumerate()
+        .map(|(i, e)| (e.name.clone(), i as u32))
+        .collect();
+
     // 4. Generate instructions for each function
     let mut all_instructions: Vec<Instruction> = Vec::new();
 
@@ -170,9 +165,9 @@ pub fn compile_to_aivm(contract: &ContractDefinition, structs: &[StructDefinitio
             local_map: std::collections::HashMap::new(),
             local_types: HashMap::new(),
             next_local: 0,
-            func_index: fidx as u32,
             warnings: &mut warnings,
             func_name_map: &func_name_map,
+            event_name_map: &event_name_map,
             loop_stack: Vec::new(),
         };
 
@@ -191,23 +186,6 @@ pub fn compile_to_aivm(contract: &ContractDefinition, structs: &[StructDefinitio
         // Ensure RET at end
         if all_instructions.last() != Some(&Instruction::Ret) {
             all_instructions.push(Instruction::Ret);
-        }
-    }
-
-    // 4. Resolve function call indices (second pass)
-    // Build name → index map
-    let func_name_to_index: std::collections::HashMap<String, u32> = functions.iter()
-        .enumerate()
-        .map(|(i, f)| (f.name.clone(), i as u32))
-        .collect();
-
-    for instr in &mut all_instructions {
-        if let Instruction::Call(idx) = instr {
-            if *idx == 0 && false {
-                // This was a placeholder — but we don't have the name here
-                // Actually, we stored the name in warnings during first pass
-                // This needs a different approach — see below
-            }
         }
     }
 
@@ -264,9 +242,9 @@ struct CodegenContext<'a> {
     local_map: std::collections::HashMap<String, u16>,
     local_types: HashMap<String, Type>,
     next_local: u16,
-    func_index: u32,
     warnings: &'a mut Vec<String>,
     func_name_map: &'a [(String, u32)],
+    event_name_map: &'a [(String, u32)],
     /// Stack of enclosing while-loops -- (loop_start index, pending Jmp
     /// instruction indices from `break` that need to be patched to the
     /// loop's end once it's known).
@@ -282,6 +260,12 @@ impl<'a> CodegenContext<'a> {
 
     fn func_index(&self, name: &str) -> Option<u32> {
         self.func_name_map.iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, idx)| *idx)
+    }
+
+    fn event_index(&self, name: &str) -> Option<u32> {
+        self.event_name_map.iter()
             .find(|(n, _)| *n == name)
             .map(|(_, idx)| *idx)
     }
@@ -459,7 +443,13 @@ impl<'a> CodegenContext<'a> {
                 } else {
                     self.emit(Instruction::PushU64(0));
                 }
-                self.emit(Instruction::Emit(0));
+                match self.event_index(event) {
+                    Some(idx) => self.emit(Instruction::Emit(idx as u16)),
+                    None => {
+                        self.warnings.push(format!("Emit of unknown event: {}", event));
+                        self.emit(Instruction::Emit(0));
+                    }
+                }
             }
             Statement::If { condition, then_block, else_block } => {
                 // BUG FIX (2026-08-20): Instruction::JmpIf jumps to its
@@ -895,8 +885,12 @@ fn type_to_abi(ty: &Type) -> AbiType {
         Type::UInt256 => AbiType::U128,
         Type::Int32 => AbiType::I32,
         Type::Int64 => AbiType::I64,
-        Type::Bytes | Type::BytesN(_) => AbiType::Bytes,
+        // Hash32/BytesN(32) must be checked before the general BytesN(_) catch-all
+        // below, otherwise 32-byte values always match the generic Bytes arm and
+        // this arm becomes unreachable dead code (same class of bug already
+        // fixed once in the primary IR-backend ABI mapper).
         Type::Hash32 | Type::BytesN(32) => AbiType::Bytes32,
+        Type::Bytes | Type::BytesN(_) => AbiType::Bytes,
         Type::Address => AbiType::Address,
         Type::Str => AbiType::String,
         Type::Array(inner) => AbiType::Array(Box::new(type_to_abi(inner))),

@@ -184,7 +184,6 @@ impl Instruction {
             IrOp::BinOp(_, a, b) => vec![*a, *b],
             IrOp::UnaryOp(_, a) => vec![*a],
             IrOp::AuthIdentity(a) => vec![*a],
-            IrOp::UnaryOp(_, a) => vec![*a],
             IrOp::AuthRequire(env, _) => vec![*env],
             IrOp::Call(_, args) | IrOp::AegisCall(args) | IrOp::AegisVerify(args) | IrOp::AegisDecaps(args) => args.clone(),
             IrOp::ExternCall(_, _, args) => args.clone(),
@@ -215,8 +214,8 @@ impl Instruction {
             IrOp::Branch(cond, _, _) => vec![*cond],
             IrOp::AssetCreate(_, v) => vec![*v],
             IrOp::ContractAddr(a, b, c) => vec![*a, *b, *c],
-            // Fallback: no inputs
-            _ => vec![],
+            // No catch-all needed: every IrOp variant is matched explicitly
+            // above (a trailing `_ => vec![]` was unreachable dead code).
         }
     }
 

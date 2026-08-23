@@ -243,7 +243,6 @@ fn rename_block_recursive(
 
     // 2. Process instructions in order — record substitutions for Loads,
     //    push new definitions for Stores.
-    let inst_count = func.blocks[block_id as usize].insts.len();
     let insts_info: Vec<(usize, IrOp)> = func.blocks[block_id as usize].insts.iter()
         .enumerate()
         .map(|(i, inst)| (i, inst.op.clone()))
@@ -409,7 +408,7 @@ pub fn validate_ssa(func: &IrFunction) -> Vec<String> {
     }
 
     // Check: every reachable block is terminated
-    for (i, block) in func.blocks.iter().enumerate() {
+    for block in func.blocks.iter() {
         if !block.insts.is_empty() && !block.is_terminated() {
             // Could be an unreachable block — only flag if it has predecessors
             if !block.preds.is_empty() {
@@ -666,7 +665,8 @@ fn fold_binary(op: &crate::ast::BinaryOperator, lhs: &crate::ast::Literal, rhs: 
         BinaryOperator::Ge => Some(Literal::Bool(l >= r)),
         BinaryOperator::And => Some(Literal::Bool(l != 0 && r != 0)),
         BinaryOperator::Or => Some(Literal::Bool(l != 0 || r != 0)),
-        _ => None,
+        // No catch-all: BinaryOperator's variants are all covered above, so
+        // a trailing `_ => None` was unreachable dead code.
     }
 }
 
@@ -694,7 +694,7 @@ pub fn copy_propagation(func: &mut IrFunction) -> usize {
     let mut propagated = 0;
 
     // Build copy map: ValueId -> canonical source ValueId
-    let mut copy_map: HashMap<ValueId, ValueId> = HashMap::new();
+    let copy_map: HashMap<ValueId, ValueId> = HashMap::new();
 
     // Resolve a value through the copy chain
     let resolve = |map: &HashMap<ValueId, ValueId>, v: ValueId| -> ValueId {

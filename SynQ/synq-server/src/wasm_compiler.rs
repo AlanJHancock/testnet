@@ -5,7 +5,6 @@
 use wasmtime::*;
 use std::net::SocketAddr;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 /// Default fuel cap per compilation request. ~10M fuel units is generous
 /// enough for any realistic SynQ contract but prevents runaway loops or
@@ -128,8 +127,6 @@ impl WasmRuntime {
         Ok(result)
     }
 
-    /// Get the configured fuel limit
-    pub fn fuel_limit(&self) -> u64 { self.fuel_limit }
 }
 
 // POST /compile-wasm — compile via server-side wasmtime execution with fuel metering

@@ -10,9 +10,13 @@ mod native_impl {
     use pqcrypto::kem::mceliece348864;
     use pqcrypto_traits::kem::{PublicKey, SecretKey, Ciphertext, SharedSecret};
     
+    // Only referenced from #[cfg(test)] assertions below -- allow(dead_code)
+    // avoids a false "unused" warning on plain `cargo build`.
     /// mceliece348864 public key size in bytes
+    #[allow(dead_code)]
     pub const MCELIECE_PUBLIC_KEY_BYTES: usize = 261120;
     /// mceliece348864 secret key size in bytes
+    #[allow(dead_code)]
     pub const MCELIECE_SECRET_KEY_BYTES: usize = 6492;
     /// mceliece348864 ciphertext size in bytes
     pub const MCELIECE_CIPHERTEXT_BYTES: usize = 96;

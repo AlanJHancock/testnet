@@ -10,8 +10,8 @@ mod native_impl {
     use pqcrypto_falcon::falcon512;
     use pqcrypto_traits::sign::{PublicKey, SecretKey, SignedMessage};
     
-    pub const FALCON_PUBLIC_KEY_BYTES: usize = falcon512::public_key_bytes();
-    pub const FALCON_SECRET_KEY_BYTES: usize = falcon512::secret_key_bytes();
+    // FALCON_PUBLIC_KEY_BYTES/FALCON_SECRET_KEY_BYTES removed: unreachable
+    // (native_impl is private, not re-exported) and unused within the module.
     pub const FALCON_SIGNATURE_BYTES: usize = falcon512::signature_bytes();
     
     /// Generates a real Falcon-512 keypair.

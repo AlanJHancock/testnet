@@ -219,7 +219,7 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                     Statement::Emit { args, .. } => args.iter().collect(),
                     Statement::RevertNamed { args, .. } => args.iter().collect(),
                     Statement::RevertEnum { args, .. } => args.iter().collect(),
-                    Statement::If { condition, then_block, else_block: _ } => vec![condition],
+                    Statement::If { condition, then_block: _, else_block: _ } => vec![condition],
                     Statement::Let { value, .. } => vec![value],
                     Statement::LetDestructure { value, .. } => vec![value.as_ref()],
                     Statement::MapAssignment { keys, value, .. } => { let mut v: Vec<&Expression> = keys.iter().collect(); v.push(value); v },

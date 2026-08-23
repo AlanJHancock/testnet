@@ -132,25 +132,23 @@ fn parse_struct(pair: Pair<Rule>) -> StructDefinition {
     let mut inner = pair.into_inner();
     // The first inner pair may be attribute_list (if present) or IDENT (if not).
     // We need to save attribute_list for processing in the loop below.
-    let mut saved_attr_list: Option<Pair<Rule>> = None;
-    let mut visibility_kw: Option<String> = None;
+    // attribute_list / visibility_keyword (if present) are only used to skip
+    // past them to reach the IDENT below -- neither struct nor contract
+    // definitions currently carry attribute/visibility info in the AST.
     let name = {
         let first = inner.next().unwrap();
         match first.as_rule() {
             Rule::attribute_list => {
-                saved_attr_list = Some(first);
                 // After attributes, we might have visibility_keyword or IDENT
                 let second = inner.next().unwrap();
                 match second.as_rule() {
                     Rule::visibility_keyword => {
-                        visibility_kw = Some(second.as_str().to_string());
                         inner.next().unwrap().as_str().to_string() // IDENT
                     }
                     _ => second.as_str().to_string()
                 }
             }
             Rule::visibility_keyword => {
-                visibility_kw = Some(first.as_str().to_string());
                 inner.next().unwrap().as_str().to_string() // IDENT
             }
             _ => first.as_str().to_string()
@@ -199,25 +197,23 @@ fn parse_contract(pair: Pair<Rule>) -> Result<ContractDefinition, String> {
     let mut inner = pair.into_inner();
     // The first inner pair may be attribute_list (if present) or IDENT (if not).
     // We need to save attribute_list for processing in the loop below.
-    let mut saved_attr_list: Option<Pair<Rule>> = None;
-    let mut visibility_kw: Option<String> = None;
+    // attribute_list / visibility_keyword (if present) are only used to skip
+    // past them to reach the IDENT below -- neither struct nor contract
+    // definitions currently carry attribute/visibility info in the AST.
     let name = {
         let first = inner.next().unwrap();
         match first.as_rule() {
             Rule::attribute_list => {
-                saved_attr_list = Some(first);
                 // After attributes, we might have visibility_keyword or IDENT
                 let second = inner.next().unwrap();
                 match second.as_rule() {
                     Rule::visibility_keyword => {
-                        visibility_kw = Some(second.as_str().to_string());
                         inner.next().unwrap().as_str().to_string() // IDENT
                     }
                     _ => second.as_str().to_string()
                 }
             }
             Rule::visibility_keyword => {
-                visibility_kw = Some(first.as_str().to_string());
                 inner.next().unwrap().as_str().to_string() // IDENT
             }
             _ => first.as_str().to_string()
@@ -976,10 +972,6 @@ fn parse_type(pair: Pair<Rule>) -> Type {
                 "Height" => Type::Height,
                 _ => Type::Named(pair.as_str().to_string()),
             }
-        }
-        Rule::set_type => {
-            let inner = pair.into_inner().next().unwrap();
-            Type::Array(Box::new(parse_type(inner)))
         }
         Rule::array_type => {
             let inner = pair.into_inner().next().unwrap();

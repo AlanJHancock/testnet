@@ -42,16 +42,15 @@
 
 use axum::{
     extract::{ConnectInfo, Json, Path, State},
-    http::{Method, StatusCode, HeaderValue},
+    http::{Method, StatusCode},
     response::Json as RespJson,
     routing::{delete, get, post},
     Router,
 };
-use dashmap::DashMap;
 use governor::{
     clock::DefaultClock,
     middleware::NoOpMiddleware,
-    state::{InMemoryState, NotKeyed},
+    state::InMemoryState,
     Quota, RateLimiter,
 };
 use std::net::{IpAddr, SocketAddr};
@@ -223,7 +222,12 @@ struct SessionGrant {
     display_tsynq: Option<String>,
     allowed_functions: std::collections::HashSet<String>,
     expiry: u64,
-    grant_nonce: String,
+    // NOTE: replay protection for the nonce that created this grant is
+    // enforced at creation time via session.used_nonces (see
+    // session_grant_handler) -- it doesn't need to be re-checked when the
+    // grant is later consumed in session_run_handler, so it isn't stored
+    // here. A `grant_nonce` field used to be kept for audit purposes but was
+    // never read back; removed as dead code.
 }
 
 fn eip712_hash_session_grant_v3(
@@ -541,25 +545,9 @@ fn eip712_hash_bytecode_attestation(bytecode_hash: &[u8; 32], issued_at: u64) ->
     keccak256(&enc)
 }
 
-/// hashStruct(ContractCall)
-/// struct ContractCall { string callSignature; string sessionId; string nonce; }
-///
-/// callSignature = "functionName(arg0, arg1, ...)" -- e.g. "init(1000)" or "burn(500)".
-/// Displayed verbatim in the wallet signing card so the user can verify exactly
-/// which function and arguments they are authorising before signing.
-fn eip712_hash_contract_call(call_sig: &str, session_id: &str, nonce: &str) -> [u8; 32] {
-    let type_hash = keccak256_str(
-        "ContractCall(string callSignature,string sessionId,string nonce)"
-    );
-    let mut enc = [0u8; 128];
-    enc[..32].copy_from_slice(&type_hash);
-    enc[32..64].copy_from_slice(&keccak256_str(call_sig));
-    enc[64..96].copy_from_slice(&keccak256_str(session_id));
-    enc[96..128].copy_from_slice(&keccak256_str(nonce));
-    keccak256(&enc)
-}
-
 /// V3 ContractCall struct hash with domain tag for cross-domain replay resistance.
+/// (Pre-V3 eip712_hash_contract_call without a domain tag has been removed --
+/// every call site now uses this V3 version, per the SYNQ-CALL-v3 domain.)
 /// struct ContractCall(string callSignature, string sessionId, string nonce, string domainTag)
 /// domainTag = "SYNQ-CALL-v3" — binds the signature to the V3 call domain.
 fn eip712_hash_contract_call_v3(call_sig: &str, session_id: &str, nonce: &str, domain_tag: &str) -> [u8; 32] {
@@ -649,16 +637,6 @@ fn ecrecover(hash: &[u8; 32], sig65: &[u8]) -> Result<[u8; 20], String> {
     let mut addr = [0u8; 20];
     addr.copy_from_slice(&addr_hash[12..]);
     Ok(addr)
-}
-
-fn recover_evm_signer_from_str(message: &str, signature: &[u8]) -> Result<[u8; 20], String> {
-    let message_bytes = message.as_bytes();
-    let mut prefixed = Vec::with_capacity(30 + message_bytes.len());
-    prefixed.extend_from_slice(b"\x19Ethereum Signed Message:\n");
-    prefixed.extend_from_slice(message_bytes.len().to_string().as_bytes());
-    prefixed.extend_from_slice(message_bytes);
-    let prefixed_hash: [u8; 32] = keccak256(&prefixed);
-    ecrecover(&prefixed_hash, signature)
 }
 
 /// Build the SynQAttestationV1 canonical payload (PR-D Item 4).
@@ -754,7 +732,6 @@ fn value_display(v: &Value) -> String {
     }
 }
 
-fn parse_arg(v: &serde_json::Value) -> Result<Value, String> { parse_arg_typed(v, "") }
 fn parse_arg_typed(v: &serde_json::Value, ty_hint: &str) -> Result<Value, String> {
     match v {
         serde_json::Value::Number(n) => {
@@ -1379,7 +1356,7 @@ async fn compile_handler(
     // Clone values needed by the SQB encoder (they get moved into CompileResponse fields)
     let sqb_functions = functions.clone();
     let sqb_state_vars = state_vars.clone();
-    let sqb_ir_dump = ir_dump.clone();
+    let _sqb_ir_dump = ir_dump.clone();
     let sqb_bytecode = bytecode.clone();
     let sqb_source = req.source.clone();
 
@@ -2003,7 +1980,7 @@ solc_version = "0.8.20"
 
     match output {
         Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
+            let _stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
 
             if out.status.success() {
@@ -2025,6 +2002,21 @@ solc_version = "0.8.20"
                             for sol_entry in sol_entries.flatten() {
                                 let json_path = sol_entry.path();
                                 if json_path.extension().map(|e| e == "json").unwrap_or(false) {
+                                    // If the caller told us which contract they care about,
+                                    // only accept the artifact whose filename stem matches it
+                                    // exactly (e.g. Token.json). Foundry can emit multiple
+                                    // artifacts from a single .sol file (interfaces, imported
+                                    // libraries, helper contracts) and directory iteration
+                                    // order is not guaranteed — without this filter we could
+                                    // silently return an unrelated contract's bytecode from
+                                    // an "audit-grade" verification call.
+                                    if let Some(name) = &req.contract_name {
+                                        let stem_matches = json_path.file_stem()
+                                            .and_then(|s| s.to_str())
+                                            .map(|s| s == name.as_str())
+                                            .unwrap_or(false);
+                                        if !stem_matches { continue; }
+                                    }
                                     if let Ok(json_str) = fs::read_to_string(&json_path) {
                                         if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&json_str) {
                                             if let Some(bc) = json_val
@@ -3211,7 +3203,7 @@ async fn evm_call_handler(
                         // Extract revert reason from cast error
                         if let Some(pos) = call_err.find("revert: ") {
                             Some(call_err[pos..].lines().next().unwrap_or("").to_string())
-                        } else if let Some(pos) = call_err.find("execution reverted") {
+                        } else if let Some(_pos) = call_err.find("execution reverted") {
                             Some("execution reverted".to_string())
                         } else if !call_err.is_empty() {
                             Some(call_err.lines().last().unwrap_or(&call_err).to_string())
@@ -3289,7 +3281,7 @@ async fn diff_test_handler(
     use std::process::Command;
     use std::fs;
 
-    if let Err(wait) = check_rate_limit(&state.rate_limiter, addr.ip()) {
+    if let Err(_wait) = check_rate_limit(&state.rate_limiter, addr.ip()) {
         return (StatusCode::TOO_MANY_REQUESTS, RespJson(DiffTestResponse {
             total: 0, passed: 0, failed: 0, results: vec![], forge_version: None,
         }));
@@ -4068,7 +4060,7 @@ async fn attest_handler(
     // EIP-712 verification for /attest
     // Step 1: compute bytecode keccak256 server-side
     let bytecode_hash: [u8; 32] = keccak256(&raw_bytecode);
-    let bytecode_hash_hex = format!("0x{}", hex_encode(&bytecode_hash));
+    let _bytecode_hash_hex = format!("0x{}", hex_encode(&bytecode_hash));
 
     // Step 2: reconstruct EIP-712 digest
     //   struct BytecodeAttestation { bytes32 bytecodeHash; address signer; uint256 issuedAt; }
@@ -4803,7 +4795,7 @@ async fn session_new_handler(
         let sig_ok = if let Some(ref sig) = artifact.signature {
             // Verify ML-DSA-87 signature over artifact root
             match state.compiler_key.as_ref() {
-                CompilerKey::Persistent { public_key, .. } => {
+                CompilerKey::Persistent {  .. } => {
                     // For SQB with embedded signature, we verify against the
                     // manifest's compiler_public_key if available
                     if let Some(manifest_str) = artifact.manifest_json() {
@@ -5296,7 +5288,6 @@ async fn session_grant_handler(
         display_tsynq: req.display_tsynq.clone(),
         allowed_functions: allowed_set,
         expiry: req.expiry,
-        grant_nonce: req.grant_nonce,
     });
 
     { state.sessions.lock().unwrap().insert(session_id.clone(), session); }
@@ -6029,7 +6020,7 @@ async fn bench_compile_handler(
     use std::time::Instant;
 
     let t0 = Instant::now();
-    let ast = match synq_compiler::parser::parse(&req.source) {
+    let _ast = match synq_compiler::parser::parse(&req.source) {
         Ok(a)  => a,
         Err(e) => return RespJson(BenchCompileResponse {
             success: false, parse_ns: t0.elapsed().as_nanos() as u64,

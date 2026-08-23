@@ -28,8 +28,13 @@ mod native_impl {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     
     /// hqc128 public key size in bytes
+    // Only referenced from #[cfg(test)] assertions below -- allow(dead_code)
+    // avoids a false "unused" warning on plain `cargo build` (tests aren't
+    // compiled then), without deleting a constant the test suite relies on.
+    #[allow(dead_code)]
     pub const HQC_PUBLIC_KEY_BYTES: usize = 2249;
     /// hqc128 secret key size in bytes
+    #[allow(dead_code)]
     pub const HQC_SECRET_KEY_BYTES: usize = 2305;
     /// hqc128 ciphertext size in bytes
     pub const HQC_CIPHERTEXT_BYTES: usize = 4433;

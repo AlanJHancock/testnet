@@ -10,8 +10,8 @@ mod native_impl {
     use pqcrypto_sphincsplus::sphincsshake128ssimple;
     use pqcrypto_traits::sign::{PublicKey, SecretKey, SignedMessage};
     
-    pub const SPHINCS_PUBLIC_KEY_BYTES: usize = sphincsshake128ssimple::public_key_bytes();
-    pub const SPHINCS_SECRET_KEY_BYTES: usize = sphincsshake128ssimple::secret_key_bytes();
+    // SPHINCS_PUBLIC_KEY_BYTES/SPHINCS_SECRET_KEY_BYTES removed (unreachable +
+    // unused, same as the ML-DSA constants in dilithium.rs).
     pub const SPHINCS_SIGNATURE_BYTES: usize = sphincsshake128ssimple::signature_bytes();
     
     /// Generates a real SPHINCS+-SHAKE-128s keypair.
