@@ -6115,55 +6115,6 @@ async fn debug_ecrecover_handler(
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let sessions:   SessionStore   = Arc::new(Mutex::new(HashMap::new()));
-    let wallet_workspaces: WalletWorkspaceStore = Arc::new(Mutex::new(HashMap::new()));
-    let workspaces: WorkspaceStore = Arc::new(Mutex::new(HashMap::new()));
-    let rate_limiter  = build_rate_limiter();
-    let compiler_key  = Arc::new(load_compiler_key());
-    // Rev-2: per-restart HMAC secret for source-nonce derivation.
-    // SYNQ_SOURCE_NONCE_SECRET env var (64-char hex) for persistence across restarts.
-    // Falls back to keccak256 of compiler key bytes, or CSPRNG if ephemeral.
-    let source_nonce_secret: Vec<u8> = std::env::var("SYNQ_SOURCE_NONCE_SECRET")
-        .ok()
-        .and_then(|s| hex_decode_strict(s.trim()).ok())
-        .unwrap_or_else(|| {
-            match compiler_key.as_ref() {
-                CompilerKey::Persistent { private_key, .. } => {
-                    use sha3::{Digest, Keccak256};
-                    Keccak256::digest(&private_key[..32]).to_vec()
-                }
-                CompilerKey::Ephemeral => new_session_id().into_bytes(),
-            }
-        });
-    let wasm_runtime = {
-        let path = std::env::var("SYNQ_WASM_PATH").unwrap_or_else(|_| {
-            "/root/Downloads/synergy-testnet/SynQ/synq-compiler-wasm/target/wasm32-unknown-unknown/release/synq_compiler_wasm.wasm".to_string()
-        });
-        match wasm_compiler::WasmRuntime::new(&path) {
-            Ok(rt) => { println!("  WASM runtime:   loaded from {}", path); Some(Arc::new(rt)) }
-            Err(e) => { eprintln!("  WASM runtime:   FAILED: {}", e); None }
-        }
-    };
-    let estimate_gas_semaphore = Arc::new(tokio::sync::Semaphore::new(4));
-    let store = AppState { sessions, workspaces, wallet_workspaces, rate_limiter, compiler_key, source_nonce_secret, wasm_runtime, estimate_gas_semaphore };
-
-    let cors_origin = std::env::var("SYNQ_CORS_ORIGIN").unwrap_or_else(|_| "*".to_string());
-    let cors = if cors_origin == "*" {
-        CorsLayer::new()
-            .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
-            .allow_headers(Any)
-            .allow_origin(Any)
-    } else {
-        let origin = cors_origin.parse::<axum::http::HeaderValue>()
-            .expect("Invalid SYNQ_CORS_ORIGIN value");
-        CorsLayer::new()
-            .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
-            .allow_headers(Any)
-            .allow_origin(origin)
-    };
-
 // ─── POST /save-contract ──────────────────────────────────────────────────────
 // Saves an edited contract source to the user's per-wallet directory.
 #[derive(serde::Deserialize)]
@@ -6448,7 +6399,63 @@ async fn list_contracts_handler(
     })))
 }
 
-    let app = Router::new()
+pub fn build_app_state() -> AppState {
+    let sessions:   SessionStore   = Arc::new(Mutex::new(HashMap::new()));
+    let wallet_workspaces: WalletWorkspaceStore = Arc::new(Mutex::new(HashMap::new()));
+    let workspaces: WorkspaceStore = Arc::new(Mutex::new(HashMap::new()));
+    let rate_limiter  = build_rate_limiter();
+    let compiler_key  = Arc::new(load_compiler_key());
+    // Rev-2: per-restart HMAC secret for source-nonce derivation.
+    // SYNQ_SOURCE_NONCE_SECRET env var (64-char hex) for persistence across restarts.
+    // Falls back to keccak256 of compiler key bytes, or CSPRNG if ephemeral.
+    let source_nonce_secret: Vec<u8> = std::env::var("SYNQ_SOURCE_NONCE_SECRET")
+        .ok()
+        .and_then(|s| hex_decode_strict(s.trim()).ok())
+        .unwrap_or_else(|| {
+            match compiler_key.as_ref() {
+                CompilerKey::Persistent { private_key, .. } => {
+                    use sha3::{Digest, Keccak256};
+                    Keccak256::digest(&private_key[..32]).to_vec()
+                }
+                CompilerKey::Ephemeral => new_session_id().into_bytes(),
+            }
+        });
+    let wasm_runtime = {
+        let path = std::env::var("SYNQ_WASM_PATH").unwrap_or_else(|_| {
+            "/root/Downloads/synergy-testnet/SynQ/synq-compiler-wasm/target/wasm32-unknown-unknown/release/synq_compiler_wasm.wasm".to_string()
+        });
+        match wasm_compiler::WasmRuntime::new(&path) {
+            Ok(rt) => { println!("  WASM runtime:   loaded from {}", path); Some(Arc::new(rt)) }
+            Err(e) => { eprintln!("  WASM runtime:   FAILED: {}", e); None }
+        }
+    };
+    let estimate_gas_semaphore = Arc::new(tokio::sync::Semaphore::new(4));
+    let store = AppState { sessions, workspaces, wallet_workspaces, rate_limiter, compiler_key, source_nonce_secret, wasm_runtime, estimate_gas_semaphore };
+
+    store
+}
+
+pub fn build_cors_layer() -> CorsLayer {
+    let cors_origin = std::env::var("SYNQ_CORS_ORIGIN").unwrap_or_else(|_| "*".to_string());
+    let cors = if cors_origin == "*" {
+        CorsLayer::new()
+            .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+            .allow_headers(Any)
+            .allow_origin(Any)
+    } else {
+        let origin = cors_origin.parse::<axum::http::HeaderValue>()
+            .expect("Invalid SYNQ_CORS_ORIGIN value");
+        CorsLayer::new()
+            .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+            .allow_headers(Any)
+            .allow_origin(origin)
+    };
+
+    cors
+}
+
+pub fn build_router(store: AppState, cors: CorsLayer) -> Router {
+    Router::new()
         .route("/health",            get(health))
         .route("/health/ready",      get(health_ready))
         .route("/pubkey",            get(pubkey_handler))
@@ -6484,12 +6491,19 @@ async fn list_contracts_handler(
         .route("/list-user-contracts", get(list_user_contracts_handler))
         .route("/load-contract",       get(load_contract_handler))
         .route("/list-contracts",      get(list_contracts_handler))
-        .with_state(store.clone())
+        .with_state(store)
         .layer(
             ServiceBuilder::new()
                 .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
                 .layer(cors)
-        );
+        )
+}
+
+#[tokio::main]
+async fn main() {
+    let store = build_app_state();
+    let cors = build_cors_layer();
+    let app = build_router(store.clone(), cors);
 
     let addr = "0.0.0.0:3030";
     println!("SynQ server listening on {}", addr);
@@ -6504,4 +6518,175 @@ async fn list_contracts_handler(
     println!("  Signing:         {}", key_mode);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+}
+// ─── Router-level integration tests ───────────────────────────────────────────
+// Unlike aivm_handler's tests (which call handler functions directly), these
+// exercise the REAL axum Router returned by build_router() -- routing,
+// State extraction, and (critically) the tower middleware stack
+// (RequestBodyLimitLayer, CorsLayer) that a handler-level test structurally
+// cannot reach at all. Backlog item 13's last open checklist entry: "Router-
+// level (as opposed to handler-level) axum integration tests on synq-server
+// -- still blocked on a main.rs refactor to expose a standalone
+// build_router()." That refactor is this file's build_app_state() /
+// build_cors_layer() / build_router() split (2026-08-24) -- main() itself is
+// now just three calls into those, so this module can build the exact same
+// Router main() serves and drive it with real HTTP requests via
+// tower::ServiceExt::oneshot, with zero behavior change to the running
+// server (existing 28 synq-server tests plus the full workspace suite were
+// confirmed green before and after the split).
+#[cfg(test)]
+mod router_integration_tests {
+    use super::*;
+    use tower::ServiceExt; // for `.oneshot(...)`
+
+    fn test_app_state() -> AppState {
+        AppState {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            workspaces: Arc::new(Mutex::new(HashMap::new())),
+            wallet_workspaces: Arc::new(Mutex::new(HashMap::new())),
+            rate_limiter: build_rate_limiter(),
+            compiler_key: Arc::new(CompilerKey::Ephemeral),
+            source_nonce_secret: vec![0u8; 32],
+            wasm_runtime: None,
+            estimate_gas_semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+        }
+    }
+
+    fn test_router() -> Router {
+        build_router(test_app_state(), build_cors_layer())
+    }
+
+    /// oneshot() drives the Router directly, bypassing the connect-info
+    /// wiring that `axum::serve(...).into_make_service_with_connect_info()`
+    /// normally provides in production -- so any handler using the
+    /// `ConnectInfo<SocketAddr>` extractor (e.g. estimate_gas_handler, for
+    /// rate limiting) needs that extension attached manually here, exactly
+    /// as the real make-service layer would.
+    fn with_connect_info(builder: axum::http::request::Builder) -> axum::http::request::Builder {
+        builder.extension(axum::extract::ConnectInfo(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 12345)),
+        ))
+    }
+
+    #[tokio::test]
+    async fn health_route_answers_through_the_real_router() {
+        let response = test_router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["max_body_bytes"], MAX_BODY_BYTES);
+    }
+
+    #[tokio::test]
+    async fn unknown_route_is_a_clean_404_not_a_panic() {
+        let response = test_router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/this-route-does-not-exist")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn oversized_request_body_is_rejected_by_the_body_limit_layer() {
+        // This is the whole point of a *router*-level test: RequestBodyLimitLayer
+        // is tower middleware wired on in build_router(), not handler code --
+        // calling estimate_gas_handler() directly (as aivm_handler's tests do)
+        // can never exercise this, since the handler never sees a request that
+        // large in the first place when this layer is in front of it for real.
+        let oversized = "a".repeat(MAX_BODY_BYTES + 1);
+        let body = serde_json::json!({
+            "source": oversized,
+            "function": "whatever",
+        }).to_string();
+        let response = test_router()
+            .oneshot(
+                with_connect_info(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/aivm/estimate-gas")
+                        .header("content-type", "application/json"),
+                )
+                .body(axum::body::Body::from(body))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "a body over MAX_BODY_BYTES must be rejected by the layer before the handler runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_gets_allow_headers_from_the_cors_layer() {
+        // Exercises CorsLayer specifically -- another tower middleware
+        // invisible to handler-level tests. A real browser preflight
+        // (OPTIONS + Access-Control-Request-Method) must get back
+        // Access-Control-Allow-* headers, not fall through as an
+        // unhandled/404'd route.
+        let response = test_router()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("OPTIONS")
+                    .uri("/aivm/estimate-gas")
+                    .header("origin", "https://forge.example")
+                    .header("access-control-request-method", "POST")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "CORS preflight should be answered directly by the layer");
+        assert!(
+            response.headers().contains_key("access-control-allow-origin"),
+            "expected an Access-Control-Allow-Origin header from CorsLayer, got: {:?}", response.headers()
+        );
+    }
+
+    #[tokio::test]
+    async fn estimate_gas_route_works_end_to_end_through_the_real_router() {
+        // Same request the handler-level tests exercise directly, but this
+        // time driven through actual HTTP routing + JSON body extraction +
+        // State<AppState> wiring, proving the route table itself (not just
+        // the handler fn in isolation) is wired correctly.
+        let src = "contract Adder { state { } impl { @public function add(a: u256, b: u256) -> u256 { return a + b; } } }";
+        let payload = serde_json::json!({
+            "source": src,
+            "function": "add",
+            "args": [2, 3],
+        }).to_string();
+        let response = test_router()
+            .oneshot(
+                with_connect_info(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/aivm/estimate-gas")
+                        .header("content-type", "application/json"),
+                )
+                .body(axum::body::Body::from(payload))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], true, "{json:?}");
+        assert_eq!(json["return_value"], serde_json::json!(5));
+    }
 }

@@ -13,7 +13,7 @@ tokio         = { version = "1",   features = ["full"] }
 serde         = { workspace = true }
 serde_json    = { workspace = true }
 tower-http    = { version = "0.5", features = ["cors", "limit"] }
-tower         = { version = "0.4" }
+tower         = { version = "0.4", features = ["util"] }
 synq-compiler = { path = "../compiler" }
 synq-pqc-shims = { path = "../pqc-shims" }
 synq-vm       = { path = "../vm" }
