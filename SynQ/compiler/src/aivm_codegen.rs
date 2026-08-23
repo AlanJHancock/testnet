@@ -566,7 +566,13 @@ impl<'a> CodegenContext<'a> {
                         self.emit(Instruction::PushU64(n));
                     }
                     Literal::Bool(b) => {
-                        self.emit(Instruction::PushU64(if *b { 1 } else { 0 }));
+                        // BUG FIX (2026-08-22): bool literals used to compile to
+                        // PushU64(0/1), producing a Value::U64 at runtime -- which
+                        // JSON-serializes as the raw number 1/0 (see
+                        // aivm_value_to_json) instead of true/false. PushBool
+                        // preserves the real Value::Bool type end to end, same
+                        // fix pattern as the PushString fix just above.
+                        self.emit(Instruction::PushBool(*b));
                     }
                     Literal::String(s) => {
                         // BUG FIX (2026-08-22): string literals used to compile to

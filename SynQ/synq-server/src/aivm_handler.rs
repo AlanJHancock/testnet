@@ -194,6 +194,23 @@ pub async fn compile_aivm_handler(
 // oracle on Synergy testnet (see atlas.synergy-network.io/gas methodology),
 // and price is an economic/fee-market question, not an execution-cost one.
 
+/// Wire format for one asset record, carried in `EstimateGasRequest::assets`
+/// / `EstimateGasResponse::final_assets` -- the asset-lifecycle counterpart
+/// of the `state`/`final_state` slot-index chaining (see `AssetLedger` doc
+/// comment). `owner` is a decimal string, not a JSON number: u128 exceeds
+/// JS's safe integer range, same convention as `aivm_value_to_json`'s
+/// `Value::U128` case.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetRecordWire {
+    pub id: u64,
+    pub owner: String,
+    pub value: u64,
+    pub type_tag: String,
+    pub active: bool,
+}
+
+fn default_next_asset_id() -> u64 { 1 }
+
 /// Request for a dry-run gas estimate
 #[derive(Debug, Deserialize)]
 pub struct EstimateGasRequest {
@@ -209,6 +226,16 @@ pub struct EstimateGasRequest {
     /// functions -- without this every dry-run executes as the zero address.
     #[serde(default)]
     pub caller: Option<String>,
+    /// Optional pre-seeded asset ledger, carried over from a previous dry
+    /// run's `final_assets` -- the asset-lifecycle counterpart of `state`.
+    /// Empty/omitted means "start with an empty ledger" (a fresh contract).
+    #[serde(default)]
+    pub assets: Vec<AssetRecordWire>,
+    /// Next asset id counter to resume from -- paired with `assets` (see
+    /// AssetLedger::with_records doc). Defaults to 1 (fresh ledger, matching
+    /// AssetLedger::new()) if omitted.
+    #[serde(default = "default_next_asset_id")]
+    pub next_asset_id: u64,
 }
 
 /// Backlog item 9's target canonical `synergy_estimateGas` response shape
@@ -268,6 +295,18 @@ pub struct EstimateGasResponse {
     /// useful for seeing exactly what precondition failed).
     #[serde(default)]
     pub final_state: std::collections::HashMap<String, serde_json::Value>,
+    /// Snapshot of the asset ledger after this call -- the asset-lifecycle
+    /// counterpart of `final_state`. Pass both `final_assets` and
+    /// `next_asset_id` back as the next call's `assets`/`next_asset_id` to
+    /// chain asset_create/transfer/burn/balance/owner calls across separate
+    /// dry-run invocations (see `AssetLedger` doc comment, fixed 2026-08-22
+    /// -- previously every dry-run call got a fresh, empty ledger with no
+    /// way to carry records forward, so e.g. checkBalance() in a later call
+    /// always saw 0 for an asset createAsset() had just minted).
+    #[serde(default)]
+    pub final_assets: Vec<AssetRecordWire>,
+    #[serde(default)]
+    pub next_asset_id: u64,
     /// Backlog item 9 preview -- see `CanonicalEstimate` doc comment.
     /// `None` whenever there's no real execution result to compute it from
     /// (validation/rate-limit/compile-error responses via `err_resp`).
@@ -509,6 +548,8 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
             events: vec![],
             state_discarded: true,
             final_state: std::collections::HashMap::new(),
+            final_assets: vec![],
+            next_asset_id: 1,
             canonical: None,
             note: note.clone(),
             errors,
@@ -609,7 +650,27 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
     // persistent store. That's the entire "dry run" mechanism.
     let mut overlay = aivm::vm::StateOverlay::with_state(seeded);
 
-    match avm.execute(func_idx, args, &ctx, &mut overlay) {
+    // Rebuild the asset ledger from the previous call's final_assets (see
+    // AssetLedger::with_records doc) -- same "seed it, execute, snapshot it
+    // back" pattern as the state overlay just above. Still fully ephemeral:
+    // this HashMap and counter are dropped with the rest of the request.
+    let mut seeded_assets: std::collections::HashMap<u64, aivm::host::AssetRecord> =
+        std::collections::HashMap::new();
+    for rec in &req.assets {
+        let owner: u128 = match rec.owner.parse() {
+            Ok(n) => n,
+            Err(_) => return err_resp(vec![format!("bad asset owner (expected decimal u128 string): {}", rec.owner)]),
+        };
+        seeded_assets.insert(rec.id, aivm::host::AssetRecord {
+            owner,
+            value: rec.value,
+            type_tag: rec.type_tag.clone(),
+            active: rec.active,
+        });
+    }
+    let mut asset_ledger = aivm::host::AssetLedger::with_records(seeded_assets, req.next_asset_id);
+
+    match avm.execute_with_assets(func_idx, args, &ctx, &mut overlay, &mut asset_ledger) {
         Ok(result) => {
             let status = match result.receipt.status {
                 aivm::receipt::ReceiptStatus::Success => "success",
@@ -625,6 +686,17 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
                 .committed_snapshot()
                 .iter()
                 .map(|(slot, val)| (slot.to_string(), aivm_value_to_json(val)))
+                .collect();
+            let (asset_records, next_asset_id) = asset_ledger.snapshot();
+            let final_assets: Vec<AssetRecordWire> = asset_records
+                .iter()
+                .map(|(id, rec)| AssetRecordWire {
+                    id: *id,
+                    owner: rec.owner.to_string(),
+                    value: rec.value,
+                    type_tag: rec.type_tag.clone(),
+                    active: rec.active,
+                })
                 .collect();
             let canonical = CanonicalEstimate {
                 gas_used: result.receipt.gas_used.to_string(),
@@ -648,6 +720,8 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
                 events,
                 state_discarded: true,
                 final_state,
+                final_assets,
+                next_asset_id,
                 canonical: Some(canonical),
                 note,
                 errors: vec![],
@@ -704,6 +778,8 @@ mod estimate_gas_handler_tests {
             args: vec![],
             state: HashMap::new(),
             caller: None,
+            assets: vec![],
+            next_asset_id: 1,
         }
     }
 
@@ -1003,5 +1079,82 @@ mod estimate_gas_handler_tests {
         // burn chain must preserve that same value (100) through to the
         // final burn() return.
         assert_eq!(body.return_value, Some(serde_json::json!(100)));
+    }
+
+    #[tokio::test]
+    async fn asset_ledger_persists_across_chained_dry_runs() {
+        // Regression guard for the "forge run createAsset(12) then a
+        // separate forge run checkBalance(1) returns 0" bug report
+        // (2026-08-22): each dry run used to get a brand-new, empty
+        // AssetLedger with no way to carry records from a prior call
+        // forward -- unlike declared state, which already chains via
+        // final_state/state. Fixed by giving AssetLedger the same
+        // with_records/snapshot seed-and-restore pair StateOverlay already
+        // had, wired through EstimateGasRequest.assets/next_asset_id and
+        // EstimateGasResponse.final_assets/next_asset_id.
+        let src = "contract AssetPersistTest { state { dummy: u256; } impl { @public function mint(v: u256) -> u256 { return asset_create(\"Widget\", v); } @public function bal(id: u256) -> u256 { return asset_balance(id); } } }";
+
+        let mut mint_req = req(src, "mint");
+        mint_req.args = vec![serde_json::json!(12)];
+        let state = test_state();
+        let (status, RespJson(mint_body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(mint_req),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(mint_body.success, "mint dry run should succeed: {mint_body:?}");
+        assert_eq!(mint_body.return_value, Some(serde_json::json!(1)), "first minted asset should get id 1");
+        assert!(!mint_body.final_assets.is_empty(), "mint should snapshot at least one asset record: {mint_body:?}");
+
+        // Simulate the frontend auto-chaining final_assets/next_asset_id
+        // from the first call into the second, exactly as ForgeIDE.tsx's
+        // sessionState chaining does for final_state already.
+        let mut bal_req = req(src, "bal");
+        bal_req.args = vec![serde_json::json!(1)];
+        bal_req.assets = mint_body.final_assets.clone();
+        bal_req.next_asset_id = mint_body.next_asset_id;
+        let state2 = test_state();
+        let (status2, RespJson(bal_body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state2),
+            Json(bal_req),
+        ).await;
+        assert_eq!(status2, StatusCode::OK);
+        assert!(bal_body.success, "balance dry run should succeed: {bal_body:?}");
+        assert_eq!(
+            bal_body.return_value, Some(serde_json::json!(12)),
+            "balance of the asset minted in the previous call must carry through, not reset to 0: {bal_body:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bool_literal_return_value_serializes_as_json_true_not_one() {
+        // Regression guard for the "init() -> success · returned 1 (not
+        // true)" bug report (2026-08-22): `Literal::Bool` used to compile
+        // to PushU64(0/1), producing a Value::U64 at runtime that
+        // JSON-serializes as the raw number instead of a real boolean.
+        // Fixed with a dedicated PushBool instruction that preserves
+        // Value::Bool end to end.
+        let src = "contract BoolTest { state { initialised: bool; } impl { @public function init() -> bool { initialised = true; return true; } @public function is_off() -> bool { return false; } } }";
+        let state = test_state();
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(req(src, "init")),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.success, "{body:?}");
+        assert_eq!(body.return_value, Some(serde_json::json!(true)), "expected JSON true, not 1: {body:?}");
+
+        let state2 = test_state();
+        let (status2, RespJson(body2)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state2),
+            Json(req(src, "is_off")),
+        ).await;
+        assert_eq!(status2, StatusCode::OK);
+        assert!(body2.success, "{body2:?}");
+        assert_eq!(body2.return_value, Some(serde_json::json!(false)), "expected JSON false, not 0: {body2:?}");
     }
 }

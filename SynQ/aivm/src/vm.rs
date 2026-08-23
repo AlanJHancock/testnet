@@ -164,13 +164,32 @@ impl Avm {
         }
     }
 
-    /// Execute a function by index
+    /// Execute a function by index. Uses a fresh, throwaway asset ledger --
+    /// see `execute_with_assets` if the caller needs asset records to be
+    /// seeded from (or read back into) a ledger that outlives this call.
     pub fn execute(
         &self,
         func_index: u32,
         args: Vec<Value>,
         ctx: &ExecutionContext,
         state: &mut StateOverlay,
+    ) -> Result<ExecutionResult, AivmError> {
+        let mut assets = AssetLedger::new();
+        self.execute_with_assets(func_index, args, ctx, state, &mut assets)
+    }
+
+    /// Same as `execute`, but takes the asset ledger by reference so the
+    /// caller can pre-seed it (asset records carried over from a previous
+    /// dry-run call) and read the resulting records back out afterwards --
+    /// the same pattern `StateOverlay` already uses for regular state (see
+    /// `AssetLedger`'s doc comment).
+    pub fn execute_with_assets(
+        &self,
+        func_index: u32,
+        args: Vec<Value>,
+        ctx: &ExecutionContext,
+        state: &mut StateOverlay,
+        assets: &mut AssetLedger,
     ) -> Result<ExecutionResult, AivmError> {
         let func = self.functions.get(func_index as usize)
             .ok_or(AivmError::InvalidFunctionIndex(func_index))?;
@@ -186,7 +205,6 @@ impl Avm {
         let mut gas = GasMeter::new(ctx.gas_limit);
         let mut pq_gas = PqGasMeter::new(ctx.pq_gas_limit);
         let mut events = Vec::new();
-        let mut assets = AssetLedger::new();
 
         // Set up initial frame with args as locals
         let mut frame = CallFrame {
@@ -230,6 +248,13 @@ impl Avm {
                         return Err(AivmError::StackOverflow);
                     }
                     stack.push(Value::String(s.clone()));
+                }
+                Instruction::PushBool(b) => {
+                    gas.charge(gas_cost::PUSH_U64)?;
+                    if stack.len() >= self.stack_limit {
+                        return Err(AivmError::StackOverflow);
+                    }
+                    stack.push(Value::Bool(*b));
                 }
                 Instruction::LoadState(key) => {
                     gas.charge(gas_cost::LOAD_STATE)?;
@@ -433,7 +458,7 @@ impl Avm {
                         state,
                         &mut stack,
                         &mut events,
-                        &mut assets,
+                        assets,
                     )?;
                 }
                 Instruction::Pack(count) => {

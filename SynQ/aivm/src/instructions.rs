@@ -46,6 +46,11 @@ pub enum Opcode {
     /// any string literal return value showed up as "0x..." garbage
     /// instead of the readable string).
     PushString = 0x93,
+    /// Push a real Value::Bool literal (was previously routed through
+    /// PushU64(0/1), which produces Value::U64 -- JSON-serialized as the
+    /// raw number 1/0 instead of true/false, so any bool literal return
+    /// value (e.g. `return true;`) showed up as "1" instead of "true").
+    PushBool = 0x94,
 }
 
 impl Opcode {
@@ -81,6 +86,7 @@ impl Opcode {
             0x91 => Some(Opcode::ArrayGet),
             0x92 => Some(Opcode::ArraySet),
             0x93 => Some(Opcode::PushString),
+            0x94 => Some(Opcode::PushBool),
             _ => None,
         }
     }
@@ -107,6 +113,7 @@ impl Opcode {
             Opcode::ArrayGet => 1,
             Opcode::ArraySet => 1,
             Opcode::PushString => 4, // length prefix, same framing as PushBytes
+            Opcode::PushBool => 1,
         }
     }
 }
@@ -147,6 +154,8 @@ pub enum Instruction {
     ArraySet(u8),
     /// Push a UTF-8 string literal as a real Value::String (see Opcode::PushString doc)
     PushString(String),
+    /// Push a real boolean literal as Value::Bool (see Opcode::PushBool doc)
+    PushBool(bool),
 }
 
 impl Instruction {
@@ -233,6 +242,10 @@ impl Instruction {
                 let bytes = s.as_bytes();
                 buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
                 buf.extend_from_slice(bytes);
+            }
+            Instruction::PushBool(b) => {
+                buf.push(Opcode::PushBool as u8);
+                buf.push(if *b { 1 } else { 0 });
             }
         }
         buf
@@ -372,6 +385,10 @@ impl Instruction {
                     })?;
                     instructions.push(Instruction::PushString(s));
                     offset += len;
+                }
+                Opcode::PushBool => {
+                    let b = read_u8(bytes, &mut offset)?;
+                    instructions.push(Instruction::PushBool(b != 0));
                 }
             }
         }

@@ -195,13 +195,15 @@ pub struct AssetRecord {
     pub active: bool,
 }
 
-/// Asset ledger scoped to a single `Avm::execute()` call. Per spec, AIVM
-/// today is used for stateless dry-runs (gas estimation, single-call
-/// execution) -- unlike `StateOverlay`, this ledger is not carried across
-/// separate execute() invocations. If/when AIVM needs assets to persist
-/// across chained dry-run calls the same way state does (see
-/// StateOverlay::committed_snapshot), this is the type to extend with an
-/// equivalent snapshot/restore pair.
+/// Asset ledger for a single `Avm::execute`/`execute_with_assets` call.
+/// `execute()` always starts from an empty ledger (true one-shot dry run).
+/// `execute_with_assets()` takes the ledger by reference so a caller that
+/// wants asset records to persist across separate dry-run calls the same
+/// way declared state does can seed it via `with_records` beforehand and
+/// read it back via `snapshot` afterwards (see synq-server's
+/// aivm_handler.rs, which does exactly this alongside StateOverlay's
+/// existing committed_snapshot chaining -- fixed 2026-08-22, see
+/// asset_ledger_persists_across_chained_dry_runs below).
 #[derive(Debug, Clone)]
 pub struct AssetLedger {
     records: HashMap<u64, AssetRecord>,
@@ -211,6 +213,22 @@ pub struct AssetLedger {
 impl AssetLedger {
     pub fn new() -> Self {
         Self { records: HashMap::new(), next_id: 1 }
+    }
+
+    /// Rebuild a ledger from records + the next-id counter carried over from
+    /// a previous `Avm::execute_with_assets` call -- the asset-lifecycle
+    /// counterpart of `StateOverlay::with_state`. `next_id` must be passed
+    /// explicitly (not inferred as max(records)+1) so ids stay monotonic
+    /// even across a burn/transfer that deactivated the highest id.
+    pub fn with_records(records: HashMap<u64, AssetRecord>, next_id: u64) -> Self {
+        Self { records, next_id: next_id.max(1) }
+    }
+
+    /// Snapshot every record for carrying forward into the next dry-run
+    /// call, alongside the next-id counter -- the asset-lifecycle
+    /// counterpart of `StateOverlay::committed_snapshot`.
+    pub fn snapshot(&self) -> (&HashMap<u64, AssetRecord>, u64) {
+        (&self.records, self.next_id)
     }
 }
 
