@@ -321,3 +321,49 @@ fn test_conditional_jump() {
     let result = avm.execute(0, vec![Value::U64(15)], &ctx, &mut state).unwrap();
     assert_eq!(result.return_value, Some(Value::U64(30)));
 }
+
+#[test]
+fn test_operand_stack_overflow_traps_cleanly() {
+    // Backlog item 13's other open resource-limit case (see the
+    // call-depth/StackOverflow regression test added to synq-server's
+    // estimate_gas_handler on 2026-08-23, commit 821889f): the VM's
+    // *operand* stack depth cap (`stack_limit`, 1024 -- distinct from
+    // `call_depth_limit`, 64, which bounds function-call nesting) had
+    // zero test coverage anywhere in the workspace.
+    //
+    // This is deliberately a low-level VM test with hand-built
+    // instructions rather than a synq-server handler test like the
+    // call-depth one: the compiler's nesting-depth cap (16, item 6's DoS
+    // fix in synq_compiler::parser::parse) means no real SynQ source
+    // compiled through compile_to_aivm can currently leave anywhere near
+    // 1024 live values on the operand stack at once -- ordinary
+    // expression evaluation pops what it pushes almost immediately, and
+    // recursive calls exhaust call_depth_limit (64) long before 1024
+    // pushes ever accumulate. So the only way to actually exercise this
+    // specific guard is to construct bytecode directly, confirming the
+    // VM-level mechanism itself is sound even though it isn't reachable
+    // via the compiler pipeline today.
+    let mut instructions: Vec<Instruction> = (0..1100)
+        .map(|_| Instruction::PushU64(1))
+        .collect();
+    instructions.push(Instruction::Ret);
+
+    let functions = vec![FunctionEntry {
+        name: "push_too_many".to_string(),
+        instruction_offset: 0,
+        param_count: 0,
+        visibility: FunctionVisibility::Public,
+        mutability: FunctionMutability::View,
+    }];
+
+    let avm = Avm::new(instructions, functions, make_host());
+    let ctx = make_ctx();
+    let mut state = StateOverlay::new();
+
+    let result = avm.execute(0, vec![], &ctx, &mut state);
+    assert!(result.is_err(), "1100 unpopped pushes must trip stack_limit (1024), not succeed");
+    match result.unwrap_err() {
+        AivmError::StackOverflow => {}
+        other => panic!("expected StackOverflow (operand stack_limit), got {:?}", other),
+    }
+}
