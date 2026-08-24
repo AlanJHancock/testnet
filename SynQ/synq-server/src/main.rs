@@ -5075,6 +5075,19 @@ async fn session_new_handler(
                 // Use caller_address from the request if provided (user wallet),
                 // otherwise fall back to the devnet authority identity.
                 let init_caller = if let Some(ref addr_hex) = req.caller_address {
+                    // Try the connected-wallet address formats first --
+                    // from_any_network_address covers both the community-
+                    // facing synw/syna/sync scheme (what the wallet
+                    // extension actually sends) and the legacy tsynq/synq
+                    // VM-internal scheme. Only fall back to raw hex, then
+                    // devnet, if neither bech32 form parses. Previously this
+                    // only tried raw hex, so every real wallet address here
+                    // (always bech32, never hex) silently fell back to the
+                    // devnet identity for the entire session's lifetime.
+                    if let Ok(bytes) = synq_vm::bech32::from_any_network_address(addr_hex) {
+                        eprintln!("[SESSION] Auto-init with wallet caller {} for session {}", addr_hex, id);
+                        bytes
+                    } else {
                     let clean = addr_hex.trim_start_matches("0x");
                     match hex::decode(clean) {
                         Ok(bytes) if bytes.len() == 20 => {
@@ -5091,6 +5104,7 @@ async fn session_new_handler(
                             eprintln!("[SESSION] Invalid caller_address, falling back to devnet caller for session {}", id);
                             a
                         }
+                    }
                     }
                 } else {
                     use sha3::Digest;
@@ -5692,7 +5706,12 @@ async fn session_run_handler(
     // but the contract sees the user's synw identity as the caller.
     let mut effective_caller = caller_addr;
     if let Some(ref synw) = req.display_tsynq {
-        if let Ok(decoded) = synq_vm::bech32::from_any_synq(synw) {
+        // from_any_network_address handles both the wallet extension's
+        // real-world synw/syna/sync addresses AND legacy tsynq/synq input --
+        // from_any_synq alone only understood the latter, so a real
+        // connected-wallet address here used to silently fail this decode
+        // and fall through to the devnet placeholder caller with no error.
+        if let Ok(decoded) = synq_vm::bech32::from_any_network_address(synw) {
             eprintln!("[RUN] display_tsynq override: {} -> {}", synw, hex_encode(&decoded));
             effective_caller = decoded;
         } else {
@@ -5773,7 +5792,7 @@ async fn session_run_handler(
     let caller_tsynq = if let Some(ref synw) = req.display_tsynq {
         synw.clone()
     } else {
-        synq_vm::bech32::encode_address(&caller_addr).unwrap_or_else(|_| hex_encode(&caller_addr))
+        synq_vm::bech32::encode_address(&effective_caller).unwrap_or_else(|_| hex_encode(&effective_caller))
     };
     eprintln!("[RUN] sid={} caller={} fn={} args_len={}", &req.session_id, caller_tsynq, req.function, vm_args.len());
 
@@ -5815,7 +5834,7 @@ async fn session_run_handler(
                 None    => (None, "Function completed (no return value)".to_string()),
             };
             {
-        let caller_tsynq = if let Some(ref synw) = req.display_tsynq { Some(synw.clone()) } else { synq_vm::bech32::encode_address(&caller_addr).ok() };
+        let caller_tsynq = if let Some(ref synw) = req.display_tsynq { Some(synw.clone()) } else { synq_vm::bech32::encode_address(&effective_caller).ok() };
         (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None, error_code: None, error_name: None, caller_tsynq, fuel_used, fuel_remaining, steps_used, steps_remaining }))
     }
         }
@@ -5823,7 +5842,7 @@ async fn session_run_handler(
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("revert: {}", message)),
-            caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_address(&caller_addr).ok()),
+            caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_address(&effective_caller).ok()),
             error_code: Some(code),
             error_name: Some(message.split('(').next().unwrap_or(&message).split("::").last().unwrap_or(&message).to_string()),
             fuel_used, fuel_remaining, steps_used, steps_remaining,
@@ -5832,7 +5851,7 @@ async fn session_run_handler(
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("require failed: {}", msg)),
-        caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_address(&caller_addr).ok()),
+        caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_address(&effective_caller).ok()),
         error_code: None,
         error_name: None,
         fuel_used, fuel_remaining, steps_used, steps_remaining,
@@ -5841,7 +5860,7 @@ async fn session_run_handler(
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("{}", e)),
-        caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_address(&caller_addr).ok()),
+        caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_address(&effective_caller).ok()),
         error_code: None,
         error_name: None,
         fuel_used, fuel_remaining, steps_used, steps_remaining,

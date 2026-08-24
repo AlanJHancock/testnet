@@ -317,8 +317,32 @@ pub fn execute_host_call(
                 other => other.type_name().to_string(),
             };
             let owner = {
+                // ctx.caller is the 41-byte SynqAddress wire format:
+                // [0]=version [1..3]=network_id [3..5]=algo_id
+                // [5..37]=pk_hash(32B, real 20-byte identity in [0..20]
+                // zero-padded to 32) [37..41]=checksum(4B) -- see
+                // vm::bech32::SynqAddress::to_bytes/from_20_bytes.
+                //
+                // This used to read caller[25..41], which is the LAST 12
+                // zero-padding bytes of pk_hash followed by the 4-byte
+                // checksum -- i.e. asset owner was silently being set to
+                // (mostly zeros ++ the address checksum), not the actual
+                // caller identity at all. Every asset created via the
+                // AIVM dry-run path ended up "owned" by a small
+                // checksum-derived number completely disconnected from
+                // the connected wallet (e.g. checkOwner returning
+                // 216496619 / 0x0ce779eb instead of anything resembling
+                // the caller's real address).
+                //
+                // Fix: read caller[5..21], the first 16 bytes of the
+                // real 20-byte identity in pk_hash -- consistent with
+                // AIVM's existing documented u256->u128 downcast
+                // convention (see Value::as_u128 doc comment), just
+                // reading the right bytes for it. Loses the identity's
+                // last 4 bytes to the u128 width, same tradeoff already
+                // accepted everywhere else AIVM handles addresses.
                 let mut buf = [0u8; 16];
-                buf.copy_from_slice(&ctx.caller[25..41]);
+                buf.copy_from_slice(&ctx.caller[5..21]);
                 u128::from_be_bytes(buf)
             };
             let id = assets.next_id;

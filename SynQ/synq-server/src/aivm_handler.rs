@@ -15,7 +15,7 @@ use aivm::manifest::Manifest;
 use aivm::instructions::Instruction;
 
 use crate::{AppState, check_rate_limit, RespJson, MAX_SOURCE_BYTES};
-use synq_vm::bech32::{bech32m_decode, SynqAddress, HRP_TESTNET, HRP_MAINNET};
+use synq_vm::bech32::{bech32m_decode, SynqAddress, HRP_TESTNET, HRP_MAINNET, ALGO_ML_DSA_65, NETWORK_ID_TESTNET, decode_network_address};
 
 /// Request for AIVM compilation
 #[derive(Debug, Deserialize)]
@@ -331,6 +331,19 @@ fn parse_caller_address(s: &str) -> Result<[u8; 41], String> {
         }
         let addr = SynqAddress::from_bytes(&data)
             .map_err(|e| format!("invalid bech32 caller address: {}", e))?;
+        return Ok(addr.to_bytes());
+    }
+    // Community-facing Synergy Address Engine format (synw/syna/sync/etc,
+    // or the all-zero syn0... sentinel) -- what the actual wallet extension
+    // and Forge's connected-wallet auto-fill send. This is a *different*,
+    // shorter Bech32m scheme than this VM's own tsynq/synq format above (see
+    // vm::bech32 module doc), so it needs its own decode path rather than
+    // falling through to raw hex, which used to fail with a confusing
+    // "invalid caller hex: Odd number of digits" error.
+    if trimmed.len() == 41 && trimmed.starts_with("syn") && !trimmed.starts_with("tsynq1") {
+        let id20 = decode_network_address(trimmed)
+            .map_err(|e| format!("invalid network caller address: {}", e))?;
+        let addr = SynqAddress::from_20_bytes(&id20, ALGO_ML_DSA_65, NETWORK_ID_TESTNET);
         return Ok(addr.to_bytes());
     }
     // Fall back to raw hex (0x-prefixed or bare), the original format.
