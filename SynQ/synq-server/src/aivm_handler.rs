@@ -197,9 +197,12 @@ pub async fn compile_aivm_handler(
 /// Wire format for one asset record, carried in `EstimateGasRequest::assets`
 /// / `EstimateGasResponse::final_assets` -- the asset-lifecycle counterpart
 /// of the `state`/`final_state` slot-index chaining (see `AssetLedger` doc
-/// comment). `owner` is a decimal string, not a JSON number: u128 exceeds
-/// JS's safe integer range, same convention as `aivm_value_to_json`'s
-/// `Value::U128` case.
+/// comment). `owner` is a `0x`-prefixed hex string of the full 41-byte
+/// SynqAddress (same shape as the top-level `caller` field below and
+/// `aivm_value_to_json`'s `Value::Address` case) -- previously a decimal
+/// u128 string, switched when `AssetRecord::owner` widened from a lossy
+/// truncated u128 to the full address so `asset_owner(id) == caller()`
+/// compares byte-for-byte (see aivm::host::AssetRecord doc comment).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetRecordWire {
     pub id: u64,
@@ -670,10 +673,14 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
     let mut seeded_assets: std::collections::HashMap<u64, aivm::host::AssetRecord> =
         std::collections::HashMap::new();
     for rec in &req.assets {
-        let owner: u128 = match rec.owner.parse() {
-            Ok(n) => n,
-            Err(_) => return err_resp(vec![format!("bad asset owner (expected decimal u128 string): {}", rec.owner)]),
+        let owner_hex = rec.owner.trim_start_matches("0x");
+        let owner_bytes = match hex::decode(owner_hex) {
+            Ok(b) if b.len() == 41 => b,
+            Ok(b) => return err_resp(vec![format!("bad asset owner (expected 41-byte 0x-hex address, got {} bytes): {}", b.len(), rec.owner)]),
+            Err(e) => return err_resp(vec![format!("bad asset owner (expected 0x-hex address): {}: {}", rec.owner, e)]),
         };
+        let mut owner = [0u8; 41];
+        owner.copy_from_slice(&owner_bytes);
         seeded_assets.insert(rec.id, aivm::host::AssetRecord {
             owner,
             value: rec.value,
@@ -705,7 +712,7 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
                 .iter()
                 .map(|(id, rec)| AssetRecordWire {
                     id: *id,
-                    owner: rec.owner.to_string(),
+                    owner: format!("0x{}", hex::encode(rec.owner)),
                     value: rec.value,
                     type_tag: rec.type_tag.clone(),
                     active: rec.active,

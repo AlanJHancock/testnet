@@ -103,9 +103,17 @@ impl Value {
     }
 
     /// Convert to u128 (widest native integer AIVM carries -- used for
-    /// asset owner/recipient identifiers, which are u256 at the SynQ
-    /// language level but truncated to u128 in AIVM's simplified numeric
-    /// model, matching the existing u256 -> u128 downcast convention).
+    /// plain numeric values that happen to be u256 at the SynQ language
+    /// level but truncated to u128 in AIVM's simplified numeric model,
+    /// matching the existing u256 -> u128 downcast convention).
+    ///
+    /// NOTE: identity/address values (asset owner/recipient) should go
+    /// through `as_address` instead -- this used to also handle
+    /// `Value::Address` by reading `bytes[25..41]`, which is that
+    /// address's zero-padding + 4-byte checksum, not its actual identity
+    /// (same root bug fixed in `as_address` and `asset.create` below).
+    /// Address is deliberately no longer accepted here so a caller can't
+    /// silently get a checksum-derived number again by mistake.
     pub fn as_u128(&self) -> Result<u128, AivmError> {
         match self {
             Value::U128(v) => Ok(*v),
@@ -118,12 +126,37 @@ impl Value {
                 }
             }
             Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
-            Value::Address(bytes) => {
-                let mut buf = [0u8; 16];
-                buf.copy_from_slice(&bytes[25..41]);
-                Ok(u128::from_be_bytes(buf))
-            }
             other => Err(AivmError::TypeMismatch { expected: "u128", got: other.type_name() }),
+        }
+    }
+
+    /// Convert to a full 41-byte SynqAddress-shaped identity value --
+    /// the non-lossy counterpart of `as_u128` for asset owner/recipient
+    /// identifiers. `Value::Address` (what `caller()`/`call_sender()`
+    /// actually produce) passes through byte-for-byte, so
+    /// `asset_owner(id) == caller()` and `asset_transfer(id, caller())`
+    /// compare/store the *exact* identity with no truncation.
+    ///
+    /// A plain number (e.g. a literal passed where an address is
+    /// expected) is right-aligned into the same byte range a real
+    /// SynqAddress keeps its identity in (`[5..21]`, see
+    /// `vm::bech32::SynqAddress::to_bytes`/`from_20_bytes`), zero
+    /// elsewhere, so repeated reads of that same value stay internally
+    /// consistent even though it isn't a real wallet address.
+    pub fn as_address(&self) -> Result<[u8; 41], AivmError> {
+        match self {
+            Value::Address(bytes) => Ok(*bytes),
+            Value::U128(v) => {
+                let mut buf = [0u8; 41];
+                buf[5..21].copy_from_slice(&v.to_be_bytes());
+                Ok(buf)
+            }
+            Value::U64(v) => {
+                let mut buf = [0u8; 41];
+                buf[13..21].copy_from_slice(&v.to_be_bytes());
+                Ok(buf)
+            }
+            other => Err(AivmError::TypeMismatch { expected: "address", got: other.type_name() }),
         }
     }
 
@@ -189,7 +222,12 @@ impl Value {
 /// and burn/balance/owner all read as zero/inactive once burned.
 #[derive(Debug, Clone)]
 pub struct AssetRecord {
-    pub owner: u128,
+    /// Full 41-byte SynqAddress bytes -- same representation
+    /// `context.caller`/`context.call_sender` push as `Value::Address`, so
+    /// `asset_owner(id) == caller()` compares byte-for-byte with zero
+    /// truncation (see `Value::as_address` doc comment for the history of
+    /// why this used to be a lossy `u128`).
+    pub owner: [u8; 41],
     pub value: u64,
     pub type_tag: String,
     pub active: bool,
@@ -316,42 +354,32 @@ pub fn execute_host_call(
                 Value::Bytes(b) => String::from_utf8_lossy(b).to_string(),
                 other => other.type_name().to_string(),
             };
-            let owner = {
-                // ctx.caller is the 41-byte SynqAddress wire format:
-                // [0]=version [1..3]=network_id [3..5]=algo_id
-                // [5..37]=pk_hash(32B, real 20-byte identity in [0..20]
-                // zero-padded to 32) [37..41]=checksum(4B) -- see
-                // vm::bech32::SynqAddress::to_bytes/from_20_bytes.
-                //
-                // This used to read caller[25..41], which is the LAST 12
-                // zero-padding bytes of pk_hash followed by the 4-byte
-                // checksum -- i.e. asset owner was silently being set to
-                // (mostly zeros ++ the address checksum), not the actual
-                // caller identity at all. Every asset created via the
-                // AIVM dry-run path ended up "owned" by a small
-                // checksum-derived number completely disconnected from
-                // the connected wallet (e.g. checkOwner returning
-                // 216496619 / 0x0ce779eb instead of anything resembling
-                // the caller's real address).
-                //
-                // Fix: read caller[5..21], the first 16 bytes of the
-                // real 20-byte identity in pk_hash -- consistent with
-                // AIVM's existing documented u256->u128 downcast
-                // convention (see Value::as_u128 doc comment), just
-                // reading the right bytes for it. Loses the identity's
-                // last 4 bytes to the u128 width, same tradeoff already
-                // accepted everywhere else AIVM handles addresses.
-                let mut buf = [0u8; 16];
-                buf.copy_from_slice(&ctx.caller[5..21]);
-                u128::from_be_bytes(buf)
-            };
+            // Owner is ctx.caller verbatim -- the exact same 41-byte
+            // Value::Address bytes context.caller()/context.call_sender()
+            // push onto the stack. No slicing, no truncation: this used
+            // to extract a lossy u128 out of the wrong byte range
+            // (caller[25..41], the address's zero-padding + 4-byte
+            // checksum -- see git history), which meant checkOwner()
+            // could never equal caller() and every asset ended up
+            // "owned" by a small checksum-derived number unrelated to
+            // the connected wallet. Storing the full address makes
+            // `asset_owner(id) == caller()` compare byte-for-byte, and
+            // asset_owner() now returns the same Value::Address type
+            // caller()/call_sender() already return, so both sides of
+            // that comparison are the same variant for the first time.
+            let owner = ctx.caller;
             let id = assets.next_id;
             assets.next_id += 1;
             assets.records.insert(id, AssetRecord { owner, value, type_tag, active: true });
             stack.push(Value::U64(id));
         }
         "asset.transfer" => {
-            let to = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
+            // as_address (not as_u128): `to` is normally caller() (a
+            // Value::Address) when a contract does asset_transfer(id,
+            // caller()) to reclaim/reassign an asset -- as_address passes
+            // that through byte-for-byte instead of truncating it into a
+            // checksum-derived number the way the old as_u128 path did.
+            let to = stack.pop().ok_or(AivmError::StackUnderflow)?.as_address()?;
             let asset_id = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
             let record = assets.records.get(&asset_id)
                 .filter(|r| r.active)
@@ -383,8 +411,15 @@ pub fn execute_host_call(
         }
         "asset.owner" => {
             let asset_id = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-            let owner = assets.records.get(&asset_id).filter(|r| r.active).map(|r| r.owner).unwrap_or(0);
-            stack.push(Value::U128(owner));
+            // Value::Address, matching what caller()/call_sender() push --
+            // was Value::U128(owner) reading a lossy truncated number,
+            // which also meant this could never structurally equal
+            // caller() in a require(asset_owner(id) == caller()) check
+            // (different enum variants never compare equal). Zero address
+            // (not 0u128) for the "no such active asset" case, consistent
+            // with the real type.
+            let owner = assets.records.get(&asset_id).filter(|r| r.active).map(|r| r.owner).unwrap_or([0u8; 41]);
+            stack.push(Value::Address(owner));
         }
         other => {
             return Err(AivmError::HostFunctionNotDeclared(other.to_string()));
