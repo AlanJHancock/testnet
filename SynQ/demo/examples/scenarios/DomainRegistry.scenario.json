@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "contract": "DomainRegistry",
+  "scenarios": [
+    {
+      "name": "3-level nested map lifecycle: default-zero read -> set -> sibling isolation at all three levels -> update -> delete -> sibling survives",
+      "steps": [
+        { "call": "init", "args": [], "expectReturn": true },
+        { "call": "get_record", "args": [1, 2, 3], "expectReturn": 0 },
+        { "call": "set_record", "args": [1, 2, 3, 42], "expectReturn": true },
+        { "call": "get_record", "args": [1, 2, 3], "expectReturn": 42 },
+        { "call": "set_record", "args": [1, 2, 4, 99], "expectReturn": true },
+        { "call": "get_record", "args": [1, 2, 3], "expectReturn": 42 },
+        { "call": "get_record", "args": [1, 2, 4], "expectReturn": 99 },
+        { "call": "set_record", "args": [1, 5, 3, 7], "expectReturn": true },
+        { "call": "get_record", "args": [1, 2, 3], "expectReturn": 42 },
+        { "call": "get_record", "args": [1, 5, 3], "expectReturn": 7 },
+        { "call": "set_record", "args": [9, 2, 3, 777], "expectReturn": true },
+        { "call": "get_record", "args": [1, 2, 3], "expectReturn": 42 },
+        { "call": "get_record", "args": [9, 2, 3], "expectReturn": 777 },
+        { "call": "update_record", "args": [1, 2, 3, 100], "expectReturn": true },
+        { "call": "get_record", "args": [1, 2, 3], "expectReturn": 100 },
+        { "call": "delete_record", "args": [1, 2, 3], "expectReturn": true },
+        { "call": "get_record", "args": [1, 2, 3], "expectReturn": 0 },
+        { "call": "get_record", "args": [1, 2, 4], "expectReturn": 99 }
+      ]
+    },
+    {
+      "name": "guard rail: update_record on a record that was never set must revert",
+      "steps": [
+        { "call": "update_record", "args": [5, 5, 5, 1], "expectStatus": "reverted" }
+      ]
+    }
+  ]
+}
