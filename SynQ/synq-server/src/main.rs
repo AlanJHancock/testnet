@@ -734,6 +734,18 @@ fn value_display(v: &Value) -> String {
 
 fn parse_arg_typed(v: &serde_json::Value, ty_hint: &str) -> Result<Value, String> {
     match v {
+        // 2026-08-25: the Run panel's bool-typed params (e.g. setDebugMode's
+        // `enabled: bool`) send a real JSON boolean over the wire -- the
+        // Run panel's own coerceArgForType() already turns a typed "1"/
+        // "true" into a native JS `true` before this ever leaves the
+        // browser (see forge-v3's app/lib/ide/execute.ts). This match had
+        // no arm for it at all, so every bool-typed call fell into the
+        // catch-all `other => Err("Expected number or string, got {}")`
+        // below -- e.g. `setDebugMode(1)` reverted with exactly that error
+        // even though the argument was perfectly well-formed. See the
+        // `serde_json::Value::String` arm below for the equivalent fix for
+        // callers (CLI/curl) that send a raw "true"/"1" string instead.
+        serde_json::Value::Bool(b) => Ok(Value::Bool(*b)),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 // Negative → signed Value; positive small → I32; large → U128
@@ -757,6 +769,18 @@ fn parse_arg_typed(v: &serde_json::Value, ty_hint: &str) -> Result<Value, String
             let s = s.trim();
             // Empty string → UTF-8 string param (not numeric zero)
             if s.is_empty() { return Ok(Value::Bytes(vec![])); }
+            // Bool-typed param sent as a raw string (CLI/curl callers that
+            // skip the Run panel's client-side coercion) -- same "true" or
+            // "1" check as forge-v3's coerceArgForType, kept in sync so a
+            // bool param behaves identically no matter which caller sends
+            // it. Without this, a string "true"/"false" for a bool param
+            // fell all the way through to the final `Value::Bytes` fallback
+            // at the bottom of this match (a `str::parse::<U256>()` failure
+            // on "true"/"false" default to raw UTF-8 bytes), silently
+            // handing the VM Bytes(b"true") instead of Bool(true).
+            if ty_hint == "bool" {
+                return Ok(Value::Bool(s == "true" || s == "1"));
+            }
             // If the caller declared this param as str/string, treat any value as bytes
             // even if it looks numeric — "33" as a label should be Bytes, not I32.
             if ty_hint == "str" || ty_hint == "string" {
@@ -6707,5 +6731,29 @@ mod router_integration_tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["success"], true, "{json:?}");
         assert_eq!(json["return_value"], serde_json::json!(5));
+    }
+
+    #[test]
+    fn parse_arg_typed_accepts_native_json_bool_for_bool_param() {
+        // 2026-08-25 regression: setDebugMode(1)/(true) reverted with
+        // "Expected number or string, got true" because parse_arg_typed had
+        // no match arm for serde_json::Value::Bool at all -- the Run
+        // panel's own coerceArgForType() already turns a typed "1"/"true"
+        // into a native JS `true` before it ever leaves the browser (see
+        // forge-v3's app/lib/ide/execute.ts), so every bool-typed call from
+        // the Run & Debug UI hit this exact crash.
+        assert!(matches!(parse_arg_typed(&serde_json::json!(true), "bool"), Ok(Value::Bool(true))));
+        assert!(matches!(parse_arg_typed(&serde_json::json!(false), "bool"), Ok(Value::Bool(false))));
+    }
+
+    #[test]
+    fn parse_arg_typed_accepts_string_true_and_1_for_bool_param() {
+        // Same fix, string path -- covers CLI/curl callers that send a raw
+        // "true"/"1" string instead of a native JSON bool, kept in sync
+        // with the client-side coerceArgForType check.
+        assert!(matches!(parse_arg_typed(&serde_json::json!("true"), "bool"), Ok(Value::Bool(true))));
+        assert!(matches!(parse_arg_typed(&serde_json::json!("1"), "bool"), Ok(Value::Bool(true))));
+        assert!(matches!(parse_arg_typed(&serde_json::json!("false"), "bool"), Ok(Value::Bool(false))));
+        assert!(matches!(parse_arg_typed(&serde_json::json!("0"), "bool"), Ok(Value::Bool(false))));
     }
 }
