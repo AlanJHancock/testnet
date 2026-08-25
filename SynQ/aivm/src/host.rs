@@ -351,6 +351,21 @@ impl Default for AssetLedger {
 }
 
 /// Execute a host function call
+/// Extract the UTF-8 string content of a `str`-typed `Value` for the
+/// string builtins (str_len/str_concat/str_eq). Accepts both
+/// `Value::String` (the normal case -- string literals and str-typed
+/// state/params all decode to this) and `Value::Bytes` (lenient fallback,
+/// consistent with `Value::encode()` treating String/Bytes the same way)
+/// so a str-typed value that somehow arrived as raw bytes still works
+/// instead of hard-erroring.
+fn value_as_str(v: &Value) -> Result<String, AivmError> {
+    match v {
+        Value::String(s) => Ok(s.clone()),
+        Value::Bytes(b) => Ok(String::from_utf8_lossy(b).to_string()),
+        other => Err(AivmError::TypeMismatch { expected: "string", got: other.type_name() }),
+    }
+}
+
 pub fn execute_host_call(
     import_index: u16,
     host: &HostFunctions,
@@ -411,6 +426,56 @@ pub fn execute_host_call(
             // Stub — real cross-contract calls need host runtime support
             let _ = stack.pop();
             stack.push(Value::U64(0));
+        }
+        // String builtins — str_len/str_concat/str_eq (see
+        // synq-language-spec.md's str type + these three builtins).
+        // These were declared in HostFunctions::default_v01()'s import
+        // table (indices 9-11) from the start, and aivm_codegen.rs has
+        // always compiled str_len/str_concat/str_eq calls to
+        // HostCall(9)/HostCall(10)/HostCall(11) -- but this dispatch
+        // match had no arms for "string.length"/"string.concat"/
+        // "string.eq", so every call fell through to the `other` catch-
+        // all below and returned HostFunctionNotDeclared. This is the
+        // ComprehensiveToken blocker: its init()/setTokenName()/
+        // setTokenSymbol()/setLabel() all gate on str_len(...) checks,
+        // and tokenInfo()/isSymbol() use str_concat/str_eq, so the
+        // contract could compile but every one of those calls reverted
+        // at runtime.
+        "string.length" => {
+            // str_len(s: str) -> u256. Byte length of the UTF-8 string
+            // (SynQ's `str` has no separate "character count" notion, and
+            // this matches Value::encode()'s length-prefix byte count for
+            // the same value). Value::U64 rather than Value::U128 --
+            // comparison opcodes (Lt/Gt/Le/Ge/Ne used by the require(...)
+            // length checks) call as_u64() on both operands regardless of
+            // which numeric variant either side is, so U64 compares fine
+            // against the u128-downcast literals (64, 8, 32, 0) those
+            // require(...) checks use.
+            let s = stack.pop().ok_or(AivmError::StackUnderflow)?;
+            stack.push(Value::U64(value_as_str(&s)?.len() as u64));
+        }
+        "string.concat" => {
+            // str_concat(a: str, b: str) -> str. Args are pushed in
+            // source-written order (a then b), so the LAST-pushed operand
+            // (b) is on top and pops first -- same convention as
+            // asset.transfer/asset.create above.
+            let b = stack.pop().ok_or(AivmError::StackUnderflow)?;
+            let a = stack.pop().ok_or(AivmError::StackUnderflow)?;
+            let mut out = value_as_str(&a)?;
+            out.push_str(&value_as_str(&b)?);
+            stack.push(Value::String(out));
+        }
+        "string.eq" => {
+            // str_eq(a: str, b: str) -> bool. Byte-for-byte content
+            // equality -- deliberately NOT `a == b` on the raw `Value`
+            // (which would also require identical *variants*): a string
+            // read back from state and a fresh string literal are both
+            // Value::String in practice, but going through value_as_str
+            // on both sides keeps this robust if a caller ever stores a
+            // str-typed value as Value::Bytes instead.
+            let b = stack.pop().ok_or(AivmError::StackUnderflow)?;
+            let a = stack.pop().ok_or(AivmError::StackUnderflow)?;
+            stack.push(Value::Bool(value_as_str(&a)? == value_as_str(&b)?));
         }
         // Linear asset model — see docs/SynQ-Language-Specification.md:
         //   asset_create(type_name: string, value: u256) -> u256

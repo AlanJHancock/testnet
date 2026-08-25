@@ -1129,22 +1129,24 @@ mod estimate_gas_handler_tests {
     #[tokio::test]
     async fn unimplemented_host_function_fails_closed_not_unsafely() {
         // Item 6 audit finding (a): several builtins declared in the
-        // import table (addr.*, auth.*, string.*) aren't wired up in
+        // import table (addr.*, auth.*) aren't wired up in
         // execute_host_call yet and return HostFunctionNotDeclared.
-        // (asset.* used to be in this bucket too -- fixed 2026-08-22, see
-        // asset_lifecycle_create_transfer_balance_burn_round_trips below --
-        // str_len/string.length stands in as the still-unimplemented case.)
+        // (asset.* used to be in this bucket too -- fixed 2026-08-22; and
+        // string.length/string.concat/string.eq (str_len/str_concat/
+        // str_eq) used to be too -- fixed 2026-08-25, see
+        // aivm/src/host.rs's "String builtins" arms. to_tsynq/addr.encode
+        // now stands in as the still-unimplemented case.)
         // Regression guard: calling one of them through a real dry run
         // must still come back as a clean success:false with a clear
         // error -- not a panic, not a silently-wrong success, and
         // critically not partial state changes made visible (state stays
         // discarded regardless of where execution stopped).
-        let src = "contract StrTest { state { dummy: u256; } impl { @public function check_len() -> u256 { str_len(\"abc\"); return dummy; } } }";
+        let src = "contract AddrTest { state { dummy: u256; } impl { @public function check_addr() as caller -> str { return to_tsynq(caller); } } }";
         let state = test_state();
         let (status, RespJson(body)) = estimate_gas_handler(
             ConnectInfo(test_addr()),
             State(state),
-            Json(req(src, "check_len")),
+            Json(req(src, "check_addr")),
         ).await;
         assert_eq!(status, StatusCode::OK);
         assert!(!body.success, "an unimplemented host function must fail closed: {body:?}");
