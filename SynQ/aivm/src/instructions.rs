@@ -52,12 +52,36 @@ pub enum Opcode {
     /// value (e.g. `return true;`) showed up as "1" instead of "true").
     PushBool = 0x94,
     /// Pop [key, map] (key on top -- pushed after the map), look up
-    /// `map_key_bytes(key)` in the map, push the found value or
-    /// `Value::U64(0)` if the map slot isn't a `Value::Map` yet (never
-    /// written) or doesn't contain that key. Used for both top-level
-    /// `state_map[key]` reads (map value comes from LoadState first) and
-    /// each descending level of a nested `map[k1][k2]...` read (map value
-    /// comes from the previous MapGetVal).
+    /// `map_key_bytes(key)` in the map, push the found value, or -- if the
+    /// map slot isn't a `Value::Map` yet (never written) or doesn't
+    /// contain that key -- push a type-appropriate zero/default value
+    /// instead of always `Value::U64(0)` (2026-08-25 fix: a blind
+    /// `U64(0)` default meant `map<K, bool>[missing_key] == false`
+    /// evaluated false, since `Eq` requires the same `Value` variant --
+    /// `U64(0) != Bool(false)` -- breaking any `if (role_map[x] ==
+    /// false)`-style check on a never-granted key). The operand is a
+    /// compact tag selecting that default, set by the compiler from the
+    /// map's declared value type (see `map_value_default_tag` in
+    /// compiler/src/aivm_codegen.rs, which is the single source of truth
+    /// for the tag numbering):
+    ///   0 = Value::U64(0)      -- numeric types (the pre-fix behaviour;
+    ///                             still correct for these, since
+    ///                             `as_u64`/`as_u128` treat U64/U128
+    ///                             interchangeably)
+    ///   1 = Value::Bool(false)
+    ///   2 = Value::String(String::new())
+    ///   3 = Value::Bytes(vec![])
+    ///   4 = Value::Bytes32([0u8; 32])
+    ///   5 = Value::Address([0u8; 41])
+    ///   6 = Value::Map(BTreeMap::new()) -- an intermediate nesting level
+    ///                             in `map[k1][k2]...` (not the final
+    ///                             key), where a miss means "no nested
+    ///                             map here yet", not a scalar default
+    /// Used for both top-level `state_map[key]` reads (map value comes
+    /// from LoadState first) and each descending level of a nested
+    /// `map[k1][k2]...` read (map value comes from the previous
+    /// MapGetVal) -- each level carries its own tag for its own declared
+    /// value type.
     MapGetVal = 0xA0,
     /// Pop [value, key, map] (value on top, pushed last), insert
     /// `map_key_bytes(key) -> value` into the map (auto-initializing an
@@ -130,7 +154,10 @@ impl Opcode {
             Opcode::ArraySet => 1,
             Opcode::PushString => 4, // length prefix, same framing as PushBytes
             Opcode::PushBool => 1,
-            Opcode::MapGetVal | Opcode::MapSetVal => 0,
+            Opcode::MapSetVal => 0,
+            // One-byte "miss default type" tag -- see MapGetVal(u8) doc on
+            // the Instruction enum below.
+            Opcode::MapGetVal => 1,
         }
     }
 }
@@ -173,8 +200,8 @@ pub enum Instruction {
     PushString(String),
     /// Push a real boolean literal as Value::Bool (see Opcode::PushBool doc)
     PushBool(bool),
-    /// See Opcode::MapGetVal doc.
-    MapGetVal,
+    /// See Opcode::MapGetVal doc. u8 operand = miss-default type tag.
+    MapGetVal(u8),
     /// See Opcode::MapSetVal doc.
     MapSetVal,
 }
@@ -268,8 +295,9 @@ impl Instruction {
                 buf.push(Opcode::PushBool as u8);
                 buf.push(if *b { 1 } else { 0 });
             }
-            Instruction::MapGetVal => {
+            Instruction::MapGetVal(tag) => {
                 buf.push(Opcode::MapGetVal as u8);
+                buf.push(*tag);
             }
             Instruction::MapSetVal => {
                 buf.push(Opcode::MapSetVal as u8);
@@ -417,7 +445,10 @@ impl Instruction {
                     let b = read_u8(bytes, &mut offset)?;
                     instructions.push(Instruction::PushBool(b != 0));
                 }
-                Opcode::MapGetVal => instructions.push(Instruction::MapGetVal),
+                Opcode::MapGetVal => {
+                    let tag = read_u8(bytes, &mut offset)?;
+                    instructions.push(Instruction::MapGetVal(tag));
+                }
                 Opcode::MapSetVal => instructions.push(Instruction::MapSetVal),
             }
         }

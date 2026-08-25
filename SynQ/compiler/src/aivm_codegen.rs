@@ -451,7 +451,12 @@ impl<'a> CodegenContext<'a> {
                         if i + 1 < n {
                             self.emit(Instruction::LoadLocal(map_scratch[i]));
                             self.emit(Instruction::LoadLocal(key_scratch[i]));
-                            self.emit(Instruction::MapGetVal);
+                            // Always an intermediate nesting level here (by
+                            // construction: this branch only runs while
+                            // i+1 < n, i.e. there's always a further key
+                            // to descend into) -- a miss means "no nested
+                            // map here yet", so tag 6 (Value::Map, empty).
+                            self.emit(Instruction::MapGetVal(6));
                             self.emit(Instruction::StoreLocal(map_scratch[i + 1]));
                         }
                     }
@@ -767,16 +772,33 @@ impl<'a> CodegenContext<'a> {
             }
             Expression::MapIndex(map, keys) => {
                 // `map[k1][k2]...[kN]` read, any depth: load the state map
-                // once, then chain MapGetVal per key. Each level defaults
-                // to the zero value if that level isn't a real Value::Map
-                // yet (unset state, or a key that was never written) --
-                // see MapGetVal's doc comment in aivm/src/vm.rs.
+                // once, then chain MapGetVal per key. Each level's miss
+                // default is now type-correct (2026-08-25 fix), not
+                // always a blind `Value::U64(0)` -- intermediate levels
+                // (more keys still to come) default to an empty map
+                // (tag 6); the FINAL level defaults according to the
+                // map's actual declared value type (bool -> false,
+                // str -> "", etc, via `map_value_default_tag`) -- see
+                // Opcode::MapGetVal's doc comment in aivm/src/instructions.rs
+                // for the full tag table.
                 let idx = self.state_index(map)
                     .ok_or_else(|| format!("unknown state variable: {}", map))?;
                 self.emit(Instruction::LoadState(idx));
-                for key in keys {
+                let mut cur_ty = self.state_var_types.get(map).cloned();
+                let n = keys.len();
+                for (i, key) in keys.iter().enumerate() {
                     self.gen_expr(key)?;
-                    self.emit(Instruction::MapGetVal);
+                    let value_ty = match &cur_ty {
+                        Some(Type::Mapping(_, v)) => Some((**v).clone()),
+                        _ => None,
+                    };
+                    let tag = if i + 1 == n {
+                        value_ty.as_ref().map(map_value_default_tag).unwrap_or(0)
+                    } else {
+                        6 // intermediate level -- a miss is "no nested map yet"
+                    };
+                    self.emit(Instruction::MapGetVal(tag));
+                    cur_ty = value_ty;
                 }
             }
             Expression::MapMethod { map, method, args: _ } => {
@@ -988,5 +1010,37 @@ fn type_to_abi(ty: &Type) -> AbiType {
         Type::Str => AbiType::String,
         Type::Array(inner) => AbiType::Array(Box::new(type_to_abi(inner))),
         _ => AbiType::Bytes,
+    }
+}
+
+/// Maps a `map<K, V>`'s declared value type `V` to the compact tag
+/// `MapGetVal`'s runtime miss-default logic understands (see
+/// `Opcode::MapGetVal`'s doc comment in aivm/src/instructions.rs for the
+/// authoritative tag table -- this function is what actually assigns
+/// them, so it must stay in sync with `map_get_miss_default` in
+/// aivm/src/vm.rs). Anything not explicitly listed here (numeric types,
+/// `Array`/`Named`/struct-shaped values, etc.) falls back to tag 0
+/// (`Value::U64(0)`) -- the same default every map miss used before this
+/// tag existed, and still correct for plain numeric types since
+/// `as_u64`/`as_u128` treat `U64`/`U128` interchangeably. Struct-shaped
+/// map values don't get a precise shaped-zero default this way (that
+/// would need the tag to carry a full field layout, not a single byte);
+/// this is a deliberate, documented limitation, not an oversight.
+fn map_value_default_tag(ty: &Type) -> u8 {
+    match ty {
+        Type::Bool => 1,
+        Type::Str => 2,
+        Type::Bytes | Type::BytesN(_) | Type::Hash32 | Type::Hash64
+        | Type::DilithiumPublicKey | Type::FalconPublicKey | Type::KyberPublicKey
+        | Type::DilithiumSignature | Type::FalconSignature => 3,
+        // Tag 4 (Value::Bytes32) has no direct source: `Type::Hash32`
+        // (AIVM's only 32-byte-hash type) is already routed to tag 3
+        // (Bytes) above, alongside Bytes/BytesN, matching how AIVM's
+        // Value::as_bytes-style consumers treat them today. Tag 4 exists
+        // in the VM's table for future use if a type ever needs to
+        // default specifically to Value::Bytes32 instead of Value::Bytes.
+        Type::Address | Type::UMAIdentity => 5,
+        Type::Mapping(_, _) => 6,
+        _ => 0,
     }
 }

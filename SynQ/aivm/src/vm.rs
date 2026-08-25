@@ -138,6 +138,26 @@ struct CallFrame {
 }
 
 /// The AIVM executor
+/// Construct the "key not found" default value for a `MapGetVal` miss,
+/// from the compiler-assigned type tag (see `Opcode::MapGetVal`'s doc
+/// comment in instructions.rs for the full, authoritative tag table --
+/// this must stay in sync with `map_value_default_tag` in
+/// compiler/src/aivm_codegen.rs, which is what actually assigns tags).
+/// Any tag this VM doesn't recognise (forward-compat: an older VM given
+/// bytecode from a newer compiler) falls back to `Value::U64(0)`, the
+/// same default every miss used before this tag existed.
+fn map_get_miss_default(tag: u8) -> Value {
+    match tag {
+        1 => Value::Bool(false),
+        2 => Value::String(String::new()),
+        3 => Value::Bytes(vec![]),
+        4 => Value::Bytes32([0u8; 32]),
+        5 => Value::Address([0u8; 41]),
+        6 => Value::Map(std::collections::BTreeMap::new()),
+        _ => Value::U64(0),
+    }
+}
+
 pub struct Avm {
     instructions: Vec<Instruction>,
     functions: Vec<FunctionEntry>,
@@ -532,26 +552,32 @@ impl Avm {
                         }
                     }
                 }
-                Instruction::MapGetVal => {
+                Instruction::MapGetVal(default_tag) => {
                     // `map_value[key]` read. Pop [key, map] (key on top).
                     // If `map` isn't a real Value::Map yet -- e.g. this
                     // state slot was never written, or (for a nested
                     // map[k1][k2] read) the outer map didn't have `k1` --
-                    // treat it as an empty map and return the zero
-                    // default, exactly like LoadState already does for an
-                    // unset scalar slot. This is what lets the *same*
-                    // MapGetVal opcode chain cleanly through arbitrarily
-                    // nested map reads without a separate "is this the
-                    // last level" case.
+                    // or the key just isn't present, treat it as an empty
+                    // map and return a MISS DEFAULT -- but a type-correct
+                    // one, not always `Value::U64(0)` (2026-08-25 fix; see
+                    // this opcode's doc comment in instructions.rs for the
+                    // full tag table and why a blind U64(0) broke
+                    // `map<K,bool>[missing] == false` checks). The tag is
+                    // baked in by the compiler from the map's declared
+                    // value type, so this is still the *same* MapGetVal
+                    // opcode chaining cleanly through arbitrarily nested
+                    // map reads -- it just now carries one extra byte of
+                    // "what should a miss look like at this level" info.
                     gas.charge(gas_cost::MAP_GET)?;
                     let key = stack.pop().ok_or(AivmError::StackUnderflow)?;
                     let map_val = stack.pop().ok_or(AivmError::StackUnderflow)?;
+                    let miss_default = || map_get_miss_default(*default_tag);
                     let result = match map_val {
                         Value::Map(m) => {
                             let k = key.map_key_bytes();
-                            m.get(&k).cloned().unwrap_or(Value::U64(0))
+                            m.get(&k).cloned().unwrap_or_else(miss_default)
                         }
-                        _ => Value::U64(0),
+                        _ => miss_default(),
                     };
                     stack.push(result);
                 }
