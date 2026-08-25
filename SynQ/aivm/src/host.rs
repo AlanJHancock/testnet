@@ -88,7 +88,14 @@ pub enum Value {
 }
 
 impl Value {
-    /// Convert to u64
+    /// Convert to u64. See `as_u128`'s doc comment for the `Value::Address`
+    /// case -- this just further downcasts that same identity number,
+    /// with the same overflow-checked-downcast behaviour `Value::U128`
+    /// already had (a real address's identity slot is almost always
+    /// bigger than `u64::MAX`, so this arm exists for completeness/
+    /// consistency with other u64 call sites, not because comparisons
+    /// should rely on it -- see the `Ne`/`Lt`/`Gt`/`Le`/`Ge` opcodes in
+    /// `vm.rs`, which use `as_u128` precisely to avoid this overflow).
     pub fn as_u64(&self) -> Result<u64, AivmError> {
         match self {
             Value::U64(v) => Ok(*v),
@@ -97,6 +104,14 @@ impl Value {
                     Err(AivmError::TypeMismatch { expected: "u64", got: "u128_overflow" })
                 } else {
                     Ok(*v as u64)
+                }
+            }
+            Value::Address(_) => {
+                let v = self.as_u128()?;
+                if v > u64::MAX as u128 {
+                    Err(AivmError::TypeMismatch { expected: "u64", got: "address_identity_overflow" })
+                } else {
+                    Ok(v as u64)
                 }
             }
             Value::I64(v) => {
@@ -116,17 +131,38 @@ impl Value {
     /// level but truncated to u128 in AIVM's simplified numeric model,
     /// matching the existing u256 -> u128 downcast convention).
     ///
-    /// NOTE: identity/address values (asset owner/recipient) should go
-    /// through `as_address` instead -- this used to also handle
-    /// `Value::Address` by reading `bytes[25..41]`, which is that
-    /// address's zero-padding + 4-byte checksum, not its actual identity
-    /// (same root bug fixed in `as_address` and `asset.create` below).
-    /// Address is deliberately no longer accepted here so a caller can't
-    /// silently get a checksum-derived number again by mistake.
+    /// `Value::Address` support (2026-08-25): reads the SAME 16-byte
+    /// identity slot `bytes[5..21]` that `as_address()` below writes a
+    /// plain number INTO -- this is that conversion's true inverse, not
+    /// a repeat of the earlier asset-ownership bug (commit d544966,
+    /// "AIVM asset ownership: widen owner/recipient from truncated u128
+    /// to full address"). That bug read `bytes[25..41]` -- the address's
+    /// zero-padding + 4-byte checksum tail, which is NOT the identity --
+    /// so `asset_owner(id) == caller()` could never compare equal. This
+    /// is a different call site with a different fix: asset ownership
+    /// needs exact, non-lossy identity equality, so it correctly goes
+    /// through `as_address()` (full 41-byte, byte-for-byte, via `Eq`)
+    /// and MUST NOT use this method. This method exists so `Ne`/`Lt`/
+    /// `Gt`/`Le`/`Ge` (see `vm.rs`) can evaluate SynQ source like
+    /// `require(to != caller, ...)` -- a plain u256 compared against the
+    /// caller's identity -- without crashing with `TypeMismatch`. Reading
+    /// the correct `[5..21]` slot means this is the exact round-trip of
+    /// `as_address()`'s own numeric-literal encoding, so a caller
+    /// synthesized from a plain number reads back as that same number,
+    /// and a real wallet address reads back as a stable (if not
+    /// intrinsically meaningful) 128-bit number -- sufficient for the
+    /// only thing `!=`/`==`-style checks against `caller` need: a
+    /// consistent, deterministic value to compare, not a legitimate
+    /// numeric quantity.
     pub fn as_u128(&self) -> Result<u128, AivmError> {
         match self {
             Value::U128(v) => Ok(*v),
             Value::U64(v) => Ok(*v as u128),
+            Value::Address(bytes) => {
+                let mut buf = [0u8; 16];
+                buf.copy_from_slice(&bytes[5..21]);
+                Ok(u128::from_be_bytes(buf))
+            }
             Value::I64(v) => {
                 if *v < 0 {
                     Err(AivmError::TypeMismatch { expected: "u128", got: "i64_negative" })

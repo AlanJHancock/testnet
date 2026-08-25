@@ -332,34 +332,51 @@ impl Avm {
                     let a = stack.pop().ok_or(AivmError::StackUnderflow)?;
                     stack.push(Value::Bool(a == b));
                 }
+                // Lt/Gt/Ne/Le/Ge use as_u128 (not as_u64) for two reasons
+                // (2026-08-25): (1) SynQ's u256 type downcasts to
+                // Value::U128 in AIVM's numeric model, so u64 was already
+                // too narrow -- two legitimate large token amounts near
+                // u128::MAX would wrongly TypeMismatch-error here even
+                // though they're valid, comparable numbers. (2) Value::
+                // Address (what `caller()` always produces) only has an
+                // as_u128 identity projection, not as_u64 -- see
+                // host.rs's as_u128 doc comment -- so source like
+                // `require(to != caller, ...)` (transfer/revokeAdmin/
+                // revokeMinter in ComprehensiveToken.synq) used to crash
+                // with TypeMismatch{expected:"u64", got:"address"} on
+                // every call, for every caller. as_u64-based comparisons
+                // still exist elsewhere (arithmetic opcodes, asset host
+                // functions) where u64 range is the deliberate contract;
+                // this widening is scoped to just these five comparison
+                // opcodes.
                 Instruction::Lt => {
                     gas.charge(gas_cost::COMPARISON)?;
-                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
                     stack.push(Value::Bool(a < b));
                 }
                 Instruction::Gt => {
                     gas.charge(gas_cost::COMPARISON)?;
-                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
                     stack.push(Value::Bool(a > b));
                 }
                 Instruction::Ne => {
                     gas.charge(gas_cost::COMPARISON)?;
-                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
                     stack.push(Value::Bool(a != b));
                 }
                 Instruction::Le => {
                     gas.charge(gas_cost::COMPARISON)?;
-                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
                     stack.push(Value::Bool(a <= b));
                 }
                 Instruction::Ge => {
                     gas.charge(gas_cost::COMPARISON)?;
-                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
                     stack.push(Value::Bool(a >= b));
                 }
                 Instruction::Jmp(target) => {
