@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "contract": "SimpleToken",
+  "scenarios": [
+    {
+      "name": "init -> mint -> checkBalance -> burn -> assertBalance (own-address flow; see note on transfer())",
+      "steps": [
+        { "call": "init", "args": ["Synergy Token", "SNRG", 1000], "expectReturn": true },
+        { "call": "getTotalSupply", "args": [], "expectReturn": 1000 },
+        { "call": "getOwner", "args": [], "expectReturn": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000" },
+        { "call": "balanceOf", "args": [0], "expectReturn": 1000 },
+        { "call": "mint", "args": [0, 200], "expectReturn": true },
+        { "call": "balanceOf", "args": [0], "expectReturn": 1200 },
+        { "call": "getTotalSupply", "args": [], "expectReturn": 1200 },
+        { "call": "checkBalance", "args": [0, 100], "expectReturn": true },
+        { "call": "burn", "args": [0, 50], "expectReturn": true },
+        { "call": "balanceOf", "args": [0], "expectReturn": 1150 },
+        { "call": "getTotalSupply", "args": [], "expectReturn": 1150 },
+        { "call": "assertBalance", "args": [150], "expectReturn": true }
+      ]
+    },
+    {
+      "name": "guard rail: mint from a non-owner caller must revert",
+      "steps": [
+        { "call": "init", "args": ["Synergy Token", "SNRG", 1000], "expectReturn": true },
+        { "call": "mint", "args": [0, 200], "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000099", "expectStatus": "reverted" }
+      ]
+    }
+  ]
+}

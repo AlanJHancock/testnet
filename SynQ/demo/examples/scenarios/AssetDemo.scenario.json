@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "contract": "AssetDemo",
+  "scenarios": [
+    {
+      "name": "full asset lifecycle: create -> transfer -> checkOwner/checkBalance/assetInfo -> burn",
+      "steps": [
+        { "call": "init", "args": [], "expectReturn": true },
+        { "call": "createAsset", "args": [100], "expectReturn": [1, 100] },
+        { "call": "transferAsset", "args": [1, 999], "capture": "newAssetId", "expectReturn": 2 },
+        { "call": "checkOwner", "args": ["$newAssetId"], "expectReturn": "0x0000000000000000000000000000000000000003e70000000000000000000000000000000000000000" },
+        { "call": "checkBalance", "args": ["$newAssetId"], "expectReturn": 100 },
+        { "call": "assetInfo", "args": ["$newAssetId"], "expectReturn": ["SNRG", 100] },
+        { "call": "checkBalance", "args": [1], "expectReturn": 0 },
+        { "call": "burnAsset", "args": ["$newAssetId"], "expectReturn": 100 },
+        { "call": "checkBalance", "args": ["$newAssetId"], "expectReturn": 0 }
+      ]
+    }
+  ]
+}

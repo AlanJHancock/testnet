@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "contract": "TokenVault",
+  "scenarios": [
+    {
+      "name": "init -> deposit -> withdraw -- vault-side flow accounting (tokenBalance()/assertSync() reflect the dry-run's stubbed extern_call, see note)",
+      "steps": [
+        { "call": "init", "args": [], "expectReturn": true },
+        { "call": "getTotalIn", "args": [], "expectReturn": 0 },
+        { "call": "getTotalOut", "args": [], "expectReturn": 0 },
+        { "call": "available", "args": [], "expectReturn": 0 },
+        { "call": "netFlow", "args": [], "expectReturn": 0 },
+        { "call": "deposit", "args": [100], "expectReturn": 100 },
+        { "call": "getTotalIn", "args": [], "expectReturn": 100 },
+        { "call": "available", "args": [], "expectReturn": 100 },
+        { "call": "netFlow", "args": [], "expectReturn": 100 },
+        { "call": "withdraw", "args": [30], "expectReturn": 30 },
+        { "call": "getTotalOut", "args": [], "expectReturn": 30 },
+        { "call": "available", "args": [], "expectReturn": 70 },
+        { "call": "netFlow", "args": [], "expectReturn": 70 },
+        { "call": "tokenBalance", "args": [], "expectReturn": 0 },
+        { "call": "assertSync", "args": [], "expectReturn": true }
+      ]
+    },
+    {
+      "name": "guard rail: withdraw from a non-owner caller must revert",
+      "steps": [
+        { "call": "init", "args": [], "expectReturn": true },
+        { "call": "deposit", "args": [100], "expectReturn": 100 },
+        { "call": "withdraw", "args": [30], "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000099", "expectStatus": "reverted" }
+      ]
+    },
+    {
+      "name": "guard rail: deposit of amount 0 must revert",
+      "steps": [
+        { "call": "init", "args": [], "expectReturn": true },
+        { "call": "deposit", "args": [0], "expectStatus": "reverted" }
+      ]
+    }
+  ]
+}

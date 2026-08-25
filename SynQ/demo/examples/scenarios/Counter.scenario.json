@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "contract": "Counter",
+  "scenarios": [
+    {
+      "name": "init then accumulate via increment",
+      "steps": [
+        { "call": "init", "args": [], "expectReturn": true },
+        { "call": "increment", "args": [5], "expectReturn": 5 },
+        { "call": "increment", "args": [10], "expectReturn": 15 },
+        { "call": "get", "args": [], "expectReturn": 15 }
+      ]
+    }
+  ]
+}

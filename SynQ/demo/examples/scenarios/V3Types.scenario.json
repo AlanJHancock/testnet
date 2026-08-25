@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "contract": "V3Types",
+  "scenarios": [
+    {
+      "name": "session id, stored value, and block height round-trip (uma/owner/caller/address builtins skipped -- see note below)",
+      "steps": [
+        { "call": "getUmaId", "args": [], "expectReturn": "0x" },
+        { "call": "setSessionId", "args": ["0x1111111111111111111111111111111111111111111111111111111111111111"], "expectReturn": true },
+        { "call": "getSessionId", "args": [], "expectReturn": "0x1111111111111111111111111111111111111111111111111111111111111111" },
+        { "call": "setValue", "args": [777], "expectReturn": true },
+        { "call": "getValue", "args": [], "expectReturn": 777 },
+        { "call": "setBlockHeight", "args": [12345], "expectReturn": true },
+        { "call": "getBlockHeight", "args": [], "expectReturn": 12345 }
+      ]
+    }
+  ]
+}

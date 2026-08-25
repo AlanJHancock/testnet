@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "contract": "PQCDemo",
+  "scenarios": [
+    {
+      "name": "store key material then verify/decapsulate with malformed inputs (correctly rejected -- false)",
+      "steps": [
+        { "call": "init", "args": [], "expectReturn": true },
+        { "call": "setPublicKey", "args": ["0xdeadbeef"], "expectReturn": true },
+        { "call": "setSignature", "args": ["0xdeadbeef"], "expectReturn": true },
+        { "call": "setMessage", "args": ["0xdeadbeef"], "expectReturn": true },
+        { "call": "verifyStored", "args": [], "expectReturn": false },
+        { "call": "verifyMlDsa", "args": ["0x01", "0x02", "0x03"], "expectReturn": false },
+        { "call": "verifyFnDsa", "args": ["0x01", "0x02", "0x03"], "expectReturn": false },
+        { "call": "decapsMlKem", "args": ["0x01", "0x02"], "expectReturn": false }
+      ]
+    }
+  ]
+}
