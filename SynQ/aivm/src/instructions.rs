@@ -51,6 +51,20 @@ pub enum Opcode {
     /// raw number 1/0 instead of true/false, so any bool literal return
     /// value (e.g. `return true;`) showed up as "1" instead of "true").
     PushBool = 0x94,
+    /// Pop [key, map] (key on top -- pushed after the map), look up
+    /// `map_key_bytes(key)` in the map, push the found value or
+    /// `Value::U64(0)` if the map slot isn't a `Value::Map` yet (never
+    /// written) or doesn't contain that key. Used for both top-level
+    /// `state_map[key]` reads (map value comes from LoadState first) and
+    /// each descending level of a nested `map[k1][k2]...` read (map value
+    /// comes from the previous MapGetVal).
+    MapGetVal = 0xA0,
+    /// Pop [value, key, map] (value on top, pushed last), insert
+    /// `map_key_bytes(key) -> value` into the map (auto-initializing an
+    /// empty map if the popped value wasn't already a `Value::Map`), push
+    /// the updated map back so the caller can StoreState/chain it into an
+    /// outer map's MapSetVal for nested writes.
+    MapSetVal = 0xA1,
 }
 
 impl Opcode {
@@ -87,6 +101,8 @@ impl Opcode {
             0x92 => Some(Opcode::ArraySet),
             0x93 => Some(Opcode::PushString),
             0x94 => Some(Opcode::PushBool),
+            0xa0 => Some(Opcode::MapGetVal),
+            0xa1 => Some(Opcode::MapSetVal),
             _ => None,
         }
     }
@@ -114,6 +130,7 @@ impl Opcode {
             Opcode::ArraySet => 1,
             Opcode::PushString => 4, // length prefix, same framing as PushBytes
             Opcode::PushBool => 1,
+            Opcode::MapGetVal | Opcode::MapSetVal => 0,
         }
     }
 }
@@ -156,6 +173,10 @@ pub enum Instruction {
     PushString(String),
     /// Push a real boolean literal as Value::Bool (see Opcode::PushBool doc)
     PushBool(bool),
+    /// See Opcode::MapGetVal doc.
+    MapGetVal,
+    /// See Opcode::MapSetVal doc.
+    MapSetVal,
 }
 
 impl Instruction {
@@ -246,6 +267,12 @@ impl Instruction {
             Instruction::PushBool(b) => {
                 buf.push(Opcode::PushBool as u8);
                 buf.push(if *b { 1 } else { 0 });
+            }
+            Instruction::MapGetVal => {
+                buf.push(Opcode::MapGetVal as u8);
+            }
+            Instruction::MapSetVal => {
+                buf.push(Opcode::MapSetVal as u8);
             }
         }
         buf
@@ -390,6 +417,8 @@ impl Instruction {
                     let b = read_u8(bytes, &mut offset)?;
                     instructions.push(Instruction::PushBool(b != 0));
                 }
+                Opcode::MapGetVal => instructions.push(Instruction::MapGetVal),
+                Opcode::MapSetVal => instructions.push(Instruction::MapSetVal),
             }
         }
 

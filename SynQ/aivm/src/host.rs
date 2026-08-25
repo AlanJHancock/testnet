@@ -76,6 +76,15 @@ pub enum Value {
     Address([u8; 41]),
     String(String),
     Array(Vec<Value>),
+    /// Keyed map state (`map<K, V>`, including nested `map<K, map<K, V>>`).
+    /// Keyed by a canonical byte encoding of the key value (see
+    /// `Value::map_key_bytes`) rather than by the raw `Value` itself, so a
+    /// logical key (e.g. the u256 `55`) always lands in the same bucket
+    /// regardless of which numeric `Value` variant (`U64`/`U128`) decoded
+    /// it -- ints and bools share one canonicalized numeric encoding
+    /// (see `map_key_bytes`), while bytes/address/string keys keep their
+    /// own tagged encoding so distinct types never collide.
+    Map(std::collections::BTreeMap<Vec<u8>, Value>),
 }
 
 impl Value {
@@ -183,6 +192,7 @@ impl Value {
             Value::Address(_) => "address",
             Value::String(_) => "string",
             Value::Array(_) => "array",
+            Value::Map(_) => "map",
         }
     }
 
@@ -212,6 +222,70 @@ impl Value {
                 }
                 buf
             }
+            Value::Map(entries) => {
+                let mut buf = (entries.len() as u32).to_be_bytes().to_vec();
+                for (k, v) in entries {
+                    buf.extend((k.len() as u32).to_be_bytes());
+                    buf.extend(k);
+                    buf.extend(v.encode());
+                }
+                buf
+            }
+        }
+    }
+
+    /// Canonicalize a `Value` used as a map key into bytes suitable for a
+    /// `BTreeMap<Vec<u8>, Value>` lookup. Every integer-ish variant
+    /// (`U64`/`U128`/`I64`/`Bool`) shares ONE tag + a fixed 16-byte
+    /// big-endian body, so `map[55]` finds the same bucket whether `55`
+    /// arrived as `Value::U64(55)` or `Value::U128(55)` -- this is what a
+    /// SynQ `u256` map key is supposed to mean regardless of which AIVM
+    /// scalar variant the wire decoder happened to pick. Byte-shaped
+    /// variants (`Bytes`/`Bytes32`/`Address`/`String`) get their own
+    /// distinct tag so two different types never collide even if their
+    /// raw bytes happen to match.
+    pub fn map_key_bytes(&self) -> Vec<u8> {
+        match self {
+            Value::U64(n) => {
+                let mut b = vec![0u8];
+                b.extend_from_slice(&(*n as u128).to_be_bytes());
+                b
+            }
+            Value::U128(n) => {
+                let mut b = vec![0u8];
+                b.extend_from_slice(&n.to_be_bytes());
+                b
+            }
+            Value::I64(n) => {
+                let mut b = vec![0u8];
+                b.extend_from_slice(&((*n as i128) as u128).to_be_bytes());
+                b
+            }
+            Value::Bool(v) => vec![0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, if *v { 1 } else { 0 }],
+            Value::Bytes(d) => {
+                let mut b = vec![1u8];
+                b.extend_from_slice(d);
+                b
+            }
+            Value::Bytes32(d) => {
+                let mut b = vec![2u8];
+                b.extend_from_slice(d);
+                b
+            }
+            Value::Address(d) => {
+                let mut b = vec![3u8];
+                b.extend_from_slice(d);
+                b
+            }
+            Value::String(s) => {
+                let mut b = vec![4u8];
+                b.extend_from_slice(s.as_bytes());
+                b
+            }
+            // Arrays/maps aren't valid map keys in SynQ's type system --
+            // degrade to a fixed marker rather than panicking, matching
+            // this VM's overall philosophy of failing soft on state ops.
+            Value::Array(_) | Value::Map(_) => vec![5u8],
         }
     }
 }

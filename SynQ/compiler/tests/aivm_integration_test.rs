@@ -178,3 +178,106 @@ fn test_aivm_break_exits_loop_not_function() {
     assert_eq!(r2.receipt.status, ReceiptStatus::Success);
     assert_eq!(r2.return_value, Some(Value::U64(0)));
 }
+
+// MAP CODEGEN FIX (2026-08-25): `Statement::MapAssignment`/`Expression::
+// MapIndex` used to completely ignore the map key -- single-key
+// `map[key] = value` did a blind `StoreState(idx)` as if the whole map
+// were one scalar, so `mint(0, 100)` then `mint(55, 200)` left
+// `balanceOf(0)` returning 200 too (last write wins for EVERY key, not
+// just the one written). Multi-key `map[k1][k2] = value` errored outright
+// ("nested map assignment not yet supported"), blocking any contract
+// using `map<K, map<K,V>>` (e.g. DomainRegistry's 3-level
+// `map<address,map<address,map<address,u256>>>`) from compiling at all.
+// Fixed by giving the AIVM a real `Value::Map` + `MapGetVal`/`MapSetVal`
+// opcodes, with codegen chaining reads and read-forward/write-back'ing
+// writes through scratch locals for arbitrary nesting depth.
+
+const SINGLE_MAP_SOURCE: &str = "contract MapDemo {\n  state {\n    balances: map<u256, u256>;\n  }\n  impl {\n    @public\n    function setBalance(id: u256, amount: u256) -> bool {\n      balances[id] = amount;\n      return true;\n    }\n\n    @public\n    function getBalance(id: u256) -> u256 {\n      return balances[id];\n    }\n  }\n}\n";
+
+#[test]
+fn test_single_level_map_keys_stay_isolated() {
+    let ast = parse(SINGLE_MAP_SOURCE).unwrap();
+    let contract = extract_contract(&ast);
+    let result = compile_to_aivm(contract, &[]).unwrap();
+
+    let host = HostFunctions::default_v01();
+    let avm = Avm::new(result.instructions, result.functions, host);
+    let ctx = ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    let mut state = StateOverlay::new();
+
+    let set_idx = avm.find_function("setBalance").expect("setBalance not found");
+    let get_idx = avm.find_function("getBalance").expect("getBalance not found");
+
+    // Before the fix, this second write clobbered the FIRST key's value
+    // too (both reads below would return 200).
+    avm.execute(set_idx, vec![Value::U64(0), Value::U64(100)], &ctx, &mut state).unwrap();
+    avm.execute(set_idx, vec![Value::U64(55), Value::U64(200)], &ctx, &mut state).unwrap();
+    avm.execute(set_idx, vec![Value::U64(99), Value::U64(300)], &ctx, &mut state).unwrap();
+
+    let r0 = avm.execute(get_idx, vec![Value::U64(0)], &ctx, &mut state).unwrap();
+    assert_eq!(r0.return_value, Some(Value::U64(100)), "key 0 must keep its own value");
+
+    let r55 = avm.execute(get_idx, vec![Value::U64(55)], &ctx, &mut state).unwrap();
+    assert_eq!(r55.return_value, Some(Value::U64(200)), "key 55 must keep its own value");
+
+    let r99 = avm.execute(get_idx, vec![Value::U64(99)], &ctx, &mut state).unwrap();
+    assert_eq!(r99.return_value, Some(Value::U64(300)), "key 99 must keep its own value");
+
+    // Never-written key defaults to zero, not another key's value.
+    let r7 = avm.execute(get_idx, vec![Value::U64(7)], &ctx, &mut state).unwrap();
+    assert_eq!(r7.return_value, Some(Value::U64(0)), "unset key defaults to 0");
+}
+
+const NESTED_3LEVEL_SOURCE: &str = "contract DomainRegistryDemo {\n  state {\n    registry: map<u256, map<u256, map<u256, u256>>>;\n  }\n  impl {\n    @public\n    function setEntry(a: u256, b: u256, c: u256, value: u256) -> bool {\n      registry[a][b][c] = value;\n      return true;\n    }\n\n    @public\n    function getEntry(a: u256, b: u256, c: u256) -> u256 {\n      return registry[a][b][c];\n    }\n  }\n}\n";
+
+#[test]
+fn test_three_level_nested_map_assignment_compiles_and_isolates_keys() {
+    // This is the exact shape that used to hard-fail codegen with
+    // "nested map assignment not yet supported in AIVM codegen"
+    // (DomainRegistry's `registry: map<address, map<address, map<address,
+    // u256>>>`, mirrored here with u256 keys to stay self-contained).
+    let ast = parse(NESTED_3LEVEL_SOURCE).unwrap();
+    let contract = extract_contract(&ast);
+    let result = compile_to_aivm(contract, &[]).expect("3-level nested map must compile now");
+
+    let host = HostFunctions::default_v01();
+    let avm = Avm::new(result.instructions, result.functions, host);
+    let ctx = ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    let mut state = StateOverlay::new();
+
+    let set_idx = avm.find_function("setEntry").expect("setEntry not found");
+    let get_idx = avm.find_function("getEntry").expect("getEntry not found");
+
+    avm.execute(set_idx, vec![Value::U64(1), Value::U64(2), Value::U64(3), Value::U64(111)], &ctx, &mut state).unwrap();
+    avm.execute(set_idx, vec![Value::U64(1), Value::U64(2), Value::U64(4), Value::U64(222)], &ctx, &mut state).unwrap();
+    avm.execute(set_idx, vec![Value::U64(1), Value::U64(9), Value::U64(3), Value::U64(333)], &ctx, &mut state).unwrap();
+    avm.execute(set_idx, vec![Value::U64(8), Value::U64(2), Value::U64(3), Value::U64(444)], &ctx, &mut state).unwrap();
+
+    let r1 = avm.execute(get_idx, vec![Value::U64(1), Value::U64(2), Value::U64(3)], &ctx, &mut state).unwrap();
+    assert_eq!(r1.return_value, Some(Value::U64(111)), "[1][2][3] must keep its own value");
+
+    // Sibling at the innermost level (same a,b, different c) must not
+    // collide with [1][2][3] -- this is exactly the read-forward/
+    // write-back chain that has to correctly preserve sibling entries at
+    // every level it touches.
+    let r2 = avm.execute(get_idx, vec![Value::U64(1), Value::U64(2), Value::U64(4)], &ctx, &mut state).unwrap();
+    assert_eq!(r2.return_value, Some(Value::U64(222)), "[1][2][4] is a distinct entry from [1][2][3]");
+
+    // Sibling at the middle level (same a, different b) must also stay isolated.
+    let r3 = avm.execute(get_idx, vec![Value::U64(1), Value::U64(9), Value::U64(3)], &ctx, &mut state).unwrap();
+    assert_eq!(r3.return_value, Some(Value::U64(333)), "[1][9][3] is a distinct entry from [1][2][3]");
+
+    // Sibling at the outer level (different a) must also stay isolated.
+    let r4 = avm.execute(get_idx, vec![Value::U64(8), Value::U64(2), Value::U64(3)], &ctx, &mut state).unwrap();
+    assert_eq!(r4.return_value, Some(Value::U64(444)), "[8][2][3] is a distinct entry from [1][2][3]");
+
+    // The original [1][2][3] must be unaffected by any of the writes to
+    // its siblings above (this is what write-back-clobbering-the-whole-
+    // map would break).
+    let r1_again = avm.execute(get_idx, vec![Value::U64(1), Value::U64(2), Value::U64(3)], &ctx, &mut state).unwrap();
+    assert_eq!(r1_again.return_value, Some(Value::U64(111)), "[1][2][3] must survive sibling writes");
+
+    // Never-written path defaults to zero.
+    let r_unset = avm.execute(get_idx, vec![Value::U64(5), Value::U64(6), Value::U64(7)], &ctx, &mut state).unwrap();
+    assert_eq!(r_unset.return_value, Some(Value::U64(0)), "unset nested path defaults to 0");
+}

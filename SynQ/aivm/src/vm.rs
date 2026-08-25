@@ -515,6 +515,53 @@ impl Avm {
                         }
                     }
                 }
+                Instruction::MapGetVal => {
+                    // `map_value[key]` read. Pop [key, map] (key on top).
+                    // If `map` isn't a real Value::Map yet -- e.g. this
+                    // state slot was never written, or (for a nested
+                    // map[k1][k2] read) the outer map didn't have `k1` --
+                    // treat it as an empty map and return the zero
+                    // default, exactly like LoadState already does for an
+                    // unset scalar slot. This is what lets the *same*
+                    // MapGetVal opcode chain cleanly through arbitrarily
+                    // nested map reads without a separate "is this the
+                    // last level" case.
+                    gas.charge(gas_cost::MAP_GET)?;
+                    let key = stack.pop().ok_or(AivmError::StackUnderflow)?;
+                    let map_val = stack.pop().ok_or(AivmError::StackUnderflow)?;
+                    let result = match map_val {
+                        Value::Map(m) => {
+                            let k = key.map_key_bytes();
+                            m.get(&k).cloned().unwrap_or(Value::U64(0))
+                        }
+                        _ => Value::U64(0),
+                    };
+                    stack.push(result);
+                }
+                Instruction::MapSetVal => {
+                    // `map_value[key] = value`. Pop [value, key, map]
+                    // (value on top, pushed last), push the *updated* map
+                    // back (does not touch state directly -- the caller
+                    // chains this into StoreState, or into an outer
+                    // MapSetVal for nested writes, exactly mirroring
+                    // ArraySet's "push the updated container back" shape).
+                    // If the popped `map` value wasn't already a real
+                    // Value::Map (never written, or a nested level that
+                    // didn't exist yet), auto-initialize an empty map
+                    // instead of erroring -- matches this VM's existing
+                    // "auto-init on write" philosophy (see StoreLocal's
+                    // auto-resize above).
+                    gas.charge(gas_cost::MAP_SET)?;
+                    let value = stack.pop().ok_or(AivmError::StackUnderflow)?;
+                    let key = stack.pop().ok_or(AivmError::StackUnderflow)?;
+                    let map_val = stack.pop().ok_or(AivmError::StackUnderflow)?;
+                    let mut m = match map_val {
+                        Value::Map(m) => m,
+                        _ => std::collections::BTreeMap::new(),
+                    };
+                    m.insert(key.map_key_bytes(), value);
+                    stack.push(Value::Map(m));
+                }
             }
         }
 

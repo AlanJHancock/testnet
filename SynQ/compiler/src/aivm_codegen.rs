@@ -169,6 +169,7 @@ pub fn compile_to_aivm(contract: &ContractDefinition, structs: &[StructDefinitio
             func_name_map: &func_name_map,
             event_name_map: &event_name_map,
             loop_stack: Vec::new(),
+            next_scratch: 0,
         };
 
         // Map params to local slots (+ types, for struct field resolution)
@@ -249,6 +250,11 @@ struct CodegenContext<'a> {
     /// instruction indices from `break` that need to be patched to the
     /// loop's end once it's known).
     loop_stack: Vec<(u32, Vec<usize>)>,
+    /// Counter for synthetic scratch-local names used by nested map
+    /// read/write-back codegen (see `scratch_local`) -- guarantees each
+    /// callsite gets its own disjoint set of local slots even within the
+    /// same function (e.g. two separate nested-map writes in one body).
+    next_scratch: u32,
 }
 
 impl<'a> CodegenContext<'a> {
@@ -278,6 +284,20 @@ impl<'a> CodegenContext<'a> {
         self.local_map.insert(name.to_string(), idx);
         self.next_local += 1;
         idx
+    }
+
+    /// Allocate a fresh, guaranteed-unique local slot for use as scratch
+    /// storage in nested map read/write-back codegen (see the
+    /// `Statement::MapAssignment` and `Expression::MapIndex` cases below).
+    /// `tag` is just for readability if instructions are ever dumped/
+    /// disassembled -- uniqueness comes entirely from the counter, so it
+    /// can never collide with a real user-declared local (whatever the
+    /// user names it) or with another scratch slot from a different
+    /// nested-map callsite in the same function.
+    fn scratch_local(&mut self, tag: &str) -> u16 {
+        let id = self.next_scratch;
+        self.next_scratch += 1;
+        self.local_index(&format!("__map_scratch_{}_{}", tag, id))
     }
 
     /// Look up the struct definition a `Type::Named(...)` refers to, if any.
@@ -389,11 +409,75 @@ impl<'a> CodegenContext<'a> {
             Statement::MapAssignment { map, keys, value } => {
                 let idx = self.state_index(map)
                     .ok_or_else(|| format!("unknown state variable: {}", map))?;
-                if keys.len() == 1 {
+                if keys.is_empty() {
+                    return Err(format!("map assignment to '{}' has no keys", map));
+                } else if keys.len() == 1 {
+                    // Single-level `map[key] = value`:
+                    //   LoadState(idx)        -- the map (or default if unset)
+                    //   <key>
+                    //   <value>
+                    //   MapSetVal             -- pops value,key,map -> pushes updated map
+                    //   StoreState(idx)
+                    self.emit(Instruction::LoadState(idx));
+                    self.gen_expr(&keys[0])?;
                     self.gen_expr(value)?;
+                    self.emit(Instruction::MapSetVal);
                     self.emit(Instruction::StoreState(idx));
                 } else {
-                    return Err("nested map assignment not yet supported in AIVM codegen".to_string());
+                    // Nested `map[k1][k2]...[kN] = value` (arbitrary depth,
+                    // e.g. DomainRegistry's map<address, map<address,
+                    // map<address, u256>>> is 3 levels). A plain stack
+                    // machine can't hold "the outer map + k1" while it goes
+                    // off and computes "the inner map + k2 + value" and
+                    // still have them around afterwards to write the
+                    // result back -- there's no Dup/Swap opcode in this
+                    // ISA. So instead of juggling the stack, descend while
+                    // saving each level's (map, key) pair into its own
+                    // scratch local, then walk back up rebuilding each
+                    // level's map with MapSetVal from the bottom.
+                    let n = keys.len();
+                    let map_scratch: Vec<u16> = (0..n).map(|_| self.scratch_local("map")).collect();
+                    let key_scratch: Vec<u16> = (0..n).map(|_| self.scratch_local("key")).collect();
+
+                    // Descend: map_scratch[0] = state map; for i in 0..n-1,
+                    // map_scratch[i+1] = map_scratch[i][key_scratch[i]]
+                    // (each read-forward defaults to an empty map if that
+                    // level didn't exist yet, per MapGetVal's semantics).
+                    self.emit(Instruction::LoadState(idx));
+                    self.emit(Instruction::StoreLocal(map_scratch[0]));
+                    for i in 0..n {
+                        self.gen_expr(&keys[i])?;
+                        self.emit(Instruction::StoreLocal(key_scratch[i]));
+                        if i + 1 < n {
+                            self.emit(Instruction::LoadLocal(map_scratch[i]));
+                            self.emit(Instruction::LoadLocal(key_scratch[i]));
+                            self.emit(Instruction::MapGetVal);
+                            self.emit(Instruction::StoreLocal(map_scratch[i + 1]));
+                        }
+                    }
+
+                    // Innermost write: map_scratch[n-1][key_scratch[n-1]] = value
+                    self.emit(Instruction::LoadLocal(map_scratch[n - 1]));
+                    self.emit(Instruction::LoadLocal(key_scratch[n - 1]));
+                    self.gen_expr(value)?;
+                    self.emit(Instruction::MapSetVal);
+                    // This is the updated innermost map -- reuse map_scratch[n-1]
+                    // as the "updated" slot for that level since the stale
+                    // pre-update value is no longer needed.
+                    self.emit(Instruction::StoreLocal(map_scratch[n - 1]));
+
+                    // Walk back up: for i from n-2 down to 0,
+                    // map_scratch[i] = map_scratch[i][key_scratch[i]] = map_scratch[i+1] (updated)
+                    for i in (0..n - 1).rev() {
+                        self.emit(Instruction::LoadLocal(map_scratch[i]));
+                        self.emit(Instruction::LoadLocal(key_scratch[i]));
+                        self.emit(Instruction::LoadLocal(map_scratch[i + 1]));
+                        self.emit(Instruction::MapSetVal);
+                        self.emit(Instruction::StoreLocal(map_scratch[i]));
+                    }
+
+                    self.emit(Instruction::LoadLocal(map_scratch[0]));
+                    self.emit(Instruction::StoreState(idx));
                 }
             }
             Statement::SetOp { set, op, value } => {
@@ -681,10 +765,19 @@ impl<'a> CodegenContext<'a> {
                     }
                 }
             }
-            Expression::MapIndex(map, _keys) => {
+            Expression::MapIndex(map, keys) => {
+                // `map[k1][k2]...[kN]` read, any depth: load the state map
+                // once, then chain MapGetVal per key. Each level defaults
+                // to the zero value if that level isn't a real Value::Map
+                // yet (unset state, or a key that was never written) --
+                // see MapGetVal's doc comment in aivm/src/vm.rs.
                 let idx = self.state_index(map)
                     .ok_or_else(|| format!("unknown state variable: {}", map))?;
                 self.emit(Instruction::LoadState(idx));
+                for key in keys {
+                    self.gen_expr(key)?;
+                    self.emit(Instruction::MapGetVal);
+                }
             }
             Expression::MapMethod { map, method, args: _ } => {
                 let idx = self.state_index(map)

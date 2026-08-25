@@ -42,6 +42,12 @@ pub mod gas_cost {
     pub const PACK_PER_FIELD: u64 = 2;
     pub const ARRAY_GET: u64 = 3;
     pub const ARRAY_SET: u64 = 4;
+    /// Map lookup: BTreeMap::get on a canonicalized key -- O(log n) but
+    /// priced a bit above ARRAY_GET since it also runs map_key_bytes().
+    pub const MAP_GET: u64 = 6;
+    /// Map insert: BTreeMap::insert (may clone the map's backing tree on
+    /// write in the worst case) -- priced above MAP_GET/ARRAY_SET.
+    pub const MAP_SET: u64 = 8;
 }
 
 /// Gas meter

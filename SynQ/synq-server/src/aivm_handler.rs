@@ -447,7 +447,16 @@ fn default_aivm_value_for_type(
         Type::Tuple(types) => Value::Array(
             types.iter().map(|t| default_aivm_value_for_type(t, structs)).collect(),
         ),
-        Type::Array(_) | Type::Mapping(_, _) => Value::Array(vec![]),
+        Type::Array(_) => Value::Array(vec![]),
+        // A never-written map-typed state slot must default to a real,
+        // empty Value::Map, not Value::Array([]) -- the AIVM VM's
+        // MapGetVal/MapSetVal only recognize Value::Map as "a map with
+        // entries" and otherwise fall back to a fresh empty map anyway,
+        // but seeding this correctly up front means a freshly-deployed
+        // contract's map state round-trips through get/set the same way
+        // a written-then-read one does, and any future direct state
+        // inspection sees the right shape immediately.
+        Type::Mapping(_, _) => Value::Map(std::collections::BTreeMap::new()),
         Type::Bool => Value::Bool(false),
         Type::UInt128 | Type::Int128 => Value::U128(0),
         Type::Str => Value::String(String::new()),
@@ -478,6 +487,28 @@ fn json_to_aivm_value_typed(
             return Ok(Value::Array(vals));
         }
         return Err(format!("unknown struct type '{}' for object argument", sname));
+    }
+    // Map-typed state var, fed back from a previous dry-run's `final_state`
+    // (see `aivm_value_to_json`'s Value::Map case: a JSON object keyed by
+    // "0x<hex map_key_bytes>" -> value). The hex key round-trips byte-for-
+    // byte into the BTreeMap key (map_key_bytes is exactly what produced
+    // it), so no re-canonicalization is needed here -- just hex-decode it
+    // back. Each entry's value is decoded with the map's declared value
+    // type so nested maps (map<K, map<K,V>>) recurse correctly.
+    if let (serde_json::Value::Object(obj), Some(Type::Mapping(_key_ty, value_ty))) = (v, ty) {
+        let mut m = std::collections::BTreeMap::new();
+        for (k, val) in obj {
+            let key_bytes = match k.strip_prefix("0x") {
+                Some(hexstr) => hex::decode(hexstr)
+                    .map_err(|e| format!("bad map key hex '{}': {}", k, e))?,
+                None => return Err(format!(
+                    "map key '{}' must be a 0x-hex string (as produced by a previous dry-run's final_state)", k
+                )),
+            };
+            let decoded = json_to_aivm_value_typed(val, Some(value_ty.as_ref()), structs)?;
+            m.insert(key_bytes, decoded);
+        }
+        return Ok(Value::Map(m));
     }
     if let serde_json::Value::Array(arr) = v {
         let elem_ty = if let Some(Type::Array(inner)) = ty { Some(inner.as_ref()) } else { None };
@@ -539,6 +570,16 @@ fn aivm_value_to_json(v: &aivm::host::Value) -> serde_json::Value {
         Value::Address(b) => serde_json::json!(format!("0x{}", hex::encode(b))),
         Value::String(s) => serde_json::json!(s),
         Value::Array(arr) => serde_json::json!(arr.iter().map(aivm_value_to_json).collect::<Vec<_>>()),
+        // Maps serialize as a JSON object keyed by the canonical map-key
+        // bytes (hex-encoded, since map keys aren't necessarily strings --
+        // e.g. an address or u256 key). This is a debug/inspection shape,
+        // not an ABI-typed decode target; scenario tests and normal
+        // contract calls read individual entries back out via the
+        // contract's own getter functions (e.g. balanceOf(addr)), not by
+        // decoding this JSON directly.
+        Value::Map(entries) => serde_json::json!(entries.iter()
+            .map(|(k, v)| (format!("0x{}", hex::encode(k)), aivm_value_to_json(v)))
+            .collect::<std::collections::BTreeMap<String, serde_json::Value>>()),
     }
 }
 
@@ -632,10 +673,18 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
             Ok(n) => n,
             Err(_) => return err_resp(vec![format!("bad state key: {}", k)]),
         };
-        // Use the typed decoder (no expected type here — state is keyed by
-        // slot index, not name) so plain JSON arrays decode to Value::Array
-        // for seeding struct-typed state vars (e.g. [1, 2] for a Point).
-        match json_to_aivm_value_typed(v, None, &struct_map) {
+        // Pass the slot's declared type (now that we look it up by index
+        // here) so the typed decoder can tell a map-typed state var's JSON
+        // object (as emitted by aivm_value_to_json's Value::Map case, e.g.
+        // {"0x03...": 111}) apart from a struct-typed one ({"x":1,"y":2}) --
+        // both are JSON objects, and only the declared Type::Mapping vs.
+        // Type::Named distinguishes them. Previously this always passed
+        // `None`, so a map-typed state var's `final_state` from one
+        // dry-run could never be fed back into a later dry-run's `state`
+        // (every chained call after the first that touched a map failed
+        // with "bad state value: unsupported arg type: {...}").
+        let expected_ty = compiled.state_var_types.iter().find(|(idx, _)| *idx == key).map(|(_, ty)| ty);
+        match json_to_aivm_value_typed(v, expected_ty, &struct_map) {
             Ok(val) => { seeded.insert(key, val); }
             Err(e) => return err_resp(vec![format!("bad state value: {}", e)]),
         }
