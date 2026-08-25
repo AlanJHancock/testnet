@@ -495,7 +495,7 @@ pub fn compile_synq_ide(source: &str) -> JsValue {
 
     let result = serde_json::json!({
         "ok": ok,
-        "compilerVersion": format!("{} (IR backend, sole path)", synq_version()),
+        "compilerVersion": format!("{} (Intermediate Representation backend, sole path)", synq_version()),
         "diagnostics": diagnostics,
         "artifacts": artifacts,
     });
