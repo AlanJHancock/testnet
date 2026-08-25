@@ -308,9 +308,27 @@ impl Value {
                 b.extend_from_slice(d);
                 b
             }
+            // 2026-08-25: Address keys now canonicalize into the SAME
+            // tag-0 numeric bucket as U64/U128/I64/Bool, using the
+            // address's 16-byte identity slot [5..21] -- the exact slot
+            // as_u128() already reads for the Ne/Lt/Gt/Le/Ge comparison
+            // opcodes (see that method's doc comment for why [5..21] is
+            // the address's true identity, not [25..41]). Without this,
+            // admin_role[caller] = true (write, Address-tagged) and
+            // admin_role[1] (read, u256-literal-tagged) landed in
+            // DIFFERENT map buckets for the identical numeric identity,
+            // even though every comparison operator already treated them
+            // as equal. Confirmed live via ComprehensiveToken: isAdmin(1)
+            // returned false right after init() made that same address
+            // an admin via caller, and delegated roles / transfer()
+            // were broken the same way in the other direction. See
+            // aivm-scenario-testing-backlog.md item 7 for the full repro.
+            // Tag 3 is retired from map keys as a result -- Address no
+            // longer gets its own tag, it folds into tag 0 like every
+            // other numeric-identity variant.
             Value::Address(d) => {
-                let mut b = vec![3u8];
-                b.extend_from_slice(d);
+                let mut b = vec![0u8];
+                b.extend_from_slice(&d[5..21]);
                 b
             }
             Value::String(s) => {
