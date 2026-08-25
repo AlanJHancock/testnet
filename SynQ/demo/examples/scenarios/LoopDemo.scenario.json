@@ -1,29 +1,83 @@
 {
   "version": 1,
-  "contract": "LoopDemo",
+  "contract": "contracts/LoopDemo.synq",
   "scenarios": [
     {
       "name": "pure loop functions -- no state required",
       "steps": [
-        { "call": "factorial", "args": [5], "expectReturn": 120 },
-        { "call": "sumRange", "args": [1, 10], "expectReturn": 55 },
-        { "call": "countEven", "args": [10], "expectReturn": 5 },
-        { "call": "sqrtFloor", "args": [50], "expectReturn": 7 },
-        { "call": "power", "args": [2, 8], "expectReturn": 256 }
+        {
+          "call": "factorial",
+          "args": [
+            5
+          ],
+          "expectReturn": 120
+        },
+        {
+          "call": "sumRange",
+          "args": [
+            1,
+            10
+          ],
+          "expectReturn": 55
+        },
+        {
+          "call": "countEven",
+          "args": [
+            10
+          ],
+          "expectReturn": 5
+        },
+        {
+          "call": "sqrtFloor",
+          "args": [
+            50
+          ],
+          "expectReturn": 7
+        },
+        {
+          "call": "power",
+          "args": [
+            2,
+            8
+          ],
+          "expectReturn": 256
+        }
       ]
     },
     {
       "name": "stateful runIterations accumulates across calls after init",
       "steps": [
-        { "call": "init", "args": [], "expectReturn": true },
-        { "call": "runIterations", "args": [4], "expectReturn": 6 },
-        { "call": "runIterations", "args": [3], "expectReturn": 3 }
+        {
+          "call": "init",
+          "args": [],
+          "expectReturn": true
+        },
+        {
+          "call": "runIterations",
+          "args": [
+            4
+          ],
+          "expectReturn": 6
+        },
+        {
+          "call": "runIterations",
+          "args": [
+            3
+          ],
+          "expectReturn": 3
+        }
       ]
     },
     {
       "name": "guard rail: runIterations before init must revert",
       "steps": [
-        { "call": "runIterations", "args": [3], "expectStatus": "reverted" }
+        {
+          "call": "runIterations",
+          "args": [
+            3
+          ],
+          "expectStatus": "reverted"
+        }
       ]
     }
   ]

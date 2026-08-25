@@ -1,43 +1,196 @@
 {
   "version": 1,
-  "contract": "StructValue",
+  "contract": "contracts/StructValue.synq",
   "scenarios": [
     {
       "name": "read-only struct helpers -- no state mutation",
       "steps": [
-        { "call": "init", "args": [], "expectReturn": true },
-        { "call": "getCorner", "args": [], "expectReturn": [0, 0] },
-        { "call": "getCornerX", "args": [], "expectReturn": 0 },
-        { "call": "getCornerY", "args": [], "expectReturn": 0 },
-        { "call": "getBoxOriginX", "args": [], "expectReturn": 1 },
-        { "call": "getBoxSizeY", "args": [], "expectReturn": 200 },
-        { "call": "makePoint", "args": [3, 4], "expectReturn": [3, 4] },
-        { "call": "translate", "args": [{ "x": 1, "y": 2 }, 5, 7], "expectReturn": [6, 9] },
-        { "call": "testTranslateFixed", "args": [], "expectReturn": [15, 27] },
-        { "call": "checkTranslate", "args": [{ "x": 1, "y": 2 }, 5, 7], "expectReturn": true }
+        {
+          "call": "init",
+          "args": [],
+          "expectReturn": true
+        },
+        {
+          "call": "getCorner",
+          "args": [],
+          "expectReturn": [
+            0,
+            0
+          ]
+        },
+        {
+          "call": "getCornerX",
+          "args": [],
+          "expectReturn": 0
+        },
+        {
+          "call": "getCornerY",
+          "args": [],
+          "expectReturn": 0
+        },
+        {
+          "call": "getBoxOriginX",
+          "args": [],
+          "expectReturn": 1
+        },
+        {
+          "call": "getBoxSizeY",
+          "args": [],
+          "expectReturn": 200
+        },
+        {
+          "call": "makePoint",
+          "args": [
+            3,
+            4
+          ],
+          "expectReturn": [
+            3,
+            4
+          ]
+        },
+        {
+          "call": "translate",
+          "args": [
+            {
+              "x": 1,
+              "y": 2
+            },
+            5,
+            7
+          ],
+          "expectReturn": [
+            6,
+            9
+          ]
+        },
+        {
+          "call": "testTranslateFixed",
+          "args": [],
+          "expectReturn": [
+            15,
+            27
+          ]
+        },
+        {
+          "call": "checkTranslate",
+          "args": [
+            {
+              "x": 1,
+              "y": 2
+            },
+            5,
+            7
+          ],
+          "expectReturn": true
+        }
       ]
     },
     {
       "name": "corner/box mutators chained -- each builds on the previous state",
       "steps": [
-        { "call": "init", "args": [], "expectReturn": true },
-        { "call": "setCorner", "args": [{ "x": 9, "y": 9 }], "expectReturn": true },
-        { "call": "getCorner", "args": [], "expectReturn": [9, 9] },
-        { "call": "setCornerFromMake", "args": [3, 4], "expectReturn": true },
-        { "call": "getCorner", "args": [], "expectReturn": [3, 4] },
-        { "call": "moveCorner", "args": [1, 1], "expectReturn": true },
-        { "call": "getCorner", "args": [], "expectReturn": [4, 5] },
-        { "call": "setBoxOrigin", "args": [{ "x": 0, "y": 0 }], "expectReturn": true },
-        { "call": "getBoxOriginX", "args": [], "expectReturn": 0 },
-        { "call": "setCornerX", "args": [99], "expectReturn": true },
-        { "call": "getCornerX", "args": [], "expectReturn": 99 },
-        { "call": "getCornerY", "args": [], "expectReturn": 5 }
+        {
+          "call": "init",
+          "args": [],
+          "expectReturn": true
+        },
+        {
+          "call": "setCorner",
+          "args": [
+            {
+              "x": 9,
+              "y": 9
+            }
+          ],
+          "expectReturn": true
+        },
+        {
+          "call": "getCorner",
+          "args": [],
+          "expectReturn": [
+            9,
+            9
+          ]
+        },
+        {
+          "call": "setCornerFromMake",
+          "args": [
+            3,
+            4
+          ],
+          "expectReturn": true
+        },
+        {
+          "call": "getCorner",
+          "args": [],
+          "expectReturn": [
+            3,
+            4
+          ]
+        },
+        {
+          "call": "moveCorner",
+          "args": [
+            1,
+            1
+          ],
+          "expectReturn": true
+        },
+        {
+          "call": "getCorner",
+          "args": [],
+          "expectReturn": [
+            4,
+            5
+          ]
+        },
+        {
+          "call": "setBoxOrigin",
+          "args": [
+            {
+              "x": 0,
+              "y": 0
+            }
+          ],
+          "expectReturn": true
+        },
+        {
+          "call": "getBoxOriginX",
+          "args": [],
+          "expectReturn": 0
+        },
+        {
+          "call": "setCornerX",
+          "args": [
+            99
+          ],
+          "expectReturn": true
+        },
+        {
+          "call": "getCornerX",
+          "args": [],
+          "expectReturn": 99
+        },
+        {
+          "call": "getCornerY",
+          "args": [],
+          "expectReturn": 5
+        }
       ]
     },
     {
       "name": "guard rail: setCorner before init must revert",
       "steps": [
-        { "call": "setCorner", "args": [{ "x": 1, "y": 1 }], "expectStatus": "reverted" }
+        {
+          "call": "setCorner",
+          "args": [
+            {
+              "x": 1,
+              "y": 1
+            }
+          ],
+          "expectStatus": "reverted"
+        }
       ]
     }
   ]
