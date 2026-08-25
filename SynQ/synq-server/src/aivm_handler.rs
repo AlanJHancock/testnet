@@ -360,6 +360,38 @@ fn parse_caller_address(s: &str) -> Result<[u8; 41], String> {
     Ok(arr)
 }
 
+/// Best-effort sanity check for a hand-built (non-bech32) caller address.
+/// The numeric identity slot is `bytes[5..21]` -- the exact 16-byte
+/// big-endian range `Value::as_u128()` reads for the `Ne`/`Lt`/`Gt`/`Le`/
+/// `Ge` comparison opcodes, and the exact range `Value::map_key_bytes()`
+/// now canonicalizes `Value::Address` map keys through (fixed 2026-08-25,
+/// see aivm-scenario-testing-backlog.md item 7). A real bech32m-decoded
+/// address (tsynq1.../synq1.../synw.../syna...) always has its pk_hash
+/// land in that slot by construction, so this only fires for the raw-hex
+/// fallback path in `parse_caller_address` -- e.g. a hand-crafted test
+/// caller that put a distinguishing byte at the end of the 41-byte array
+/// instead of inside `[5..21]`. That caller silently aliases to identity
+/// `0` for every map lookup and every `caller`-vs-literal comparison, which
+/// is exactly the mistake this project's own `ComprehensiveToken` test
+/// scenario made before item 7 was diagnosed. Non-fatal: surfaced via the
+/// response's `note` field, never blocks execution.
+fn caller_identity_slot_warning(addr: &[u8; 41]) -> Option<String> {
+    let identity_is_zero = addr[5..21].iter().all(|b| *b == 0);
+    let anything_nonzero = addr.iter().any(|b| *b != 0);
+    if identity_is_zero && anything_nonzero {
+        Some(format!(
+            "warning: caller address 0x{} has an all-zero identity slot (bytes[5..21]) but non-zero bytes elsewhere. \
+This will alias to identity 0 for every map lookup and comparison against a plain numeric literal (isAdmin(n)/isRegistered(n)/ \
+balanceOf(n)-style getters, and any caller-vs-literal Ne/Lt/Gt/Le/Ge check). If you hand-built this address for a test, encode \
+the distinguishing number as a 16-byte big-endian value written into bytes[5..21] -- the same slot Value::as_address() writes \
+a plain u128 literal into -- not at the end of the array. See aivm-scenario-testing-backlog.md item 7.",
+            hex::encode(addr)
+        ))
+    } else {
+        None
+    }
+}
+
 fn json_to_aivm_value(v: &serde_json::Value) -> Result<aivm::host::Value, String> {
     use aivm::host::Value;
     match v {
@@ -707,6 +739,7 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
         },
         _ => [0u8; 41],
     };
+    let caller_warning = caller_identity_slot_warning(&caller);
     let ctx = aivm::context::ExecutionContext::testnet(caller, [0u8; 41]);
     // This overlay is local to the request and is dropped at the end of this
     // function. avm.execute() may internally .commit() it on success — that
@@ -792,7 +825,10 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
                 final_assets,
                 next_asset_id,
                 canonical: Some(canonical),
-                note,
+                note: match &caller_warning {
+                    Some(w) => format!("{} {}", note, w),
+                    None => note.clone(),
+                },
                 errors: vec![],
             }))
         }
