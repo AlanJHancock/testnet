@@ -1,0 +1,340 @@
+{
+  "version": 1,
+  "contract": "ComprehensiveToken",
+  "scenarios": [
+    {
+      "name": "init -> metadata (str_len/str_concat/str_eq) -> role grants -> mint/burn as genesis admin -> labels -> revokes. NOTE: transfer() is not covered here -- see the map-key-tag caveat and aivm-scenario-testing-backlog.md item 7. Every write/read pair below deliberately uses ONE consistent key representation (either always the caller's own address, or always a plain u256 literal) to stay inside AIVM's currently-working behaviour.",
+      "steps": [
+        {
+          "call": "init",
+          "args": [
+            "Synergy Token",
+            "SNRG"
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": true
+        },
+        {
+          "call": "isInitialised",
+          "args": [],
+          "expectReturn": true
+        },
+        {
+          "call": "tokenName",
+          "args": [],
+          "expectReturn": "Synergy Token"
+        },
+        {
+          "call": "tokenSymbol",
+          "args": [],
+          "expectReturn": "SNRG"
+        },
+        {
+          "call": "getVersion",
+          "args": [],
+          "expectReturn": 2
+        },
+        {
+          "call": "isPQCEnabled",
+          "args": [],
+          "expectReturn": true
+        },
+        {
+          "call": "setDebugMode",
+          "args": [
+            true
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": true
+        },
+        {
+          "call": "whoAmI",
+          "args": [],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001"
+        },
+        {
+          "call": "amIAdmin",
+          "args": [],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": true
+        },
+        {
+          "call": "amIRegistered",
+          "args": [],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": true
+        },
+        {
+          "call": "tokenInfo",
+          "args": [],
+          "expectReturn": "Name: Synergy Token [SNRG]"
+        },
+        {
+          "call": "isSymbol",
+          "args": [
+            "SNRG"
+          ],
+          "expectReturn": true
+        },
+        {
+          "call": "isSymbol",
+          "args": [
+            "WRONG"
+          ],
+          "expectReturn": false
+        },
+        {
+          "call": "grantMinter",
+          "args": [
+            2
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": true
+        },
+        {
+          "call": "isMinter",
+          "args": [
+            2
+          ],
+          "expectReturn": true
+        },
+        {
+          "call": "grantAdmin",
+          "args": [
+            4
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": true
+        },
+        {
+          "call": "isAdmin",
+          "args": [
+            4
+          ],
+          "expectReturn": true
+        },
+        {
+          "call": "register",
+          "args": [
+            3
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": true
+        },
+        {
+          "call": "isRegistered",
+          "args": [
+            3
+          ],
+          "expectReturn": true
+        },
+        {
+          "call": "setLabel",
+          "args": [
+            3,
+            "Alice"
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": true
+        },
+        {
+          "call": "getLabel",
+          "args": [
+            3
+          ],
+          "expectReturn": "Alice"
+        },
+        {
+          "call": "mint",
+          "args": [
+            3,
+            500
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": 500
+        },
+        {
+          "call": "balanceOf",
+          "args": [
+            3
+          ],
+          "expectReturn": 500
+        },
+        {
+          "call": "totalSupply",
+          "args": [],
+          "expectReturn": 500
+        },
+        {
+          "call": "burn",
+          "args": [
+            3,
+            50
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": 450
+        },
+        {
+          "call": "balanceOf",
+          "args": [
+            3
+          ],
+          "expectReturn": 450
+        },
+        {
+          "call": "totalSupply",
+          "args": [],
+          "expectReturn": 450
+        },
+        {
+          "call": "revokeMinter",
+          "args": [
+            2
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": true
+        },
+        {
+          "call": "isMinter",
+          "args": [
+            2
+          ],
+          "expectReturn": false
+        },
+        {
+          "call": "revokeAdmin",
+          "args": [
+            4
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": true
+        },
+        {
+          "call": "isAdmin",
+          "args": [
+            4
+          ],
+          "expectReturn": false
+        }
+      ]
+    },
+    {
+      "name": "guard rail: init() rejects an empty name (str_len check)",
+      "steps": [
+        {
+          "call": "init",
+          "args": [
+            "",
+            "SNRG"
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectStatus": "reverted"
+        }
+      ]
+    },
+    {
+      "name": "guard rail: init() rejects a name over 64 chars (str_len check)",
+      "steps": [
+        {
+          "call": "init",
+          "args": [
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "SNRG"
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectStatus": "reverted"
+        }
+      ]
+    },
+    {
+      "name": "guard rail: init() rejects a symbol over 8 chars (str_len check)",
+      "steps": [
+        {
+          "call": "init",
+          "args": [
+            "Synergy Token",
+            "TOOLONGSYM"
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectStatus": "reverted"
+        }
+      ]
+    },
+    {
+      "name": "guard rail: revokeAdmin() cannot revoke self",
+      "steps": [
+        {
+          "call": "init",
+          "args": [
+            "Synergy Token",
+            "SNRG"
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": true
+        },
+        {
+          "call": "revokeAdmin",
+          "args": [
+            1
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectStatus": "reverted"
+        }
+      ]
+    },
+    {
+      "name": "guard rail: revokeAdmin() cannot remove the last admin",
+      "steps": [
+        {
+          "call": "init",
+          "args": [
+            "Synergy Token",
+            "SNRG"
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": true
+        },
+        {
+          "call": "revokeAdmin",
+          "args": [
+            99
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectStatus": "reverted"
+        }
+      ]
+    },
+    {
+      "name": "guard rail: deregister() reverts while the target still holds a balance",
+      "steps": [
+        {
+          "call": "init",
+          "args": [
+            "Synergy Token",
+            "SNRG"
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": true
+        },
+        {
+          "call": "mint",
+          "args": [
+            3,
+            500
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectReturn": 500
+        },
+        {
+          "call": "deregister",
+          "args": [
+            3
+          ],
+          "caller": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "expectStatus": "reverted"
+        }
+      ]
+    }
+  ]
+}
