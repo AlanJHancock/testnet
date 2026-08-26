@@ -571,6 +571,65 @@ fn json_to_aivm_value_typed(
             .collect();
         return Ok(Value::Array(vals?));
     }
+    // A decimal-string numeric value for a numeric-typed field: the
+    // ENCODE side (`aivm_value_to_json`'s `Value::U128` case) deliberately
+    // stringifies u128/u256-mapped values because they can exceed JS's
+    // safe-integer range (2^53) -- any real token amount/balance routinely
+    // does. But until this check existed, the decoder had no matching path
+    // back: a plain non-"0x" JSON string fell straight through to the
+    // untyped `json_to_aivm_value` fallback below, which has no numeric
+    // parsing for strings and returns an opaque `Value::String` instead.
+    // That silently corrupts the value -- it round-trips fine through a
+    // bare `return`, but the moment it's used in a comparison or arithmetic
+    // op (`!=`, `+`, ...) the VM throws `TypeMismatch { expected: "u128",
+    // got: "string" }`. Repro: DomainRegistry.set_record(11,22,33,"999")
+    // then update_record(11,22,33,555) -- `require(current != 0, ...)`
+    // reading that same nested-map value back throws. Passing 999 as a
+    // JSON number instead of a string avoided it, but a real u256 amount
+    // over 2^53 has no choice but to arrive as a string, so this needed a
+    // real fix, not just "pass numbers" caller guidance. Signed types are
+    // included for symmetry even though this AIVM's `Value` enum has no
+    // I128 variant yet (i64::MAX is the ceiling until one is added) --
+    // untested against a live signed-int example since none exist in the
+    // current demo set, but strictly safer than the prior silent
+    // corruption for any string that does show up there.
+    // IMPORTANT: only intercept plain decimal strings here. A "0x..."
+    // string is NEVER a decimal numeric encoding in this protocol -- it's
+    // the hex encoding used for Address/Bytes32/Bytes (see
+    // `json_to_aivm_value` below), and that includes values whose
+    // DECLARED SynQ type is a numeric one but whose actual runtime Value
+    // is an Address -- e.g. `owner: u256; ... owner = caller;` stores a
+    // real `Value::Address`, which `aivm_value_to_json` serializes as a
+    // "0x"-prefixed 41-byte hex string. Treating that as decimal would
+    // (and, before this guard was added during testing, briefly did)
+    // break every `x = caller`-assigned-to-a-numeric-slot state var on
+    // its next round trip through `state`/`final_state` chaining --
+    // caught via SimpleToken.init()/getTotalSupply() regression-testing
+    // this same fix. Only a string with no "0x" prefix reaches here.
+    if let serde_json::Value::String(s) = v {
+        if !s.starts_with("0x") {
+            let is_unsigned = matches!(
+                ty,
+                Some(Type::UInt8) | Some(Type::UInt16) | Some(Type::UInt32) | Some(Type::UInt64)
+                    | Some(Type::UInt128) | Some(Type::UInt256) | Some(Type::Height)
+            );
+            let is_signed = matches!(
+                ty,
+                Some(Type::Int8) | Some(Type::Int16) | Some(Type::Int32)
+                    | Some(Type::Int64) | Some(Type::Int128) | Some(Type::Int256)
+            );
+            if is_unsigned {
+                return s.parse::<u128>()
+                    .map(Value::U128)
+                    .map_err(|_| format!("expected an unsigned integer string for this argument, got '{}'", s));
+            }
+            if is_signed {
+                return s.parse::<i64>()
+                    .map(Value::I64)
+                    .map_err(|_| format!("expected an integer string for this argument, got '{}'", s));
+            }
+        }
+    }
     // A scalar (number/bool/string/null) can never represent a struct --
     // accepting one here would silently corrupt the value: e.g. setCorner
     // called with a bare 10 instead of {x, y} would store corner as
