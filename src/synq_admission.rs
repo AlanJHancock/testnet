@@ -229,7 +229,7 @@ pub fn build_deploy_admission_envelope_from_pqsynq_bytes(
         signer: deploy
             .signing_payload
             .signer_address
-            .to_testnet_debug_string(),
+            .to_execution_signer_id(),
         payload_hash: deploy.signing_payload.payload_hash,
         bytecode_hash: Some(deploy.bytecode_hash),
         manifest_hash: Some(deploy.manifest_hash),
@@ -304,7 +304,7 @@ pub fn build_call_admission_envelope_from_pqsynq_bytes(
         signer: call
             .signing_payload
             .signer_address
-            .to_testnet_debug_string(),
+            .to_execution_signer_id(),
         payload_hash: call.signing_payload.payload_hash,
         bytecode_hash: None,
         manifest_hash: None,
@@ -495,7 +495,7 @@ pub fn verify_synq_deploy_for_chain_admission(
         || verified.bytecode_hash != bytecode_hash
         || verified.manifest_hash != manifest_hash
         || verified.abi_hash != abi_hash
-        || verified.deployer.to_testnet_debug_string() != envelope.signer
+        || verified.deployer.to_execution_signer_id() != envelope.signer
     {
         return Err(SynQAdmissionError::InvalidCarrier {
             code: "AEGIS-CANON",
@@ -531,7 +531,7 @@ pub fn verify_synq_call_for_chain_admission(
         .map_err(pqsynq_error)?;
 
     if call.signing_payload.payload_hash != envelope.payload_hash
-        || verified.caller.to_testnet_debug_string() != envelope.signer
+        || verified.caller.to_execution_signer_id() != envelope.signer
     {
         return Err(SynQAdmissionError::InvalidCarrier {
             code: "AEGIS-CANON",
@@ -764,7 +764,7 @@ fn validate_sts9_horizon_verification(
     let signer = deploy
         .signing_payload
         .signer_address
-        .to_testnet_debug_string();
+        .to_execution_signer_id();
 
     expect_str_any(
         verification,
@@ -1432,7 +1432,7 @@ pub(crate) mod test_support {
             signer: deploy
                 .signing_payload
                 .signer_address
-                .to_testnet_debug_string(),
+                .to_execution_signer_id(),
             payload_hash,
             bytecode_hash: Some(bytecode_hash),
             manifest_hash: Some(manifest_hash),
@@ -1482,7 +1482,7 @@ pub(crate) mod test_support {
             signer: call
                 .signing_payload
                 .signer_address
-                .to_testnet_debug_string(),
+                .to_execution_signer_id(),
             payload_hash,
             bytecode_hash: None,
             manifest_hash: None,

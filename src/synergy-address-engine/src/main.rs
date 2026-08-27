@@ -186,7 +186,11 @@ pub fn derive_address(public_key: &[u8], address_type: AddressType) -> Result<St
 pub fn generate_identity(address_type: AddressType) -> Result<SynergyIdentity, String> {
     if matches!(address_type, AddressType::BurnAddress) {
         return Ok(SynergyIdentity {
-            address: "synergy00000000000000000000000burn".to_string(),
+            // 2026-08-27: was "synergy00000000000000000000000burn", which didn't
+            // match the actual 41-char NETWORK_BURN_ADDRESS constant used by the L1
+            // binary (src/address.rs) and the SynQ VM (vm::bech32) -- three different
+            // burn-address literals across the codebase. Aligned to the canonical one.
+            address: "syn00000000000000000000000000000000000000".to_string(),
             public_key: String::new(),
             private_key: String::new(),
             address_type: "Burn Address".to_string(),

@@ -1365,7 +1365,7 @@ mod tests {
         let contract_address_text = synergy_contract_address_from_pqsynq_address(&contract_address);
         assert_ne!(
             contract_address_text,
-            fixture.address.to_testnet_debug_string()
+            fixture.address.to_execution_signer_id()
         );
         let increment_payload = fixture.call_payload(
             contract_address,

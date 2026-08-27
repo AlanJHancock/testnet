@@ -25,6 +25,17 @@ pub enum AddressKind {
     FeeCollector,
     ValidatorCluster,
     Contract,
+    /// synm (general), synu (DAO treasury), synl (validator/council) --
+    /// distinct from Wallet per SNTS v1.3 registry. Previously synu was
+    /// misclassified as Wallet here (fixed 2026-08-27).
+    Multisig,
+    /// synb1/synb2/synb3 (STS-9 fungible tiers), synn1/synn2 (STS-NF),
+    /// synj (multi-asset), synk (identity/credential) -- object addresses,
+    /// distinct from BurnAddress. Previously any synb*-prefixed address was
+    /// misclassified as BurnAddress here, which would have wrongly treated
+    /// real token-tier addresses as protocol-controlled/non-spendable
+    /// (fixed 2026-08-27).
+    Token,
     BurnAddress,
     System,
     Unknown,
@@ -181,12 +192,14 @@ pub fn address_kind(address: &str) -> AddressKind {
         AddressKind::ValidatorCluster
     } else if address.starts_with("synv") {
         AddressKind::Validator
-    } else if address.starts_with("synw") || address.starts_with("synu") {
+    } else if address.starts_with("synm") || address.starts_with("synu") || address.starts_with("synl") {
+        AddressKind::Multisig
+    } else if address.starts_with("synw") {
         AddressKind::Wallet
     } else if address.starts_with("synq") || address.starts_with("sync") {
         AddressKind::Contract
-    } else if address.starts_with("synb") {
-        AddressKind::BurnAddress
+    } else if address.starts_with("synb") || address.starts_with("synn") || address.starts_with("synj") || address.starts_with("synk") {
+        AddressKind::Token
     } else if address.starts_with("syn") {
         AddressKind::System
     } else {
@@ -201,11 +214,12 @@ pub fn is_network_burn_address(address: &str) -> bool {
 pub fn registry_entry_for_prefix(prefix: &str) -> Option<AddressRegistryEntry> {
     let address_type = match prefix {
         "synf" => AddressKind::FeeCollector,
-        "syngrp1" => AddressKind::ValidatorCluster,
-        "synw" | "synu" => AddressKind::Wallet,
+        "syngrp1" | "syngrp2" | "syngrp3" | "syngrp4" | "syngrp5" => AddressKind::ValidatorCluster,
+        "synw" => AddressKind::Wallet,
+        "synm" | "synu" | "synl" => AddressKind::Multisig,
         "synv1" | "synv2" | "synv3" | "synv4" | "synv5" => AddressKind::Validator,
         "synq" | "sync" => AddressKind::Contract,
-        "synb" => AddressKind::BurnAddress,
+        "synb1" | "synb2" | "synb3" | "synn1" | "synn2" | "synj" | "synk" => AddressKind::Token,
         _ => return None,
     };
 
@@ -460,5 +474,23 @@ mod tests {
             generate_wallet_address(key_b),
             "different keys must produce different addresses"
         );
+    }
+
+    #[test]
+    fn synu_prefix_is_multisig_not_wallet() {
+        let addr = format!("synu1{}", "q".repeat(36));
+        assert_eq!(address_kind(&addr), AddressKind::Multisig);
+        assert_ne!(address_kind(&addr), AddressKind::Wallet);
+        let entry = registry_entry_for_prefix("synu").expect("synu registry entry");
+        assert_eq!(entry.address_type, AddressKind::Multisig);
+    }
+
+    #[test]
+    fn synb_token_tier_is_not_burn_address() {
+        let addr = format!("synb1{}", "q".repeat(36));
+        assert_eq!(address_kind(&addr), AddressKind::Token);
+        assert_ne!(address_kind(&addr), AddressKind::BurnAddress);
+        let entry = registry_entry_for_prefix("synb1").expect("synb1 registry entry");
+        assert_eq!(entry.address_type, AddressKind::Token);
     }
 }
