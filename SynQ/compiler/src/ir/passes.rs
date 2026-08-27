@@ -668,9 +668,26 @@ fn fold_binary(op: &crate::ast::BinaryOperator, lhs: &crate::ast::Literal, rhs: 
         BinaryOperator::BitAnd => Some(Literal::Number(l & r)),
         BinaryOperator::BitOr => Some(Literal::Number(l | r)),
         BinaryOperator::BitXor => Some(Literal::Number(l ^ r)),
-        // Literal::Number is backed by u128 — only fold shifts that stay within
-        // that width; wider shifts are left for runtime U256 evaluation.
-        BinaryOperator::Shl => if r < 128 { l.checked_shl(r as u32).map(Literal::Number) } else { None },
+        // Literal::Number is backed by u128 -- only fold shifts that stay
+        // within that width; wider shifts (or ones whose RESULT overflows
+        // u128, even though the shift amount itself is < 128) are left for
+        // runtime U256 evaluation.
+        //
+        // Bug this guards against: u128::checked_shl(r) only rejects
+        // r >= 128 (the bit width) -- it does NOT check whether the shifted
+        // value itself still fits in 128 bits. For r < 128 it always
+        // returns Some(...), silently discarding any bits pushed past
+        // bit 127. E.g. (2^100) << 50 (a perfectly valid u256 literal
+        // expression, correct answer 2^150) has shift amount 50 < 128, so
+        // the old "r < 128" guard let it through, and
+        // 2u128.pow(100).checked_shl(50) silently truncated to 0 --
+        // a folded compile-time CONSTANT of the wrong value with no error
+        // at all. Guarding on l.leading_zeros() >= r proves no set bit
+        // of l is shifted past bit 127, so the u128 fold is bit-for-bit
+        // identical to the true (wider) result before falling back.
+        BinaryOperator::Shl => if r < 128 && (l.leading_zeros() as u128) >= r {
+            l.checked_shl(r as u32).map(Literal::Number)
+        } else { None },
         BinaryOperator::Shr => if r < 128 { Some(Literal::Number(l >> r as u32)) } else { None },
         // No catch-all: BinaryOperator's variants are all covered above, so
         // a trailing `_ => None` was unreachable dead code.

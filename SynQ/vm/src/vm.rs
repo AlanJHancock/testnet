@@ -2879,4 +2879,58 @@ contract BitwiseTest {
         assert_eq!(prec, U256::from(10u32), "(6 & 3) | 8 should be 10, not 6 & (3 | 8) = 6");
     }
 
+
+    #[test]
+    fn test_ir_shl_constant_fold_does_not_silently_truncate() {
+        // Regression test for a real compile-time miscompilation:
+        // BinaryOperator::Shl constant-folding guarded only on the shift
+        // AMOUNT being < 128 (u128's bit width), not on whether the shifted
+        // RESULT still fits in 128 bits. u128::checked_shl(r) never returns
+        // None for r < 128 -- it just performs a truncating shift within
+        // the fixed 128-bit width, silently discarding any bits pushed
+        // past bit 127.
+        //
+        // Concretely: (2^100) << 50 is a perfectly valid u256 expression
+        // (correct answer 2^150), but the old guard let it fold at COMPILE
+        // TIME to 2u128.pow(100).checked_shl(50) == 0 (since 2^150 mod
+        // 2^128 == 0) -- a wrong constant baked into the bytecode with no
+        // error at all. This test proves the compiled contract now returns
+        // the true 256-bit answer, not the old silently-truncated zero.
+        let source = r#"pragma synq ^0.9;
+contract ShlFoldTest {
+    state {
+        initialised: bool;
+    }
+
+    @public
+    function init() -> bool {
+        if (initialised) { return false; }
+        initialised = true;
+        return true;
+    }
+
+    @public
+    function shiftLiteralOverflow() -> u256 {
+        // 2^100 literal, shifted left by 50 -> true answer is 2^150.
+        return 1267650600228229401496703205376 << 50;
+    }
+}
+"#;
+
+        let mut vm = compile_ir_and_load(source);
+        vm.call_function("init", &[]).expect("init() should succeed");
+
+        let r = vm.call_function("shiftLiteralOverflow", &[])
+            .expect("shiftLiteralOverflow should execute");
+
+        // 2^150, computed independently via runtime U256 shift (not the
+        // buggy constant-folded path) to cross-check the expected value.
+        let expected = U256::from(1u32) << U256::from(150u32);
+
+        match r {
+            Some(Value::U256(v)) => assert_eq!(v, expected,
+                "(2^100) << 50 should equal 2^150, not a u128-truncated value (e.g. 0)"),
+            other => panic!("shiftLiteralOverflow unexpected result: {:?}", other),
+        }
+    }
 }
