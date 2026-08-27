@@ -764,6 +764,7 @@ impl<'a> BuildContext<'a> {
                 let result_ty = match op {
                     UnaryOperator::Not => IrType::Bool,
                     UnaryOperator::Neg => IrType::U256,
+                    UnaryOperator::BitNot => IrType::U256,
                 };
                 Ok(self.push_value(IrOp::UnaryOp(*op, val), result_ty))
             }

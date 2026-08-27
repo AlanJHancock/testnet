@@ -275,11 +275,12 @@ fn binop_to_synq(op: &BinaryOperator) -> &'static str {
     BinaryOperator::Div => "/", BinaryOperator::Mod => "%", BinaryOperator::Eq => "==",
     BinaryOperator::Ne => "!=", BinaryOperator::Lt => "<", BinaryOperator::Le => "<=",
     BinaryOperator::Gt => ">", BinaryOperator::Ge => ">=", BinaryOperator::And => "&&",
-    BinaryOperator::Or => "||" }
+    BinaryOperator::Or => "||", BinaryOperator::BitAnd => "&", BinaryOperator::BitOr => "|",
+    BinaryOperator::BitXor => "^", BinaryOperator::Shl => "<<", BinaryOperator::Shr => ">>" }
 }
 
 fn unop_to_synq(op: &UnaryOperator) -> &'static str {
-    match op { UnaryOperator::Neg => "-", UnaryOperator::Not => "!" }
+    match op { UnaryOperator::Neg => "-", UnaryOperator::Not => "!", UnaryOperator::BitNot => "~" }
 }
 
 fn literal_to_synq(lit: &Literal) -> String {

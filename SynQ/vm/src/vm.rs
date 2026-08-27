@@ -681,6 +681,39 @@ impl QuantumVM {
                     let av=a.as_u256()?;let bv=b.as_u256()?;let r=av.checked_mul(bv).ok_or_else(||VMError::RuntimeError(format!("UInt256 overflow on Mul: {}×{}",av,bv)))?;self.push(Value::from_u256_shrink(r))?;
                 } else { return Err(VMError::RuntimeError("Mul: expected numeric".to_string())); }
             }
+            OpCode::BitAnd => {
+                let b = self.pop()?; let a = self.pop()?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    let av=a.as_u256()?;let bv=b.as_u256()?;self.push(Value::from_u256_shrink(av & bv))?;
+                } else { return Err(VMError::RuntimeError("BitAnd: expected numeric".to_string())); }
+            }
+            OpCode::BitOr => {
+                let b = self.pop()?; let a = self.pop()?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    let av=a.as_u256()?;let bv=b.as_u256()?;self.push(Value::from_u256_shrink(av | bv))?;
+                } else { return Err(VMError::RuntimeError("BitOr: expected numeric".to_string())); }
+            }
+            OpCode::BitXor => {
+                let b = self.pop()?; let a = self.pop()?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    let av=a.as_u256()?;let bv=b.as_u256()?;self.push(Value::from_u256_shrink(av ^ bv))?;
+                } else { return Err(VMError::RuntimeError("BitXor: expected numeric".to_string())); }
+            }
+            OpCode::Shl => {
+                // Full 256-bit logical shift; shift amounts >= 256 saturate to zero
+                // (ruint's overflowing_shl_big already implements this).
+                let b = self.pop()?; let a = self.pop()?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    let av=a.as_u256()?;let bv=b.as_u256()?;self.push(Value::from_u256_shrink(av << bv))?;
+                } else { return Err(VMError::RuntimeError("Shl: expected numeric".to_string())); }
+            }
+            OpCode::Shr => {
+                // Full 256-bit logical shift; shift amounts >= 256 saturate to zero.
+                let b = self.pop()?; let a = self.pop()?;
+                if a.is_uint_compat() && b.is_uint_compat() {
+                    let av=a.as_u256()?;let bv=b.as_u256()?;self.push(Value::from_u256_shrink(av >> bv))?;
+                } else { return Err(VMError::RuntimeError("Shr: expected numeric".to_string())); }
+            }
             OpCode::Div => {
                 let b = self.pop()?; let a = self.pop()?;
                 if a.is_signed() && b.is_signed() {
@@ -2723,5 +2756,127 @@ contract DomainRegistry {
         }
     }
 
+
+    #[test]
+    fn test_ir_bitwise_and_shift_ops_full_width() {
+        // Covers the new BitAnd/BitOr/BitXor/Shl/Shr/BitNot operators end-to-end
+        // (grammar -> AST -> IR -> VM), specifically exercising the FULL
+        // 256-bit range — not just u64/u128 — since that's the whole point
+        // of these being u256-native ops.
+        let source = r#"pragma synq ^0.9;
+contract BitwiseTest {
+    state {
+        initialised: bool;
+    }
+
+    @public
+    function init() -> bool {
+        if (initialised) { return false; }
+        initialised = true;
+        return true;
+    }
+
+    @public
+    function shiftLeftFull(bits: u256) -> u256 {
+        let one: u256 = 1;
+        return one << bits;
+    }
+
+    @public
+    function shiftRightFull(x: u256, bits: u256) -> u256 {
+        return x >> bits;
+    }
+
+    @public
+    function bitAndOp(a: u256, b: u256) -> u256 {
+        return a & b;
+    }
+
+    @public
+    function bitOrOp(a: u256, b: u256) -> u256 {
+        return a | b;
+    }
+
+    @public
+    function bitXorOp(a: u256, b: u256) -> u256 {
+        return a ^ b;
+    }
+
+    @public
+    function bitNotOp(a: u256) -> u256 {
+        return ~a;
+    }
+
+    @public
+    function precedenceCheck() -> u256 {
+        // & binds tighter than |: (6 & 3) | 8 = 2 | 8 = 10
+        return 6 & 3 | 8;
+    }
+}
+"#;
+
+        let mut vm = compile_ir_and_load(source);
+        vm.call_function("init", &[]).expect("init() should succeed");
+
+        fn as_u256(r: Option<Value>) -> U256 {
+            match r {
+                Some(Value::U256(v)) => v,
+                Some(Value::I32(v)) => U256::from(v as u64),
+                other => panic!("expected U256-compatible result, got {:?}", other),
+            }
+        }
+
+        // 1 << 255 — a value that only exists in the top half of a 256-bit
+        // word; u64/u128 arithmetic could never produce this.
+        let shifted = as_u256(vm.call_function("shiftLeftFull", &[Value::U256(U256::from(255u32))])
+            .expect("shiftLeftFull(255) should execute"));
+        let expected_2pow255 = U256::from(1u32) << U256::from(255u32);
+        assert_eq!(shifted, expected_2pow255, "1 << 255 should equal 2^255");
+
+        // Shift back down and recover 1.
+        let back = as_u256(vm.call_function("shiftRightFull", &[Value::U256(expected_2pow255), Value::U256(U256::from(255u32))])
+            .expect("shiftRightFull should execute"));
+        assert_eq!(back, U256::from(1u32), "2^255 >> 255 should equal 1");
+
+        // Shift amount >= 256 saturates to zero (EVM-style semantics), not a panic
+        // and not a wrap-around modulo 256.
+        let over_shift = as_u256(vm.call_function("shiftLeftFull", &[Value::U256(U256::from(300u32))])
+            .expect("shiftLeftFull(300) should execute"));
+        assert_eq!(over_shift, U256::ZERO, "1 << 300 should saturate to 0, not wrap");
+
+        let over_shift_r = as_u256(vm.call_function("shiftRightFull", &[Value::U256(U256::from(1u32)), Value::U256(U256::from(256u32))])
+            .expect("shiftRightFull(1, 256) should execute"));
+        assert_eq!(over_shift_r, U256::ZERO, "1 >> 256 should saturate to 0");
+
+        // BitAnd/BitOr/BitXor at the high end of the range.
+        let high_a = expected_2pow255; // 2^255
+        let high_b = expected_2pow255 - U256::from(1u32); // 2^255 - 1 (all lower bits set)
+        let and_r = as_u256(vm.call_function("bitAndOp", &[Value::U256(high_a), Value::U256(high_b)])
+            .expect("bitAndOp should execute"));
+        assert_eq!(and_r, U256::ZERO, "2^255 & (2^255 - 1) should be 0 (disjoint bit ranges)");
+
+        let or_r = as_u256(vm.call_function("bitOrOp", &[Value::U256(high_a), Value::U256(high_b)])
+            .expect("bitOrOp should execute"));
+        assert_eq!(or_r, high_a | high_b, "bitwise OR should combine both bit ranges");
+
+        let xor_r = as_u256(vm.call_function("bitXorOp", &[Value::U256(high_a), Value::U256(high_a)])
+            .expect("bitXorOp should execute"));
+        assert_eq!(xor_r, U256::ZERO, "x ^ x should always be 0");
+
+        // Full-width bitwise complement: ~0 must be ALL 256 bits set
+        // (U256::MAX), not just the low 64/128 bits set.
+        let not_zero = as_u256(vm.call_function("bitNotOp", &[Value::U256(U256::ZERO)])
+            .expect("bitNotOp(0) should execute"));
+        assert_eq!(not_zero, U256::MAX, "~0 should be U256::MAX across the full 256-bit width");
+
+        let not_max = as_u256(vm.call_function("bitNotOp", &[Value::U256(U256::MAX)])
+            .expect("bitNotOp(MAX) should execute"));
+        assert_eq!(not_max, U256::ZERO, "~U256::MAX should be 0");
+
+        // Operator precedence: & binds tighter than |.
+        let prec = as_u256(vm.call_function("precedenceCheck", &[])
+            .expect("precedenceCheck should execute"));
+        assert_eq!(prec, U256::from(10u32), "(6 & 3) | 8 should be 10, not 6 & (3 | 8) = 6");
+    }
 
 }

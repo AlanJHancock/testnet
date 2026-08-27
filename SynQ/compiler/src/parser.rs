@@ -735,7 +735,8 @@ fn parse_statement(pair: Pair<Rule>) -> Statement {
 fn parse_expression(pair: Pair<Rule>) -> Expression {
     match pair.as_rule() {
         Rule::expression => parse_expression(pair.into_inner().next().unwrap()),
-        Rule::logical | Rule::comparison | Rule::additive | Rule::multiplicative => {
+        Rule::logical | Rule::comparison | Rule::bitor | Rule::bitxor | Rule::bitand
+        | Rule::shift | Rule::additive | Rule::multiplicative => {
             let mut inner = pair.into_inner();
             let mut left = parse_expression(inner.next().unwrap());
             while let Some(op_pair) = inner.next() {
@@ -756,6 +757,9 @@ fn parse_expression(pair: Pair<Rule>) -> Expression {
             if full.starts_with('!') {
                 let operand = parse_expression(operand_pair);
                 Expression::UnaryOp(UnaryOperator::Not, Box::new(operand))
+            } else if full.starts_with('~') {
+                let operand = parse_expression(operand_pair);
+                Expression::UnaryOp(UnaryOperator::BitNot, Box::new(operand))
             } else if full.starts_with('-') {
                 let operand = parse_expression(operand_pair);
                 Expression::BinaryOp(
@@ -918,6 +922,11 @@ fn parse_binop(pair: &Pair<Rule>) -> BinaryOperator {
         "%"  => BinaryOperator::Mod,
         "||" => BinaryOperator::Or,
         "&&" => BinaryOperator::And,
+        "|"  => BinaryOperator::BitOr,
+        "^"  => BinaryOperator::BitXor,
+        "&"  => BinaryOperator::BitAnd,
+        "<<" => BinaryOperator::Shl,
+        ">>" => BinaryOperator::Shr,
         _    => BinaryOperator::Add,
     }
 }

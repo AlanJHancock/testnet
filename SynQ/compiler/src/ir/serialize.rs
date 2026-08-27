@@ -192,6 +192,9 @@ impl Writer {
             BinaryOperator::Le  => 0x09, BinaryOperator::Gt  => 0x0A,
             BinaryOperator::Ge  => 0x0B, BinaryOperator::And => 0x0C,
             BinaryOperator::Or  => 0x0D,
+            BinaryOperator::BitAnd => 0x0E, BinaryOperator::BitOr => 0x0F,
+            BinaryOperator::BitXor => 0x10, BinaryOperator::Shl => 0x11,
+            BinaryOperator::Shr => 0x12,
         };
         self.u8(tag);
     }
@@ -201,6 +204,7 @@ impl Writer {
         let tag = match op {
             UnaryOperator::Neg => 0x01,
             UnaryOperator::Not => 0x02,
+            UnaryOperator::BitNot => 0x03,
         };
         self.u8(tag);
     }
@@ -672,6 +676,9 @@ impl<'a> Reader<'a> {
             0x09 => Ok(BinaryOperator::Le),   0x0A => Ok(BinaryOperator::Gt),
             0x0B => Ok(BinaryOperator::Ge),   0x0C => Ok(BinaryOperator::And),
             0x0D => Ok(BinaryOperator::Or),
+            0x0E => Ok(BinaryOperator::BitAnd), 0x0F => Ok(BinaryOperator::BitOr),
+            0x10 => Ok(BinaryOperator::BitXor), 0x11 => Ok(BinaryOperator::Shl),
+            0x12 => Ok(BinaryOperator::Shr),
             _ => Err(IrSerError::InvalidTag(tag)),
         }
     }
@@ -681,6 +688,7 @@ impl<'a> Reader<'a> {
         match tag {
             0x01 => Ok(UnaryOperator::Neg),
             0x02 => Ok(UnaryOperator::Not),
+            0x03 => Ok(UnaryOperator::BitNot),
             _ => Err(IrSerError::InvalidTag(tag)),
         }
     }

@@ -253,12 +253,15 @@ pub enum BinaryOperator {
     Add, Sub, Mul, Div, Mod,
     Eq, Ne, Lt, Le, Gt, Ge,
     And, Or,
+    // Bitwise / shift ops — operate on the full 256-bit unsigned representation.
+    BitAnd, BitOr, BitXor, Shl, Shr,
 }
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum UnaryOperator {
     Neg,   // `-`
     Not,   // `!`
+    BitNot, // `~` — full-width (256-bit) bitwise complement
 }
 
 // ── Types ────────────────────────────────────────────────────────────────────

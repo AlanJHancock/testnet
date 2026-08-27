@@ -40,7 +40,7 @@ pub struct SynqDeployKeyfile {
     pub algorithm: String,
     pub public_key_hex: String,
     pub secret_key_hex: String,
-    pub testnet_address_debug: String,
+    pub execution_signer_id: String,
 }
 
 pub fn keygen(out: &Path) -> Result<(), String> {
@@ -58,13 +58,13 @@ pub fn keygen(out: &Path) -> Result<(), String> {
         algorithm: "ML-DSA-65".to_string(),
         public_key_hex: hex::encode(&public_key_bytes),
         secret_key_hex: hex::encode(&secret_key_bytes),
-        testnet_address_debug: address.to_testnet_debug_string(),
+        execution_signer_id: address.to_execution_signer_id(),
     };
     let json = serde_json::to_string_pretty(&keyfile)
         .map_err(|error| format!("serialize keyfile: {error}"))?;
     fs::write(out, json).map_err(|error| format!("write {}: {error}", out.display()))?;
     println!("Generated ML-DSA-65 deploy key -> {}", out.display());
-    println!("  testnet address: {}", keyfile.testnet_address_debug);
+    println!("  signer id:       {}", keyfile.execution_signer_id);
     println!("  (dev/test key only — do not use for anything real)");
     Ok(())
 }
@@ -183,7 +183,7 @@ pub fn build_deploy_envelope(args: &DeployEnvelopeArgs) -> Result<(), String> {
         .map_err(|error| format!("write {}: {error}", args.out_path.display()))?;
 
     println!("Deploy envelope self-verified OK -> {}", args.out_path.display());
-    println!("  signer:         {}", verified.deployer.to_testnet_debug_string());
+    println!("  signer:         {}", verified.deployer.to_execution_signer_id());
     println!("  bytecode_hash:  0x{}", hex::encode(verified.bytecode_hash));
     println!("  manifest_hash:  0x{}", hex::encode(verified.manifest_hash));
     println!("  abi_hash:       0x{}", hex::encode(verified.abi_hash));
@@ -271,8 +271,8 @@ pub fn build_call_envelope(args: &CallEnvelopeArgs) -> Result<(), String> {
         .map_err(|error| format!("write {}: {error}", args.out_path.display()))?;
 
     println!("Call envelope self-verified OK -> {}", args.out_path.display());
-    println!("  caller:  {}", verified.caller.to_testnet_debug_string());
-    println!("  target:  {}", verified.contract_address.to_testnet_debug_string());
+    println!("  caller:  {}", verified.caller.to_execution_signer_id());
+    println!("  target:  {}", verified.contract_address.to_execution_signer_id());
     println!("  selector: 0x{}", hex::encode(verified.method_selector));
     println!();
     println!("Ready to submit once write RPC is live:");

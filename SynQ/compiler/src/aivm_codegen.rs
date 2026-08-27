@@ -711,6 +711,10 @@ impl<'a> CodegenContext<'a> {
                     BinaryOperator::Gt => self.emit(Instruction::Gt),
                     BinaryOperator::Ge => self.emit(Instruction::Ge),
                     BinaryOperator::And | BinaryOperator::Or => {} // handled above
+                    BinaryOperator::BitAnd | BinaryOperator::BitOr | BinaryOperator::BitXor
+                    | BinaryOperator::Shl | BinaryOperator::Shr => {
+                        return Err("Bitwise/shift operators (&, |, ^, <<, >>) are not supported on the AIVM backend (64-bit words only) — use the IR/VM compilation path for u256 bitwise ops".to_string());
+                    }
                 }
             }
             Expression::UnaryOp(op, expr) => {
@@ -724,6 +728,9 @@ impl<'a> CodegenContext<'a> {
                         self.emit(Instruction::PushU64(1));
                         self.gen_expr(expr)?;
                         self.emit(Instruction::SubU64);
+                    }
+                    UnaryOperator::BitNot => {
+                        return Err("Bitwise complement (~) is not supported on the AIVM backend (64-bit words only) — use the IR/VM compilation path for u256 bitwise ops".to_string());
                     }
                 }
             }

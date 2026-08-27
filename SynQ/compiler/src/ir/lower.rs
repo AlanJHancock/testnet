@@ -504,6 +504,11 @@ impl IrLowerer {
                             BinaryOperator::Le => OpCode::Le,
                             BinaryOperator::Gt => OpCode::Gt,
                             BinaryOperator::Ge => OpCode::Ge,
+                            BinaryOperator::BitAnd => OpCode::BitAnd,
+                            BinaryOperator::BitOr => OpCode::BitOr,
+                            BinaryOperator::BitXor => OpCode::BitXor,
+                            BinaryOperator::Shl => OpCode::Shl,
+                            BinaryOperator::Shr => OpCode::Shr,
                             _ => unreachable!(),
                         };
                         self.asm.emit_op(opcode);
@@ -525,6 +530,12 @@ impl IrLowerer {
                         self.asm.emit_op(OpCode::Push);
                         self.asm.emit_i32(0);
                         self.asm.emit_op(OpCode::Eq);
+                    }
+                    UnaryOperator::BitNot => {
+                        // ~x = x XOR all-ones, evaluated at full 256-bit width.
+                        self.asm.emit_op(OpCode::LoadImm256);
+                        self.asm.emit_raw(&[0xFFu8; 32]);
+                        self.asm.emit_op(OpCode::BitXor);
                     }
                 }
             }

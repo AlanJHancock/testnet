@@ -53,6 +53,13 @@ pub enum OpCode {
     Div = 0x13,
     Rem = 0x14,
 
+    // Bitwise / shift operations — full 256-bit width.
+    BitAnd = 0x15,
+    BitOr  = 0x16,
+    BitXor = 0x17,
+    Shl    = 0x18,
+    Shr    = 0x19,
+
     // Comparison operations
     Eq = 0x20,
     Ne = 0x21,
@@ -155,6 +162,11 @@ impl TryFrom<u8> for OpCode {
             0x12 => Ok(OpCode::Mul),
             0x13 => Ok(OpCode::Div),
             0x14 => Ok(OpCode::Rem),
+            0x15 => Ok(OpCode::BitAnd),
+            0x16 => Ok(OpCode::BitOr),
+            0x17 => Ok(OpCode::BitXor),
+            0x18 => Ok(OpCode::Shl),
+            0x19 => Ok(OpCode::Shr),
             0x20 => Ok(OpCode::Eq),
             0x21 => Ok(OpCode::Ne),
             0x22 => Ok(OpCode::Lt),

@@ -665,6 +665,13 @@ fn fold_binary(op: &crate::ast::BinaryOperator, lhs: &crate::ast::Literal, rhs: 
         BinaryOperator::Ge => Some(Literal::Bool(l >= r)),
         BinaryOperator::And => Some(Literal::Bool(l != 0 && r != 0)),
         BinaryOperator::Or => Some(Literal::Bool(l != 0 || r != 0)),
+        BinaryOperator::BitAnd => Some(Literal::Number(l & r)),
+        BinaryOperator::BitOr => Some(Literal::Number(l | r)),
+        BinaryOperator::BitXor => Some(Literal::Number(l ^ r)),
+        // Literal::Number is backed by u128 — only fold shifts that stay within
+        // that width; wider shifts are left for runtime U256 evaluation.
+        BinaryOperator::Shl => if r < 128 { l.checked_shl(r as u32).map(Literal::Number) } else { None },
+        BinaryOperator::Shr => if r < 128 { Some(Literal::Number(l >> r as u32)) } else { None },
         // No catch-all: BinaryOperator's variants are all covered above, so
         // a trailing `_ => None` was unreachable dead code.
     }

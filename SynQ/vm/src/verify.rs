@@ -63,6 +63,9 @@ fn stack_effect(op: OpCode, extern_arg_count: Option<u8>) -> Option<(i32, i32)> 
         // Arithmetic (pop 2, push 1)
         OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Div | OpCode::Rem => Some((2, 1)),
 
+        // Bitwise / shift (pop 2, push 1)
+        OpCode::BitAnd | OpCode::BitOr | OpCode::BitXor | OpCode::Shl | OpCode::Shr => Some((2, 1)),
+
         // Comparison (pop 2, push 1)
         OpCode::Eq | OpCode::Ne | OpCode::Lt | OpCode::Le | OpCode::Gt | OpCode::Ge => Some((2, 1)),
 

@@ -178,8 +178,20 @@ expression = { logical }
 logical    = { comparison ~ (logical_op ~ comparison)* }
 logical_op = { "||" | "&&" }
 
-comparison = { additive ~ (compare_op ~ additive)* }
+comparison = { bitor ~ (compare_op ~ bitor)* }
 compare_op = { ">=" | "<=" | "!=" | "==" | ">" | "<" }
+
+bitor    = { bitxor ~ (bitor_op ~ bitxor)* }
+bitor_op = { "|" }
+
+bitxor    = { bitand ~ (bitxor_op ~ bitand)* }
+bitxor_op = { "^" }
+
+bitand    = { shift ~ (bitand_op ~ shift)* }
+bitand_op = { "&" }
+
+shift    = { additive ~ (shift_op ~ additive)* }
+shift_op = { "<<" | ">>" }
 
 additive = { multiplicative ~ (add_op ~ multiplicative)* }
 add_op   = { "+" | "-" }
@@ -187,7 +199,7 @@ add_op   = { "+" | "-" }
 multiplicative = { unary ~ (mul_op ~ unary)* }
 mul_op         = { "*" | "/" | "%" }
 
-unary   = { ("-" ~ unary) | ("!" ~ unary) | postfix }
+unary   = { ("-" ~ unary) | ("!" ~ unary) | ("~" ~ unary) | postfix }
 postfix = { primary ~ postfix_suffix* }
 postfix_suffix = { "." ~ (IDENT ~ ("(" ~ arg_list? ~ ")")? | number_literal) }
 primary = { self_access | map_index_expr | enum_access_expr | struct_literal

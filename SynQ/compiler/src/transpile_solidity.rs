@@ -115,6 +115,7 @@ fn infer_expr_type(expr: &Expression) -> Type {
         Expression::UnaryOp(op, val) => match op {
             UnaryOperator::Not => Type::Bool,
             UnaryOperator::Neg => infer_expr_type(val),
+            UnaryOperator::BitNot => infer_expr_type(val),
         },
         Expression::Literal(lit) => match lit {
             Literal::String(_) => Type::Str,
@@ -1360,11 +1361,14 @@ fn binop_to_sol(op: &BinaryOperator) -> &'static str {
         BinaryOperator::Le => "<=", BinaryOperator::Gt => ">",
         BinaryOperator::Ge => ">=", BinaryOperator::And => "&&",
         BinaryOperator::Or => "||",
+        BinaryOperator::BitAnd => "&", BinaryOperator::BitOr => "|",
+        BinaryOperator::BitXor => "^", BinaryOperator::Shl => "<<",
+        BinaryOperator::Shr => ">>",
     }
 }
 
 fn unop_to_sol(op: &UnaryOperator) -> &'static str {
-    match op { UnaryOperator::Neg => "-", UnaryOperator::Not => "!" }
+    match op { UnaryOperator::Neg => "-", UnaryOperator::Not => "!", UnaryOperator::BitNot => "~" }
 }
 
 /// Resolve SynQ type aliases to their underlying Solidity type.
