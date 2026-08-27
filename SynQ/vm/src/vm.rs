@@ -1031,7 +1031,10 @@ impl QuantumVM {
                     }
                     _ => return Err(VMError::RuntimeError("AddrEncode: expected address value (Bytes/U256/U128/I32)".into())),
                 };
-                match crate::bech32::encode_address(&addr20) {
+                // Encode using the SNTS-01 synw wallet format (the current default
+                // display HRP); from_any_network_address on the decode side still
+                // accepts legacy tsynq/synq strings for backward compatibility.
+                match crate::bech32::encode_wallet_address(&addr20) {
                     Ok(encoded) => self.stack.push(Value::Bytes(encoded.into_bytes())),
                     Err(e) => return Err(VMError::RuntimeError(format!("AddrEncode: {}", e))),
                 }
@@ -1045,7 +1048,12 @@ impl QuantumVM {
                         .map_err(|_| VMError::RuntimeError("AddrDecode: invalid UTF-8".into()))?,
                     _ => return Err(VMError::RuntimeError("AddrDecode: expected Bytes (Bech32 string)".into())),
                 };
-                let addr = crate::bech32::decode_address(&s)
+                // Accept either a modern SNTS-01 network address (synw1..., syna1...,
+                // the all-zero sentinel, etc.) or a legacy tsynq1.../synq1... address.
+                // decode_address (tsynq/synq-only, byte-aligned) rejected every
+                // well-formed synw-style address with a raw "invalid padding" error
+                // because SNTS-01 payloads are not byte-aligned by design.
+                let addr = crate::bech32::from_any_network_address(&s)
                     .map_err(|e| VMError::RuntimeError(format!("AddrDecode: {}", e)))?;
                 let mut b32 = [0u8; 32];
                 b32[12..32].copy_from_slice(&addr);
@@ -2932,5 +2940,53 @@ contract ShlFoldTest {
                 "(2^100) << 50 should equal 2^150, not a u128-truncated value (e.g. 0)"),
             other => panic!("shiftLiteralOverflow unexpected result: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_addr_decode_accepts_synw_style_sns_address() {
+        // Regression test for the live bug report: forge run parseSyna(synw...)
+        // failed with "AddrDecode: invalid padding" because the AddrDecode
+        // opcode called the legacy tsynq/synq-only, byte-aligned decode_address
+        // function. A well-formed SNTS-01 synw address (4-char HRP -> 30 data
+        // words -> 150 bits) is NOT byte-aligned by design, so the strict
+        // convert_bits(_, 5, 8, pad=false) check always rejected it. Fixed by
+        // switching the opcode to from_any_network_address, which already
+        // existed and is unit-tested in bech32.rs but was never wired in here.
+        let source = r#"pragma synq ^0.9;
+contract ParseSynaRegression {
+    state {
+        placeholder: u256;
+    }
+    impl {
+        function init() -> bool {
+            placeholder = 0;
+            return true;
+        }
+
+        @public
+        function parseSyna(s: str) -> u256 {
+            return from_tsynq(s);
+        }
+    }
+}
+"#;
+
+        let mut vm = compile_ir_and_load(source);
+        vm.call_function("init", &[]).expect("init() should succeed");
+
+        let addr = "synw1ps6g2wdu60dfj74xudl874zpstustc9uqvkk";
+        assert_eq!(addr.len(), 41, "sanity: this is a real 41-char SNTS-01 address, not a fixture typo");
+
+        let result = vm.call_function("parseSyna", &[Value::Bytes(addr.as_bytes().to_vec())]);
+        match result {
+            Ok(Some(Value::U256(_))) => {} // success — no longer "invalid padding"
+            Ok(other) => panic!("parseSyna returned unexpected value: {:?}", other),
+            Err(e) => panic!("parseSyna(synw...) should succeed after the AddrDecode fix, got: {:?}", e),
+        }
+
+        // Legacy tsynq input must still keep working (backward compatibility).
+        let legacy = crate::bech32::encode_address(&[0x42u8; 20]).expect("legacy encode");
+        let legacy_result = vm.call_function("parseSyna", &[Value::Bytes(legacy.into_bytes())]);
+        assert!(legacy_result.is_ok(), "legacy tsynq address must still decode: {:?}", legacy_result);
     }
 }
