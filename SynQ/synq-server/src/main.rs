@@ -41,9 +41,10 @@
 //!             binary structure; PQC signs this instead of ad-hoc concatenation.
 
 use axum::{
-    extract::{ConnectInfo, Json, Path, State},
+    extract::{ConnectInfo, Json, Path, Request, State},
     http::{Method, StatusCode},
-    response::Json as RespJson,
+    middleware::{self, Next},
+    response::{Json as RespJson, Response},
     routing::{delete, get, post},
     Router,
 };
@@ -6478,6 +6479,41 @@ pub fn build_app_state() -> AppState {
     store
 }
 
+/// nginx (see /etc/nginx/sites-enabled/hanksweb.co.uk, `location /synq/`)
+/// reverse-proxies every browser request to this server over
+/// 127.0.0.1, setting `X-Real-IP: $remote_addr` with the true client IP.
+/// synq-server's per-IP rate limiter (`check_rate_limit`, PR-F Item 2)
+/// keys off `ConnectInfo<SocketAddr>`, which for a proxied connection is
+/// nginx's own loopback address -- NOT the real client. That collapses
+/// the intended 30 req/min-per-client budget (burst 10) into a single
+/// bucket shared by every Forge IDE user hitting the hosted demo, so
+/// ordinary multi-step scenario-test runs (a handful of chained
+/// /aivm/estimate-gas dry-run calls) spuriously trip "rate limit
+/// exceeded" for everyone once any user's traffic exhausts the shared
+/// burst -- unrelated to whether their contract or test is correct.
+/// This middleware swaps the real client IP (from X-Real-IP) into the
+/// ConnectInfo extension before routing/handler extraction, so the
+/// rate limiter keys correctly per real client again. Requests that
+/// hit :3030 directly (bypassing nginx) have no X-Real-IP header and
+/// fall through to the original ConnectInfo unchanged.
+async fn trust_proxy_real_ip(mut req: Request, next: Next) -> Response {
+    if let Some(real_ip) = req
+        .headers()
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<IpAddr>().ok())
+    {
+        let port = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ConnectInfo(addr)| addr.port())
+            .unwrap_or(0);
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::new(real_ip, port)));
+    }
+    next.run(req).await
+}
+
 pub fn build_cors_layer() -> CorsLayer {
     let cors_origin = std::env::var("SYNQ_CORS_ORIGIN").unwrap_or_else(|_| "*".to_string());
     let cors = if cors_origin == "*" {
@@ -6537,6 +6573,7 @@ pub fn build_router(store: AppState, cors: CorsLayer) -> Router {
         .with_state(store)
         .layer(
             ServiceBuilder::new()
+                .layer(middleware::from_fn(trust_proxy_real_ip))
                 .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES))
                 .layer(cors)
         )

@@ -44,8 +44,25 @@ pub use vm_inner::QuantumVM;
 /// `struct_names` is the set of struct names declared in the source unit --
 /// `Type::Named(name)` covers BOTH struct and enum references (see ast.rs),
 /// so this only formats as "struct<Name>" when `name` is a known struct;
-/// enum/unknown named types fall through to the pre-existing "u256"
-/// scalar-encoding behavior to avoid changing enum ABI shape.
+/// enum/unknown named types keep the pre-existing "u256" scalar-encoding
+/// behavior to avoid changing enum ABI shape.
+///
+/// Every OTHER `Type` variant is now matched explicitly, mirroring
+/// synq-server's own `type_name()` in main.rs byte-for-byte (same string
+/// per variant) so the in-browser WASM-compiled ABI and the real
+/// server-compile ABI never disagree on a concrete type's wire name.
+/// This used to fall through a catch-all `_ => "u256"` for anything not
+/// in the short explicit list above -- silently mis-typing Hash32,
+/// Hash64, UMAIdentity, Height, ModelId, BytesN, the PQC key/sig types,
+/// Int*, Option/Result/Tuple/Mapping/Array as "u256" in the ABI. That in
+/// turn made Forge's Run & Debug / scenario-test arg coercion (which
+/// trusts the ABI type string) treat a full 32-byte Hash32 hex argument
+/// as a plain decimal-ish number, `Number()`-coerce it into a lossy
+/// float (e.g. 7.71947261582108e+75), and send THAT as the JSON arg --
+/// which the server then rejects with "unsupported number: <float>"
+/// since it doesn't fit u64. Removing the wildcard arm also means this
+/// match is exhaustive: a future new `Type` variant will fail to compile
+/// here instead of silently inheriting the old "u256" mis-mapping.
 fn type_name(ty: &Type, struct_names: &std::collections::HashSet<String>) -> String {
     match ty {
         Type::Bool    => "bool".to_string(),
@@ -57,9 +74,36 @@ fn type_name(ty: &Type, struct_names: &std::collections::HashSet<String>) -> Str
         Type::UInt64  => "u64".to_string(),
         Type::UInt128 => "u128".to_string(),
         Type::UInt256 => "u256".to_string(),
-        Type::Bytes   => "bytes".to_string(),
+        Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128 | Type::Int256 => {
+            "i256".to_string()
+        }
+        Type::Bytes              => "bytes".to_string(),
+        Type::DilithiumPublicKey => "dilithium_pubkey".to_string(),
+        Type::FalconPublicKey    => "falcon_pubkey".to_string(),
+        Type::KyberPublicKey     => "kyber_pubkey".to_string(),
+        Type::DilithiumSignature => "dilithium_sig".to_string(),
+        Type::FalconSignature    => "falcon_sig".to_string(),
+        Type::Hash32             => "hash32".to_string(),
+        Type::Hash64             => "hash64".to_string(),
+        Type::UMAIdentity        => "uma_identity".to_string(),
+        Type::Height             => "height".to_string(),
+        Type::ModelId            => "model_id".to_string(),
+        Type::BytesN(n)          => format!("bytes{}", n),
+        Type::Asset(inner)       => format!("Asset<{}>", type_name(inner, struct_names)),
+        Type::Option(inner)      => format!("option<{}>", type_name(inner, struct_names)),
+        Type::Result(ok, err) => {
+            format!("result<{}, {}>", type_name(ok, struct_names), type_name(err, struct_names))
+        }
+        Type::Tuple(types) => {
+            let parts: Vec<String> = types.iter().map(|t| type_name(t, struct_names)).collect();
+            format!("({})", parts.join(", "))
+        }
+        Type::Mapping(k, v) => {
+            format!("mapping<{}, {}>", type_name(k, struct_names), type_name(v, struct_names))
+        }
+        Type::Array(inner) => format!("[{}]", type_name(inner, struct_names)),
         Type::Named(name) if struct_names.contains(name) => format!("struct<{}>", name),
-        _             => "u256".to_string(),
+        Type::Named(_) => "u256".to_string(),
     }
 }
 
@@ -392,7 +436,41 @@ pub fn compile_synq_ide(source: &str) -> JsValue {
                 if let SourceUnit::Contract(c) = unit {
                     for part in &c.parts {
                         match part {
-                            ContractPart::Function(f) if f.is_public => {
+                            // Inclusion gate for "does this function belong in the
+                            // ABI's methods list at all" (externally callable in
+                            // SOME form), NOT the narrower `f.is_public` ("no
+                            // authority required, callable by anyone" per the
+                            // spec's attribute table). Those are different
+                            // questions: @authority(Scope)/@governance(Scope) are
+                            // documented as alternate "callable from outside"
+                            // gates with their own enforcement, not "internal
+                            // only" -- a devnet admin setter like
+                            // `@authority(AdminScope) function setValue(...) as
+                            // caller` is meant to be externally invokable (with
+                            // an authority envelope), just not by ANYONE the way
+                            // @public is. The old bare `f.is_public` filter here
+                            // silently dropped every such function from the ABI
+                            // entirely, which is what made Forge's scenario-test
+                            // runner report "setValue is not a published method
+                            // on this contract's ABI" even though the real
+                            // server-side dry-run endpoint executes it fine.
+                            // aivm_codegen.rs's own manifest-function filter
+                            // already ORs in `f.requires_caller` for exactly this
+                            // reason (see `if !fdef.is_public &&
+                            // !fdef.requires_caller { continue; }`) -- mirrored
+                            // here, plus an explicit Authority/Governance check
+                            // so a function gated ONLY by @authority/@governance
+                            // (no `as caller` clause) is still included.
+                            ContractPart::Function(f)
+                                if f.is_public
+                                    || f.requires_caller
+                                    || f.attributes.iter().any(|a| {
+                                        matches!(
+                                            a,
+                                            Attribute::Authority(_) | Attribute::Governance(_)
+                                        )
+                                    }) =>
+                            {
                                 let param_types: Vec<String> =
                                     f.params.iter().map(|p| type_name(&p.ty, &struct_names)).collect();
                                 let params: Vec<serde_json::Value> = f.params.iter().map(|p| {
