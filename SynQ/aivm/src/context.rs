@@ -51,6 +51,16 @@ pub struct ExecutionContext {
     pub gas_limit: u64,
     pub pq_gas_limit: u64,
     pub security_policy: SecurityPolicy,
+    /// Signed authority envelope for this call, mirroring the primary
+    /// IR/VM backend's CallContext.authority_envelope (vm/src/vm.rs).
+    /// Empty by default -- no request path (IR/VM's synq-server main.rs
+    /// included) currently plumbs a real signed envelope in, so this is
+    /// deliberately a same-as-production-today empty default, not a
+    /// regression. Backs the auth.envelope/auth.require/auth.identity
+    /// host functions added alongside this field; see host.rs's dispatch
+    /// arms for the exact envelope layout (identity[0..32] / scope[32..64]
+    /// / expiry[72..80], same as vm.rs's AuthRequire/AuthIdentity opcodes).
+    pub authority_envelope: Vec<u8>,
 }
 
 impl ExecutionContext {
@@ -67,6 +77,7 @@ impl ExecutionContext {
             gas_limit: 1_000_000,
             pq_gas_limit: 300_000,
             security_policy: SecurityPolicy::default(),
+            authority_envelope: Vec::new(),
         }
     }
 

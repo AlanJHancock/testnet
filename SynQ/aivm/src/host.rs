@@ -46,6 +46,7 @@ impl HostFunctions {
                 "addr.contract_address".to_string(), // 19
                 "auth.require".to_string(),          // 20
                 "auth.identity".to_string(),          // 21
+                "auth.envelope".to_string(),          // 22
             ],
         }
     }
@@ -613,6 +614,64 @@ pub fn execute_host_call(
             // with the real type.
             let owner = assets.records.get(&asset_id).filter(|r| r.active).map(|r| r.owner).unwrap_or([0u8; 41]);
             stack.push(Value::Address(owner));
+        }
+        // Authority model -- see vm/src/vm.rs's LoadAuthority/AuthRequire/
+        // AuthIdentity opcodes (0x51-0x53) for the canonical semantics this
+        // mirrors. Envelope layout (when present): bytes[0..32] = UMA
+        // identity, bytes[32..64] = scope hash, bytes[72..80] = big-endian
+        // expiry height (0 = never expires). ctx.authority_envelope is
+        // empty by default today (no request path populates a real signed
+        // envelope yet, on this backend or the primary IR/VM one), so in
+        // practice these currently degrade to the same harmless
+        // zero/false the IR/VM backend already returns for an empty
+        // envelope -- NOT a hard error like the previous
+        // HostFunctionNotDeclared("auth.identity") bug this fixes (found
+        // via V3Types.synq's init(), which calls
+        // authority_identity(authority_envelope()) directly).
+        "auth.envelope" => {
+            stack.push(Value::Bytes(ctx.authority_envelope.clone()));
+        }
+        "auth.require" => {
+            // Pops (in source-written-arg order, last arg on top):
+            // scope_hash then envelope -- same push/pop convention as
+            // asset.transfer/string.concat above.
+            let scope_hash = match stack.pop().ok_or(AivmError::StackUnderflow)? {
+                Value::Bytes(b) => b,
+                Value::Bytes32(b) => b.to_vec(),
+                Value::U64(n) => { let mut b = vec![0u8; 24]; b.extend_from_slice(&n.to_be_bytes()); b }
+                Value::U128(n) => n.to_be_bytes().to_vec(),
+                other => return Err(AivmError::TypeMismatch { expected: "bytes (scope_hash)", got: other.type_name() }),
+            };
+            let envelope = match stack.pop().ok_or(AivmError::StackUnderflow)? {
+                Value::Bytes(b) => b,
+                Value::Bytes32(b) => b.to_vec(),
+                other => return Err(AivmError::TypeMismatch { expected: "bytes (envelope)", got: other.type_name() }),
+            };
+            if envelope.len() < 80 {
+                stack.push(Value::Bool(false));
+            } else {
+                let env_scope = &envelope[32..64];
+                let env_expiry = u64::from_be_bytes(envelope[72..80].try_into().unwrap_or([0u8; 8]));
+                let scope_matches = env_scope == scope_hash.as_slice()
+                    || env_scope.iter().all(|&b| b == 0); // devnet wildcard
+                let not_expired = env_expiry == 0 || env_expiry > ctx.block_height;
+                let identity_is_set = envelope[0..32].iter().any(|&b| b != 0);
+                stack.push(Value::Bool(scope_matches && not_expired && identity_is_set));
+            }
+        }
+        "auth.identity" => {
+            let envelope = match stack.pop().ok_or(AivmError::StackUnderflow)? {
+                Value::Bytes(b) => b,
+                Value::Bytes32(b) => b.to_vec(),
+                other => return Err(AivmError::TypeMismatch { expected: "bytes (envelope)", got: other.type_name() }),
+            };
+            if envelope.len() < 32 {
+                stack.push(Value::Bytes32([0u8; 32]));
+            } else {
+                let mut identity = [0u8; 32];
+                identity.copy_from_slice(&envelope[0..32]);
+                stack.push(Value::Bytes32(identity));
+            }
         }
         other => {
             return Err(AivmError::HostFunctionNotDeclared(other.to_string()));

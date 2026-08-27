@@ -756,6 +756,7 @@ impl<'a> CodegenContext<'a> {
                     "contract_address" => Some(19), // addr.contract_address
                     "authority_require" => Some(20), // auth.require
                     "authority_identity" => Some(21), // auth.identity
+                    "authority_envelope" => Some(22), // auth.envelope
                     _ => None,
                 };
                 if let Some(hidx) = host_idx {

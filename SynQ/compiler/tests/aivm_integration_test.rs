@@ -281,3 +281,83 @@ fn test_three_level_nested_map_assignment_compiles_and_isolates_keys() {
     let r_unset = avm.execute(get_idx, vec![Value::U64(5), Value::U64(6), Value::U64(7)], &ctx, &mut state).unwrap();
     assert_eq!(r_unset.return_value, Some(Value::U64(0)), "unset nested path defaults to 0");
 }
+
+// BUG FIX REGRESSION (2026-08-27): calling authority_identity(authority_
+// envelope()) on the AIVM backend used to fail every single time with
+// AivmError::HostFunctionNotDeclared("auth.identity") -- reproduced live
+// via Forge IDE's Run & Debug panel calling init() on the V3Types.synq
+// demo contract (which does exactly this in its `init()` body). Root
+// cause was two-fold: (1) `authority_envelope()` had no host_idx mapping
+// in aivm_codegen.rs at all, so it silently miscompiled to a bogus
+// user-function `Call(0)` instead of a host call; (2) even the already-
+// declared "auth.require"/"auth.identity" host imports (indices 20/21)
+// had zero dispatch arms in host.rs's execute() match, so ANY use of
+// either builtin hard-errored on AIVM even though the same call succeeds
+// harmlessly on the primary IR/VM backend (which defaults to an empty
+// authority envelope today, since no request path -- IR/VM's synq-server
+// main.rs included -- populates a real signed one yet). Fixed by adding
+// auth.envelope (new import 22) + dispatch arms for auth.envelope/
+// auth.require/auth.identity in host.rs, mirroring vm.rs's LoadAuthority/
+// AuthRequire/AuthIdentity opcodes (0x51-0x53) exactly, and wiring
+// authority_envelope() in aivm_codegen.rs's host_idx table.
+const AUTH_IDENTITY_SOURCE: &str = "contract AuthDemo {\n  state {\n    initialised: bool;\n    umaId: UMAIdentity;\n  }\n  impl {\n    @public\n    function init() -> bool {\n      if (initialised) { return false; }\n      initialised = true;\n      let env = authority_identity(authority_envelope());\n      umaId = env;\n      return true;\n    }\n  }\n}\n";
+
+#[test]
+fn test_aivm_authority_identity_no_longer_errors() {
+    let ast = parse(AUTH_IDENTITY_SOURCE).unwrap();
+    let contract = extract_contract(&ast);
+    let result = compile_to_aivm(contract, &[]).unwrap();
+
+    let host = HostFunctions::default_v01();
+    let avm = Avm::new(result.instructions, result.functions, host);
+
+    let ctx = ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    let mut state = StateOverlay::new();
+
+    let init_idx = avm.find_function("init").expect("init function not found");
+    // Before the fix, this returned Err(HostFunctionNotDeclared("auth.identity"))
+    // instead of Ok(..) -- exactly the error reported from Forge IDE.
+    let r = avm.execute(init_idx, vec![], &ctx, &mut state)
+        .expect("init() should execute without HostFunctionNotDeclared");
+    assert_eq!(r.receipt.status, ReceiptStatus::Success);
+    assert_eq!(r.return_value, Some(Value::Bool(true)));
+
+    // ctx.authority_envelope defaults to empty (Vec::new()), so
+    // authority_envelope() -> auth.envelope pushes an empty Bytes, and
+    // authority_identity() on a <32-byte envelope pushes a zeroed
+    // Bytes32 -- mirroring vm.rs's AuthIdentity returning U256::ZERO for
+    // the same short-envelope case. umaId slot index 1 (initialised=0).
+    let uma_id = state.read(1).unwrap();
+    assert_eq!(uma_id, Value::Bytes32([0u8; 32]));
+
+    // Second call should hit the initialised guard and return false,
+    // same short-circuit behavior as every other @public init() guard.
+    let r2 = avm.execute(init_idx, vec![], &ctx, &mut state).unwrap();
+    assert_eq!(r2.receipt.status, ReceiptStatus::Success);
+    assert_eq!(r2.return_value, Some(Value::Bool(false)));
+}
+
+// Direct auth.require coverage: with the default empty authority
+// envelope, authority_require(...) must return false (envelope too
+// short, len < 80) rather than error -- same host-function-declared
+// contract as auth.identity above.
+const AUTH_REQUIRE_SOURCE: &str = "contract AuthRequireDemo {\n  impl {\n    @public\n    function checkAuth() -> bool {\n      return authority_require(authority_envelope(), authority_envelope());\n    }\n  }\n}\n";
+
+#[test]
+fn test_aivm_authority_require_no_longer_errors() {
+    let ast = parse(AUTH_REQUIRE_SOURCE).unwrap();
+    let contract = extract_contract(&ast);
+    let result = compile_to_aivm(contract, &[]).unwrap();
+
+    let host = HostFunctions::default_v01();
+    let avm = Avm::new(result.instructions, result.functions, host);
+
+    let ctx = ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    let mut state = StateOverlay::new();
+
+    let idx = avm.find_function("checkAuth").expect("checkAuth function not found");
+    let r = avm.execute(idx, vec![], &ctx, &mut state)
+        .expect("authority_require should execute without HostFunctionNotDeclared");
+    assert_eq!(r.receipt.status, ReceiptStatus::Success);
+    assert_eq!(r.return_value, Some(Value::Bool(false)));
+}
