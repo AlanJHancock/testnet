@@ -10,6 +10,7 @@ docs/spec-v7/
 synq-internal/
 demo/contracts/syna*/
 demo/contracts/anon_*/
+demo/contracts/synw*/
 demo/contracts/Counter.synq
 out/
 synq-server-bin
