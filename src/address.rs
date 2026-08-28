@@ -20,6 +20,13 @@ const SEPARATOR_LEN: usize = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AddressKind {
+    /// synw (primary), syns (secondary/utility), syna (standard account),
+    /// synz (UMA smart wallet) -- all four are "Wallet" standard per the
+    /// SNTS v1.3 registry. Previously syna/syns/synz fell through to the
+    /// generic System bucket here, which would have wrongly made
+    /// is_protocol_controlled_address() true (and is_spendable_user_address()
+    /// false) for perfectly ordinary user wallets using those HRPs -- same
+    /// class of bug as the synu/synb fix below (fixed 2026-08-28).
     Wallet,
     Validator,
     FeeCollector,
@@ -188,13 +195,17 @@ pub fn address_kind(address: &str) -> AddressKind {
         AddressKind::BurnAddress
     } else if address.starts_with("synf") {
         AddressKind::FeeCollector
-    } else if address.starts_with("syngrp1") {
+    } else if address.starts_with("syngrp") {
         AddressKind::ValidatorCluster
     } else if address.starts_with("synv") {
         AddressKind::Validator
     } else if address.starts_with("synm") || address.starts_with("synu") || address.starts_with("synl") {
         AddressKind::Multisig
-    } else if address.starts_with("synw") {
+    } else if address.starts_with("synw")
+        || address.starts_with("syna")
+        || address.starts_with("syns")
+        || address.starts_with("synz")
+    {
         AddressKind::Wallet
     } else if address.starts_with("synq") || address.starts_with("sync") {
         AddressKind::Contract
@@ -215,7 +226,7 @@ pub fn registry_entry_for_prefix(prefix: &str) -> Option<AddressRegistryEntry> {
     let address_type = match prefix {
         "synf" => AddressKind::FeeCollector,
         "syngrp1" | "syngrp2" | "syngrp3" | "syngrp4" | "syngrp5" => AddressKind::ValidatorCluster,
-        "synw" => AddressKind::Wallet,
+        "synw" | "syna" | "syns" | "synz" => AddressKind::Wallet,
         "synm" | "synu" | "synl" => AddressKind::Multisig,
         "synv1" | "synv2" | "synv3" | "synv4" | "synv5" => AddressKind::Validator,
         "synq" | "sync" => AddressKind::Contract,
@@ -492,5 +503,45 @@ mod tests {
         assert_ne!(address_kind(&addr), AddressKind::BurnAddress);
         let entry = registry_entry_for_prefix("synb1").expect("synb1 registry entry");
         assert_eq!(entry.address_type, AddressKind::Token);
+    }
+
+    #[test]
+    fn wallet_variant_hrps_are_wallet_not_system() {
+        // syna/syns/synz are all "Wallet" standard per the SNTS v1.3
+        // registry, same as synw -- previously fell through to the generic
+        // System bucket here, which would have wrongly flagged ordinary user
+        // wallets as protocol-controlled (fixed 2026-08-28).
+        for prefix in ["synw", "syna", "syns", "synz"] {
+            let addr = format!("{}1{}", prefix, "q".repeat(36 - (prefix.len() - 4)));
+            assert_eq!(
+                address_kind(&addr),
+                AddressKind::Wallet,
+                "{} must classify as Wallet, not System",
+                prefix
+            );
+            assert_ne!(address_kind(&addr), AddressKind::System);
+            assert!(
+                is_spendable_user_address(&addr) || !is_valid_address(&addr),
+                "a Wallet-kind address must not be reported as protocol-controlled"
+            );
+            let entry = registry_entry_for_prefix(prefix)
+                .unwrap_or_else(|| panic!("{} registry entry", prefix));
+            assert_eq!(entry.address_type, AddressKind::Wallet);
+        }
+    }
+
+    #[test]
+    fn syngrp_family_all_report_validator_cluster() {
+        // address_kind() previously only matched the literal "syngrp1",
+        // so syngrp2-5 fell through to System. is_protocol_controlled_address
+        // already covered both arms so spendability was never wrong, but the
+        // reported AddressKind itself was inaccurate for 4 of the 5 cluster
+        // groups (fixed 2026-08-28).
+        for group in 1u8..=5 {
+            let addr = generate_cluster_address("regression-seed", group);
+            assert_eq!(address_kind(&addr), AddressKind::ValidatorCluster);
+            assert!(is_protocol_controlled_address(&addr));
+            assert!(!is_spendable_user_address(&addr));
+        }
     }
 }
