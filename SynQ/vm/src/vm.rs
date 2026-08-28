@@ -1142,7 +1142,22 @@ impl QuantumVM {
                 let constructor_hash = [0u8; 32];
                 let network = std::option_env!("SYNQ_NETWORK_ID").unwrap_or("synergy-testnet-v3");
 
-                match crate::bech32::derive_contract_address(&deployer, nonce, &artifact_hash, &constructor_hash, network) {
+                // Phase 3 prototype opt-in (see notes/synq-forge-toolchain/
+                // address-engine-migration-scope.md #4): default stays the
+                // legacy tsynq/SHA-256 derivation so every existing deployed
+                // contract keeps deriving byte-identical addresses. Setting
+                // SYNQ_CONTRACT_ADDR_SNTS01=1 switches new derivations to
+                // the SNTS v1.3-conformant sync/SHA3-256 path for review and
+                // testing ahead of an explicit Phase 3 sequencing decision.
+                let use_snts01 = std::env::var("SYNQ_CONTRACT_ADDR_SNTS01")
+                    .map(|v| v == "1")
+                    .unwrap_or(false);
+                let result = if use_snts01 {
+                    crate::bech32::derive_contract_address_snts01(&deployer, nonce, &artifact_hash, &constructor_hash)
+                } else {
+                    crate::bech32::derive_contract_address(&deployer, nonce, &artifact_hash, &constructor_hash, network)
+                };
+                match result {
                     Ok(encoded) => self.stack.push(Value::Bytes(encoded.into_bytes())),
                     Err(e) => return Err(VMError::RuntimeError(format!("ContractAddr: {}", e))),
                 }

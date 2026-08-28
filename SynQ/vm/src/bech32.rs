@@ -13,6 +13,7 @@
 //! display and input encoding only.
 
 use sha2::{Sha256, Digest};
+use sha3::Sha3_256;
 
 /// HRP for testnet addresses.
 pub const HRP_TESTNET: &str = "tsynq";
@@ -533,6 +534,46 @@ pub fn from_any_network_address(s: &str) -> Result<[u8; 20], String> {
     decode_network_address(trimmed)
 }
 
+/// HRP for user-deployed SynQ contracts per SNTS v1.3's canonical namespace
+/// registry (`sync` = "Custom Contract", the Contract standard). `synq` is
+/// reserved there for network-deployed SYSTEM contracts only -- this VM
+/// doesn't deploy system contracts, so only the user-contract HRP is wired
+/// up here.
+pub const HRP_CONTRACT: &str = "sync";
+
+/// SNTS v1.3-conformant contract-address derivation -- SHA3-256 (per the
+/// standard) into the SNTS-01 network-address encoding (`encode_network_address`
+/// with HRP_CONTRACT = "sync"), instead of `derive_contract_address` below's
+/// legacy SHA-256 + deprecated fixed-byte SynqAddress{version,network_id,
+/// algorithm_id,pk_hash,checksum} layout (which v1.3's own revision history
+/// says was removed as unsupported).
+///
+/// NOT wired into the live ContractAddr (0x56) opcode by default -- see the
+/// `SYNQ_CONTRACT_ADDR_SNTS01` opt-in env var in vm.rs. Every existing
+/// deployed-contract address must keep deriving identically (legacy tsynq/
+/// SHA-256) until Phase 3's cutover is explicitly sequenced with Justin --
+/// this function exists so the new derivation can be reviewed, tested, and
+/// switched on for real once that decision is made, not to change runtime
+/// behavior silently. See notes/synq-forge-toolchain/address-engine-migration-scope.md
+/// ("Real gaps / conflicts" #4) for the full backward-compat / SQB-format
+/// considerations before flipping the default.
+pub fn derive_contract_address_snts01(
+    deployer: &[u8; 20],
+    nonce: u64,
+    artifact_hash: &[u8; 32],
+    constructor_hash: &[u8; 32],
+) -> Result<String, String> {
+    let mut hasher = Sha3_256::new();
+    hasher.update(deployer);
+    hasher.update(&nonce.to_be_bytes());
+    hasher.update(artifact_hash);
+    hasher.update(constructor_hash);
+    let digest: [u8; 32] = hasher.finalize().into();
+    let mut id = [0u8; 20];
+    id.copy_from_slice(&digest[0..20]);
+    encode_network_address(HRP_CONTRACT, &id)
+}
+
 /// Derive a contract address from deployment parameters.
 ///
 /// pk_hash = SHA-256(deployer[20] || nonce_be[8] || artifact_hash[32] || constructor_hash[32] || network_id)
@@ -803,5 +844,42 @@ mod network_address_tests {
     fn test_from_any_network_address_accepts_zero_sentinel() {
         let decoded = from_any_network_address(NETWORK_ZERO_ADDRESS).unwrap();
         assert_eq!(decoded, [0u8; 20]);
+    }
+
+    #[test]
+    fn test_derive_contract_address_snts01_uses_sync_hrp() {
+        let deployer = [0x33u8; 20];
+        let artifact_hash = [0x44u8; 32];
+        let constructor_hash = [0x55u8; 32];
+        let encoded = derive_contract_address_snts01(&deployer, 7, &artifact_hash, &constructor_hash).unwrap();
+        assert!(encoded.starts_with("sync1"), "must use sync HRP, got: {}", encoded);
+        // Must decode cleanly through the same SNTS-01 network-address path
+        // used for synw wallet addresses (encode_network_address is
+        // HRP-agnostic).
+        let (hrp, _) = bech32m_decode_raw_groups(&encoded).unwrap();
+        assert_eq!(hrp, "sync");
+    }
+
+    #[test]
+    fn test_derive_contract_address_snts01_deterministic_and_nonce_sensitive() {
+        let deployer = [0x66u8; 20];
+        let artifact_hash = [0x77u8; 32];
+        let constructor_hash = [0x88u8; 32];
+        let a = derive_contract_address_snts01(&deployer, 1, &artifact_hash, &constructor_hash).unwrap();
+        let b = derive_contract_address_snts01(&deployer, 1, &artifact_hash, &constructor_hash).unwrap();
+        let c = derive_contract_address_snts01(&deployer, 2, &artifact_hash, &constructor_hash).unwrap();
+        assert_eq!(a, b, "same inputs must derive the same address");
+        assert_ne!(a, c, "different nonce must derive a different address");
+    }
+
+    #[test]
+    fn test_legacy_derive_contract_address_unchanged_by_snts01_addition() {
+        // Backward compatibility: adding the SNTS-01 path must not touch the
+        // legacy tsynq/SHA-256 derivation's output at all.
+        let deployer = [0x99u8; 20];
+        let artifact_hash = [0xaau8; 32];
+        let constructor_hash = [0xbbu8; 32];
+        let legacy = derive_contract_address(&deployer, 3, &artifact_hash, &constructor_hash, "synergy-testnet-v3").unwrap();
+        assert!(legacy.starts_with("tsynq1"), "legacy path must still emit tsynq, got: {}", legacy);
     }
 }
