@@ -202,7 +202,7 @@ fn build_rate_limiter() -> StdArc<IpLimiter> {
 const SESSION_TTL: Duration    = Duration::from_secs(30 * 60);
 const MAX_SESSIONS: usize      = 100;
 pub const MAX_SOURCE_BYTES: usize  = 64 * 1024;
-const MAX_BODY_BYTES: usize    = 128 * 1024;
+const MAX_BODY_BYTES: usize    = 1024 * 1024; // raised from 128 KiB for multi-file Forge project sync (see MAX_FORGE_PROJECT_BYTES)
 
 // ─── Session store ────────────────────────────────────────────────────────────
 
@@ -6385,6 +6385,263 @@ async fn load_contract_handler(
 }
 
 
+
+// ─── Forge multi-file project storage (wallet-scoped) ─────────────────────────
+// Distinct from save-contract/load-contract above, which persist a single
+// .synq source string for the Playground. A ForgeIDE "project" is a whole
+// workspace -- synq.toml, README, multiple contracts/*.synq, tests/*.json,
+// plus build/test/run history -- so it's stored as one opaque JSON blob per
+// project under {wallet}/forge-projects/{id}.json rather than reusing the
+// flat {wallet}/{name}.synq layout above. The server never needs to
+// understand a ForgeProject's internal shape (that's ForgeIDE's
+// app/lib/ide/types.ts); it only extracts `id`/`name`/`updatedAt` for
+// listing and otherwise treats the JSON as opaque, trusted-on-write bytes.
+//
+// This lets a connected wallet reopen "its" projects from any browser or
+// device, complementing (not replacing) the existing per-browser IndexedDB
+// store, which remains authoritative for instant/offline autosave.
+
+/// Defense-in-depth cap on a single project payload, independent of the
+/// transport-level RequestBodyLimitLayer (see MAX_BODY_BYTES) -- kept
+/// slightly below it so a handler-level error message fires first with a
+/// clearer reason than a bare 413.
+const MAX_FORGE_PROJECT_BYTES: usize = 768 * 1024;
+/// Hard cap on stored projects per wallet, so a single wallet can't grow
+/// unbounded disk usage. Deliberately NOT auto-evicted (unlike the ephemeral
+/// VM Workspace store above) -- this is durable user data, so once the cap
+/// is hit the wallet owner is told to delete an old project rather than
+/// silently losing one.
+const MAX_FORGE_PROJECTS_PER_WALLET: usize = 100;
+
+/// Validate a Forge project id for filesystem safety. Covers every id shape
+/// ForgeIDE's randomId() and static ids can produce: UUIDv4
+/// ("3fa2...-...-..."), the Date.now()-based fallback ("local-<b36>-<b36>"),
+/// and fixed ids like "forge-starter-counter".
+fn validate_forge_project_id(id: &str) -> Result<String, String> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return Err("Project id must be 1-128 characters".into());
+    }
+    if !trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err("Project id may only contain letters, digits, - and _".into());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn forge_projects_dir(wallet: &str) -> String {
+    format!("{}/{}/forge-projects", contracts_base_dir(), wallet)
+}
+
+#[derive(serde::Deserialize)]
+struct SaveForgeProjectRequest {
+    wallet:  String,
+    project: serde_json::Value,
+}
+#[derive(serde::Serialize)]
+struct SaveForgeProjectResponse {
+    success: bool,
+    error:   Option<String>,
+}
+
+async fn save_forge_project_handler(
+    State(_state): State<AppState>,
+    Json(req): Json<SaveForgeProjectRequest>,
+) -> (StatusCode, Json<SaveForgeProjectResponse>) {
+    let wallet = match validate_wallet_path(&req.wallet) {
+        Ok(w) => w,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(SaveForgeProjectResponse { success: false, error: Some(e) })),
+    };
+    let id = match req.project.get("id").and_then(|v| v.as_str()) {
+        Some(id) => match validate_forge_project_id(id) {
+            Ok(id) => id,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(SaveForgeProjectResponse { success: false, error: Some(e) })),
+        },
+        None => return (StatusCode::BAD_REQUEST, Json(SaveForgeProjectResponse {
+            success: false, error: Some("Project is missing an id field".into()),
+        })),
+    };
+
+    let serialized = match serde_json::to_string(&req.project) {
+        Ok(s) => s,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(SaveForgeProjectResponse {
+            success: false, error: Some(format!("Project could not be serialized: {}", e)),
+        })),
+    };
+    if serialized.len() > MAX_FORGE_PROJECT_BYTES {
+        return (StatusCode::PAYLOAD_TOO_LARGE, Json(SaveForgeProjectResponse {
+            success: false,
+            error: Some(format!("Project too large: {} bytes (max {})", serialized.len(), MAX_FORGE_PROJECT_BYTES)),
+        }));
+    }
+
+    let dir = forge_projects_dir(&wallet);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("[forge/save-project] Failed to create dir {}: {}", dir, e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(SaveForgeProjectResponse {
+            success: false, error: Some(format!("Failed to create project directory: {}", e)),
+        }));
+    }
+
+    let file_path = format!("{}/{}.json", dir, id);
+    let is_new = !std::path::Path::new(&file_path).exists();
+    if is_new {
+        let existing_count = std::fs::read_dir(&dir)
+            .map(|entries| entries.flatten().filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json")).count())
+            .unwrap_or(0);
+        if existing_count >= MAX_FORGE_PROJECTS_PER_WALLET {
+            return (StatusCode::CONFLICT, Json(SaveForgeProjectResponse {
+                success: false,
+                error: Some(format!(
+                    "This wallet already has {} stored projects (the max). Delete an old one before syncing a new project.",
+                    MAX_FORGE_PROJECTS_PER_WALLET,
+                )),
+            }));
+        }
+    }
+
+    match std::fs::write(&file_path, &serialized) {
+        Ok(_) => {
+            println!("[forge/save-project] Saved {}.json ({} bytes) for wallet {}", id, serialized.len(), &wallet[..wallet.len().min(16)]);
+            (StatusCode::OK, Json(SaveForgeProjectResponse { success: true, error: None }))
+        }
+        Err(e) => {
+            eprintln!("[forge/save-project] Failed to save {}: {}", id, e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(SaveForgeProjectResponse {
+                success: false, error: Some(format!("Failed to write project: {}", e)),
+            }))
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct ForgeProjectSummary {
+    id:        String,
+    name:      String,
+    #[serde(rename = "updatedAt")]
+    updated_at: String,
+    #[serde(rename = "fileCount")]
+    file_count: usize,
+    source:    String,
+}
+#[derive(serde::Serialize)]
+struct ListForgeProjectsResponse {
+    success:  bool,
+    projects: Vec<ForgeProjectSummary>,
+    error:    Option<String>,
+}
+
+async fn list_forge_projects_handler(
+    State(_state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<ListForgeProjectsResponse>) {
+    let wallet = match params.get("wallet") {
+        Some(w) => match validate_wallet_path(w) {
+            Ok(w) => w,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(ListForgeProjectsResponse { success: false, projects: vec![], error: Some(e) })),
+        },
+        None => return (StatusCode::BAD_REQUEST, Json(ListForgeProjectsResponse {
+            success: false, projects: vec![], error: Some("Missing wallet parameter".into()),
+        })),
+    };
+
+    let dir = forge_projects_dir(&wallet);
+    let mut projects = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            let Ok(raw) = std::fs::read_to_string(&path) else { continue };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+            let id = value.get("id").and_then(|v| v.as_str()).unwrap_or(stem).to_string();
+            let name = value.get("name").and_then(|v| v.as_str()).unwrap_or(stem).to_string();
+            let updated_at = value.get("updatedAt").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let file_count = value.get("files").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+            let source = value.get("source").and_then(|v| v.as_str()).unwrap_or("local").to_string();
+            projects.push(ForgeProjectSummary { id, name, updated_at, file_count, source });
+        }
+    }
+    projects.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    (StatusCode::OK, Json(ListForgeProjectsResponse { success: true, projects, error: None }))
+}
+
+#[derive(serde::Serialize)]
+struct LoadForgeProjectResponse {
+    success: bool,
+    project: Option<serde_json::Value>,
+    error:   Option<String>,
+}
+
+async fn load_forge_project_handler(
+    State(_state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> (StatusCode, Json<LoadForgeProjectResponse>) {
+    let wallet = match params.get("wallet") {
+        Some(w) => match validate_wallet_path(w) {
+            Ok(w) => w,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(LoadForgeProjectResponse { success: false, project: None, error: Some(e) })),
+        },
+        None => return (StatusCode::BAD_REQUEST, Json(LoadForgeProjectResponse {
+            success: false, project: None, error: Some("Missing wallet parameter".into()),
+        })),
+    };
+    let id = match params.get("id") {
+        Some(id) => match validate_forge_project_id(id) {
+            Ok(id) => id,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(LoadForgeProjectResponse { success: false, project: None, error: Some(e) })),
+        },
+        None => return (StatusCode::BAD_REQUEST, Json(LoadForgeProjectResponse {
+            success: false, project: None, error: Some("Missing id parameter".into()),
+        })),
+    };
+
+    let file_path = format!("{}/{}.json", forge_projects_dir(&wallet), id);
+    match std::fs::read_to_string(&file_path) {
+        Ok(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(value) => (StatusCode::OK, Json(LoadForgeProjectResponse { success: true, project: Some(value), error: None })),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(LoadForgeProjectResponse {
+                success: false, project: None, error: Some(format!("Stored project is corrupt: {}", e)),
+            })),
+        },
+        Err(_) => (StatusCode::NOT_FOUND, Json(LoadForgeProjectResponse {
+            success: false, project: None, error: Some(format!("Project '{}' not found for this wallet", id)),
+        })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct DeleteForgeProjectRequest {
+    wallet: String,
+    id:     String,
+}
+#[derive(serde::Serialize)]
+struct DeleteForgeProjectResponse {
+    success: bool,
+    error:   Option<String>,
+}
+
+async fn delete_forge_project_handler(
+    State(_state): State<AppState>,
+    Json(req): Json<DeleteForgeProjectRequest>,
+) -> (StatusCode, Json<DeleteForgeProjectResponse>) {
+    let wallet = match validate_wallet_path(&req.wallet) {
+        Ok(w) => w,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(DeleteForgeProjectResponse { success: false, error: Some(e) })),
+    };
+    let id = match validate_forge_project_id(&req.id) {
+        Ok(id) => id,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(DeleteForgeProjectResponse { success: false, error: Some(e) })),
+    };
+    let file_path = format!("{}/{}.json", forge_projects_dir(&wallet), id);
+    match std::fs::remove_file(&file_path) {
+        Ok(_) => (StatusCode::OK, Json(DeleteForgeProjectResponse { success: true, error: None })),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (StatusCode::OK, Json(DeleteForgeProjectResponse { success: true, error: None })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(DeleteForgeProjectResponse {
+            success: false, error: Some(format!("Failed to delete project: {}", e)),
+        })),
+    }
+}
+
 // ─── GET /list-contracts — list available .synq template contracts ─────────────
 async fn list_contracts_handler(
     State(_state): State<AppState>,
@@ -6570,6 +6827,10 @@ pub fn build_router(store: AppState, cors: CorsLayer) -> Router {
         .route("/list-user-contracts", get(list_user_contracts_handler))
         .route("/load-contract",       get(load_contract_handler))
         .route("/list-contracts",      get(list_contracts_handler))
+        .route("/forge/save-project",   post(save_forge_project_handler))
+        .route("/forge/list-projects",  get(list_forge_projects_handler))
+        .route("/forge/load-project",   get(load_forge_project_handler))
+        .route("/forge/delete-project", post(delete_forge_project_handler))
         .with_state(store)
         .layer(
             ServiceBuilder::new()
