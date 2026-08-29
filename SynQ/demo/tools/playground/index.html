@@ -58,11 +58,21 @@
 
   .playground{max-width:1180px;margin:0 auto;padding:0 28px 12px;}
   .panes{
-    display:grid;grid-template-columns:1fr 1fr;border:1px solid var(--line);
+    display:flex;border:1px solid var(--line);
     border-radius:var(--radius) var(--radius) 0 0;overflow:hidden;
   }
-  .pane{display:flex;flex-direction:column}
-  .pane + .pane{border-left:1px solid var(--line)}
+  .pane{display:flex;flex-direction:column;flex:1 1 0%;min-width:180px;}
+  .resizer{
+    flex:0 0 7px;width:7px;cursor:col-resize;background:var(--line);
+    position:relative;
+  }
+  .resizer::after{
+    content:'';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+    width:3px;height:28px;border-radius:2px;background:var(--muted-2);
+  }
+  .resizer:hover{background:var(--line-soft)}
+  .resizer:hover::after,.resizer.dragging::after{background:var(--green-bright)}
+  .resizer.dragging{background:var(--line-soft)}
   .pane-head{
     display:flex;align-items:center;justify-content:space-between;
     padding:12px 16px;border-bottom:1px solid var(--line);
@@ -89,7 +99,7 @@
   .tok-attr{color:#c99bff}
   .tok-num{color:#ffb08a}
 
-  .evidence{padding:16px;font-family:var(--font-mono);font-size:12.5px;color:var(--muted);line-height:1.6}
+  .evidence{padding:16px;font-family:var(--font-mono);font-size:12.5px;color:var(--muted);line-height:1.6;width:max-content;min-width:100%}
   .evidence .placeholder{color:var(--muted-2)}
   .evidence h4{color:#e7f0ea;font-size:12px;text-transform:uppercase;letter-spacing:0.06em;margin:16px 0 6px;}
   .evidence h4:first-child{margin-top:0}
@@ -109,7 +119,7 @@
   .evidence-tab:hover{color:#e7f0ea}
   .evidence-tab.active{background:var(--line-soft);color:var(--green-bright)}
   .evidence-json{
-    margin:0;white-space:pre-wrap;word-break:break-all;color:#dfe8e2;
+    margin:0;white-space:pre;color:#dfe8e2;
     font-family:var(--font-mono);font-size:12px;line-height:1.55;
   }
   .evidence-note{
@@ -203,6 +213,7 @@
         </div>
       </div>
     </div>
+    <div class="resizer" id="paneResizer" title="Drag to resize · double-click to reset"></div>
     <div class="pane">
       <div class="pane-head"><span>Compiler evidence</span></div>
       <div class="pane-body">
@@ -270,6 +281,65 @@ const evidenceEl = document.getElementById('evidence');
 const compileBtn = document.getElementById('compileBtn');
 const statusNote = document.getElementById('statusNote');
 const walletBtn = document.getElementById('walletBtn');
+
+/* ── Draggable divider between the editor and evidence panes ────────────
+ * Plain pointer-events drag: hold the resizer, move, the left pane's flex
+ * basis tracks the cursor (clamped so neither pane collapses below
+ * min-width), release to drop it. Double-click snaps back to an even 50/50
+ * split. Persisted per-browser via localStorage so it survives reloads.
+ */
+(function () {
+  var panes = document.querySelector('.panes');
+  var resizer = document.getElementById('paneResizer');
+  if (!panes || !resizer) return;
+  var leftPane = panes.querySelector('.pane');
+  var MIN_PANE = 180;
+  var STORAGE_KEY = 'synq-playground-split-px';
+
+  function applyWidth(px) {
+    leftPane.style.flex = '0 0 ' + px + 'px';
+  }
+
+  var saved = parseFloat(localStorage.getItem(STORAGE_KEY) || '');
+  if (!isNaN(saved) && saved > 0) applyWidth(saved);
+
+  var dragging = false;
+
+  function onMove(e) {
+    if (!dragging) return;
+    var rect = panes.getBoundingClientRect();
+    var x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+    var max = rect.width - MIN_PANE - resizer.offsetWidth;
+    x = Math.max(MIN_PANE, Math.min(max, x));
+    applyWidth(x);
+  }
+
+  function stopDrag() {
+    if (!dragging) return;
+    dragging = false;
+    resizer.classList.remove('dragging');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    var rect = panes.getBoundingClientRect();
+    localStorage.setItem(STORAGE_KEY, String(leftPane.getBoundingClientRect().width));
+  }
+
+  resizer.addEventListener('pointerdown', function (e) {
+    dragging = true;
+    resizer.classList.add('dragging');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    e.preventDefault();
+  });
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', stopDrag);
+  window.addEventListener('pointercancel', stopDrag);
+
+  resizer.addEventListener('dblclick', function () {
+    leftPane.style.flex = '';
+    localStorage.removeItem(STORAGE_KEY);
+  });
+})();
 
 /* ── Wallet connect (ported/lean from the main SynQ IDE) ──────────────────
  * Playground only needs an identity string for the save/load namespace --
