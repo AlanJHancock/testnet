@@ -7,6 +7,7 @@
 
 use crate::context::ExecutionContext;
 use crate::errors::AivmError;
+use crate::gas::{pq_gas_cost, PqGasMeter};
 use crate::receipt::EventRecord;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -47,6 +48,9 @@ impl HostFunctions {
                 "auth.require".to_string(),          // 20
                 "auth.identity".to_string(),          // 21
                 "auth.envelope".to_string(),          // 22
+                "pqc.dilithium_verify".to_string(), // 23 -- ML-DSA-65, real pqcrypto verify, PQ-gas metered per synq-pq-gas-spec.md
+                "pqc.falcon_verify".to_string(),     // 24 -- FN-DSA-512, real pqcrypto verify. PQ-gas cost NOT YET in synq-pq-gas-spec.md (v0.1 only covers ML-DSA-65) -- flagged for Justin, metered as ordinary HOST_CALL gas only until the spec is extended.
+                "pqc.kyber_decaps".to_string(),      // 25 -- ML-KEM-768 decapsulate. Dry-run/off-chain sandbox ONLY (see aegis-pqvm README + legacy vm crate's ACTS-15 §3 comment): takes a raw secret key as an argument, which must never be deterministic on-chain calldata. Same gas caveat as falcon_verify.
             ],
         }
     }
@@ -421,6 +425,32 @@ fn value_as_str(v: &Value) -> Result<String, AivmError> {
     }
 }
 
+/// Coerce a stack value into raw bytes for PQC host functions
+/// (dilithium_verify/falcon_verify/kyber_decaps all take bytes params).
+/// Permissive by design -- SynQ bytes args can arrive as a genuine
+/// Value::Bytes/Bytes32 (from a previous dry-run's final_state round-trip,
+/// or a 32-byte hex literal upgraded to Bytes32 by json_to_aivm_value), or
+/// as a Value::String hex literal (with or without the "0x" prefix --
+/// SNTS-07 mandates NO prefix, but json_to_aivm_value currently only
+/// hex-decodes the 0x-prefixed form, so a bare-hex string still lands here
+/// as Value::String and must be decoded, not treated as literal UTF-8).
+/// Malformed hex falls back to raw UTF-8 bytes rather than erroring --
+/// the downstream pqcrypto verify/decaps calls already fail closed
+/// (return false / Err) on structurally invalid input, so there is no
+/// safety reason to reject early here.
+fn value_as_bytes(v: &Value) -> Vec<u8> {
+    match v {
+        Value::Bytes(b) => b.clone(),
+        Value::Bytes32(b) => b.to_vec(),
+        Value::Address(a) => a.to_vec(),
+        Value::String(s) => {
+            let hex_str = s.strip_prefix("0x").unwrap_or(s);
+            hex::decode(hex_str).unwrap_or_else(|_| s.as_bytes().to_vec())
+        }
+        other => other.encode(),
+    }
+}
+
 pub fn execute_host_call(
     import_index: u16,
     host: &HostFunctions,
@@ -429,6 +459,7 @@ pub fn execute_host_call(
     stack: &mut Vec<Value>,
     events: &mut Vec<EventRecord>,
     assets: &mut AssetLedger,
+    pq_gas: &mut PqGasMeter,
 ) -> Result<(), AivmError> {
     let name = host.get(import_index)?;
 
@@ -481,6 +512,68 @@ pub fn execute_host_call(
             // Stub — real cross-contract calls need host runtime support
             let _ = stack.pop();
             stack.push(Value::U64(0));
+        }
+        // ── Post-quantum verification (Phase 5: Quantum-Safe Runtime) ──────
+        // Real pqcrypto-backed implementations via synq-pqc-shims (the same
+        // crate the legacy vm crate's AEG1 dispatcher and the SSA IR backend
+        // already use). Previously dilithium_verify/falcon_verify/kyber_decaps
+        // had NO entry in aivm_codegen.rs's host_idx table at all, so calls
+        // silently fell through to "unknown function -> Call(0)" and
+        // returned whatever the contract's FIRST function returned --
+        // completely ignoring the actual signature/key. Fixed 30 Aug 2026.
+        "pqc.dilithium_verify" => {
+            // dilithium_verify(message: bytes, signature: bytes, publicKey: bytes) -> bool
+            // Args pushed in source order -> popped in reverse (publicKey, signature, message).
+            let public_key = value_as_bytes(&stack.pop().ok_or(AivmError::StackUnderflow)?);
+            let signature  = value_as_bytes(&stack.pop().ok_or(AivmError::StackUnderflow)?);
+            let message    = value_as_bytes(&stack.pop().ok_or(AivmError::StackUnderflow)?);
+
+            // synq-pq-gas-spec.md v0.1 "Failure Semantics": malformed keys/
+            // signatures are charged parse costs before failure; a full
+            // verification attempt (valid or invalid signature) is charged
+            // the full verify cost. Parse costs are charged unconditionally
+            // (they represent real work the shim does regardless of outcome).
+            pq_gas.charge(pq_gas_cost::PARSE_ML_DSA_65_PUBKEY)?;
+            pq_gas.charge(pq_gas_cost::PARSE_ML_DSA_65_SIGNATURE)?;
+            pq_gas.charge(pq_gas_cost::VERIFY_ML_DSA_65)?;
+
+            let ok = synq_pqc_shims::dilithium::verify(&message, &signature, &public_key);
+            stack.push(Value::Bool(ok));
+        }
+        "pqc.falcon_verify" => {
+            // falcon_verify(message: bytes, signature: bytes, publicKey: bytes) -> bool
+            // FN-DSA-512, real pqcrypto verify (synq_pqc_shims::falcon).
+            // NOTE: synq-pq-gas-spec.md v0.1 only defines PQ-Gas costs for
+            // ML-DSA-65 -- there is no protocol-defined FN-DSA cost yet.
+            // Per standing policy (never fabricate a PQ-Gas number), this
+            // charges NO pq_gas; it relies solely on the flat ordinary
+            // gas_cost::HOST_CALL charge the VM already applies to every
+            // HostCall before dispatch. Flagged for Justin to extend the
+            // spec before this is load-bearing for anything security-critical.
+            let public_key = value_as_bytes(&stack.pop().ok_or(AivmError::StackUnderflow)?);
+            let signature  = value_as_bytes(&stack.pop().ok_or(AivmError::StackUnderflow)?);
+            let message    = value_as_bytes(&stack.pop().ok_or(AivmError::StackUnderflow)?);
+            let ok = synq_pqc_shims::falcon::verify(&message, &signature, &public_key);
+            stack.push(Value::Bool(ok));
+        }
+        "pqc.kyber_decaps" => {
+            // kyber_decaps(ciphertext: bytes, secretKey: bytes) -> bytes
+            // ML-KEM-768 decapsulate, real pqcrypto (synq_pqc_shims::kyber).
+            // SECURITY BOUNDARY (matches legacy vm crate's ACTS-15 §3 note
+            // and aegis-pqvm's own README scope statement): decapsulation
+            // takes a raw secret key as an argument. This is only safe in a
+            // throwaway dry-run sandbox (StateOverlay never persists, no
+            // real chain attached) -- it must NEVER be reachable from
+            // deterministic on-chain/consensus execution, where the
+            // "argument" would be public calldata. Same PQ-gas caveat as
+            // falcon_verify: no protocol-defined cost yet, ordinary
+            // HOST_CALL gas only.
+            let secret_key = value_as_bytes(&stack.pop().ok_or(AivmError::StackUnderflow)?);
+            let ciphertext = value_as_bytes(&stack.pop().ok_or(AivmError::StackUnderflow)?);
+            match synq_pqc_shims::kyber::decaps(&ciphertext, &secret_key) {
+                Ok(shared_secret) => stack.push(Value::Bytes(shared_secret)),
+                Err(_) => stack.push(Value::Bytes(vec![])),
+            }
         }
         // String builtins — str_len/str_concat/str_eq (see
         // synq-language-spec.md's str type + these three builtins).

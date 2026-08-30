@@ -223,7 +223,7 @@ impl Avm {
 
         let state_root_before = state.state_root();
         let mut gas = GasMeter::new(ctx.gas_limit);
-        let pq_gas = PqGasMeter::new(ctx.pq_gas_limit);
+        let mut pq_gas = PqGasMeter::new(ctx.pq_gas_limit);
         let mut events = Vec::new();
 
         // Set up initial frame with args as locals
@@ -495,6 +495,7 @@ impl Avm {
                         &mut stack,
                         &mut events,
                         assets,
+                        &mut pq_gas,
                     )?;
                 }
                 Instruction::Pack(count) => {

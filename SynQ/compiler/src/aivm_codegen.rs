@@ -757,6 +757,17 @@ impl<'a> CodegenContext<'a> {
                     "authority_require" => Some(20), // auth.require
                     "authority_identity" => Some(21), // auth.identity
                     "authority_envelope" => Some(22), // auth.envelope
+                    // Phase 5 (30 Aug 2026): previously MISSING from this table entirely,
+                    // so dilithium_verify/falcon_verify/kyber_decaps fell through to the
+                    // "unknown function" branch below and silently compiled to Call(0) --
+                    // i.e. calling the contract's FIRST function and returning ITS result,
+                    // completely ignoring the real signature/key arguments. Real PQC
+                    // dispatch now lives in aivm/src/host.rs (pqc.dilithium_verify /
+                    // pqc.falcon_verify / pqc.kyber_decaps), backed by genuine pqcrypto via
+                    // synq-pqc-shims -- same crypto the legacy vm crate's AEG1 path uses.
+                    "dilithium_verify" => Some(23), // pqc.dilithium_verify (ML-DSA-65)
+                    "falcon_verify" => Some(24),    // pqc.falcon_verify (FN-DSA-512)
+                    "kyber_decaps" => Some(25),     // pqc.kyber_decaps (ML-KEM-768, dry-run/off-chain only)
                     _ => None,
                 };
                 if let Some(hidx) = host_idx {

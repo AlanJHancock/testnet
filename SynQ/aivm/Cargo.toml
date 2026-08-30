@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 description = "Abstract Instruction Virtual Machine — spec-compliant SynQ execution engine"
 
+[features]
+default = ["native"]
+native = ["dep:synq-pqc-shims", "synq-pqc-shims/native"]
+wasm = ["dep:synq-pqc-shims", "synq-pqc-shims/wasm"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -11,6 +16,7 @@ sha2 = { workspace = true }
 sha3 = { workspace = true }
 hex = { workspace = true }
 ruint = { workspace = true }
+synq-pqc-shims = { package = "synq-pqc-shims", path = "../pqc-shims", default-features = false, optional = true }
 
 [dev-dependencies]
 # tests will use the crate itself
