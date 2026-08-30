@@ -6,6 +6,24 @@ use crate::ast::*;
 #[grammar = "synq.pest"]
 pub struct SynQParser;
 
+/// Parses every `Rule::statement` child of a `Rule::block`/`Rule::if_body`-
+/// shaped pair into (statements, spans), spans[i] being the (line, column)
+/// of statements[i] captured from pest's own span tracking. Used at every
+/// site that builds an `ast::Block` so Block.statements and Block.spans
+/// stay in lockstep -- see ast::Block's doc comment.
+fn parse_statement_list_with_spans(block_pair: Pair<Rule>) -> (Vec<Statement>, Vec<Span>) {
+    let mut statements = Vec::new();
+    let mut spans = Vec::new();
+    for stmt_pair in block_pair.into_inner() {
+        if stmt_pair.as_rule() == Rule::statement {
+            let (line, column) = stmt_pair.as_span().start_pos().line_col();
+            spans.push(Span { line: line as u32, column: column as u32 });
+            statements.push(parse_statement(stmt_pair.into_inner().next().unwrap()));
+        }
+    }
+    (statements, spans)
+}
+
 /// Hard cap on bracket/paren/brace nesting depth, enforced BEFORE the pest
 /// grammar ever sees the source.
 ///
@@ -379,6 +397,7 @@ fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
     let mut params = vec![];
     let mut returns: Option<Type> = None;
     let mut body_stmts = vec![];
+    let mut body_spans: Vec<Span> = vec![];
     let mut param_names: HashSet<String> = HashSet::new();
 
     let mut requires_caller = false;
@@ -508,11 +527,9 @@ fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
                 }
             }
             Rule::block => {
-                for stmt_pair in p.into_inner() {
-                    if stmt_pair.as_rule() == Rule::statement {
-                        body_stmts.push(parse_statement(stmt_pair.into_inner().next().unwrap()));
-                    }
-                }
+                let (stmts, spans) = parse_statement_list_with_spans(p);
+                body_stmts = stmts;
+                body_spans = spans;
             }
             _ => {}
         }
@@ -563,7 +580,7 @@ fn parse_function(pair: Pair<Rule>) -> Result<FunctionDefinition, String> {
         name,
         params,
         returns,
-        body: Block { statements: body_stmts },
+        body: Block { statements: body_stmts, spans: body_spans },
         is_public,
         requires_caller,
         capabilities,
@@ -694,26 +711,18 @@ fn parse_statement(pair: Pair<Rule>) -> Statement {
         Rule::if_statement => {
             let mut inner = pair.into_inner();
             let condition = parse_expression(inner.next().unwrap());
-            let then_pairs: Vec<Statement> = inner.next().unwrap().into_inner()
-                .filter(|p| p.as_rule() == Rule::statement)
-                .map(|p| parse_statement(p.into_inner().next().unwrap()))
-                .collect();
-            let else_block = inner.next().map(|eb| Block {
-                statements: eb.into_inner()
-                    .filter(|p| p.as_rule() == Rule::statement)
-                    .map(|p| parse_statement(p.into_inner().next().unwrap()))
-                    .collect()
+            let (then_pairs, then_spans) = parse_statement_list_with_spans(inner.next().unwrap());
+            let else_block = inner.next().map(|eb| {
+                let (statements, spans) = parse_statement_list_with_spans(eb);
+                Block { statements, spans }
             });
-            Statement::If { condition, then_block: Block { statements: then_pairs }, else_block }
+            Statement::If { condition, then_block: Block { statements: then_pairs, spans: then_spans }, else_block }
         }
         Rule::while_statement => {
             let mut inner = pair.into_inner();
             let condition = parse_expression(inner.next().unwrap());
-            let body_stmts: Vec<Statement> = inner.next().unwrap().into_inner()
-                .filter(|p| p.as_rule() == Rule::statement)
-                .map(|p| parse_statement(p.into_inner().next().unwrap()))
-                .collect();
-            Statement::While { condition, body: Block { statements: body_stmts } }
+            let (body_stmts, body_spans) = parse_statement_list_with_spans(inner.next().unwrap());
+            Statement::While { condition, body: Block { statements: body_stmts, spans: body_spans } }
         }
         Rule::break_statement    => Statement::Break,
         Rule::continue_statement => Statement::Continue,

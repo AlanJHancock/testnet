@@ -5,19 +5,30 @@ edition = "2021"
 
 [features]
 default = ["native"]
+# NOTE (2026-08-31): aivm has its own default ["native"] feature (pulls in
+# pqcrypto-* C crates via synq-pqc-shims). The dependency below now sets
+# default-features = false so it stops picking that up implicitly -- wired
+# explicitly to aivm/native and aivm/wasm here instead. Without this, a
+# "wasm"-feature build of this crate (used by synq-compiler-wasm) still
+# unification-pulled aivm's native PQC deps regardless of this crate's own
+# feature choice, which fails outright on a clean wasm32 build (no libc
+# for bare wasm32-unknown-unknown to compile pqcrypto-internals' C code
+# against).
 native = [
     "dep:synq-pqc-shims",
     "synq-pqc-shims/native",
     "dep:pqcrypto",
     "quantumvm/native",
+    "aivm/native",
 ]
 wasm = [
     "dep:synq-pqc-shims",
     "synq-pqc-shims/wasm",
+    "aivm/wasm",
 ]
 
 [dependencies]
-aivm = { path = "../aivm" }
+aivm = { path = "../aivm", default-features = false }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 hex         = { workspace = true }

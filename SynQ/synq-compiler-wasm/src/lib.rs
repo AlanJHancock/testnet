@@ -166,45 +166,79 @@ fn wasm_stmt_writes_state(stmt: &Statement, state_names: &[String], out: &mut bo
     }
 }
 
-/// Add PQC warnings for WASM mode (PQC builtins compile but throw at runtime).
-fn add_pqc_warnings(ast: &[SourceUnit], warnings: &mut Vec<String>) {
+/// Finds PQC-builtin calls anywhere in the contract (including inside
+/// if/while bodies -- recursed via scan_block) and returns one
+/// (message, span) pair per call site, so WASM-mode callers get a real
+/// warning per occurrence instead of a single warning for the whole file.
+///
+/// `span` is `Some` with the real (line, column) of the statement
+/// containing the call, sourced from `Block.spans` (populated by the
+/// parser via pest's own span tracking -- see ast::Block/ast::Span doc
+/// comments). It is `None` only for a block with no position info at all
+/// (synthetic/programmatic AST construction, not real parsed source --
+/// doesn't happen today since the parser is Block's sole constructor, but
+/// handled defensively rather than assumed away).
+fn collect_pqc_warnings(ast: &[SourceUnit]) -> Vec<(String, Option<Span>)> {
     const PQC_BUILTINS_WARN: &[&str] = &[
         "dilithium_verify", "falcon_verify", "sphincs_verify",
         "kyber_encapsulate", "kyber_decapsulate", "kyber_decaps",
         "falcon_sign", "mceliece_encapsulate", "mceliece_decapsulate",
         "hqc_encapsulate", "hqc_decapsulate",
     ];
-    'pqc_check: for unit in ast {
+
+    fn scan_block(block: &Block, out: &mut Vec<(String, Option<Span>)>) {
+        for (idx, stmt) in block.statements.iter().enumerate() {
+            let span = block.spans.get(idx).copied().filter(|s| *s != Span::default());
+            let exprs: Vec<&Expression> = match stmt {
+                Statement::Expression(e) => vec![e],
+                Statement::Return(Some(e)) => vec![e],
+                Statement::Assignment(_, e) => vec![e],
+                Statement::Require(e, _) => vec![e],
+                Statement::Let { value, .. } => vec![value],
+                Statement::LetDestructure { value, .. } => vec![value.as_ref()],
+                _ => vec![],
+            };
+            for expr in exprs {
+                if let Expression::Call(name, _) = expr {
+                    if PQC_BUILTINS_WARN.contains(&name.as_str()) {
+                        out.push((
+                            format!(
+                                "PQC builtin '{}' will throw a RuntimeError in browser (WASM) mode. \
+                                 Deploy to synq-server for real PQC verification.",
+                                name
+                            ),
+                            span,
+                        ));
+                    }
+                }
+            }
+            // Recurse so a call nested in an if/while body is still found
+            // -- and reports ITS OWN block's span, not the enclosing
+            // statement's.
+            match stmt {
+                Statement::If { then_block, else_block, .. } => {
+                    scan_block(then_block, out);
+                    if let Some(eb) = else_block {
+                        scan_block(eb, out);
+                    }
+                }
+                Statement::While { body, .. } => scan_block(body, out),
+                _ => {}
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for unit in ast {
         if let SourceUnit::Contract(c) = unit {
             for part in &c.parts {
                 if let ContractPart::Function(f) = part {
-                    for stmt in &f.body.statements {
-                        let exprs: Vec<&Expression> = match stmt {
-                            Statement::Expression(e) => vec![e],
-                            Statement::Return(Some(e)) => vec![e],
-                            Statement::Assignment(_, e) => vec![e],
-                            Statement::Require(e, _) => vec![e],
-                            Statement::Let { value, .. } => vec![value],
-                            Statement::LetDestructure { value, .. } => vec![value.as_ref()],
-                            _ => vec![],
-                        };
-                        for expr in exprs {
-                            if let Expression::Call(name, _) = expr {
-                                if PQC_BUILTINS_WARN.contains(&name.as_str()) {
-                                    warnings.push(format!(
-                                        "PQC builtin '{}' will throw a RuntimeError in browser (WASM) mode. \
-                                         Deploy to synq-server for real PQC verification.",
-                                        name
-                                    ));
-                                    break 'pqc_check;
-                                }
-                            }
-                        }
-                    }
+                    scan_block(&f.body, &mut out);
                 }
             }
         }
     }
+    out
 }
 
 // ── WASM-bindgen exports for browser IDE ─────────────────────────────────────
@@ -243,7 +277,12 @@ pub fn compile_synq(source: &str) -> String {
     let result = match synq_compiler::compile_ir(source) {
         Ok(cr) => {
             let mut warnings = cr.warnings.clone();
-            add_pqc_warnings(&ast, &mut warnings);
+            warnings.extend(collect_pqc_warnings(&ast).into_iter().map(|(msg, span)| {
+                match span {
+                    Some(s) => format!("{} (line {}, column {})", msg, s.line, s.column),
+                    None => msg,
+                }
+            }));
 
             // Collect extern_call targets from AST (for IDE cross-check)
             let mut extern_contracts: Vec<String> = Vec::new();
@@ -381,9 +420,7 @@ pub fn compile_synq_ide(source: &str) -> JsValue {
         Ok(cr) => {
             ok = true;
 
-            let mut warnings = cr.warnings.clone();
-            add_pqc_warnings(&ast, &mut warnings);
-            for w in &warnings {
+            for w in &cr.warnings {
                 // IR pipeline stats ("[IR] fn foo: N blocks, ...") are
                 // per-function diagnostic telemetry, not something the
                 // developer needs to act on - keep them out of the
@@ -395,6 +432,15 @@ pub fn compile_synq_ide(source: &str) -> JsValue {
                     "message": w,
                     "line": null,
                     "column": null,
+                    "source": "synq-compiler",
+                }));
+            }
+            for (message, span) in collect_pqc_warnings(&ast) {
+                diagnostics.push(serde_json::json!({
+                    "severity": "warning",
+                    "message": message,
+                    "line": span.map(|s| s.line),
+                    "column": span.map(|s| s.column),
                     "source": "synq-compiler",
                 }));
             }

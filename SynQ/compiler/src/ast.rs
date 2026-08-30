@@ -184,9 +184,38 @@ pub struct Parameter {
     pub is_indexed: bool,
 }
 
+/// A 1-based (line, column) source position, captured at parse time via
+/// pest's `Pair::as_span().start_pos().line_col()`. Threaded through
+/// `Block.spans` (parallel to `Block.statements`) so diagnostics (e.g. the
+/// PQC-in-WASM warning in synq-compiler-wasm) can report a real location
+/// instead of a fake "line 1, column 1" fallback.
+///
+/// (0, 0) means "no position available" -- used for `Block::new()`, i.e.
+/// blocks built synthetically rather than parsed from source (there are
+/// none of these in this crate today; the parser is the sole constructor
+/// of `Block`, but the helper exists for any future programmatic AST
+/// construction, e.g. in tests).
+#[derive(Debug, PartialEq, Clone, Copy, Default)]
+pub struct Span {
+    pub line: u32,
+    pub column: u32,
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct Block {
     pub statements: Vec<Statement>,
+    /// Parallel to `statements` -- spans[i] is the source position of
+    /// statements[i]. Always kept the same length as `statements`.
+    pub spans: Vec<Span>,
+}
+
+impl Block {
+    /// Build a Block with no position info for every statement. Use this
+    /// for synthetic/programmatic construction (not from the parser).
+    pub fn new(statements: Vec<Statement>) -> Self {
+        let spans = vec![Span::default(); statements.len()];
+        Block { statements, spans }
+    }
 }
 
 // ── Statements ───────────────────────────────────────────────────────────────
