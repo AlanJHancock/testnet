@@ -250,14 +250,24 @@
 </div>
 
 <script>
-const EXAMPLE = `contract Counter {
+const EXAMPLE = `pragma synq ^0.9;
+
+contract Counter {
   state {
     counter: u256;
+    initialised: bool;
   }
   impl {
     @public
-    function increment() -> u256 {
-      counter = counter + 1;
+    function init() -> bool {
+      counter = 0;
+      initialised = true;
+      return true;
+    }
+
+    @public
+    function increment(amt: u256) -> u256 {
+      counter = counter + amt;
       return counter;
     }
 
