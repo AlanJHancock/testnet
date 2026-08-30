@@ -1,3 +1,11 @@
+# ARCHIVED — v0.1 draft, superseded 30 Aug 2026
+#
+# This is the original aspirational v0.1 language sketch (co-drafted with
+# Manus/Claude contributions per the project checklist). It does NOT reflect
+# the actual implemented language. See synq-dsl-v1.md for the current,
+# implementation-accurate spec (v1.0 / "spec v7.0" per internal AST comments).
+# Kept here for historical reference only.
+
 # SynQ Language Specification v0.1
 
 ---

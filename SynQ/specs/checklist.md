@@ -48,11 +48,19 @@
 ---
 
 ## 📌 Phase 3: Gap Merging + Checklist Verification (IN PROGRESS)
-- [ ] Merge Manus/Claude contributions with DSL spec
-- [ ] Extract and reconcile opcode differences
+- [x] Merge Manus/Claude contributions with DSL spec -- see specs/synq-dsl-v1.md
+  (30 Aug 2026). The old v0.1 draft (synq.dsl) is archived in place, superseded.
+- [ ] Extract and reconcile opcode differences — VM opcode set now documented in
+  synq-dsl-v1.md §8/§10, but AIVM + EVM-transpilation targets use different opcode
+  numbering for overlapping ops; full cross-target reconciliation still open.
 - [ ] Add any missing intrinsics or decorators
-- [ ] Ensure compiler ↔ VM ↔ SDK interface contracts match
+- [ ] Ensure compiler ↔ VM ↔ SDK interface contracts match — @requires/@ensures/
+  @effects are parsed but not verified against function bodies; SDK parity unchecked.
 - [ ] Add core test fixtures for DSL + compiler
+
+**Note (30 Aug 2026):** while documenting Phase 3, found that Phase 5's PQC
+precompiles below are further along than this checklist implies — see synq-dsl-v1.md
+§0/§8. Checkboxes below intentionally left as-is pending a real verification pass.
 
 ---
 
