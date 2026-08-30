@@ -9,6 +9,8 @@
 //             rejected by the AEG1 deterministic dispatcher (0x8F).
 //             The legacy opcodes (0x80-0x83) bypass AEG1 dispatch
 //             and call the PQC shim directly.
+pragma synq ^0.9;
+
 contract PQCDemo {
   state {
     initialised: bool;
