@@ -5314,7 +5314,7 @@ async fn session_grant_handler(
     session.pending_nonce = None;
     session.used_nonces.insert(req.grant_nonce.clone());
 
-    let caller_tsynq = synq_vm::bech32::encode_address(&recovered)
+    let caller_tsynq = synq_vm::bech32::encode_wallet_address(&recovered)
         .unwrap_or_else(|_| hex_encode(&recovered));
     let allowed_set: std::collections::HashSet<String> =
         req.allowed_functions.iter().cloned().collect();
@@ -5817,7 +5817,7 @@ async fn session_run_handler(
     let caller_tsynq = if let Some(ref synw) = req.display_tsynq {
         synw.clone()
     } else {
-        synq_vm::bech32::encode_address(&effective_caller).unwrap_or_else(|_| hex_encode(&effective_caller))
+        synq_vm::bech32::encode_wallet_address(&effective_caller).unwrap_or_else(|_| hex_encode(&effective_caller))
     };
     eprintln!("[RUN] sid={} caller={} fn={} args_len={}", &req.session_id, caller_tsynq, req.function, vm_args.len());
 
@@ -5859,7 +5859,7 @@ async fn session_run_handler(
                 None    => (None, "Function completed (no return value)".to_string()),
             };
             {
-        let caller_tsynq = if let Some(ref synw) = req.display_tsynq { Some(synw.clone()) } else { synq_vm::bech32::encode_address(&effective_caller).ok() };
+        let caller_tsynq = if let Some(ref synw) = req.display_tsynq { Some(synw.clone()) } else { synq_vm::bech32::encode_wallet_address(&effective_caller).ok() };
         (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None, error_code: None, error_name: None, caller_tsynq, fuel_used, fuel_remaining, steps_used, steps_remaining }))
     }
         }
@@ -5867,7 +5867,7 @@ async fn session_run_handler(
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("revert: {}", message)),
-            caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_address(&effective_caller).ok()),
+            caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_wallet_address(&effective_caller).ok()),
             error_code: Some(code),
             error_name: Some(message.split('(').next().unwrap_or(&message).split("::").last().unwrap_or(&message).to_string()),
             fuel_used, fuel_remaining, steps_used, steps_remaining,
@@ -5876,7 +5876,7 @@ async fn session_run_handler(
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("require failed: {}", msg)),
-        caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_address(&effective_caller).ok()),
+        caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_wallet_address(&effective_caller).ok()),
         error_code: None,
         error_name: None,
         fuel_used, fuel_remaining, steps_used, steps_remaining,
@@ -5885,7 +5885,7 @@ async fn session_run_handler(
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("{}", e)),
-        caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_address(&effective_caller).ok()),
+        caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_wallet_address(&effective_caller).ok()),
         error_code: None,
         error_name: None,
         fuel_used, fuel_remaining, steps_used, steps_remaining,
