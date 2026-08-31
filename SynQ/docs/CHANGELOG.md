@@ -7,6 +7,46 @@ Dates are in UTC.
 
 ## 2026-08-31
 
+### Five PQC Builtins Fixed — kyber_encapsulate/mceliece/hqc No Longer Silently Return `false`
+
+- **Found while auditing the 2026-08-31 AEG1 typed-dispatch fix:** a
+  code comment next to it flagged a pre-existing "KNOWN GAP" --
+  `kyber_encapsulate`, `mceliece_encapsulate`, `mceliece_decapsulate`,
+  `hqc_encapsulate`, and `hqc_decapsulate` all fell through to the
+  generic frame-based `AegisCall` opcode with raw un-framed args, which
+  reliably failed to parse as an AEG1 frame and silently returned
+  `Bool(false)` / garbage bytes -- indistinguishable from a real
+  successful (if empty) result.
+- **Root cause is structural, not a bug to patch the same way:** AEG1
+  (ACTS-15) defines exactly 3 operations -- `MlKemDecaps`, `MlDsaVerify`,
+  `FnDsaVerify` -- there is no KEM-encapsulate operation and no
+  McEliece/HQC algorithm in the protocol's `Algorithm` enum at all.
+  Extending the wire protocol with new operation IDs is a spec decision
+  above this fix's authority, so instead of inventing new AEG1 ops, these
+  five builtins now hard-revert with an honest, named error.
+- **Fix:** new `IrOp::PqcUnsupported(name, args)` / `OpCode::PqcUnsupported`
+  (0x85). Immediate encoding `[name_len: u32][name][argc: u8]`. Always
+  returns `Err(VMError::RuntimeError(...))` naming the exact builtin and
+  citing the AEG1/ACTS-15 limitation -- identical behavior on native and
+  wasm builds, since no crypto backend is touched either way. Mirrors the
+  existing hard-reject already used for `kyber_decaps` (ACTS-15 §3), just
+  for a different reason (no operation slot vs. no secret-key ops on-chain).
+- **Test suite:** 5 new tests added to
+  `compiler/tests/aegis_ir_pipeline_test.rs`, each compiling a real
+  contract through `compile_ir()` and calling it through `QuantumVM`,
+  asserting the call `Err`s and the message names the exact builtin. Full
+  workspace suite: **358 tests, 0 failures** (28 binaries, 1 pre-existing
+  ignored) -- no regressions elsewhere.
+- **Live verification:** rebuilt `synq-server` in release mode, restarted
+  the live service on hanksweb.co.uk, and ran a real
+  `/compile` → `/session/new` → `/session/run` round trip calling
+  `kyber_encapsulate` -- got back a clean runtime error naming the builtin
+  and AEG1, not a silent false/empty result.
+- **Commit:** `72cfcb4` on `phase3-contract-addr-snts01-proto` (12 files
+  changed, 215 insertions, 12 deletions).
+
+---
+
 ### Caller Display Regression Fixed — `tsynq` HRP Was Showing Instead of `synw`
 
 - **Report:** a live `init()` call in Forge's Debug Console showed
