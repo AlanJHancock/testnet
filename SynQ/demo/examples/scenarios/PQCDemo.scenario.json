@@ -3,7 +3,7 @@
   "contract": "contracts/PQCDemo.synq",
   "scenarios": [
     {
-      "name": "store key material then verify/decapsulate with malformed inputs (correctly rejected -- false)",
+      "name": "store key material then verify/decapsulate with malformed inputs (correctly rejected)",
       "steps": [
         {
           "call": "init",
@@ -60,7 +60,7 @@
             "0x01",
             "0x02"
           ],
-          "expectReturn": false
+          "expectReturn": "0x"
         }
       ]
     }
