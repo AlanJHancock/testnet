@@ -5,6 +5,65 @@ Dates are in UTC.
 
 ---
 
+## 2026-08-31
+
+### AEG1 Typed Dispatch Fix — dilithium_verify/falcon_verify/kyber_decaps Always Returned false
+
+- **Root cause:** the IR lowering for the convenience builtins `dilithium_verify`,
+  `falcon_verify`, and `kyber_decaps` pushed their raw args and emitted the
+  frame-based `AegisCall` (0x8F) opcode directly. That opcode pops exactly ONE
+  value and parses it as a wire-encoded AEG1 frame — it only ever received the
+  last pushed arg (e.g. `publicKey`), which is not a valid frame. Every
+  deterministic (non-AIVM-dry-run) call to these builtins therefore always
+  failed with an "invalid magic"/"truncated" dispatch error and always
+  returned `Bool(false)`, regardless of whether the signature/ciphertext was
+  actually valid. Confirmed hitting real production traffic (PQCDemo,
+  `verifyMlDsa`) in the `synq-server` logs before the fix.
+- **Fix:** new VM opcode `AegisTypedCall` (0x84) — immediate `(op, alg)` bytes
+  select the AEG1 operation + algorithm, pops a fixed arg count directly off
+  the stack, and builds the `Aeg1Request` in-process (no wire-frame
+  encode/decode round trip). Charges real ACTS-15 §4 gas via
+  `aeg1::compute_cost()` before dispatch. `IrOp::AegisVerify`/`AegisDecaps` now
+  carry `(op, alg, args)` instead of discarding which algorithm was called.
+  `dilithium_verify` → op=2/alg=0x11 (ML-DSA-65); `falcon_verify` →
+  op=3/alg=0x20 (FN-DSA-512); `kyber_decapsulate`/`kyber_decaps` → op=1/alg=0x02
+  (ML-KEM-768, hard-rejected per ACTS-15 §3 — no secret-key op may run
+  on-chain).
+- **Second bug found in the same pass:** `sphincs_verify` has no AEG1
+  operation slot at all (AEG1 only covers ML-KEM/ML-DSA/FN-DSA), so it was
+  routed to the legacy `SphincsVerify` opcode via new `IrOp::LegacySphincsVerify`.
+  That legacy opcode (shared pop-order convention with legacy
+  `DilithiumVerify`/`FalconVerify`) pops args as `[public_key, message,
+  signature]`, not source call order — the first draft pushed source order and
+  silently swapped `message`↔`signature`, so a genuinely valid SPHINCS+
+  signature was rejected while a forged one still (coincidentally) returned
+  `false`. Caught by writing real positive+negative signature tests rather
+  than trusting one green run.
+- **SIR1 binary IR encoding:** tags 0x22/0x23 (old args-only `AegisVerify`/
+  `AegisDecaps` shape, no algorithm selector) are retired — `decode()` now
+  returns `InvalidTag` instead of misreading bytes meant for the new shape.
+  New tags 0x3C/0x3D/0x3E carry the new `(op, alg, args)`/`(op, alg, args)`/
+  `(args)` shapes. No real backward-compat path existed for the old shape
+  anyway — it never recorded which algorithm was intended.
+- **Test suite:** new `compiler/tests/aegis_ir_pipeline_test.rs` (7 tests)
+  exercises the real `compile_ir()` → `QuantumVM` pipeline (not hand-assembled
+  bytecode) — `dilithium_verify`/`falcon_verify`/`sphincs_verify`
+  positive+negative signature cases, plus confirms `kyber_decaps` is hard
+  `Err` in the deterministic path. Full workspace suite: **354 tests, 0
+  failures** (28 test binaries across vm/compiler/pqc-shims/synq-server/cli) —
+  no regressions elsewhere.
+- **Live verification:** rebuilt `synq-server` in release mode, restarted the
+  `synq-server.service` live on hanksweb.co.uk, and ran a real end-to-end HTTP
+  round trip (`/compile` → `/session/new` → `/session/run`) against a fresh
+  ML-DSA-65 test vector from `/pqc/test-vector` — a genuinely valid signature
+  returned `Bool(true)`, a tampered one correctly returned `Bool(false)`. Log
+  confirms the new opcode path (`84 02 11 ...`) and a real `[AEG1] verify
+  rejected: InvalidSignature` only on the tampered case.
+- **Commit:** `f8df9f9` on `phase3-contract-addr-snts01-proto` (11 files
+  changed, 430 insertions, 35 deletions).
+
+---
+
 ## 2026-08-02
 
 ### V3 Audit Readiness Package
