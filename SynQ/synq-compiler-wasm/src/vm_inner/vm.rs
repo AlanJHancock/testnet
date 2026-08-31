@@ -1201,6 +1201,45 @@ impl QuantumVM {
                     "AegisCall requires native build — use synq-server for PQC".into()
                 ));
             }
+            // ── AegisTypedCall (0x84): typed PQC dispatch, same stub reasoning
+            // as AegisCall above -- real dilithium_verify/falcon_verify/
+            // kyber_decaps execution stays server-side. Consume the [op][alg]
+            // immediate bytes so pc bookkeeping stays correct even though we
+            // return Err immediately after (defensive, matches the pattern
+            // used for real inline-operand opcodes elsewhere in this file).
+            OpCode::AegisTypedCall => {
+                let _op = self.code.get(self.pc).copied().ok_or(VMError::InvalidAddress(self.pc))?;
+                let _alg = self.code.get(self.pc + 1).copied().ok_or(VMError::InvalidAddress(self.pc + 1))?;
+                self.pc += 2;
+                return Err(VMError::RuntimeError(
+                    "AegisTypedCall requires native build — use synq-server for PQC".into()
+                ));
+            }
+            // ── PqcUnsupported (0x85): builtin has no AEG1 operation slot at
+            // all (kyber_encapsulate, mceliece_*, hqc_*) -- always reverts on
+            // the native server too (see vm/src/vm.rs), so this in-browser
+            // stub gives the same "not supported by the protocol" answer
+            // rather than the generic native-build-required message, since
+            // no native build would ever make this succeed either.
+            OpCode::PqcUnsupported => {
+                let name_len = self.read_u32()? as usize;
+                let name_bytes = self.read_bytes(name_len)?;
+                let name = String::from_utf8(name_bytes)
+                    .map_err(|_| VMError::RuntimeError("PqcUnsupported: name is not valid UTF-8".into()))?;
+                if self.pc >= self.code.len() {
+                    return Err(VMError::InvalidAddress(self.pc));
+                }
+                let argc = self.code[self.pc] as usize;
+                self.pc += 1;
+                for _ in 0..argc {
+                    self.pop()?;
+                }
+                return Err(VMError::RuntimeError(format!(
+                    "{}: not supported by the AEG1 protocol (ACTS-15 defines only \
+ML-KEM-decapsulate, ML-DSA-verify, and FN-DSA-verify -- no KEM-encapsulate, \
+McEliece, or HQC operation slot exists yet)", name
+                )));
+            }
             OpCode::ToString => {
                 let value = self.pop()?;
                 self.push(Value::Str(vm_value_display(&value)))?;

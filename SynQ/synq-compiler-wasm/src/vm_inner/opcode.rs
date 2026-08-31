@@ -134,6 +134,17 @@ pub enum OpCode {
     SphincsVerify    = 0x83,
     // AEG1 unified dispatch — preferred for spec v7.0 alignment
     AegisCall        = 0x8F,
+    // Added 2026-08-31 in the native vm crate (typed dispatch for
+    // dilithium_verify/falcon_verify/kyber_decaps); vendored here 2026-09-01
+    // so bytecode containing it doesn't fail to even DECODE in-browser.
+    // Immediate bytes: [op: u8][alg: u8]. Always stubbed below like the
+    // other PQC opcodes -- real execution stays server-side.
+    AegisTypedCall   = 0x84,
+    // Added 2026-09-01 in the native vm crate for builtins with no AEG1
+    // operation slot at all (kyber_encapsulate, mceliece_*, hqc_*).
+    // Immediate bytes: [name_len: u32 LE][name: name_len bytes][argc: u8].
+    // Vendored here so decoding never fails on this byte in-browser.
+    PqcUnsupported   = 0x85,
 
     // Utility
     Print = 0xF0,
@@ -220,6 +231,8 @@ impl TryFrom<u8> for OpCode {
             0x82 => Ok(OpCode::FalconVerify),
             0x83 => Ok(OpCode::SphincsVerify),
             0x8F => Ok(OpCode::AegisCall),
+            0x84 => Ok(OpCode::AegisTypedCall),
+            0x85 => Ok(OpCode::PqcUnsupported),
             0xF0 => Ok(OpCode::Print),
             0xFF => Ok(OpCode::Halt),
             _    => Err(VMError::InvalidInstruction(value)),
