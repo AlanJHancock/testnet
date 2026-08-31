@@ -151,6 +151,11 @@ fn stack_effect(op: OpCode, extern_arg_count: Option<u8>) -> Option<(i32, i32)> 
         OpCode::FalconVerify     => Some((3, 1)),
         OpCode::SphincsVerify    => Some((3, 1)),
         OpCode::AegisCall        => Some((1, 1)),
+        // AegisTypedCall's pop count depends on its immediate op byte
+        // (2 for ML-KEM decaps, 3 for ML-DSA/FN-DSA verify) -- not
+        // knowable from the opcode alone, so treat as dynamic like
+        // TuplePack/TupleUnpack; the VM's runtime pop() checks handle it.
+        OpCode::AegisTypedCall   => None,
 
         // Utility
         OpCode::Print => Some((1, 0)),
@@ -259,6 +264,9 @@ fn parse_instructions(code: &[u8]) -> Result<Vec<Instruction>, VMError> {
                 let nlen = read_u32_le!() as usize;
                 read_bytes!(nlen);
             }
+
+            // AegisTypedCall: 2 inline immediate bytes (op, alg) follow.
+            OpCode::AegisTypedCall => { read_bytes!(2u32); }
 
             // All other opcodes: no inline operands
             _ => {}

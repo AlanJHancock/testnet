@@ -98,7 +98,8 @@ fn analyze_function(func: &mut IrFunction, report: &mut AnalysisReport) -> Funct
                     stats.effects.push(EffectKind::ExternalCall(contract.clone(), function.clone()));
                     stats.host_profiles += 1;
                 }
-                IrOp::AegisCall(_) | IrOp::AegisVerify(_) | IrOp::AegisDecaps(_) => {
+                IrOp::AegisCall(_) | IrOp::AegisVerify(_, _, _) | IrOp::AegisDecaps(_, _, _)
+                | IrOp::LegacySphincsVerify(_) => {
                     stats.host_profiles += 1;
                 }
                 IrOp::AuthRequire(_, _) => {

@@ -1493,10 +1493,90 @@ OpCode::MapNew => {
                     }
                 }
             }
+
+            // ── AEG1 typed PQC dispatch (0x84) ────────────────────────────────
+            // Compiler-emitted convenience dispatch for dilithium_verify /
+            // falcon_verify / kyber_decaps. Immediate (op, alg) bytes select
+            // the AEG1 operation + algorithm; a FIXED number of raw byte args
+            // (per Aeg1Request::expected_arg_count()) are popped straight off
+            // the stack and an Aeg1Request is built in-process directly --
+            // no wire-frame encode/decode round trip needed for this path.
+            //
+            // Fixes a real bug (found 2026-08-31): the IR lowering for these
+            // builtins used to push raw args and emit the frame-based AegisCall
+            // opcode directly, which popped only the LAST arg, tried to parse it
+            // as an AEG1 frame, always failed with "invalid magic", and always
+            // returned Bool(false) -- so every deterministic (non-AIVM) call to
+            // dilithium_verify/falcon_verify/kyber_decaps silently returned false
+            // regardless of whether the signature was actually valid.
+            #[cfg(feature = "native")]
+            OpCode::AegisTypedCall => {
+                let op_byte = self.read_u8()?;
+                let alg_byte = self.read_u8()?;
+                let operation = aeg1::Operation::try_from(op_byte)
+                    .map_err(|e| VMError::RuntimeError(format!("AEG1: {}", e)))?;
+                let algorithm = aeg1::Algorithm::try_from(alg_byte)
+                    .map_err(|e| VMError::RuntimeError(format!("AEG1: {}", e)))?;
+                let argc = match operation {
+                    aeg1::Operation::MlKemDecaps => 2,
+                    aeg1::Operation::MlDsaVerify | aeg1::Operation::FnDsaVerify => 3,
+                };
+
+                // Args were pushed in source order (e.g. message, signature,
+                // publicKey), so popping LIFO yields them in REVERSE order --
+                // collect then reverse to restore Aeg1Request's expected
+                // [msg, sig, pk] / [ciphertext, secret_key] ordering.
+                let mut args = Vec::with_capacity(argc);
+                for _ in 0..argc {
+                    args.push(self.pop()?.as_bytes()?.to_vec());
+                }
+                args.reverse();
+
+                let req = aeg1::Aeg1Request { operation, algorithm, args };
+
+                // ACTS-VM-005: compute and charge cost BEFORE dispatch.
+                let cost = aeg1::compute_cost(&req);
+                let remaining = self.max_fuel.saturating_sub(self.fuel_used);
+                if cost > remaining {
+                    eprintln!("[AEG1] fuel exhausted: needed {} but only {} remaining", cost, remaining);
+                    return Err(VMError::FuelExhausted { cost, remaining });
+                }
+                self.fuel_used += cost;
+
+                match aeg1::dispatch_deterministic(&req) {
+                    aeg1::Aeg1Response::Ok(result) => {
+                        if result.is_empty() {
+                            // Verify operations return empty body → push Bool(true)
+                            self.push(Value::Bool(true))?;
+                        } else {
+                            // Decapsulate returns shared secret → push Bytes
+                            self.push(Value::Bytes(result))?;
+                        }
+                    }
+                    aeg1::Aeg1Response::Error(code, msg) => {
+                        match operation {
+                            // A failed verify is a normal contract-level outcome --
+                            // signal it as Bool(false), not a fault.
+                            aeg1::Operation::MlDsaVerify | aeg1::Operation::FnDsaVerify => {
+                                eprintln!("[AEG1] verify rejected: {:?} - {}", code, msg);
+                                self.push(Value::Bool(false))?;
+                            }
+                            // ML-KEM decaps in a deterministic context is a hard
+                            // security rejection (ACTS-15 §3, no secret key may be
+                            // handled deterministically on-chain) -- surface it as a
+                            // revert so it can never be confused with a successful
+                            // (even if empty) decapsulation result.
+                            aeg1::Operation::MlKemDecaps => {
+                                return Err(VMError::RuntimeError(format!("AEG1: {:?} - {}", code, msg)));
+                            }
+                        }
+                    }
+                }
+            }
 #[cfg(not(feature = "native"))]
             OpCode::DilithiumVerify | OpCode::KyberKeyExchange |
             OpCode::FalconVerify    | OpCode::SphincsVerify |
-            OpCode::AegisCall => {
+            OpCode::AegisCall       | OpCode::AegisTypedCall => {
                 return Err(VMError::RuntimeError(
                     "PQC opcodes require native build — use synq-server for signing".into()
                 ));
@@ -1683,6 +1763,16 @@ OpCode::MapNew => {
 
     fn peek(&self) -> Result<&Value, VMError> {
         self.stack.last().ok_or(VMError::StackUnderflow)
+    }
+
+    #[cfg_attr(not(feature = "native"), allow(dead_code))]
+    fn read_u8(&mut self) -> Result<u8, VMError> {
+        if self.pc + 1 > self.code.len() {
+            return Err(VMError::InvalidAddress(self.pc));
+        }
+        let b = self.code[self.pc];
+        self.pc += 1;
+        Ok(b)
     }
 
     fn read_i32(&mut self) -> Result<i32, VMError> {

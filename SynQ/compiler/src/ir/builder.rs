@@ -814,33 +814,95 @@ impl<'a> BuildContext<'a> {
                         Ok(self.push_value(IrOp::AssetOwner(arg_vals[0]), IrType::U256))
                     }
                     "aegis_call" | "aegis_verify" | "aegis_decaps" => {
-                        let op = if name == "aegis_verify" {
-                            IrOp::AegisVerify(arg_vals)
-                        } else if name == "aegis_decaps" {
-                            IrOp::AegisDecaps(arg_vals)
-                        } else {
-                            IrOp::AegisCall(arg_vals)
-                        };
+                        // Low-level generic builtins: the caller passes an already
+                        // AEG1-framed byte blob as the single arg; all three names are
+                        // synonyms that lower to the same frame-based IrOp::AegisCall
+                        // (op/alg are already baked into the frame the caller built --
+                        // not to be confused with the *typed* convenience builtins
+                        // dilithium_verify/falcon_verify/kyber_decaps below, which build
+                        // the frame for the caller and need real op/alg tags).
                         self.ir_fn.host_profiles.push(HostFnProfile {
                             kind: HostFnKind::AegisCall,
                             callee: name.clone(),
                             arg_types: vec![],
                             return_type: IrType::Bool,
                         });
-                        Ok(self.push_value(op, IrType::Bool))
+                        Ok(self.push_value(IrOp::AegisCall(arg_vals), IrType::Bool))
                     }
-                    "dilithium_verify" | "falcon_verify" | "sphincs_verify" => {
+                    "dilithium_verify" => {
+                        // AEG1 op=2 (ML-DSA verify), alg=0x11 (ML-DSA-65) -- matches
+                        // the real pqcrypto backend wired in synq-pqc-shims::dilithium.
                         self.ir_fn.host_profiles.push(HostFnProfile {
                             kind: HostFnKind::PqcVerify,
                             callee: name.clone(),
                             arg_types: vec![],
                             return_type: IrType::Bool,
                         });
-                        Ok(self.push_value(IrOp::AegisVerify(arg_vals), IrType::Bool))
+                        Ok(self.push_value(IrOp::AegisVerify(2, 0x11, arg_vals), IrType::Bool))
                     }
-                    "kyber_encapsulate" | "kyber_decapsulate" | "kyber_decaps"
+                    "falcon_verify" => {
+                        // AEG1 op=3 (FN-DSA verify), alg=0x20 (FN-DSA-512).
+                        self.ir_fn.host_profiles.push(HostFnProfile {
+                            kind: HostFnKind::PqcVerify,
+                            callee: name.clone(),
+                            arg_types: vec![],
+                            return_type: IrType::Bool,
+                        });
+                        Ok(self.push_value(IrOp::AegisVerify(3, 0x20, arg_vals), IrType::Bool))
+                    }
+                    "sphincs_verify" => {
+                        // SPHINCS+ has no AEG1 operation slot (AEG1 covers only
+                        // ML-KEM/ML-DSA/FN-DSA per ACTS-15) -- route to the pre-AEG1
+                        // legacy opcode, which already calls real
+                        // synq-pqc-shims::sphincs::verify directly.
+                        //
+                        // IMPORTANT: the legacy SphincsVerify/DilithiumVerify/
+                        // FalconVerify opcodes (0x80/0x82/0x83) all pop args in a
+                        // fixed [public_key, message, signature] order (i.e. they
+                        // expect push order [signature, message, public_key]) --
+                        // NOT the natural sphincs_verify(message, signature,
+                        // publicKey) source-call order. arg_vals here is
+                        // [message, signature, public_key]; reorder to
+                        // [signature, message, public_key] before pushing so the
+                        // legacy opcode's pops line up with the right values
+                        // (verified end-to-end 2026-08-31 -- pushing in source
+                        // order silently swapped message<->signature, which
+                        // happened to still return false for both valid AND
+                        // forged signatures).
+                        let legacy_args = vec![arg_vals[1], arg_vals[0], arg_vals[2]];
+                        self.ir_fn.host_profiles.push(HostFnProfile {
+                            kind: HostFnKind::PqcVerify,
+                            callee: name.clone(),
+                            arg_types: vec![],
+                            return_type: IrType::Bool,
+                        });
+                        Ok(self.push_value(IrOp::LegacySphincsVerify(legacy_args), IrType::Bool))
+                    }
+                    "kyber_decapsulate" | "kyber_decaps" => {
+                        // AEG1 op=1 (ML-KEM decaps), alg=0x02 (ML-KEM-768).
+                        // Deterministic dispatch REJECTS this (ACTS-15 §3 -- requires
+                        // a secret key) and the VM surfaces that as a revert, never as
+                        // a silent false/empty value.
+                        self.ir_fn.host_profiles.push(HostFnProfile {
+                            kind: HostFnKind::PqcKem,
+                            callee: name.clone(),
+                            arg_types: vec![],
+                            return_type: IrType::Bytes,
+                        });
+                        Ok(self.push_value(IrOp::AegisDecaps(1, 0x02, arg_vals), IrType::Bytes))
+                    }
+                    "kyber_encapsulate"
                     | "mceliece_encapsulate" | "mceliece_decapsulate"
                     | "hqc_encapsulate" | "hqc_decapsulate" => {
+                        // KNOWN GAP (pre-existing, not introduced by the 2026-08-31
+                        // AEG1 typed-dispatch fix): AEG1 has no operation slot for KEM
+                        // encapsulate, or for McEliece/HQC at all, yet. These still
+                        // fall through to the generic frame-based AegisCall opcode with
+                        // raw un-framed args, which will reliably fail to parse as an
+                        // AEG1 frame and return Bool(false) -- that is an *unimplemented
+                        // deterministic backend*, not a real "operation rejected" signal.
+                        // Do not rely on these five builtins in on-chain/deterministic
+                        // contract code yet.
                         self.ir_fn.host_profiles.push(HostFnProfile {
                             kind: HostFnKind::PqcKem,
                             callee: name.clone(),

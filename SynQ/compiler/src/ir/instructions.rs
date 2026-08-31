@@ -97,10 +97,24 @@ pub enum IrOp {
     StrEq(ValueId, ValueId),
 
     // ── PQC / AEG1 operations ───────────────────────────────────────────
-    /// Unified AEG1 dispatch: result = aegis_call(op, alg, args).
+    /// Unified AEG1 dispatch: caller passes an already-framed AEG1 byte
+    /// blob as the single arg (generic `aegis_call`/`aegis_verify`/
+    /// `aegis_decaps` builtins). result = aegis_call(frame).
     AegisCall(Vec<ValueId>),
-    AegisVerify(Vec<ValueId>),
-    AegisDecaps(Vec<ValueId>),
+    /// Typed convenience verify dispatch for dilithium_verify/falcon_verify.
+    /// Fields: (aeg1_operation_id, aeg1_algorithm_id, args) -- ids match
+    /// synq_pqc_shims::aeg1::{Operation, Algorithm} byte values. Lowered to
+    /// OpCode::AegisTypedCall, which builds the AEG1 request in-process
+    /// (no wire-frame encode/decode needed).
+    AegisVerify(u8, u8, Vec<ValueId>),
+    /// Typed convenience decapsulate dispatch for kyber_decaps. Same
+    /// (op, alg, args) shape as AegisVerify.
+    AegisDecaps(u8, u8, Vec<ValueId>),
+    /// SPHINCS+ verify -- AEG1 has no operation slot for SPHINCS+ (only
+    /// ML-KEM/ML-DSA/FN-DSA per ACTS-15), so this lowers directly to the
+    /// pre-AEG1 legacy OpCode::SphincsVerify, which already calls real
+    /// synq-pqc-shims sphincs::verify.
+    LegacySphincsVerify(Vec<ValueId>),
 
     // ── Linear asset operations ────────────────────────────────────────
     /// Create asset: result = asset_id. type_tag from string hash.
@@ -185,7 +199,8 @@ impl Instruction {
             IrOp::UnaryOp(_, a) => vec![*a],
             IrOp::AuthIdentity(a) => vec![*a],
             IrOp::AuthRequire(env, _) => vec![*env],
-            IrOp::Call(_, args) | IrOp::AegisCall(args) | IrOp::AegisVerify(args) | IrOp::AegisDecaps(args) => args.clone(),
+            IrOp::Call(_, args) | IrOp::AegisCall(args) | IrOp::LegacySphincsVerify(args) => args.clone(),
+            IrOp::AegisVerify(_, _, args) | IrOp::AegisDecaps(_, _, args) => args.clone(),
             IrOp::ExternCall(_, _, args) => args.clone(),
             IrOp::MapGet(_, key) => vec![*key],
             IrOp::MapMethod(_, _, args) | IrOp::SetMethod(_, _, args) => args.clone(),

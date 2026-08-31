@@ -142,6 +142,15 @@ pub enum OpCode {
     SphincsVerify    = 0x83,
     // AEG1 unified dispatch — preferred for spec v7.0 alignment
     AegisCall        = 0x8F,
+    /// Compiler-emitted typed PQC dispatch for the convenience builtins
+    /// (dilithium_verify/falcon_verify/kyber_decaps). Immediate bytes
+    /// following this opcode: [op: u8][alg: u8] (matching
+    /// synq_pqc_shims::aeg1::{Operation, Algorithm}). Pops a FIXED number
+    /// of raw byte args (per aeg1::Aeg1Request::expected_arg_count() for
+    /// that op) directly off the stack and builds the AEG1 request
+    /// in-process -- no wire-frame encode/decode round trip needed.
+    /// See vm.rs's AegisTypedCall handler and ACTS-15 §3+§4.
+    AegisTypedCall   = 0x84,
 
     // Utility
     Print = 0xF0,
@@ -234,6 +243,7 @@ impl TryFrom<u8> for OpCode {
             0x82 => Ok(OpCode::FalconVerify),
             0x83 => Ok(OpCode::SphincsVerify),
             0x8F => Ok(OpCode::AegisCall),
+            0x84 => Ok(OpCode::AegisTypedCall),
             0xF0 => Ok(OpCode::Print),
             0xFF => Ok(OpCode::Halt),
             _    => Err(VMError::InvalidInstruction(value)),

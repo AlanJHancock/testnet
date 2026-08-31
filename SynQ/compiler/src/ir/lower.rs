@@ -778,11 +778,30 @@ impl IrLowerer {
             }
 
             // ── PQC / AEG1 ──
-            IrOp::AegisCall(args) | IrOp::AegisVerify(args) | IrOp::AegisDecaps(args) => {
+            // Generic low-level builtin: caller already built the AEG1 frame as
+            // a single bytes arg; VM's AegisCall opcode pops exactly that one value.
+            IrOp::AegisCall(args) => {
                 for arg in args {
                     load_val!(self, *arg);
                 }
                 self.asm.emit_op(OpCode::AegisCall);
+            }
+            // Typed convenience dispatch: push raw args in source order, then emit
+            // AegisTypedCall with immediate (op, alg) bytes. The VM pops a FIXED
+            // arg count for that op and builds the AEG1 request directly -- no
+            // wire-frame encode/decode needed for this in-process path.
+            IrOp::AegisVerify(op, alg, args) | IrOp::AegisDecaps(op, alg, args) => {
+                for arg in args {
+                    load_val!(self, *arg);
+                }
+                self.asm.emit_op(OpCode::AegisTypedCall);
+                self.asm.emit_raw(&[*op, *alg]);
+            }
+            IrOp::LegacySphincsVerify(args) => {
+                for arg in args {
+                    load_val!(self, *arg);
+                }
+                self.asm.emit_op(OpCode::SphincsVerify);
             }
 
             // ── Linear assets ──

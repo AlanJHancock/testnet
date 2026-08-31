@@ -348,13 +348,29 @@ impl Writer {
                 self.u32(args.len() as u32);
                 for a in args { self.u32(*a); }
             }
-            IrOp::AegisVerify(args) => {
-                self.u8(0x22);
+            // NOTE (2026-08-31): tags 0x22/0x23 used to encode AegisVerify/
+            // AegisDecaps as (args) only, with NO algorithm selector at all --
+            // that shape could never be re-lowered correctly (the info needed to
+            // pick the right PQC algorithm was already lost before serialization).
+            // Given there's no real backward-compat path for a payload that was
+            // provably non-functional, tags 0x22/0x23 are retired outright rather
+            // than reused with a silently different shape (see LoadAuthority/
+            // MapMethod/SetMethod above for why silent tag reshaping is exactly
+            // the bug class to avoid). New unique tags 0x3C/0x3D carry the fixed,
+            // typed (op, alg, args) shape; decode() below rejects 0x22/0x23
+            // outright with InvalidTag rather than misreading old bytes.
+            IrOp::AegisVerify(op, alg, args) => {
+                self.u8(0x3C); self.u8(*op); self.u8(*alg);
                 self.u32(args.len() as u32);
                 for a in args { self.u32(*a); }
             }
-            IrOp::AegisDecaps(args) => {
-                self.u8(0x23);
+            IrOp::AegisDecaps(op, alg, args) => {
+                self.u8(0x3D); self.u8(*op); self.u8(*alg);
+                self.u32(args.len() as u32);
+                for a in args { self.u32(*a); }
+            }
+            IrOp::LegacySphincsVerify(args) => {
+                self.u8(0x3E);
                 self.u32(args.len() as u32);
                 for a in args { self.u32(*a); }
             }
@@ -832,17 +848,30 @@ impl<'a> Reader<'a> {
                 for _ in 0..count { args.push(self.u32()?); }
                 Ok(IrOp::AegisCall(args))
             }
-            0x22 => {
+            // 0x22/0x23 (pre-2026-08-31 AegisVerify/AegisDecaps, args-only, no
+            // algorithm selector) are retired -- there is no valid re-lowering for
+            // that shape. Reject explicitly rather than misreading bytes meant for
+            // the new (op, alg, args) shape now on 0x3C/0x3D.
+            0x22 | 0x23 => Err(IrSerError::InvalidTag(tag)),
+            0x3C => {
+                let op = self.u8()?; let alg = self.u8()?;
                 let count = self.u32()? as usize;
                 let mut args = Vec::with_capacity(count);
                 for _ in 0..count { args.push(self.u32()?); }
-                Ok(IrOp::AegisVerify(args))
+                Ok(IrOp::AegisVerify(op, alg, args))
             }
-            0x23 => {
+            0x3D => {
+                let op = self.u8()?; let alg = self.u8()?;
                 let count = self.u32()? as usize;
                 let mut args = Vec::with_capacity(count);
                 for _ in 0..count { args.push(self.u32()?); }
-                Ok(IrOp::AegisDecaps(args))
+                Ok(IrOp::AegisDecaps(op, alg, args))
+            }
+            0x3E => {
+                let count = self.u32()? as usize;
+                let mut args = Vec::with_capacity(count);
+                for _ in 0..count { args.push(self.u32()?); }
+                Ok(IrOp::LegacySphincsVerify(args))
             }
             0x24 => {
                 let name = self.str()?;
