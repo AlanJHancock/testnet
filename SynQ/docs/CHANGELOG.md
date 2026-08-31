@@ -7,6 +7,52 @@ Dates are in UTC.
 
 ## 2026-08-31
 
+### synergy-aivm Integration Audit — quantumvm API Drift Found + Fix PR Opened
+
+- **Context:** reviewed the internal `synergy-aivm` repo (private,
+  `synergy-network-hq/synergy-aivm`, commit `d2d8e67`) as a candidate
+  blueprint for integrating PQC metering/runtime patterns into the main
+  Forge chain. Its `runtime/aivm-core` crate is a real, working
+  deploy/call harness — canonical `SynQRuntimeReceipt`s with pre/post
+  state roots, a two-lane `AivmGasMeter` (ordinary + PQC gas), and STS-9/
+  STS-MA/STS-NF token selectors — that wraps our VM via an optional
+  `quantumvm` path-dependency. (The rest of that repo — model registry,
+  GPU-worker marketplace, federated training — is unrelated stale
+  scaffolding from Sep 2025 and not relevant here.)
+- **Finding:** `aivm-core`'s usage of `quantumvm` was written against an
+  API shape our real `synq-vm` crate never had. Confirmed line-by-line
+  against `vm/src/vm.rs` and `vm/src/opcode.rs`:
+  - Its `Cargo.toml` dependency key `quantumvm` had no `package =` alias,
+    but our crate's own `[package] name` is `synq-vm` — the dependency
+    line does not resolve as written.
+  - `QuantumVM::with_gas(gas, pq_gas)` does not exist; only `new()` does.
+    The real VM exposes two public limit fields instead: `max_steps`
+    (execution budget, a step count) and `max_fuel` (PQC-operation
+    budget, ACTS-VM-005).
+  - `consumed_gas()`/`consumed_pqc_gas()` do not exist; the real
+    accessors are `steps_used()` and `fuel_used()`.
+  - `VMError::OutOfGas` does not exist. The real, structured variants are
+    `FuelExhausted{cost,remaining}` (PQC fuel exhausted) and
+    `StepLimitExceeded(usize)` (step budget exhausted) — no
+    string-sniffing needed, both already carry typed data.
+  - `load_bytecode()`, `execute()`, the `stack` field, and
+    `Assembler`/`OpCode` usage were already correct and needed no
+    changes.
+- **Action:** opened
+  [`synergy-aivm#2`](https://github.com/synergy-network-hq/synergy-aivm/pull/2)
+  (branch `fix/aivm-core-quantumvm-compat`) against `main` with the 4
+  fixes above. Source-verified against our real crate, not build-tested
+  end-to-end (no local checkout of aivm-core's full dependency tree) —
+  PR description asks Justin to run `cargo check -p aivm-core --features
+  synq` before merging. No changes made to `synq-vm` itself; this was
+  purely an aivm-core-side fix, so there is no backward-compat impact on
+  compile-deployed or SQB-deployed sessions.
+- **Still open:** confirm with Justin (once Developer Hub access works)
+  whether `aivm-core`'s two-lane gas model (ordinary steps + separate PQC
+  fuel) is the intended shape for the "GasMeter/PqGasMeter integration"
+  item on the gas/fee estimator backlog, since it maps cleanly onto
+  fields our VM already exposes.
+
 ### AEG1 Typed Dispatch Fix — dilithium_verify/falcon_verify/kyber_decaps Always Returned false
 
 - **Root cause:** the IR lowering for the convenience builtins `dilithium_verify`,
