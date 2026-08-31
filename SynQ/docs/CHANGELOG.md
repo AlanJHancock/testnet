@@ -7,6 +7,32 @@ Dates are in UTC.
 
 ## 2026-08-31
 
+### Caller Display Regression Fixed — `tsynq` HRP Was Showing Instead of `synw`
+
+- **Report:** a live `init()` call in Forge's Debug Console showed
+  `success ... LIVE as tsynq1qyz0yq...` — the deprecated `tsynq` HRP —
+  when the wallet-standard `synw` HRP was expected.
+- **Root cause:** `session_run_handler` and `session_grant_handler` in
+  `synq-server/src/main.rs` fell back to the deprecated
+  `synq_vm::bech32::encode_address()` (produces `tsynq1...`) whenever a
+  call had no explicit `display_tsynq` override from the wallet
+  extension — i.e. any call made without a connected wallet supplying
+  its own `synw` address. Per the 2026-08-22 decision already recorded
+  in `vm/src/bech32.rs` (`tsynq`/`synq` deprecated for human-facing
+  display; `synw` is the Forge/wallet-UI standard), this fallback
+  should have used `encode_wallet_address()` (`synw1...`) all along.
+- **Fix:** switched all 6 real call sites (1 grant creation + 5
+  run-response paths) from `encode_address()` to
+  `encode_wallet_address()`. Left the one remaining `encode_address()`
+  call site (a `vm.rs` unit test) unchanged — it intentionally tests
+  the legacy-encode backward-compat path.
+- **Verified live:** `POST /session/new` + `/session/run(init)` with no
+  `display_tsynq` override now returns
+  `caller_tsynq=synw1yx5ney972vcu9tlq89fg5k6rj6zvsda66eu4` (was
+  `tsynq1...` before). Full workspace test suite green (84+12 tests)
+  before deploy. Deployed via `cargo build --release -p synq-server` +
+  `systemctl restart synq-server.service`. Committed (`dbf9a53`).
+
 ### synergy-aivm Integration Audit — quantumvm API Drift Found + Fix PR Opened
 
 - **Context:** reviewed the internal `synergy-aivm` repo (private,
