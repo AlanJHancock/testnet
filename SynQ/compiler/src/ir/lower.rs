@@ -803,6 +803,22 @@ impl IrLowerer {
                 }
                 self.asm.emit_op(OpCode::SphincsVerify);
             }
+            // No AEG1 operation slot exists for this builtin at all (ACTS-15
+            // defines only MlKemDecaps/MlDsaVerify/FnDsaVerify) -- emit a
+            // dedicated opcode that always hard-reverts naming the exact
+            // builtin, rather than routing to AegisCall/AegisTypedCall where
+            // it would either silently return Bool(false) or be misread as
+            // a real (if unknown) AEG1 operation byte.
+            IrOp::PqcUnsupported(name, args) => {
+                for arg in args {
+                    load_val!(self, *arg);
+                }
+                let nb = name.as_bytes();
+                self.asm.emit_op(OpCode::PqcUnsupported);
+                self.asm.emit_u32(nb.len() as u32);
+                self.asm.emit_raw(nb);
+                self.asm.emit_raw(&[args.len() as u8]);
+            }
 
             // ── Linear assets ──
             IrOp::AssetCreate(type_name, val) => {

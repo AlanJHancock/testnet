@@ -356,6 +356,7 @@ fn apply_substitution(inst: &mut Instruction, subs: &HashMap<ValueId, ValueId>) 
         IrOp::AegisVerify(op, alg, args) => IrOp::AegisVerify(op, alg, args.into_iter().map(apply).collect()),
         IrOp::AegisDecaps(op, alg, args) => IrOp::AegisDecaps(op, alg, args.into_iter().map(apply).collect()),
         IrOp::LegacySphincsVerify(args) => IrOp::LegacySphincsVerify(args.into_iter().map(apply).collect()),
+        IrOp::PqcUnsupported(name, args) => IrOp::PqcUnsupported(name, args.into_iter().map(apply).collect()),
         IrOp::AssetCreate(name, v) => IrOp::AssetCreate(name, apply(v)),
         IrOp::AssetTransfer(a, b) => IrOp::AssetTransfer(apply(a), apply(b)),
         IrOp::AssetBurn(v) => IrOp::AssetBurn(apply(v)),
@@ -592,6 +593,7 @@ fn has_side_effects(op: &IrOp) -> bool {
         | IrOp::Revert(_) | IrOp::RevertNamed(_, _, _) | IrOp::Print(_)
         | IrOp::ExternCall(_, _, _) | IrOp::AegisCall(_)
         | IrOp::AegisVerify(_, _, _) | IrOp::AegisDecaps(_, _, _) | IrOp::LegacySphincsVerify(_)
+        | IrOp::PqcUnsupported(_, _)
         | IrOp::AssetTransfer(_, _) | IrOp::AssetBurn(_)
         | IrOp::AssetCreate(_, _)
     )
@@ -838,6 +840,11 @@ pub fn copy_propagation(func: &mut IrFunction) -> usize {
                     let (new_args, ch) = resolve_vec(&copy_map, &args);
                     changed = ch;
                     IrOp::LegacySphincsVerify(new_args)
+                }
+                IrOp::PqcUnsupported(name, args) => {
+                    let (new_args, ch) = resolve_vec(&copy_map, &args);
+                    changed = ch;
+                    IrOp::PqcUnsupported(name, new_args)
                 }
                 IrOp::AssetCreate(name, v) => { let na = resolve(&copy_map, v); changed = na != v; IrOp::AssetCreate(name, na) }
                 IrOp::AssetTransfer(a, b) => { let na = resolve(&copy_map, a); let nb = resolve(&copy_map, b); changed = na != a || nb != b; IrOp::AssetTransfer(na, nb) }

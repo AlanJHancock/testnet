@@ -174,4 +174,10 @@ pub enum HostFnKind {
     AegisCall,     // unified PQC dispatch
     AiInfer,        // AI inference (future)
     AiVerify,       // AI proof verification (future)
+    /// Builtin has no AEG1 operation slot at all (kyber_encapsulate,
+    /// mceliece_*, hqc_*) -- always hard-reverts at runtime with a clear
+    /// "not supported by the AEG1 protocol" error. Added 2026-09-01 to stop
+    /// these 5 builtins silently falling through to the frame-based
+    /// AegisCall opcode and returning Bool(false)/garbage bytes.
+    PqcUnsupported,
 }

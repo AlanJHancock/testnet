@@ -156,6 +156,10 @@ fn stack_effect(op: OpCode, extern_arg_count: Option<u8>) -> Option<(i32, i32)> 
         // knowable from the opcode alone, so treat as dynamic like
         // TuplePack/TupleUnpack; the VM's runtime pop() checks handle it.
         OpCode::AegisTypedCall   => None,
+        // PqcUnsupported's pop count (argc) is in inline operands, same
+        // reasoning as AegisTypedCall -- the VM's runtime pop() checks
+        // handle it; this opcode always reverts before returning anyway.
+        OpCode::PqcUnsupported   => None,
 
         // Utility
         OpCode::Print => Some((1, 0)),
@@ -267,6 +271,14 @@ fn parse_instructions(code: &[u8]) -> Result<Vec<Instruction>, VMError> {
 
             // AegisTypedCall: 2 inline immediate bytes (op, alg) follow.
             OpCode::AegisTypedCall => { read_bytes!(2u32); }
+
+            // PqcUnsupported: 4B name_len + name_len bytes + 1B argc.
+            OpCode::PqcUnsupported => {
+                let nlen = read_u32_le!() as usize;
+                read_bytes!(nlen);
+                need!(1);
+                pc += 1;
+            }
 
             // All other opcodes: no inline operands
             _ => {}

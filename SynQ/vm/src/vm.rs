@@ -1573,6 +1573,35 @@ OpCode::MapNew => {
                     }
                 }
             }
+
+            // ── PqcUnsupported (0x85): builtin has no AEG1 operation slot ──────
+            // kyber_encapsulate, mceliece_encapsulate/decapsulate,
+            // hqc_encapsulate/decapsulate. AEG1/ACTS-15 defines only
+            // MlKemDecaps/MlDsaVerify/FnDsaVerify -- there is no KEM-encapsulate
+            // op and no McEliece/HQC algorithm in the protocol at all. Always
+            // hard-reverts naming the exact builtin, regardless of native/wasm
+            // build (this never touches a crypto backend, so there is nothing
+            // native-only about it) -- an honest failure instead of the
+            // pre-2026-09-01 behavior of silently returning Bool(false)/garbage
+            // bytes via the frame-based AegisCall opcode.
+            OpCode::PqcUnsupported => {
+                let name_len = self.read_u32()? as usize;
+                let name_bytes = self.read_bytes(name_len)?;
+                let name = String::from_utf8(name_bytes)
+                    .map_err(|_| VMError::InvalidBytecode("PqcUnsupported: name is not valid UTF-8".into()))?;
+                let argc = self.read_u8()? as usize;
+                // Discard the args (already evaluated for side effects by the
+                // time we get here) -- the call reverts unconditionally either way.
+                for _ in 0..argc {
+                    self.pop()?;
+                }
+                return Err(VMError::RuntimeError(format!(
+                    "{}: not supported by the AEG1 protocol (ACTS-15 defines only \
+ML-KEM-decapsulate, ML-DSA-verify, and FN-DSA-verify -- no KEM-encapsulate, \
+McEliece, or HQC operation slot exists yet)", name
+                )));
+            }
+
 #[cfg(not(feature = "native"))]
             OpCode::DilithiumVerify | OpCode::KyberKeyExchange |
             OpCode::FalconVerify    | OpCode::SphincsVerify |

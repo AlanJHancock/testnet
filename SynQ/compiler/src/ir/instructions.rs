@@ -115,6 +115,15 @@ pub enum IrOp {
     /// pre-AEG1 legacy OpCode::SphincsVerify, which already calls real
     /// synq-pqc-shims sphincs::verify.
     LegacySphincsVerify(Vec<ValueId>),
+    /// Builtin with no AEG1 operation slot at all: kyber_encapsulate,
+    /// mceliece_encapsulate/decapsulate, hqc_encapsulate/decapsulate. AEG1
+    /// (ACTS-15) defines only MlKemDecaps/MlDsaVerify/FnDsaVerify -- there is
+    /// no KEM-encapsulate op and no McEliece/HQC algorithm at all. Lowers to
+    /// OpCode::PqcUnsupported, which always hard-reverts with a clear error
+    /// naming the exact builtin -- never a silent Bool(false)/garbage bytes.
+    /// Fields: (builtin_name, args) -- args kept only so their side effects
+    /// still evaluate and dead-code elimination never drops this call.
+    PqcUnsupported(String, Vec<ValueId>),
 
     // ── Linear asset operations ────────────────────────────────────────
     /// Create asset: result = asset_id. type_tag from string hash.
@@ -201,6 +210,7 @@ impl Instruction {
             IrOp::AuthRequire(env, _) => vec![*env],
             IrOp::Call(_, args) | IrOp::AegisCall(args) | IrOp::LegacySphincsVerify(args) => args.clone(),
             IrOp::AegisVerify(_, _, args) | IrOp::AegisDecaps(_, _, args) => args.clone(),
+            IrOp::PqcUnsupported(_, args) => args.clone(),
             IrOp::ExternCall(_, _, args) => args.clone(),
             IrOp::MapGet(_, key) => vec![*key],
             IrOp::MapMethod(_, _, args) | IrOp::SetMethod(_, _, args) => args.clone(),

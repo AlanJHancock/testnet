@@ -99,7 +99,7 @@ fn analyze_function(func: &mut IrFunction, report: &mut AnalysisReport) -> Funct
                     stats.host_profiles += 1;
                 }
                 IrOp::AegisCall(_) | IrOp::AegisVerify(_, _, _) | IrOp::AegisDecaps(_, _, _)
-                | IrOp::LegacySphincsVerify(_) => {
+                | IrOp::LegacySphincsVerify(_) | IrOp::PqcUnsupported(_, _) => {
                     stats.host_profiles += 1;
                 }
                 IrOp::AuthRequire(_, _) => {

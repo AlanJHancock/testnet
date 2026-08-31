@@ -194,6 +194,7 @@ fn decompile_instruction(inst: &Instruction, names: &[String]) -> String {
         IrOp::AegisVerify(op, alg, args) => format!("{}aegis_verify(op=0x{:02x}, alg=0x{:02x}, {})", r, op, alg, args.iter().map(|a| v(names, *a)).collect::<Vec<_>>().join(", ")),
         IrOp::AegisDecaps(op, alg, args) => format!("{}aegis_decaps(op=0x{:02x}, alg=0x{:02x}, {})", r, op, alg, args.iter().map(|a| v(names, *a)).collect::<Vec<_>>().join(", ")),
         IrOp::LegacySphincsVerify(args) => format!("{}sphincs_verify({})", r, args.iter().map(|a| v(names, *a)).collect::<Vec<_>>().join(", ")),
+        IrOp::PqcUnsupported(name, args) => format!("{}{}({}) /* unsupported by AEG1 */", r, name, args.iter().map(|a| v(names, *a)).collect::<Vec<_>>().join(", ")),
         IrOp::AssetCreate(t, val) => format!("{}asset_create(\"{}\", {})", r, t, v(names, *val)),
         IrOp::AssetTransfer(a, o) => format!("{}asset_transfer({}, {})", r, v(names, *a), v(names, *o)),
         IrOp::AssetBurn(a) => format!("{}asset_burn({})", r, v(names, *a)),

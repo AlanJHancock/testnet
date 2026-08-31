@@ -255,6 +255,7 @@ impl Writer {
             HostFnKind::AegisCall  => 0x04,
             HostFnKind::AiInfer    => 0x05,
             HostFnKind::AiVerify   => 0x06,
+            HostFnKind::PqcUnsupported => 0x07,
         };
         self.u8(kind_tag);
         self.str(&p.callee);
@@ -371,6 +372,11 @@ impl Writer {
             }
             IrOp::LegacySphincsVerify(args) => {
                 self.u8(0x3E);
+                self.u32(args.len() as u32);
+                for a in args { self.u32(*a); }
+            }
+            IrOp::PqcUnsupported(name, args) => {
+                self.u8(0x3F); self.str(name);
                 self.u32(args.len() as u32);
                 for a in args { self.u32(*a); }
             }
@@ -754,6 +760,7 @@ impl<'a> Reader<'a> {
             0x01 => HostFnKind::ExternCall, 0x02 => HostFnKind::PqcVerify,
             0x03 => HostFnKind::PqcKem,     0x04 => HostFnKind::AegisCall,
             0x05 => HostFnKind::AiInfer,    0x06 => HostFnKind::AiVerify,
+            0x07 => HostFnKind::PqcUnsupported,
             _ => return Err(IrSerError::InvalidTag(kind_tag)),
         };
         let callee = self.str()?;
@@ -872,6 +879,13 @@ impl<'a> Reader<'a> {
                 let mut args = Vec::with_capacity(count);
                 for _ in 0..count { args.push(self.u32()?); }
                 Ok(IrOp::LegacySphincsVerify(args))
+            }
+            0x3F => {
+                let name = self.str()?;
+                let count = self.u32()? as usize;
+                let mut args = Vec::with_capacity(count);
+                for _ in 0..count { args.push(self.u32()?); }
+                Ok(IrOp::PqcUnsupported(name, args))
             }
             0x24 => {
                 let name = self.str()?;

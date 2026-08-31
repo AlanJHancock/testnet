@@ -152,3 +152,97 @@ fn kyber_decaps_through_ir_pipeline_is_rejected_deterministically() {
     ]);
     assert!(res.is_err(), "ML-KEM decaps must be rejected (Err), not silently succeed, in the deterministic VM path -- got {:?}", res);
 }
+
+// ── PqcUnsupported: builtins with no AEG1 operation slot at all ───────────
+//
+// Added 2026-09-01. kyber_encapsulate, mceliece_encapsulate/decapsulate, and
+// hqc_encapsulate/decapsulate used to fall through to the generic
+// frame-based AegisCall opcode with raw un-framed args, which reliably
+// failed to parse as an AEG1 frame and silently returned Bool(false)/empty
+// bytes -- indistinguishable from a real "operation completed" result.
+// AEG1/ACTS-15 defines only MlKemDecaps/MlDsaVerify/FnDsaVerify, so these
+// five now lower to a dedicated opcode that always hard-reverts naming the
+// exact builtin, exactly as kyber_decaps already does for its own
+// ACTS-15 §3 rejection above.
+
+fn assert_pqc_unsupported(source: &str, func: &str, args: Vec<Value>, builtin_name: &str) {
+    let result = compile_ir(source).expect("compile failed");
+    let mut vm = QuantumVM::new();
+    vm.load_bytecode(&result.bytecode).expect("load failed");
+    let res = vm.call_function(func, &args);
+    assert!(res.is_err(), "{} must be rejected (Err), not silently return false/empty bytes -- got {:?}", builtin_name, res);
+    let err_msg = format!("{:?}", res.unwrap_err());
+    assert!(err_msg.contains(builtin_name), "error must name the exact builtin ({}) so callers can tell which unsupported op was hit -- got: {}", builtin_name, err_msg);
+    assert!(err_msg.contains("AEG1"), "error must explain the AEG1 protocol limitation -- got: {}", err_msg);
+}
+
+const KYBER_ENCAPSULATE_SRC: &str = r#"
+contract KyberEncapsulateProbe {
+  state { dummy: u256; }
+  function encapsIt(publicKey: bytes) -> bytes {
+    return kyber_encapsulate(publicKey);
+  }
+}
+"#;
+
+#[test]
+fn kyber_encapsulate_through_ir_pipeline_is_rejected_deterministically() {
+    let (pk, _sk) = synq_pqc_shims::kyber::keygen().expect("keygen");
+    assert_pqc_unsupported(KYBER_ENCAPSULATE_SRC, "encapsIt", vec![Value::Bytes(pk)], "kyber_encapsulate");
+}
+
+const MCELIECE_ENCAPSULATE_SRC: &str = r#"
+contract McElieceEncapsulateProbe {
+  state { dummy: u256; }
+  function encapsIt(publicKey: bytes) -> bytes {
+    return mceliece_encapsulate(publicKey);
+  }
+}
+"#;
+
+#[test]
+fn mceliece_encapsulate_through_ir_pipeline_is_rejected_deterministically() {
+    assert_pqc_unsupported(MCELIECE_ENCAPSULATE_SRC, "encapsIt", vec![Value::Bytes(vec![0u8; 32])], "mceliece_encapsulate");
+}
+
+const MCELIECE_DECAPSULATE_SRC: &str = r#"
+contract McElieceDecapsulateProbe {
+  state { dummy: u256; }
+  function decapsIt(ciphertext: bytes, secretKey: bytes) -> bytes {
+    return mceliece_decapsulate(ciphertext, secretKey);
+  }
+}
+"#;
+
+#[test]
+fn mceliece_decapsulate_through_ir_pipeline_is_rejected_deterministically() {
+    assert_pqc_unsupported(MCELIECE_DECAPSULATE_SRC, "decapsIt", vec![Value::Bytes(vec![0u8; 32]), Value::Bytes(vec![0u8; 32])], "mceliece_decapsulate");
+}
+
+const HQC_ENCAPSULATE_SRC: &str = r#"
+contract HqcEncapsulateProbe {
+  state { dummy: u256; }
+  function encapsIt(publicKey: bytes) -> bytes {
+    return hqc_encapsulate(publicKey);
+  }
+}
+"#;
+
+#[test]
+fn hqc_encapsulate_through_ir_pipeline_is_rejected_deterministically() {
+    assert_pqc_unsupported(HQC_ENCAPSULATE_SRC, "encapsIt", vec![Value::Bytes(vec![0u8; 32])], "hqc_encapsulate");
+}
+
+const HQC_DECAPSULATE_SRC: &str = r#"
+contract HqcDecapsulateProbe {
+  state { dummy: u256; }
+  function decapsIt(ciphertext: bytes, secretKey: bytes) -> bytes {
+    return hqc_decapsulate(ciphertext, secretKey);
+  }
+}
+"#;
+
+#[test]
+fn hqc_decapsulate_through_ir_pipeline_is_rejected_deterministically() {
+    assert_pqc_unsupported(HQC_DECAPSULATE_SRC, "decapsIt", vec![Value::Bytes(vec![0u8; 32]), Value::Bytes(vec![0u8; 32])], "hqc_decapsulate");
+}

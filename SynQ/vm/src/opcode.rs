@@ -151,6 +151,15 @@ pub enum OpCode {
     /// in-process -- no wire-frame encode/decode round trip needed.
     /// See vm.rs's AegisTypedCall handler and ACTS-15 §3+§4.
     AegisTypedCall   = 0x84,
+    /// Builtin has no AEG1 operation slot at all: kyber_encapsulate,
+    /// mceliece_encapsulate/decapsulate, hqc_encapsulate/decapsulate.
+    /// AEG1/ACTS-15 defines only MlKemDecaps/MlDsaVerify/FnDsaVerify --
+    /// there is no KEM-encapsulate op and no McEliece/HQC algorithm at all.
+    /// Immediate bytes: [name_len: u32 LE][name: name_len bytes][argc: u8].
+    /// Always hard-reverts naming the exact builtin -- honest failure
+    /// instead of the pre-2026-09-01 behavior of silently returning
+    /// Bool(false)/garbage bytes via the frame-based AegisCall opcode.
+    PqcUnsupported   = 0x85,
 
     // Utility
     Print = 0xF0,
@@ -244,6 +253,7 @@ impl TryFrom<u8> for OpCode {
             0x83 => Ok(OpCode::SphincsVerify),
             0x8F => Ok(OpCode::AegisCall),
             0x84 => Ok(OpCode::AegisTypedCall),
+            0x85 => Ok(OpCode::PqcUnsupported),
             0xF0 => Ok(OpCode::Print),
             0xFF => Ok(OpCode::Halt),
             _    => Err(VMError::InvalidInstruction(value)),

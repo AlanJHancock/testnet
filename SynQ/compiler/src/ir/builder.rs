@@ -894,22 +894,26 @@ impl<'a> BuildContext<'a> {
                     "kyber_encapsulate"
                     | "mceliece_encapsulate" | "mceliece_decapsulate"
                     | "hqc_encapsulate" | "hqc_decapsulate" => {
-                        // KNOWN GAP (pre-existing, not introduced by the 2026-08-31
-                        // AEG1 typed-dispatch fix): AEG1 has no operation slot for KEM
-                        // encapsulate, or for McEliece/HQC at all, yet. These still
-                        // fall through to the generic frame-based AegisCall opcode with
-                        // raw un-framed args, which will reliably fail to parse as an
-                        // AEG1 frame and return Bool(false) -- that is an *unimplemented
-                        // deterministic backend*, not a real "operation rejected" signal.
-                        // Do not rely on these five builtins in on-chain/deterministic
-                        // contract code yet.
+                        // FIXED (2026-09-01, was a KNOWN GAP): AEG1 (ACTS-15) defines
+                        // only 3 operations -- MlKemDecaps, MlDsaVerify, FnDsaVerify --
+                        // there is no KEM-encapsulate op and no McEliece/HQC algorithm
+                        // at all in the protocol. These 5 builtins used to fall through
+                        // to the generic frame-based AegisCall opcode with raw
+                        // un-framed args, which reliably failed to parse as an AEG1
+                        // frame and silently returned Bool(false) -- indistinguishable
+                        // from a real "operation completed, result is false/empty"
+                        // outcome. Extending AEG1 with new operation slots is a
+                        // protocol-spec decision (not ours to make unilaterally), so
+                        // instead these now lower to IrOp::PqcUnsupported, which always
+                        // hard-reverts naming the exact builtin -- honest failure
+                        // instead of a plausible-looking wrong answer.
                         self.ir_fn.host_profiles.push(HostFnProfile {
-                            kind: HostFnKind::PqcKem,
+                            kind: HostFnKind::PqcUnsupported,
                             callee: name.clone(),
                             arg_types: vec![],
                             return_type: IrType::Bytes,
                         });
-                        Ok(self.push_value(IrOp::AegisCall(arg_vals), IrType::Bytes))
+                        Ok(self.push_value(IrOp::PqcUnsupported(name.clone(), arg_vals), IrType::Bytes))
                     }
                     "authority_envelope" => {
                         Ok(self.push_value(IrOp::LoadAuthority, IrType::Bytes))
