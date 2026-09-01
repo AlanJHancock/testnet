@@ -51,6 +51,11 @@ impl HostFunctions {
                 "pqc.dilithium_verify".to_string(), // 23 -- ML-DSA-65, real pqcrypto verify, PQ-gas metered per synq-pq-gas-spec.md
                 "pqc.falcon_verify".to_string(),     // 24 -- FN-DSA-512, real pqcrypto verify. PQ-gas cost NOT YET in synq-pq-gas-spec.md (v0.1 only covers ML-DSA-65) -- flagged for Justin, metered as ordinary HOST_CALL gas only until the spec is extended.
                 "pqc.kyber_decaps".to_string(),      // 25 -- ML-KEM-768 decapsulate. Dry-run/off-chain sandbox ONLY (see aegis-pqvm README + legacy vm crate's ACTS-15 §3 comment): takes a raw secret key as an argument, which must never be deterministic on-chain calldata. Same gas caveat as falcon_verify.
+                "pqc.kyber_encapsulate".to_string(),    // 26 -- AEG1 protocol has no KEM-encapsulate slot; hard-reverts (see execute_host_call arm)
+                "pqc.mceliece_encapsulate".to_string(), // 27 -- AEG1 protocol has no McEliece slot; hard-reverts
+                "pqc.mceliece_decapsulate".to_string(), // 28 -- AEG1 protocol has no McEliece slot; hard-reverts
+                "pqc.hqc_encapsulate".to_string(),      // 29 -- AEG1 protocol has no HQC slot; hard-reverts
+                "pqc.hqc_decapsulate".to_string(),      // 30 -- AEG1 protocol has no HQC slot; hard-reverts
             ],
         }
     }
@@ -574,6 +579,28 @@ pub fn execute_host_call(
                 Ok(shared_secret) => stack.push(Value::Bytes(shared_secret)),
                 Err(_) => stack.push(Value::Bytes(vec![])),
             }
+        }
+        // ── AEG1-unsupported PQC builtins (2026-09-01) ──────────────────
+        // kyber_encapsulate, mceliece_encapsulate/decapsulate,
+        // hqc_encapsulate/decapsulate. AEG1/ACTS-15 defines only
+        // ML-KEM-decapsulate, ML-DSA-verify, and FN-DSA-verify -- there is
+        // no KEM-encapsulate op and no McEliece/HQC algorithm in the
+        // protocol at all. Before this fix these five names had no entry
+        // anywhere in this dispatch table (in fact no entry in
+        // aivm_codegen.rs's host_idx table either), so a call compiled to
+        // Call(0) and silently ran the contract's first function instead,
+        // returning unrelated "success" data. Fail closed here exactly
+        // like an unimplemented host function, naming the exact builtin --
+        // mirrors the native vm crate's OpCode::PqcUnsupported message.
+        "pqc.kyber_encapsulate" | "pqc.mceliece_encapsulate" |
+        "pqc.mceliece_decapsulate" | "pqc.hqc_encapsulate" |
+        "pqc.hqc_decapsulate" => {
+            let builtin = name.strip_prefix("pqc.").unwrap_or(name);
+            return Err(AivmError::HostFunctionFailed(format!(
+                "{}: not supported by the AEG1 protocol (ACTS-15 defines only \
+ML-KEM-decapsulate, ML-DSA-verify, and FN-DSA-verify -- no KEM-encapsulate, \
+McEliece, or HQC operation slot exists yet)", builtin
+            )));
         }
         // String builtins — str_len/str_concat/str_eq (see
         // synq-language-spec.md's str type + these three builtins).

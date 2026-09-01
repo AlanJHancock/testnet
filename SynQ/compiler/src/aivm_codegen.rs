@@ -768,6 +768,24 @@ impl<'a> CodegenContext<'a> {
                     "dilithium_verify" => Some(23), // pqc.dilithium_verify (ML-DSA-65)
                     "falcon_verify" => Some(24),    // pqc.falcon_verify (FN-DSA-512)
                     "kyber_decaps" => Some(25),     // pqc.kyber_decaps (ML-KEM-768, dry-run/off-chain only)
+                    // AEG1 protocol slot: 2026-09-01 -- these five have NO
+                    // AEG1/ACTS-15 operation at all (only ML-KEM-decapsulate,
+                    // ML-DSA-verify, FN-DSA-verify exist). Before this fix they
+                    // were entirely absent from this table, so a call fell
+                    // through to the "unknown function" branch below and
+                    // silently compiled to Call(0) -- i.e. it invoked the
+                    // contract's FIRST function and returned ITS result,
+                    // completely unrelated to the PQC call. Mirrors the same
+                    // dilithium_verify/falcon_verify/kyber_decaps bug fixed
+                    // 30 Aug 2026 above, and the native vm crate's
+                    // OpCode::PqcUnsupported fix (2026-09-01) -- now dispatch
+                    // to host.rs, which hard-reverts with the exact builtin
+                    // name (fail-closed, same as an unimplemented host fn).
+                    "kyber_encapsulate" => Some(26),     // pqc.kyber_encapsulate -- AEG1: unsupported, hard-reverts
+                    "mceliece_encapsulate" => Some(27),  // pqc.mceliece_encapsulate -- AEG1: unsupported, hard-reverts
+                    "mceliece_decapsulate" => Some(28),  // pqc.mceliece_decapsulate -- AEG1: unsupported, hard-reverts
+                    "hqc_encapsulate" => Some(29),        // pqc.hqc_encapsulate -- AEG1: unsupported, hard-reverts
+                    "hqc_decapsulate" => Some(30),        // pqc.hqc_decapsulate -- AEG1: unsupported, hard-reverts
                     _ => None,
                 };
                 if let Some(hidx) = host_idx {
