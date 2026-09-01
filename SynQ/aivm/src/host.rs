@@ -11,6 +11,11 @@ use crate::gas::{pq_gas_cost, PqGasMeter};
 use crate::receipt::EventRecord;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+// Real AEG1 frame decode/dispatch -- the SAME `aeg1` submodule the native vm
+// crate already uses (`use pqc_shims::aeg1;` in vm/src/vm.rs). It lives
+// inside the synq-pqc-shims crate aivm already depends on for
+// dilithium/falcon/kyber/sphincs, so no new Cargo dependency is needed.
+use synq_pqc_shims::aeg1;
 
 /// Host function import index → name mapping
 /// Per spec, imports are manifest-declared host functions.
@@ -56,6 +61,8 @@ impl HostFunctions {
                 "pqc.mceliece_decapsulate".to_string(), // 28 -- AEG1 protocol has no McEliece slot; hard-reverts
                 "pqc.hqc_encapsulate".to_string(),      // 29 -- AEG1 protocol has no HQC slot; hard-reverts
                 "pqc.hqc_decapsulate".to_string(),      // 30 -- AEG1 protocol has no HQC slot; hard-reverts
+                "pqc.aegis_call".to_string(),      // 31 -- generic AEG1 frame dispatch (aegis_call/aegis_verify/aegis_decaps synonyms)
+                "pqc.sphincs_verify".to_string(),  // 32 -- SLH-DSA-SHAKE-128s, real pqcrypto verify (legacy pre-AEG1 path -- no AEG1 op slot exists for SPHINCS+)
             ],
         }
     }
@@ -579,6 +586,82 @@ pub fn execute_host_call(
                 Ok(shared_secret) => stack.push(Value::Bytes(shared_secret)),
                 Err(_) => stack.push(Value::Bytes(vec![])),
             }
+        }
+        // ── AEG1 generic frame dispatch (2026-09-01 follow-up) ─────────────
+        // aegis_call/aegis_verify/aegis_decaps: the caller passes an already
+        // AEG1-framed byte blob (built by/for the low-level frame ABI -- see
+        // pqc-shims/src/aeg1.rs's module doc for the wire format) as the
+        // single arg; all three names are synonyms, matching the IR
+        // backend's IrOp::AegisCall (compiler/src/ir/builder.rs) and the
+        // native VM's OpCode::AegisCall (0x8F, vm.rs). This mirrors that
+        // exact native opcode: dispatch via `aeg1::process_frame_deterministic`
+        // (NOT the permissive off-chain `aeg1::process_frame`), so ML-KEM
+        // decapsulate is correctly REJECTED through this generic path even
+        // though AIVM is itself a dry-run sandbox -- `aegis_call` means "do
+        // exactly what the deterministic on-chain VM would do with this
+        // frame", unlike the separate typed `kyber_decaps` convenience
+        // builtin above, which is intentionally documented as an off-chain-
+        // only escape hatch. Before this fix, this name had no AIVM host
+        // binding at all and fell through to Call(0).
+        //
+        // PQ-gas: per standing policy (never fabricate a PQ-gas number),
+        // this charges the SAME real, already-established per-operation
+        // costs as the equivalent typed builtins above -- PARSE_ML_DSA_65_*
+        // + VERIFY_ML_DSA_65 for an ML-DSA-65 request, exactly like
+        // dilithium_verify -- and charges nothing extra (ordinary HOST_CALL
+        // gas only) for FN-DSA / other algorithms / malformed frames /
+        // rejected ML-KEM requests, exactly like falcon_verify's documented
+        // policy, since synq-pq-gas-spec.md v0.1 only defines a cost for
+        // ML-DSA-65. It deliberately does NOT use aeg1::compute_cost() --
+        // that's the native VM's own internal ACTS-15 §4 fuel model, a
+        // different metering axis, not a "PQ-gas" number this spec defines.
+        "pqc.aegis_call" => {
+            let frame = value_as_bytes(&stack.pop().ok_or(AivmError::StackUnderflow)?);
+
+            if let Ok(req) = aeg1::Aeg1Request::decode(&frame) {
+                if req.operation == aeg1::Operation::MlDsaVerify
+                    && req.algorithm == aeg1::Algorithm::MlDsa65
+                {
+                    pq_gas.charge(pq_gas_cost::PARSE_ML_DSA_65_PUBKEY)?;
+                    pq_gas.charge(pq_gas_cost::PARSE_ML_DSA_65_SIGNATURE)?;
+                    pq_gas.charge(pq_gas_cost::VERIFY_ML_DSA_65)?;
+                }
+            }
+
+            match aeg1::process_frame_deterministic(&frame) {
+                Ok(response_frame) => match aeg1::Aeg1Response::decode(&response_frame) {
+                    Ok(aeg1::Aeg1Response::Ok(result)) => {
+                        if result.is_empty() {
+                            stack.push(Value::Bool(true)); // verify ops: empty body = verified
+                        } else {
+                            stack.push(Value::Bytes(result)); // decaps ops: shared secret
+                        }
+                    }
+                    Ok(aeg1::Aeg1Response::Error(_, _)) | Err(_) => {
+                        stack.push(Value::Bool(false));
+                    }
+                },
+                Err(_) => stack.push(Value::Bool(false)),
+            }
+        }
+        // sphincs_verify: SPHINCS+ (SLH-DSA-SHAKE-128s) has NO AEG1 operation
+        // slot at all (AEG1/ACTS-15 covers only ML-KEM/ML-DSA/FN-DSA) -- same
+        // as the native VM and the IR backend, this routes to the pre-AEG1
+        // legacy verification path, calling synq_pqc_shims::sphincs::verify
+        // directly (real pqcrypto-sphincsplus, not a stub) rather than going
+        // through any AEG1 frame at all. No arg-order quirk to correct here
+        // (unlike the native VM's legacy 0x83 opcode, which has its own
+        // fixed internal pop order) -- this calls the shim function
+        // directly with args in natural (message, signature, publicKey)
+        // order. No PQ-gas cost defined for SPHINCS+ in synq-pq-gas-spec.md
+        // v0.1 (same documented gap as falcon_verify) -- ordinary HOST_CALL
+        // gas only.
+        "pqc.sphincs_verify" => {
+            let public_key = value_as_bytes(&stack.pop().ok_or(AivmError::StackUnderflow)?);
+            let signature  = value_as_bytes(&stack.pop().ok_or(AivmError::StackUnderflow)?);
+            let message    = value_as_bytes(&stack.pop().ok_or(AivmError::StackUnderflow)?);
+            let ok = synq_pqc_shims::sphincs::verify(&message, &signature, &public_key);
+            stack.push(Value::Bool(ok));
         }
         // ── AEG1-unsupported PQC builtins (2026-09-01) ──────────────────
         // kyber_encapsulate, mceliece_encapsulate/decapsulate,

@@ -801,6 +801,13 @@ impl<'a> CodegenContext<'a> {
                     // to Call(0).
                     "extern_call" => Some(8),            // extern.call (documented stub -- see host.rs)
                     "kyber_decapsulate" => Some(25),     // alias of kyber_decaps -- pqc.kyber_decaps
+                    // 2026-09-01 follow-up: real AEG1 frame dispatch + SPHINCS+
+                    // verification, ported into aivm/src/host.rs using the same
+                    // synq_pqc_shims crate (incl. its aeg1 submodule) the native
+                    // vm crate already uses -- not stubs, not "unsupported"
+                    // errors. See host.rs for the full writeup.
+                    "aegis_call" | "aegis_verify" | "aegis_decaps" => Some(31), // pqc.aegis_call -- generic AEG1 frame dispatch
+                    "sphincs_verify" => Some(32),                               // pqc.sphincs_verify -- SLH-DSA, real pqcrypto verify (legacy pre-AEG1 path, same as native VM)
                     _ => None,
                 };
                 if let Some(hidx) = host_idx {
@@ -825,11 +832,16 @@ impl<'a> CodegenContext<'a> {
                     // parser never actually produces Call("map_get"/"map_set", ..)
                     // from source -- map[key] syntax parses straight to
                     // Expression::MapIndex, which AIVM already fully supports via
-                    // MapGetVal/MapSetVal -- so they're intentionally omitted
-                    // here as dead/unreachable rather than "not yet supported".)
-                    const AIVM_UNSUPPORTED_BUILTINS: &[&str] = &[
-                        "aegis_call", "aegis_verify", "aegis_decaps", "sphincs_verify",
-                    ];
+                    // MapGetVal/MapSetVal -- so they're intentionally omitted here
+                    // as dead/unreachable rather than "not yet supported". As of
+                    // 2026-09-01 every other real builtin (including
+                    // aegis_call/aegis_verify/aegis_decaps and sphincs_verify,
+                    // both now wired above) has a real AIVM host binding, so
+                    // there is currently nothing left in this "recognized
+                    // builtin, not yet ported" category -- the list is kept as
+                    // an explicit, documented extension point for the future
+                    // rather than removed outright.)
+                    const AIVM_UNSUPPORTED_BUILTINS: &[&str] = &[];
                     if AIVM_UNSUPPORTED_BUILTINS.contains(&name.as_str()) {
                         return Err(format!(
                             "'{}' is a SynQ builtin but is not yet supported on the AIVM backend (no host binding wired in aivm/src/host.rs) -- use the IR/VM compilation path (compile_ir) instead",

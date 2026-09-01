@@ -361,3 +361,140 @@ fn test_aivm_authority_require_no_longer_errors() {
     assert_eq!(r.receipt.status, ReceiptStatus::Success);
     assert_eq!(r.return_value, Some(Value::Bool(false)));
 }
+
+
+// ── AEG1 generic frame dispatch + SPHINCS+ verify (2026-09-01 follow-up) ──
+// Real pqcrypto-backed coverage for aegis_call/aegis_verify/aegis_decaps and
+// sphincs_verify -- these had NO AIVM host binding at all before this fix
+// and fell through to the "unknown function" branch, compiling to Call(0)
+// (i.e. silently running the contract's FIRST function). See host.rs's
+// "pqc.aegis_call" / "pqc.sphincs_verify" arms for the real dispatch.
+
+const SPHINCS_VERIFY_SOURCE: &str = "contract SphincsDemo {\n  impl {\n    @public\n    function probe(m: bytes, s: bytes, pk: bytes) -> bool {\n      return sphincs_verify(m, s, pk);\n    }\n  }\n}\n";
+
+#[test]
+fn test_aivm_sphincs_verify_real_crypto() {
+    let ast = parse(SPHINCS_VERIFY_SOURCE).unwrap();
+    let contract = extract_contract(&ast);
+    let result = compile_to_aivm(contract, &[]).unwrap();
+
+    let host = HostFunctions::default_v01();
+    let avm = Avm::new(result.instructions, result.functions, host);
+    let ctx = ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    let mut state = StateOverlay::new();
+    let idx = avm.find_function("probe").expect("probe function not found");
+
+    let (pk, sk) = synq_pqc_shims::sphincs::keygen();
+    let message = b"aegis-follow-up-2026-09-01".to_vec();
+    let signature = synq_pqc_shims::sphincs::sign(&message, &sk);
+
+    // Valid signature -> true. Before this fix, sphincs_verify had no AIVM
+    // host binding and this call compiled to Call(0), silently invoking
+    // probe() itself (infinite-recursion-shaped nonsense) instead of ever
+    // reaching real crypto.
+    let r = avm.execute(idx, vec![
+        Value::Bytes(message.clone()),
+        Value::Bytes(signature.clone()),
+        Value::Bytes(pk.clone()),
+    ], &ctx, &mut state).expect("sphincs_verify should execute, not error");
+    assert_eq!(r.receipt.status, ReceiptStatus::Success);
+    assert_eq!(r.return_value, Some(Value::Bool(true)));
+
+    // Tampered message -> false, not an error and not a false positive.
+    let mut tampered = message.clone();
+    tampered[0] ^= 0xFF;
+    let r2 = avm.execute(idx, vec![
+        Value::Bytes(tampered),
+        Value::Bytes(signature),
+        Value::Bytes(pk),
+    ], &ctx, &mut state).unwrap();
+    assert_eq!(r2.receipt.status, ReceiptStatus::Success);
+    assert_eq!(r2.return_value, Some(Value::Bool(false)));
+}
+
+const AEGIS_CALL_SOURCE: &str = "contract AegisDemo {\n  impl {\n    @public\n    function probe(frame: bytes) -> bool {\n      return aegis_call(frame);\n    }\n  }\n}\n";
+
+#[test]
+fn test_aivm_aegis_call_ml_dsa_verify_real_crypto() {
+    let ast = parse(AEGIS_CALL_SOURCE).unwrap();
+    let contract = extract_contract(&ast);
+    let result = compile_to_aivm(contract, &[]).unwrap();
+
+    let host = HostFunctions::default_v01();
+    let avm = Avm::new(result.instructions, result.functions, host);
+    let ctx = ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    let mut state = StateOverlay::new();
+    let idx = avm.find_function("probe").expect("probe function not found");
+
+    let (pk, sk) = synq_pqc_shims::dilithium::keygen();
+    let message = b"aegis-frame-2026-09-01".to_vec();
+    let signature = synq_pqc_shims::dilithium::sign(&message, &sk);
+
+    let frame = synq_pqc_shims::aeg1::Aeg1Request {
+        operation: synq_pqc_shims::aeg1::Operation::MlDsaVerify,
+        algorithm: synq_pqc_shims::aeg1::Algorithm::MlDsa65,
+        args: vec![message, signature, pk],
+    }.encode();
+
+    // Before this fix, aegis_call had no AIVM host binding at all and this
+    // compiled to Call(0) -- silently invoking probe() itself.
+    let r = avm.execute(idx, vec![Value::Bytes(frame)], &ctx, &mut state)
+        .expect("aegis_call should execute, not error");
+    assert_eq!(r.receipt.status, ReceiptStatus::Success);
+    assert_eq!(r.return_value, Some(Value::Bool(true)));
+}
+
+#[test]
+fn test_aivm_aegis_call_malformed_frame_returns_false_not_error() {
+    let ast = parse(AEGIS_CALL_SOURCE).unwrap();
+    let contract = extract_contract(&ast);
+    let result = compile_to_aivm(contract, &[]).unwrap();
+
+    let host = HostFunctions::default_v01();
+    let avm = Avm::new(result.instructions, result.functions, host);
+    let ctx = ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    let mut state = StateOverlay::new();
+    let idx = avm.find_function("probe").expect("probe function not found");
+
+    // Not a valid AEG1 frame at all (wrong magic) -- must fail closed with
+    // Bool(false), matching the native VM's OpCode::AegisCall behavior for
+    // a malformed frame, not panic or propagate a VM-level error.
+    let r = avm.execute(idx, vec![Value::Bytes(b"not-an-aeg1-frame".to_vec())], &ctx, &mut state)
+        .expect("a malformed frame should be a normal false result, not a VM error");
+    assert_eq!(r.receipt.status, ReceiptStatus::Success);
+    assert_eq!(r.return_value, Some(Value::Bool(false)));
+}
+
+#[test]
+fn test_aivm_aegis_call_ml_kem_decaps_rejected_deterministic() {
+    // ACTS-15 §3: ML-KEM decapsulate must be REJECTED through the generic
+    // aegis_call/aegis_verify/aegis_decaps frame path (which dispatches via
+    // process_frame_deterministic, exactly like the native VM's AegisCall
+    // opcode 0x8F) even though AIVM itself is a dry-run sandbox -- the
+    // separate *typed* `kyber_decaps` builtin (host.rs, HostCall 25) is the
+    // intentional off-chain-only escape hatch for that; this generic path
+    // must behave identically to the deterministic on-chain VM.
+    let ast = parse(AEGIS_CALL_SOURCE).unwrap();
+    let contract = extract_contract(&ast);
+    let result = compile_to_aivm(contract, &[]).unwrap();
+
+    let host = HostFunctions::default_v01();
+    let avm = Avm::new(result.instructions, result.functions, host);
+    let ctx = ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    let mut state = StateOverlay::new();
+    let idx = avm.find_function("probe").expect("probe function not found");
+
+    let (pk, sk) = synq_pqc_shims::kyber::keygen().expect("kyber keygen");
+    let (ciphertext, _shared_secret) = synq_pqc_shims::kyber::encaps(&pk).expect("kyber encaps");
+
+    let frame = synq_pqc_shims::aeg1::Aeg1Request {
+        operation: synq_pqc_shims::aeg1::Operation::MlKemDecaps,
+        algorithm: synq_pqc_shims::aeg1::Algorithm::MlKem768,
+        args: vec![ciphertext, sk],
+    }.encode();
+
+    let r = avm.execute(idx, vec![Value::Bytes(frame)], &ctx, &mut state)
+        .expect("a rejected MlKemDecaps request is a normal false result, not a VM error");
+    assert_eq!(r.receipt.status, ReceiptStatus::Success);
+    assert_eq!(r.return_value, Some(Value::Bool(false)));
+}
