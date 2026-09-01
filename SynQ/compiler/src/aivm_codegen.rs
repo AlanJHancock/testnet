@@ -786,6 +786,21 @@ impl<'a> CodegenContext<'a> {
                     "mceliece_decapsulate" => Some(28),  // pqc.mceliece_decapsulate -- AEG1: unsupported, hard-reverts
                     "hqc_encapsulate" => Some(29),        // pqc.hqc_encapsulate -- AEG1: unsupported, hard-reverts
                     "hqc_decapsulate" => Some(30),        // pqc.hqc_decapsulate -- AEG1: unsupported, hard-reverts
+                    // 2026-09-01 sweep (found while investigating the PQC
+                    // gap above): these two were ALSO missing from this
+                    // table despite having real host-side support already
+                    // wired -- extern_call has always had a HostFunctions
+                    // import + execute_host_call arm ("extern.call", index
+                    // 8 -- a documented stub pending real cross-contract
+                    // runtime support, see aivm/src/host.rs), and
+                    // kyber_decapsulate is simply the IR-backend's longer
+                    // alias for kyber_decaps (see compiler/src/ir/builder.rs
+                    // "kyber_decapsulate" | "kyber_decaps" => ...). Neither
+                    // is a PQC-unsupported case -- both were just never
+                    // connected on the AIVM side, so they too fell through
+                    // to Call(0).
+                    "extern_call" => Some(8),            // extern.call (documented stub -- see host.rs)
+                    "kyber_decapsulate" => Some(25),     // alias of kyber_decaps -- pqc.kyber_decaps
                     _ => None,
                 };
                 if let Some(hidx) = host_idx {
@@ -794,6 +809,33 @@ impl<'a> CodegenContext<'a> {
                     }
                     self.emit(Instruction::HostCall(hidx));
                 } else {
+                    // 2026-09-01: names that ARE real SynQ builtins (recognized
+                    // by the primary IR backend in compiler/src/ir/builder.rs,
+                    // and/or listed in PQC_BUILTINS in lib.rs so they don't
+                    // trip the undefined-reference checker) but have no AIVM
+                    // host binding yet. Before the guard below existed, calling
+                    // any of these here silently fell through to the generic
+                    // "unknown function" branch and compiled to Call(0) -- i.e.
+                    // it would run the contract's FIRST function and return ITS
+                    // result. Name them explicitly with a clear, honest error
+                    // instead of the more ambiguous generic "unknown function"
+                    // message a typo would get -- these aren't typos, they're
+                    // real builtins this backend just doesn't implement yet.
+                    // (map_get/map_set are listed in PQC_BUILTINS too, but the
+                    // parser never actually produces Call("map_get"/"map_set", ..)
+                    // from source -- map[key] syntax parses straight to
+                    // Expression::MapIndex, which AIVM already fully supports via
+                    // MapGetVal/MapSetVal -- so they're intentionally omitted
+                    // here as dead/unreachable rather than "not yet supported".)
+                    const AIVM_UNSUPPORTED_BUILTINS: &[&str] = &[
+                        "aegis_call", "aegis_verify", "aegis_decaps", "sphincs_verify",
+                    ];
+                    if AIVM_UNSUPPORTED_BUILTINS.contains(&name.as_str()) {
+                        return Err(format!(
+                            "'{}' is a SynQ builtin but is not yet supported on the AIVM backend (no host binding wired in aivm/src/host.rs) -- use the IR/VM compilation path (compile_ir) instead",
+                            name
+                        ));
+                    }
                     // User-defined function call
                     for arg in args {
                         self.gen_expr(arg)?;
@@ -801,8 +843,17 @@ impl<'a> CodegenContext<'a> {
                     match self.func_index(name) {
                         Some(idx) => self.emit(Instruction::Call(idx)),
                         None => {
-                            self.warnings.push(format!("Call to unknown function: {}", name));
-                            self.emit(Instruction::Call(0));
+                            // GUARD (2026-09-01): this used to silently emit
+                            // Call(0) -- i.e. call the contract's FIRST
+                            // function and return ITS result -- for ANY name
+                            // that didn't resolve to a builtin or a declared
+                            // user function (root cause of the
+                            // kyber_encapsulate/mceliece/hqc bug: they simply
+                            // had no entry above). Fail the compile instead,
+                            // matching the IR backend's patch_calls behavior
+                            // ("Call to unknown function '{name}'") -- an
+                            // unresolvable call must never silently compile.
+                            return Err(format!("Call to unknown function '{}'", name));
                         }
                     }
                 }
