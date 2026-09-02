@@ -214,6 +214,33 @@ pub struct AssetRecordWire {
 
 fn default_next_asset_id() -> u64 { 1 }
 
+/// The fixed PQ-gas charge every real Synergy transaction incurs at
+/// admission for verifying the sender's ML-DSA-65 signature, BEFORE any
+/// AIVM execution begins -- mirrors `GasSchedule::default().pqc_signature_verify_gas`
+/// in the node's canonical gas schedule (top-level `synergy-testnet` crate,
+/// `src/gas/mod.rs`), which the real chain applies via `aivm_context()` in
+/// `src/synq_execution.rs` for every admitted SynQ call/deploy.
+///
+/// This dry-run endpoint never touches real tx admission (there is no real
+/// transaction, just a throwaway VM execution -- see module doc above), so
+/// `receipt.pq_gas_used` coming out of `avm.execute_with_assets()` only
+/// reflects in-contract PQ host-function costs (e.g. a contract calling
+/// `auth.verify_signature` -- see `aivm::gas::pq_gas_cost`), and was
+/// silently missing this admission charge. That made every estimate
+/// under-report the true PQ-gas a real transaction executing the same call
+/// would pay, by exactly this amount, on every single call (most example
+/// contracts call no PQ host function at all, so `pq_gas_used` read back
+/// as a flat 0 regardless of what was actually being estimated).
+///
+/// `src/` (the node) and `SynQ/` (this workspace) are separate Cargo
+/// workspaces with no shared crate today, so this is a manually-mirrored
+/// value, not a cross-crate import -- if the canonical schedule value ever
+/// changes this constant must be updated too. That duplication is a real
+/// piece of architecture debt (the durable fix is a small shared
+/// gas-schedule crate both workspaces depend on); flagged for Justin, not
+/// resolved here.
+const ADMISSION_PQ_GAS_USED: u64 = 12_000;
+
 /// Request for a dry-run gas estimate
 #[derive(Debug, Deserialize)]
 pub struct EstimateGasRequest {
@@ -282,6 +309,9 @@ pub struct EstimateGasResponse {
     pub caller: Option<String>,
     pub status: Option<String>,
     pub gas_used: Option<u64>,
+    /// In-contract PQ host-function costs (aivm::gas::pq_gas_cost) PLUS
+    /// the fixed ADMISSION_PQ_GAS_USED charge every real transaction pays
+    /// at admission -- see that constant's doc for why both are summed here.
     pub pq_gas_used: Option<u64>,
     pub gas_limit: Option<u64>,
     pub pq_gas_limit: Option<u64>,
@@ -848,6 +878,11 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
                 .iter()
                 .map(|(slot, val)| (slot.to_string(), aivm_value_to_json(val)))
                 .collect();
+            // Total PQ-gas a real transaction executing this same call would
+            // pay: in-contract PQ host-function costs measured by this dry
+            // run's VM PqGasMeter, PLUS the fixed admission-time charge every
+            // real tx incurs outside the VM (see ADMISSION_PQ_GAS_USED doc).
+            let pq_gas_used = result.receipt.pq_gas_used.saturating_add(ADMISSION_PQ_GAS_USED);
             let (asset_records, next_asset_id) = asset_ledger.snapshot();
             let final_assets: Vec<AssetRecordWire> = asset_records
                 .iter()
@@ -861,9 +896,9 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
                 .collect();
             let canonical = CanonicalEstimate {
                 gas_used: result.receipt.gas_used.to_string(),
-                pq_gas_used: result.receipt.pq_gas_used.to_string(),
+                pq_gas_used: pq_gas_used.to_string(),
                 gas_limit_suggested: suggested_gas_limit(result.receipt.gas_used).to_string(),
-                pq_gas_limit_suggested: suggested_gas_limit(result.receipt.pq_gas_used).to_string(),
+                pq_gas_limit_suggested: suggested_gas_limit(pq_gas_used).to_string(),
                 simulation_block: None,
                 execution_status: status.to_string(),
                 state_persisted: false,
@@ -874,7 +909,7 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
                 caller: Some(format!("0x{}", hex::encode(caller))),
                 status: Some(status.to_string()),
                 gas_used: Some(result.receipt.gas_used),
-                pq_gas_used: Some(result.receipt.pq_gas_used),
+                pq_gas_used: Some(pq_gas_used),
                 gas_limit: Some(ctx.gas_limit),
                 pq_gas_limit: Some(ctx.pq_gas_limit),
                 return_value: result.return_value.as_ref().map(aivm_value_to_json),
@@ -960,10 +995,12 @@ mod estimate_gas_handler_tests {
         assert!(body.gas_used.is_some(), "gas_used should be populated: {body:?}");
         assert!(body.pq_gas_used.is_some(), "pq_gas_used should be populated: {body:?}");
         // Confirm they can genuinely diverge (separate meters, not one value
-        // mirrored into two fields) -- this contract does no PQ operations,
-        // so gas_used should be > 0 while pq_gas_used stays 0.
+        // mirrored into two fields) -- this contract does no in-contract PQ
+        // operations, so pq_gas_used should be exactly the fixed
+        // ADMISSION_PQ_GAS_USED charge (every real tx pays this at
+        // admission regardless of contract logic) and nothing more.
         assert!(body.gas_used.unwrap() > 0);
-        assert_eq!(body.pq_gas_used.unwrap(), 0);
+        assert_eq!(body.pq_gas_used.unwrap(), ADMISSION_PQ_GAS_USED);
         assert!(body.state_discarded);
     }
 
