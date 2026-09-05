@@ -667,7 +667,6 @@ fn test_single_line_comment() {
 // ─── Determinism ─────────────────────────────────────────────────────────────
 
 #[test]
-#[ignore = "dispatch table uses HashMap — fix in PR-A codegen pass: switch to BTreeMap for deterministic ordering"]
 fn test_deterministic_bytecode() {
     let src = r#"pragma synq ^0.9;
 contract Token {
