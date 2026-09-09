@@ -1263,17 +1263,25 @@ mod estimate_gas_handler_tests {
         // Item 6 audit finding (a): several builtins declared in the
         // import table (addr.*, auth.*) aren't wired up in
         // execute_host_call yet and return HostFunctionNotDeclared.
-        // (asset.* used to be in this bucket too -- fixed 2026-08-22; and
+        // (asset.* used to be in this bucket too -- fixed 2026-08-22;
         // string.length/string.concat/string.eq (str_len/str_concat/
         // str_eq) used to be too -- fixed 2026-08-25, see
-        // aivm/src/host.rs's "String builtins" arms. to_tsynq/addr.encode
-        // now stands in as the still-unimplemented case.)
+        // aivm/src/host.rs's "String builtins" arms; to_tsynq/addr.encode
+        // and from_tsynq/from_syn/from_syna/addr.decode used to stand in
+        // as the still-unimplemented case too -- fixed 2026-09-09, see
+        // `address_encode_decode_round_trip_succeeds_through_dry_run`
+        // below. contract_address/addr.contract_address now stands in as
+        // the still-unimplemented case: it's intentionally left
+        // undeclared pending Justin's Phase 3 contract-address SNTS-01
+        // HRP-migration sequencing call, see
+        // notes/synq-forge-toolchain/address-engine-migration-scope.md and
+        // vm::bech32::derive_contract_address_snts01's doc comment.)
         // Regression guard: calling one of them through a real dry run
         // must still come back as a clean success:false with a clear
         // error -- not a panic, not a silently-wrong success, and
         // critically not partial state changes made visible (state stays
         // discarded regardless of where execution stopped).
-        let src = "contract AddrTest { state { dummy: u256; } impl { @public function check_addr() as caller -> str { return to_tsynq(caller); } } }";
+        let src = "contract AddrTest { state { dummy: u256; } impl { @public function check_addr() as caller -> str { return contract_address(caller, 1, 0); } } }";
         let state = test_state();
         let (status, RespJson(body)) = estimate_gas_handler(
             ConnectInfo(test_addr()),
@@ -1284,6 +1292,38 @@ mod estimate_gas_handler_tests {
         assert!(!body.success, "an unimplemented host function must fail closed: {body:?}");
         assert!(body.state_discarded);
         assert!(!body.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn address_encode_decode_round_trip_succeeds_through_dry_run() {
+        // Bug report (2026-09-09): a real Forge "Run & Debug" call to
+        // getCallerSyna()/getOwnerSyna() (V3Types.synq demo contract,
+        // `return to_tsynq(caller);`) succeeded in a Live QVM session but
+        // reverted in AIVM dry-run with HostFunctionNotDeclared("addr.
+        // encode") -- addr.encode/addr.decode (HostCall(17)/(18)) were
+        // declared in AIVM's import table from the start but had no
+        // execute_host_call dispatch arm at all. Fixed in aivm/src/addr.rs
+        // + aivm/src/host.rs (see aivm's own addr_test.rs for the
+        // crate-level coverage) -- this is the handler-level regression
+        // guard, same pattern as `asset_lifecycle_create_transfer_
+        // balance_burn_round_trips` above for the equivalent asset.* fix.
+        let src = "contract AddrTest { state { dummy: u256; } impl { @public function check_addr() as caller -> str { return to_tsynq(caller); } } }";
+        let state = test_state();
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(req(src, "check_addr")),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.success, "addr.encode should now succeed: {body:?}");
+        // No caller override supplied -> the default all-zero caller ->
+        // the literal SNTS-01 zero sentinel, per
+        // vm::bech32::encode_network_address's special case (mirrored in
+        // aivm::addr::encode_network_address).
+        assert_eq!(
+            body.return_value,
+            Some(serde_json::Value::String("syn00000000000000000000000000000000000000".to_string()))
+        );
     }
 
     #[tokio::test]

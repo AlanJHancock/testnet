@@ -20,6 +20,7 @@ pub mod manifest;
 pub mod signing;
 pub mod receipt;
 pub mod gas;
+pub mod addr;
 pub mod host;
 pub mod vm;
 

@@ -876,6 +876,59 @@ McEliece, or HQC operation slot exists yet)", builtin
                 stack.push(Value::Bytes32(identity));
             }
         }
+        // addr.encode / addr.decode (2026-09-09): these two names have been
+        // in HostFunctions::default_v01()'s import table since the address
+        // builtins were added (indices 17/18 -- aivm_codegen.rs's host_idx
+        // table has compiled to_tsynq/to_syna/from_tsynq/from_syn/from_syna
+        // calls to HostCall(17)/HostCall(18) all along), but this dispatch
+        // match had no arms for either name -- every call fell through to
+        // the `other` catch-all below and returned
+        // HostFunctionNotDeclared("addr.encode"), exactly the
+        // string.length/concat/eq gap documented above. Any contract using
+        // to_tsynq(caller)/to_tsynq(owner) for a human-readable getter (the
+        // demo V3Types.getCallerSyna()/getOwnerSyna() pattern) could compile
+        // but always reverted at runtime in AIVM dry-run, while the same
+        // call succeeded in a Live QVM session (native vm crate's
+        // OpCode::AddrEncode has always had a real implementation). Wired
+        // to the addr module (a self-contained port of vm::bech32's CURRENT
+        // synw-wallet encoding -- see addr.rs's module doc for why it's a
+        // port rather than a cross-crate dep on synq-vm, and for what's
+        // deliberately NOT covered: legacy tsynq/synq decode and the
+        // Phase-3-gated contract-address derivation).
+        "addr.encode" => {
+            // to_tsynq(x)/to_syna(x): x is whatever the argument expression
+            // evaluates to -- typically caller()/call_sender() (a real
+            // Value::Address) or an owner state var round-tripped through
+            // as_address() if it was ever assigned from caller. as_address()
+            // already normalizes any of AIVM's numeric Value variants into
+            // the same 41-byte layout caller()/call_sender() push, so this
+            // one call covers every input shape the language allows here.
+            let v = stack.pop().ok_or(AivmError::StackUnderflow)?;
+            let addr41 = v.as_address()?;
+            // pk_hash occupies bytes[5..37] of the 41-byte layout (see
+            // as_address's doc comment + vm::bech32::SynqAddress::to_bytes);
+            // its leading 20 bytes are the VM's internal identifier --
+            // exact analogue of vm::bech32::SynqAddress::to_20_bytes().
+            let mut id20 = [0u8; 20];
+            id20.copy_from_slice(&addr41[5..25]);
+            let encoded = crate::addr::encode_wallet_address(&id20)
+                .map_err(|e| AivmError::HostFunctionFailed(format!("addr.encode: {}", e)))?;
+            stack.push(Value::String(encoded));
+        }
+        "addr.decode" => {
+            // from_tsynq(s)/from_syn(s)/from_syna(s): s is a str-typed
+            // Bech32m address. Rebuilds the full 41-byte SynqAddress-shaped
+            // value so the result is byte-for-byte identical to what
+            // context.caller/context.call_sender would push for the same
+            // underlying wallet (see decoded_id_to_address_bytes's doc
+            // comment) -- round-tripping a value through addr.decode then
+            // addr.encode reproduces the original string.
+            let v = stack.pop().ok_or(AivmError::StackUnderflow)?;
+            let s = value_as_str(&v)?;
+            let id20 = crate::addr::decode_network_address(&s)
+                .map_err(|e| AivmError::HostFunctionFailed(format!("addr.decode: {}", e)))?;
+            stack.push(Value::Address(crate::addr::decoded_id_to_address_bytes(&id20)));
+        }
         other => {
             return Err(AivmError::HostFunctionNotDeclared(other.to_string()));
         }
