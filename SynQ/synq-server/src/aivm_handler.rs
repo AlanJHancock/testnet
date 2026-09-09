@@ -1327,6 +1327,38 @@ mod estimate_gas_handler_tests {
     }
 
     #[tokio::test]
+    async fn getter_on_default_bytes_address_state_succeeds_not_type_mismatch() {
+        // Bug report (2026-09-09, live): calling getOwnerSyna() on
+        // V3Types.synq WITHOUT a prior init() (i.e. against the contract's
+        // default, never-written state) failed with `execution error:
+        // TypeMismatch { expected: "address", got: "bytes" }`, even though
+        // the fresh-state to_tsynq(caller) case (this file's
+        // address_encode_decode_round_trip_succeeds_through_dry_run test,
+        // just above) already passed. Root cause: default_aivm_value_for_
+        // type() seeds a never-written Bytes<20>/Address state var (e.g.
+        // `owner`) as an EMPTY Value::Bytes, not a Value::Address --
+        // aivm::host::Value::as_address() had no arm for Value::Bytes at
+        // all, only Address/U128/U64. Fixed in aivm/src/host.rs (see
+        // aivm's addr_test.rs for the crate-level coverage of the padding/
+        // truncation rules) -- this is the handler-level regression guard
+        // for the exact reported repro: no state override, no init call,
+        // straight to the getter.
+        let src = "contract OwnerTest { state { owner: Bytes<20>; } impl { @public function getOwnerSyna() -> str { return to_tsynq(owner); } } }";
+        let state = test_state();
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(req(src, "getOwnerSyna")),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.success, "getOwnerSyna() on default state should succeed, not TypeMismatch: {body:?}");
+        assert_eq!(
+            body.return_value,
+            Some(serde_json::Value::String("syn00000000000000000000000000000000000000".to_string()))
+        );
+    }
+
+    #[tokio::test]
     async fn asset_lifecycle_create_transfer_balance_burn_round_trips() {
         // Regression guard for the "forge run createAsset(123) ->
         // HostFunctionNotDeclared(asset.create)" bug report (2026-08-22):

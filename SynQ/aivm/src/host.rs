@@ -205,9 +205,37 @@ impl Value {
     /// `vm::bech32::SynqAddress::to_bytes`/`from_20_bytes`), zero
     /// elsewhere, so repeated reads of that same value stay internally
     /// consistent even though it isn't a real wallet address.
+    ///
+    /// `Value::Bytes`/`Value::Bytes32` support (2026-09-09): a SynQ
+    /// `Bytes<20>` state var (the demo `V3Types.owner` pattern -- see
+    /// `getOwnerSyna()`) defaults to a zero-length-20 `Value::Bytes`
+    /// when never explicitly assigned, NOT a `Value::Address` -- so
+    /// `to_tsynq(owner)` on a fresh/uninitialised contract reverted with
+    /// `TypeMismatch { expected: "address", got: "bytes" }` even though
+    /// the exact same call succeeds in a Live QVM session, because
+    /// `vm::vm.rs`'s native `OpCode::AddrEncode` has always accepted
+    /// `Value::Bytes` of any length (see its match arms) while this
+    /// method -- `addr.encode`'s AIVM-side equivalent, via
+    /// `execute_host_call`'s `"addr.encode"` arm -- only accepted
+    /// `Address`/`U128`/`U64`. Placement into the 20-byte identity slot
+    /// `[5..25]` mirrors `vm.rs`'s `AddrEncode` byte-for-byte (left-pad
+    /// if under 20 bytes, keep the last 20 if 21..=32 bytes, reject
+    /// anything longer exactly as `vm.rs` does by falling through to its
+    /// own `_ => Err` arm) so a `Bytes<20>` identity encodes to the
+    /// identical `synw...` string in both execution modes.
     pub fn as_address(&self) -> Result<[u8; 41], AivmError> {
         match self {
             Value::Address(bytes) => Ok(*bytes),
+            Value::Bytes(b) => {
+                let mut buf = [0u8; 41];
+                buf[5..25].copy_from_slice(&Self::bytes_to_id20(b)?);
+                Ok(buf)
+            }
+            Value::Bytes32(b) => {
+                let mut buf = [0u8; 41];
+                buf[5..25].copy_from_slice(&Self::bytes_to_id20(b)?);
+                Ok(buf)
+            }
             Value::U128(v) => {
                 let mut buf = [0u8; 41];
                 buf[5..21].copy_from_slice(&v.to_be_bytes());
@@ -219,6 +247,29 @@ impl Value {
                 Ok(buf)
             }
             other => Err(AivmError::TypeMismatch { expected: "address", got: other.type_name() }),
+        }
+    }
+
+    /// Normalize an arbitrary-length byte slice into a 20-byte identity,
+    /// byte-for-byte matching `vm::vm.rs`'s native `OpCode::AddrEncode`
+    /// match arms: left-pad if under 20 bytes, take the last 20 if
+    /// 21..=32 bytes, reject (rather than silently truncate) anything
+    /// longer than 32 -- `vm.rs` has no arm past 32 bytes either.
+    fn bytes_to_id20(b: &[u8]) -> Result<[u8; 20], AivmError> {
+        if b.len() == 20 {
+            let mut a = [0u8; 20];
+            a.copy_from_slice(b);
+            Ok(a)
+        } else if b.len() < 20 {
+            let mut a = [0u8; 20];
+            a[20 - b.len()..].copy_from_slice(b);
+            Ok(a)
+        } else if b.len() <= 32 {
+            let mut a = [0u8; 20];
+            a.copy_from_slice(&b[b.len() - 20..]);
+            Ok(a)
+        } else {
+            Err(AivmError::TypeMismatch { expected: "address (<=32 bytes)", got: "bytes_too_long" })
         }
     }
 

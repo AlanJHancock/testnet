@@ -121,3 +121,120 @@ fn test_addr_decode_rejects_legacy_tsynq() {
     assert!(msg.contains("addr.decode"), "expected addr.decode context in error, got: {}", msg);
     assert!(msg.contains("legacy"), "expected a legacy-tsynq-specific message, got: {}", msg);
 }
+
+
+/// Bug report (2026-09-09, live): calling `getOwnerSyna()` fresh (no prior
+/// `init()`) failed with `TypeMismatch { expected: "address", got: "bytes"
+/// }`. Root cause: a freshly-deployed contract's `Bytes<20>`/`Address`-typed
+/// state var (e.g. `V3Types.owner`) defaults to `Value::Bytes(vec![])` --
+/// synq-server's `default_aivm_value_for_type` (aivm_handler.rs) seeds an
+/// EMPTY `Value::Bytes`, not a `Value::Address` -- and `as_address()` had no
+/// arm for `Value::Bytes` at all before this fix (only `Address`/`U128`/
+/// `U64`), so `to_tsynq(owner)` on that default value TypeMismatched instead
+/// of encoding to the zero-sentinel address. Reproduces the same shape at
+/// the aivm-crate level: seed state key 0 with an empty `Value::Bytes`
+/// (exactly what a never-written `Bytes<20>`/`Address` field holds) and
+/// confirm `addr.encode` now succeeds.
+#[test]
+fn test_addr_encode_accepts_default_empty_bytes_state_value() {
+    let ctx = ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    let (instructions, functions) = one_fn(vec![
+        Instruction::LoadState(0),
+        Instruction::HostCall(17), // addr.encode
+        Instruction::Ret,
+    ]);
+    let avm = Avm::new(instructions, functions, make_host());
+    // Seed committed state key 0 with an empty Bytes value, matching
+    // synq-server's default_aivm_value_for_type() for a never-written
+    // Bytes<20>/Address state var -- NOT Value::Address.
+    let mut state = StateOverlay::with_state(
+        [(0u16, Value::Bytes(vec![]))].into_iter().collect(),
+    );
+    let result = avm.execute(0, vec![], &ctx, &mut state).unwrap();
+    assert_eq!(
+        result.return_value,
+        Some(Value::String("syn00000000000000000000000000000000000000".to_string()))
+    );
+}
+
+/// Same bug, non-empty short/long `Value::Bytes` shapes: `as_address()`'s
+/// `Bytes` arm must byte-for-byte match `vm::vm.rs`'s native `AddrEncode`
+/// padding/truncation rules (left-pad under 20 bytes, keep the last 20 of
+/// 21..=32 bytes) so a `Bytes<20>` identity encodes identically in AIVM
+/// dry-run and Live QVM.
+#[test]
+fn test_addr_encode_pads_and_truncates_bytes_like_native_vm() {
+    let ctx = ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+
+    // Exactly 20 bytes -- direct passthrough into the identity slot.
+    let id20: [u8; 20] = [0x42; 20];
+    let expected20 = aivm::addr::encode_wallet_address(&id20).unwrap();
+    let (instructions, functions) = one_fn(vec![
+        Instruction::LoadState(0),
+        Instruction::HostCall(17),
+        Instruction::Ret,
+    ]);
+    let avm = Avm::new(instructions, functions, make_host());
+    let mut state = StateOverlay::with_state(
+        [(0u16, Value::Bytes(id20.to_vec()))].into_iter().collect(),
+    );
+    let result = avm.execute(0, vec![], &ctx, &mut state).unwrap();
+    assert_eq!(result.return_value, Some(Value::String(expected20)));
+
+    // Short (5-byte) value -- left-padded with zeros to 20 bytes, matching
+    // vm.rs's `b.len() < 20` arm.
+    let short: Vec<u8> = vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
+    let mut padded_id20 = [0u8; 20];
+    padded_id20[15..20].copy_from_slice(&short);
+    let expected_short = aivm::addr::encode_wallet_address(&padded_id20).unwrap();
+    let (instructions2, functions2) = one_fn(vec![
+        Instruction::LoadState(0),
+        Instruction::HostCall(17),
+        Instruction::Ret,
+    ]);
+    let avm2 = Avm::new(instructions2, functions2, make_host());
+    let mut state2 = StateOverlay::with_state(
+        [(0u16, Value::Bytes(short))].into_iter().collect(),
+    );
+    let result2 = avm2.execute(0, vec![], &ctx, &mut state2).unwrap();
+    assert_eq!(result2.return_value, Some(Value::String(expected_short)));
+
+    // Oversized (32-byte) value -- last 20 bytes kept, matching vm.rs's
+    // `b.len() <= 32` arm.
+    let long: Vec<u8> = (1u8..=32u8).collect();
+    let mut truncated_id20 = [0u8; 20];
+    truncated_id20.copy_from_slice(&long[12..32]);
+    let expected_long = aivm::addr::encode_wallet_address(&truncated_id20).unwrap();
+    let (instructions3, functions3) = one_fn(vec![
+        Instruction::LoadState(0),
+        Instruction::HostCall(17),
+        Instruction::Ret,
+    ]);
+    let avm3 = Avm::new(instructions3, functions3, make_host());
+    let mut state3 = StateOverlay::with_state(
+        [(0u16, Value::Bytes(long))].into_iter().collect(),
+    );
+    let result3 = avm3.execute(0, vec![], &ctx, &mut state3).unwrap();
+    assert_eq!(result3.return_value, Some(Value::String(expected_long)));
+}
+
+/// A `Bytes` value longer than 32 bytes has no unambiguous 20-byte identity
+/// and must fail closed with a clear error -- not silently truncate --
+/// exactly mirroring `vm.rs`'s `AddrEncode` (its match arms stop at 32
+/// bytes; anything longer falls to its own `_ => Err` arm).
+#[test]
+fn test_addr_encode_rejects_oversized_bytes() {
+    let ctx = ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    let (instructions, functions) = one_fn(vec![
+        Instruction::LoadState(0),
+        Instruction::HostCall(17),
+        Instruction::Ret,
+    ]);
+    let avm = Avm::new(instructions, functions, make_host());
+    let mut state = StateOverlay::with_state(
+        [(0u16, Value::Bytes(vec![0u8; 33]))].into_iter().collect(),
+    );
+    let err = avm.execute(0, vec![], &ctx, &mut state).unwrap_err();
+    let msg = format!("{:?}", err);
+    assert!(msg.contains("address"), "expected an address-related TypeMismatch, got: {}", msg);
+}
