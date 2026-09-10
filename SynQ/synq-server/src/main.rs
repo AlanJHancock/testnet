@@ -5397,6 +5397,13 @@ struct RunResponse {
     /// Remaining VM step budget after this call.
     #[serde(skip_serializing_if = "Option::is_none")]
     steps_remaining: Option<usize>,
+    /// The actual require(cond, "message") / named-revert message text,
+    /// mirroring EstimateGasResponse.revert_reason (aivm_handler.rs) for
+    /// the dry-run path -- populated only for the two VMError arms below
+    /// that represent an intentional contract-level revert, never for a
+    /// genuine transport/auth/validation failure. (2026-09-10)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revert_reason: Option<String>,
 }
 
 
@@ -5435,7 +5442,8 @@ async fn session_run_handler(
     Json(mut req): Json<SessionRunRequest>,
 ) -> (StatusCode, RespJson<RunResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), events: Vec::new(), error: Some("rate limit exceeded — retry later".into()), caller_tsynq: None, error_code: None, error_name: None, fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None }));
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), events: Vec::new(), error: Some("rate limit exceeded — retry later".into()), caller_tsynq: None, error_code: None, error_name: None,
+            revert_reason: None, fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None }));
     }
     let mut vm_args: Vec<Value> = Vec::new();
     // Build call_sig before args are moved — used in EIP-712 digest if wallet auth is present.
@@ -5466,6 +5474,7 @@ async fn session_run_handler(
             caller_tsynq: None,
             error_code: None,
             error_name: None,
+            revert_reason: None,
             fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
             })),
         }
@@ -5482,6 +5491,7 @@ async fn session_run_handler(
             caller_tsynq: None,
             error_code: None,
             error_name: None,
+            revert_reason: None,
             fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
             })),
         }
@@ -5507,6 +5517,7 @@ async fn session_run_handler(
                     events: Vec::new(),
                     error: Some(format!("session grant does not allow function '{}'", req.function)),
                     caller_tsynq: None, error_code: None, error_name: None,
+            revert_reason: None,
                     fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
                 }));
             }
@@ -5538,6 +5549,7 @@ async fn session_run_handler(
                 caller_tsynq: None,
                 error_code: None,
                 error_name: None,
+            revert_reason: None,
                 fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
                 }));
             }
@@ -5550,6 +5562,7 @@ async fn session_run_handler(
                 caller_tsynq: None,
                 error_code: None,
                 error_name: None,
+            revert_reason: None,
                 fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
                 }));
             }
@@ -5565,6 +5578,7 @@ async fn session_run_handler(
             caller_tsynq: None,
             error_code: None,
             error_name: None,
+            revert_reason: None,
             fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
             }));
         }
@@ -5596,6 +5610,7 @@ async fn session_run_handler(
                 caller_tsynq: None,
                 error_code: None,
                 error_name: None,
+            revert_reason: None,
                 fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
                 }));
             }
@@ -5614,6 +5629,7 @@ async fn session_run_handler(
                 caller_tsynq: None,
                 error_code: None,
                 error_name: None,
+            revert_reason: None,
                 fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
                 }));
             }
@@ -5630,6 +5646,7 @@ async fn session_run_handler(
             caller_tsynq: None,
             error_code: None,
             error_name: None,
+            revert_reason: None,
             fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
             }));
         }
@@ -5647,6 +5664,7 @@ async fn session_run_handler(
         caller_tsynq: None,
         error_code: None,
         error_name: None,
+            revert_reason: None,
         fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
         }));
     } else {
@@ -5860,7 +5878,8 @@ async fn session_run_handler(
             };
             {
         let caller_tsynq = if let Some(ref synw) = req.display_tsynq { Some(synw.clone()) } else { synq_vm::bech32::encode_wallet_address(&effective_caller).ok() };
-        (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None, error_code: None, error_name: None, caller_tsynq, fuel_used, fuel_remaining, steps_used, steps_remaining }))
+        (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None, error_code: None, error_name: None,
+            revert_reason: None, caller_tsynq, fuel_used, fuel_remaining, steps_used, steps_remaining }))
     }
         }
         Err(synq_vm::VMError::RevertedNamed { code, message }) => (StatusCode::OK, RespJson(RunResponse {
@@ -5871,6 +5890,7 @@ async fn session_run_handler(
             error_code: Some(code),
             error_name: Some(message.split('(').next().unwrap_or(&message).split("::").last().unwrap_or(&message).to_string()),
             fuel_used, fuel_remaining, steps_used, steps_remaining,
+            revert_reason: Some(message.clone()),
         })),
         Err(synq_vm::VMError::Reverted(msg)) => (StatusCode::OK, RespJson(RunResponse {
             success: false, result: None, output: String::new(),
@@ -5879,6 +5899,7 @@ async fn session_run_handler(
         caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_wallet_address(&effective_caller).ok()),
         error_code: None,
         error_name: None,
+            revert_reason: Some(msg.clone()),
         fuel_used, fuel_remaining, steps_used, steps_remaining,
         })),
         Err(e) => (StatusCode::OK, RespJson(RunResponse {
@@ -5888,6 +5909,7 @@ async fn session_run_handler(
         caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_wallet_address(&effective_caller).ok()),
         error_code: None,
         error_name: None,
+            revert_reason: None,
         fuel_used, fuel_remaining, steps_used, steps_remaining,
         })),
     }
