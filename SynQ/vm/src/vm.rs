@@ -578,15 +578,22 @@ impl QuantumVM {
                 // Clean up any dangling call frames from this invocation
                 self.call_stack.clear();
                 self.stack.clear();
-                // Wrap the error with the function name for easier debugging
+                // Wrap internal engine errors with the function name for easier
+                // debugging -- these are VM-generated messages (type mismatches,
+                // overflow, etc.) that never include the function name themselves.
+                // Reverted is left untouched: contract authors already write
+                // require() messages with their own convention (often prefixing
+                // the function name themselves, e.g. "register: not admin"), and
+                // callers now get the exact message separately via revert_reason
+                // -- auto-prefixing here used to double up on that convention
+                // (e.g. "register: register: not admin"). RevertedNamed was
+                // already passed through unwrapped for the same reason.
                 match e {
                     VMError::RuntimeError(msg) => Err(VMError::RuntimeError(
                         format!("{}: {}", name, msg)
                     )),
-                    VMError::Reverted(msg) => Err(VMError::Reverted(
-                        format!("{}: {}", name, msg)
-                    )),
-                    // Pass through structured errors (StepLimitExceeded, etc.)
+                    // Pass through Reverted, RevertedNamed, and other structured
+                    // errors (StepLimitExceeded, etc.) verbatim.
                     other => Err(other),
                 }
             }
