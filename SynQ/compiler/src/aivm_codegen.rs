@@ -341,13 +341,16 @@ impl<'a> CodegenContext<'a> {
                 self.gen_expr(expr)?;
                 self.emit(Instruction::StoreLocal(255)); // discard result
             }
-            Statement::Require(cond, _msg) => {
+            Statement::Require(cond, msg) => {
                 self.gen_expr(cond)?;
                 self.emit(Instruction::JmpIf(self.instructions.len() as u32 + 2));
-                self.emit(Instruction::Trap(5)); // Unauthorized
+                self.emit(Instruction::TrapMsg(5, msg.clone())); // Unauthorized
             }
-            Statement::RevertNamed { .. } | Statement::RevertEnum { .. } => {
-                self.emit(Instruction::Trap(0));
+            Statement::RevertNamed { error, .. } => {
+                self.emit(Instruction::TrapMsg(0, error.clone()));
+            }
+            Statement::RevertEnum { enum_name, error, .. } => {
+                self.emit(Instruction::TrapMsg(0, format!("{}::{}", enum_name, error)));
             }
             Statement::Assignment(name, expr) => {
                 if let Some(idx) = self.state_index(name) {

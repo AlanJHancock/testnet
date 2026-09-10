@@ -371,6 +371,16 @@ pub struct EstimateGasResponse {
     /// (validation/rate-limit/compile-error responses via `err_resp`).
     #[serde(default)]
     pub canonical: Option<CanonicalEstimate>,
+    /// The actual require(cond, "message") / revert Name(...) text when
+    /// status == "reverted" (2026-09-10) -- see
+    /// aivm::vm::ExecutionResult.revert_message doc comment. None for
+    /// success, for a failed (execution-error) status, or for a revert
+    /// whose Trap has no attached message yet (not every revert site is
+    /// wired to TrapMsg). Fixes the Forge Debug Console showing
+    /// "reverted . gas 14 . returned null" with zero indication of why --
+    /// callers should show this string instead when present.
+    #[serde(default)]
+    pub revert_reason: Option<String>,
     pub note: String,
     pub errors: Vec<String>,
 }
@@ -770,6 +780,7 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
             next_asset_id: 1,
             canonical: None,
             note: note.clone(),
+            revert_reason: None,
             errors,
         }))
     };
@@ -963,6 +974,7 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
                     Some(w) => format!("{} {}", note, w),
                     None => note.clone(),
                 },
+                revert_reason: result.revert_message.clone(),
                 errors: vec![],
             }))
         }

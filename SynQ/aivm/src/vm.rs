@@ -129,6 +129,14 @@ pub enum FunctionMutability {
 pub struct ExecutionResult {
     pub receipt: Receipt,
     pub return_value: Option<Value>,
+    /// The actual `require(cond, "message")` / `revert Name(...)` text
+    /// that caused a `Reverted` status, when the compiler emitted a
+    /// `TrapMsg` for it (see that opcode's doc comment). `None` for a
+    /// `Success` result, and also `None` for a plain `Trap` with no
+    /// attached message (e.g. some host-level/authority reverts that
+    /// don't go through `Statement::Require`/`Statement::RevertNamed` --
+    /// not yet covered by this mechanism).
+    pub revert_message: Option<String>,
 }
 
 /// Call frame for function calls
@@ -514,6 +522,23 @@ impl Avm {
                     return Ok(ExecutionResult {
                         receipt,
                         return_value: None,
+                        revert_message: None,
+                    });
+                }
+                Instruction::TrapMsg(code, msg) => {
+                    gas.charge(gas_cost::TRAP)?;
+                    state.rollback();
+                    let receipt = Receipt::trap(
+                        ctx,
+                        gas.used,
+                        pq_gas.used,
+                        state_root_before,
+                        *code,
+                    );
+                    return Ok(ExecutionResult {
+                        receipt,
+                        return_value: None,
+                        revert_message: Some(msg.clone()),
                     });
                 }
                 Instruction::HostCall(import_idx) => {
@@ -658,6 +683,7 @@ impl Avm {
         Ok(ExecutionResult {
             receipt,
             return_value,
+            revert_message: None,
         })
     }
 
@@ -686,6 +712,7 @@ impl Avm {
             Ok(ExecutionResult {
                 receipt,
                 return_value: None,
+                revert_message: None,
             })
         }
     }

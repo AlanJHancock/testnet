@@ -33,6 +33,20 @@ pub enum Opcode {
     Ret = 0x51,
     Emit = 0x60,
     Trap = 0x70,
+    /// Same as `Trap` but carries the actual `require(cond, "message")` /
+    /// `revert Name(...)` text (2026-09-10: this is what fixes "reverted ·
+    /// gas 14 · returned null" giving zero indication of WHY -- the
+    /// message string was sitting right there in the SynQ source and the
+    /// AST the whole time, `Statement::Require(cond, _msg)` in
+    /// aivm_codegen.rs just discarded it at compile time (`_msg`) in favor
+    /// of one of two generic numeric Trap codes). Length-prefixed UTF-8,
+    /// same framing as `PushString`, with the numeric trap code kept
+    /// immediately before it so the canonical on-chain `Receipt` (fixed
+    /// spec shape, no string field) is unaffected -- this message only
+    /// ever surfaces through `ExecutionResult.revert_message`, the AIVM
+    /// crate's own richer (non-canonical) return type used by
+    /// synq-server's dry-run JSON responses.
+    TrapMsg = 0x71,
     HostCall = 0x80,
     /// Pop N values, push a single Value::Array of them (struct/array construction)
     Pack = 0x90,
@@ -138,6 +152,7 @@ impl Opcode {
             0x95 => Some(Opcode::PushU256),
             0xa0 => Some(Opcode::MapGetVal),
             0xa1 => Some(Opcode::MapSetVal),
+            0x71 => Some(Opcode::TrapMsg),
             _ => None,
         }
     }
@@ -159,6 +174,7 @@ impl Opcode {
             Opcode::Ret => 0,
             Opcode::Emit => 2,
             Opcode::Trap => 2,
+            Opcode::TrapMsg => 6, // code(u16) + length prefix(u32), same framing as PushString
             Opcode::HostCall => 2,
             Opcode::Pack => 1,
             Opcode::ArrayGet => 1,
@@ -201,6 +217,8 @@ pub enum Instruction {
     Ret,
     Emit(u16),
     Trap(u16),
+    /// See `Opcode::TrapMsg` doc comment.
+    TrapMsg(u16, String),
     HostCall(u16),
     /// Pop N values (in push order), push Value::Array([v0, v1, ..., vN-1])
     Pack(u8),
@@ -303,6 +321,13 @@ impl Instruction {
             Instruction::PushString(s) => {
                 buf.push(Opcode::PushString as u8);
                 let bytes = s.as_bytes();
+                buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                buf.extend_from_slice(bytes);
+            }
+            Instruction::TrapMsg(code, msg) => {
+                buf.push(Opcode::TrapMsg as u8);
+                buf.extend_from_slice(&code.to_be_bytes());
+                let bytes = msg.as_bytes();
                 buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
                 buf.extend_from_slice(bytes);
             }
@@ -458,6 +483,31 @@ impl Instruction {
                         }
                     })?;
                     instructions.push(Instruction::PushString(s));
+                    offset += len;
+                }
+                Opcode::TrapMsg => {
+                    if offset + 2 > bytes.len() {
+                        return Err(AivmError::OperandOutOfBounds { offset, needed: 2, available: bytes.len() - offset });
+                    }
+                    let code = u16::from_be_bytes([bytes[offset], bytes[offset+1]]);
+                    offset += 2;
+                    if offset + 4 > bytes.len() {
+                        return Err(AivmError::OperandOutOfBounds { offset, needed: 4, available: bytes.len() - offset });
+                    }
+                    let len = u32::from_be_bytes([
+                        bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    ]) as usize;
+                    offset += 4;
+                    if offset + len > bytes.len() {
+                        return Err(AivmError::OperandOutOfBounds { offset, needed: len, available: bytes.len() - offset });
+                    }
+                    let msg = String::from_utf8(bytes[offset..offset+len].to_vec()).map_err(|_| {
+                        AivmError::MalformedSection {
+                            section_type: crate::bytecode::section_type::INSTRUCTIONS,
+                            reason: format!("TrapMsg operand at offset {} is not valid UTF-8", offset),
+                        }
+                    })?;
+                    instructions.push(Instruction::TrapMsg(code, msg));
                     offset += len;
                 }
                 Opcode::PushBool => {
