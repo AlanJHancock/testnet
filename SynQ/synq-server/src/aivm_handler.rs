@@ -13,6 +13,7 @@ use synq_compiler::aivm_codegen::compile_to_aivm;
 use aivm::bytecode::{BytecodeArtifact, Section, section_type};
 use aivm::manifest::Manifest;
 use aivm::instructions::Instruction;
+use ruint::aliases::U256;
 
 use crate::{AppState, check_rate_limit, RespJson, MAX_SOURCE_BYTES};
 use synq_vm::bech32::{bech32m_decode, SynqAddress, HRP_TESTNET, HRP_MAINNET, ALGO_ML_DSA_65, NETWORK_ID_TESTNET, decode_network_address};
@@ -521,6 +522,7 @@ fn default_aivm_value_for_type(
         Type::Mapping(_, _) => Value::Map(std::collections::BTreeMap::new()),
         Type::Bool => Value::Bool(false),
         Type::UInt128 | Type::Int128 => Value::U128(0),
+        Type::UInt256 => Value::U256(U256::ZERO),
         Type::Str => Value::String(String::new()),
         Type::Bytes | Type::BytesN(_) | Type::Hash32 | Type::Hash64
         | Type::Address | Type::UMAIdentity
@@ -638,10 +640,22 @@ fn json_to_aivm_value_typed(
     // this same fix. Only a string with no "0x" prefix reaches here.
     if let serde_json::Value::String(s) = v {
         if !s.starts_with("0x") {
+            // UInt256 gets its own branch (2026-09-09, U256 support): the
+            // shared is_unsigned branch below parses via u128, which caps
+            // every declared-u256 argument at u128::MAX even though the
+            // AIVM Value model now has a real, full-range Value::U256.
+            // narrow it back down via from_u256_shrink so a small u256
+            // argument still decodes to the same Value::U64/U128 it always
+            // did (no JSON-shape change for the common case).
+            if matches!(ty, Some(Type::UInt256)) {
+                return s.parse::<U256>()
+                    .map(Value::from_u256_shrink)
+                    .map_err(|_| format!("expected an unsigned integer string (up to u256) for this argument, got '{}'", s));
+            }
             let is_unsigned = matches!(
                 ty,
                 Some(Type::UInt8) | Some(Type::UInt16) | Some(Type::UInt32) | Some(Type::UInt64)
-                    | Some(Type::UInt128) | Some(Type::UInt256) | Some(Type::Height)
+                    | Some(Type::UInt128) | Some(Type::Height)
             );
             let is_signed = matches!(
                 ty,
@@ -684,6 +698,7 @@ fn aivm_value_to_json(v: &aivm::host::Value) -> serde_json::Value {
     match v {
         Value::U64(n) => serde_json::json!(n),
         Value::U128(n) => serde_json::json!(n.to_string()),
+        Value::U256(n) => serde_json::json!(n.to_string()),
         Value::I64(n) => serde_json::json!(n),
         Value::Bool(b) => serde_json::json!(b),
         Value::Bytes(b) => serde_json::json!(format!("0x{}", hex::encode(b))),

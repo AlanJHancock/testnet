@@ -18,6 +18,7 @@
 use crate::ast::*;
 use std::collections::HashMap;
 use aivm::instructions::Instruction;
+use ruint::aliases::U256;
 use aivm::vm::{FunctionEntry, FunctionVisibility, FunctionMutability};
 use aivm::abi::{Abi, AbiType, AbiMethod, AbiEvent, AbiError as AbiErrorDef, AbiStateField};
 
@@ -641,8 +642,24 @@ impl<'a> CodegenContext<'a> {
                         self.emit(Instruction::PushU64(*n as u64));
                     }
                     Literal::BigNumber(s) => {
-                        let n: u64 = s.parse().map_err(|_| format!("big number {} too large for u64", s))?;
-                        self.emit(Instruction::PushU64(n));
+                        // U256 support (2026-09-09): small-enough BigNumber
+                        // literals still compile to the cheap PushU64 they
+                        // always did. A literal that doesn't fit u64 used
+                        // to hard-fail compilation outright ("too large for
+                        // u64") even for a perfectly legitimate `u256`
+                        // constant -- now it falls back to PushU256's full
+                        // 32-byte big-endian encoding. Only a literal that
+                        // doesn't fit even 256 bits (astronomically larger
+                        // than any real token amount) still errors.
+                        match s.parse::<u64>() {
+                            Ok(n) => self.emit(Instruction::PushU64(n)),
+                            Err(_) => {
+                                let big: U256 = s.parse().map_err(|_| {
+                                    format!("number literal {} too large for u256 (max {})", s, U256::MAX)
+                                })?;
+                                self.emit(Instruction::PushU256(big.to_be_bytes::<32>()));
+                            }
+                        }
                     }
                     Literal::Bool(b) => {
                         // BUG FIX (2026-08-22): bool literals used to compile to
@@ -1097,7 +1114,7 @@ fn type_to_abi(ty: &Type) -> AbiType {
         Type::UInt32 => AbiType::U32,
         Type::UInt64 => AbiType::U64,
         Type::UInt128 => AbiType::U128,
-        Type::UInt256 => AbiType::U128,
+        Type::UInt256 => AbiType::U256,
         Type::Int32 => AbiType::I32,
         Type::Int64 => AbiType::I64,
         // Hash32/BytesN(32) must be checked before the general BytesN(_) catch-all

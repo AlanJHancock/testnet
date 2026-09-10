@@ -15,6 +15,11 @@ pub enum AbiType {
     U32,
     U64,
     U128,
+    /// Full 256-bit unsigned integer (2026-09-09, U256 support). Was
+    /// previously absent entirely -- `Type::UInt256` mapped to `AbiType::
+    /// U128` in `compiler/src/aivm_codegen.rs`, silently mislabeling every
+    /// `u256`-declared field/param as 128-bit in the ABI JSON schema.
+    U256,
     I32,
     I64,
     Bytes,
@@ -34,6 +39,7 @@ impl AbiType {
             AbiType::U32 => "u32".to_string(),
             AbiType::U64 => "u64".to_string(),
             AbiType::U128 => "u128".to_string(),
+            AbiType::U256 => "u256".to_string(),
             AbiType::I32 => "i32".to_string(),
             AbiType::I64 => "i64".to_string(),
             AbiType::Bytes => "bytes".to_string(),
@@ -61,6 +67,7 @@ impl AbiType {
             AbiType::U32 => Some(4),
             AbiType::U64 => Some(8),
             AbiType::U128 => Some(16),
+            AbiType::U256 => Some(32),
             AbiType::I32 => Some(4),
             AbiType::I64 => Some(8),
             AbiType::Bytes32 => Some(32),

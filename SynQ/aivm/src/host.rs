@@ -16,6 +16,7 @@ use std::collections::HashMap;
 // inside the synq-pqc-shims crate aivm already depends on for
 // dilithium/falcon/kyber/sphincs, so no new Cargo dependency is needed.
 use synq_pqc_shims::aeg1;
+use ruint::aliases::U256;
 
 /// Host function import index → name mapping
 /// Per spec, imports are manifest-declared host functions.
@@ -86,6 +87,17 @@ impl HostFunctions {
 pub enum Value {
     U64(u64),
     U128(u128),
+    /// Full 256-bit unsigned integer (2026-09-09, U256 support) -- SynQ's
+    /// `u256` type was previously truncated to `Value::U128` end to end
+    /// (compiler literal parsing, ABI mapping, arg decoding, and every
+    /// arithmetic opcode), silently capping every `u256`-declared value at
+    /// `u128::MAX` (~3.4e38). This variant is the real thing: backed by
+    /// the SAME `ruint::aliases::U256` the native `vm` crate already uses,
+    /// so both execution engines share identical 256-bit semantics.
+    /// Values that fit comfortably in `u64`/`u128` still use those
+    /// variants (see `from_u256_shrink`) -- this exists specifically for
+    /// the numbers that don't.
+    U256(U256),
     I64(i64),
     Bool(bool),
     Bytes(Vec<u8>),
@@ -121,6 +133,13 @@ impl Value {
                     Err(AivmError::TypeMismatch { expected: "u64", got: "u128_overflow" })
                 } else {
                     Ok(*v as u64)
+                }
+            }
+            Value::U256(v) => {
+                if *v > U256::from(u64::MAX) {
+                    Err(AivmError::TypeMismatch { expected: "u64", got: "u256_overflow" })
+                } else {
+                    Ok(v.wrapping_to::<u64>())
                 }
             }
             Value::Address(_) => {
@@ -175,6 +194,13 @@ impl Value {
         match self {
             Value::U128(v) => Ok(*v),
             Value::U64(v) => Ok(*v as u128),
+            Value::U256(v) => {
+                if *v > U256::from(u128::MAX) {
+                    Err(AivmError::TypeMismatch { expected: "u128", got: "u256_overflow" })
+                } else {
+                    Ok(v.wrapping_to::<u128>())
+                }
+            }
             Value::Address(bytes) => {
                 let mut buf = [0u8; 16];
                 buf.copy_from_slice(&bytes[5..21]);
@@ -246,6 +272,23 @@ impl Value {
                 buf[13..21].copy_from_slice(&v.to_be_bytes());
                 Ok(buf)
             }
+            // U256 support (2026-09-09): a value that fits u128 mirrors the
+            // U128 arm exactly (byte-identical -- same slot, same numeric
+            // meaning, just a wider carrier type), so nothing that already
+            // worked changes. A genuinely oversized value (>u128::MAX) has
+            // no room in that 16-byte slot, so it falls back to the same
+            // 20-byte identity slot [5..25] the Bytes/Bytes32 arms above
+            // use (via bytes_to_id20 on its big-endian representation) --
+            // consistent placement, not a third convention.
+            Value::U256(v) => {
+                let mut buf = [0u8; 41];
+                if *v <= U256::from(u128::MAX) {
+                    buf[5..21].copy_from_slice(&v.wrapping_to::<u128>().to_be_bytes());
+                } else {
+                    buf[5..25].copy_from_slice(&Self::bytes_to_id20(&v.to_be_bytes::<32>())?);
+                }
+                Ok(buf)
+            }
             other => Err(AivmError::TypeMismatch { expected: "address", got: other.type_name() }),
         }
     }
@@ -279,8 +322,69 @@ impl Value {
             Value::Bool(b) => Ok(*b),
             Value::U64(v) => Ok(*v != 0),
             Value::U128(v) => Ok(*v != 0),
+            Value::U256(v) => Ok(*v != U256::ZERO),
             Value::I64(v) => Ok(*v != 0),
             other => Err(AivmError::TypeMismatch { expected: "bool", got: other.type_name() }),
+        }
+    }
+
+    /// Widen ANY numeric-like value (or a fixed-size byte string, or a
+    /// bool) to a full 256-bit unsigned integer -- the lossless superset
+    /// of `as_u128`, used by the arithmetic opcodes (`AddU64`/`SubU64`/...
+    /// in `vm.rs`, despite their legacy "U64" names -- see their doc
+    /// comments) and by `Eq`/`Lt`/`Gt`/`Ne`/`Le`/`Ge` so any two
+    /// numeric-shaped operands compare/compute correctly regardless of
+    /// which width they happen to be carried in. Mirrors the native `vm`
+    /// crate's `Value::as_u256` byte-for-byte (same address identity
+    /// slot, same byte-string padding rule) so both execution engines
+    /// widen identically.
+    pub fn as_u256(&self) -> Result<U256, AivmError> {
+        match self {
+            Value::U256(v) => Ok(*v),
+            Value::U128(v) => Ok(U256::from(*v)),
+            Value::U64(v) => Ok(U256::from(*v)),
+            Value::I64(v) => {
+                if *v < 0 {
+                    Err(AivmError::TypeMismatch { expected: "u256", got: "i64_negative" })
+                } else {
+                    Ok(U256::from(*v as u64))
+                }
+            }
+            Value::Bool(b) => Ok(if *b { U256::from(1u8) } else { U256::ZERO }),
+            Value::Address(bytes) => {
+                // Same [5..21] identity-literal slot as_u128 already reads
+                // -- widening, not a new convention (see as_u128's doc
+                // comment for why this slot, not the real 20-byte pk_hash
+                // window, is the right one for numeric-literal round-trips).
+                let mut buf = [0u8; 16];
+                buf.copy_from_slice(&bytes[5..21]);
+                Ok(U256::from(u128::from_be_bytes(buf)))
+            }
+            Value::Bytes(b) if b.len() <= 32 => {
+                let mut arr = [0u8; 32];
+                arr[32 - b.len()..].copy_from_slice(b);
+                Ok(U256::from_be_bytes::<32>(arr))
+            }
+            Value::Bytes32(b) => Ok(U256::from_be_bytes::<32>(*b)),
+            other => Err(AivmError::TypeMismatch { expected: "u256", got: other.type_name() }),
+        }
+    }
+
+    /// Narrow a computed U256 result back down to the smallest Value
+    /// variant that still holds it exactly -- U64 for anything fitting in
+    /// 64 bits, U128 for anything fitting in 128, U256 only when it
+    /// genuinely needs the full width. Keeps arithmetic on ordinary small
+    /// numbers producing the SAME Value::U64 (and same bare-number JSON
+    /// shape via aivm_value_to_json) it always did; only values that
+    /// actually exceed u128::MAX start round-tripping as U256 (JSON
+    /// decimal string, matching the existing U128 convention).
+    pub fn from_u256_shrink(v: U256) -> Value {
+        if v <= U256::from(u64::MAX) {
+            Value::U64(v.wrapping_to::<u64>())
+        } else if v <= U256::from(u128::MAX) {
+            Value::U128(v.wrapping_to::<u128>())
+        } else {
+            Value::U256(v)
         }
     }
 
@@ -289,6 +393,7 @@ impl Value {
         match self {
             Value::U64(_) => "u64",
             Value::U128(_) => "u128",
+            Value::U256(_) => "u256",
             Value::I64(_) => "i64",
             Value::Bool(_) => "bool",
             Value::Bytes(_) => "bytes",
@@ -306,6 +411,7 @@ impl Value {
             Value::Bool(b) => vec![if *b { 1 } else { 0 }],
             Value::U64(v) => v.to_be_bytes().to_vec(),
             Value::U128(v) => v.to_be_bytes().to_vec(),
+            Value::U256(v) => v.to_be_bytes::<32>().to_vec(),
             Value::I64(v) => v.to_be_bytes().to_vec(),
             Value::Bytes(_) | Value::String(_) => {
                 let data = match self {
@@ -363,6 +469,15 @@ impl Value {
             Value::I64(n) => {
                 let mut b = vec![0u8];
                 b.extend_from_slice(&((*n as i128) as u128).to_be_bytes());
+                b
+            }
+            Value::U256(n) => {
+                let mut b = vec![0u8];
+                if *n <= U256::from(u128::MAX) {
+                    b.extend_from_slice(&n.wrapping_to::<u128>().to_be_bytes());
+                } else {
+                    b.extend_from_slice(&n.to_be_bytes::<32>());
+                }
                 b
             }
             Value::Bool(v) => vec![0u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, if *v { 1 } else { 0 }],

@@ -12,6 +12,7 @@ use crate::errors::AivmError;
 use crate::gas::{GasMeter, PqGasMeter, gas_cost};
 use crate::host::{HostFunctions, Value, execute_host_call, AssetLedger};
 use crate::instructions::Instruction;
+use ruint::aliases::U256;
 use crate::receipt::{EventRecord, Receipt};
 
 /// State overlay — staged writes that commit on success, rollback on trap
@@ -276,6 +277,13 @@ impl Avm {
                     }
                     stack.push(Value::Bool(*b));
                 }
+                Instruction::PushU256(bytes) => {
+                    gas.charge(gas_cost::PUSH_U64)?;
+                    if stack.len() >= self.stack_limit {
+                        return Err(AivmError::StackOverflow);
+                    }
+                    stack.push(Value::U256(U256::from_be_bytes::<32>(*bytes)));
+                }
                 Instruction::LoadState(key) => {
                     gas.charge(gas_cost::LOAD_STATE)?;
                     let val = state.read(*key).unwrap_or(Value::U64(0));
@@ -301,58 +309,81 @@ impl Avm {
                     }
                     frame.locals[*idx as usize] = val;
                 }
+                // AddU64/SubU64/MulU64/DivU64/ModU64 (2026-09-09, U256
+                // support): despite the "U64" opcode names (kept for
+                // bytecode-history/readability reasons -- renaming the
+                // opcode enum wasn't needed to fix this), these now widen
+                // both operands to U256 via `as_u256()` before computing,
+                // then narrow the result back down via
+                // `Value::from_u256_shrink` -- U64 if it still fits (the
+                // overwhelmingly common case, so ordinary small-number
+                // arithmetic keeps producing the exact same Value::U64 and
+                // JSON shape it always did), else U128, else a real U256.
+                // Before this, `as_u64()` capped every operand at
+                // `u64::MAX` and any genuine `u256` arithmetic on a value
+                // above that (e.g. a large token amount) hard-errored with
+                // TypeMismatch -- even though the value itself could
+                // already be loaded/returned/compared fine via
+                // Value::U128/U256, just never computed on.
                 Instruction::AddU64 => {
                     gas.charge(gas_cost::ARITHMETIC)?;
-                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-                    let result = a.checked_add(b)
-                        .ok_or_else(|| {
-                            // Rollback and trap
-                            AivmError::ArithmeticOverflow
-                        })?;
-                    stack.push(Value::U64(result));
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let result = a.checked_add(b).ok_or(AivmError::ArithmeticOverflow)?;
+                    stack.push(Value::from_u256_shrink(result));
                 }
                 Instruction::SubU64 => {
                     gas.charge(gas_cost::ARITHMETIC)?;
-                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-                    let result = a.checked_sub(b)
-                        .ok_or(AivmError::ArithmeticUnderflow)?;
-                    stack.push(Value::U64(result));
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let result = a.checked_sub(b).ok_or(AivmError::ArithmeticUnderflow)?;
+                    stack.push(Value::from_u256_shrink(result));
                 }
                 Instruction::MulU64 => {
                     gas.charge(gas_cost::ARITHMETIC)?;
-                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-                    let result = a.checked_mul(b)
-                        .ok_or(AivmError::ArithmeticOverflow)?;
-                    stack.push(Value::U64(result));
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let result = a.checked_mul(b).ok_or(AivmError::ArithmeticOverflow)?;
+                    stack.push(Value::from_u256_shrink(result));
                 }
                 Instruction::DivU64 => {
                     gas.charge(gas_cost::DIVISION)?;
-                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-                    if b == 0 {
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    if b == U256::ZERO {
                         return Err(AivmError::DivisionByZero);
                     }
-                    stack.push(Value::U64(a / b));
+                    stack.push(Value::from_u256_shrink(a / b));
                 }
                 Instruction::ModU64 => {
                     gas.charge(gas_cost::DIVISION)?;
-                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-                    if b == 0 {
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    if b == U256::ZERO {
                         return Err(AivmError::DivisionByZero);
                     }
-                    stack.push(Value::U64(a % b));
+                    stack.push(Value::from_u256_shrink(a % b));
                 }
                 Instruction::Eq => {
                     gas.charge(gas_cost::COMPARISON)?;
                     let b = stack.pop().ok_or(AivmError::StackUnderflow)?;
                     let a = stack.pop().ok_or(AivmError::StackUnderflow)?;
-                    stack.push(Value::Bool(a == b));
+                    // U256 support (2026-09-09): if both operands are
+                    // numeric-widenable, compare numerically -- otherwise
+                    // e.g. a Value::U64(3) state var and a Value::U256(3)
+                    // arithmetic result (or a literal too big for U64) can
+                    // never structurally == each other even though they're
+                    // the same number, once U256 exists as a distinct
+                    // variant. Falls back to plain structural equality for
+                    // non-numeric values (strings/bytes/bools/arrays/maps),
+                    // exactly as before.
+                    let result = match (a.as_u256(), b.as_u256()) {
+                        (Ok(av), Ok(bv)) => av == bv,
+                        _ => a == b,
+                    };
+                    stack.push(Value::Bool(result));
                 }
-                // Lt/Gt/Ne/Le/Ge use as_u128 (not as_u64) for two reasons
+                // Lt/Gt/Ne/Le/Ge use as_u256 (not as_u64) for two reasons
                 // (2026-08-25): (1) SynQ's u256 type downcasts to
                 // Value::U128 in AIVM's numeric model, so u64 was already
                 // too narrow -- two legitimate large token amounts near
@@ -371,32 +402,32 @@ impl Avm {
                 // opcodes.
                 Instruction::Lt => {
                     gas.charge(gas_cost::COMPARISON)?;
-                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
-                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
                     stack.push(Value::Bool(a < b));
                 }
                 Instruction::Gt => {
                     gas.charge(gas_cost::COMPARISON)?;
-                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
-                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
                     stack.push(Value::Bool(a > b));
                 }
                 Instruction::Ne => {
                     gas.charge(gas_cost::COMPARISON)?;
-                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
-                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
                     stack.push(Value::Bool(a != b));
                 }
                 Instruction::Le => {
                     gas.charge(gas_cost::COMPARISON)?;
-                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
-                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
                     stack.push(Value::Bool(a <= b));
                 }
                 Instruction::Ge => {
                     gas.charge(gas_cost::COMPARISON)?;
-                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
-                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u128()?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
                     stack.push(Value::Bool(a >= b));
                 }
                 Instruction::Jmp(target) => {

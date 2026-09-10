@@ -51,6 +51,16 @@ pub enum Opcode {
     /// raw number 1/0 instead of true/false, so any bool literal return
     /// value (e.g. `return true;`) showed up as "1" instead of "true").
     PushBool = 0x94,
+    /// Push a real `Value::U256` literal with a fixed 32-byte big-endian
+    /// operand (2026-09-09, U256 support). Added because `PushU64`'s 8-byte
+    /// operand can only represent literals up to `u64::MAX` -- any SynQ
+    /// source literal bigger than that (a legitimate `u256` constant, e.g.
+    /// a large token-supply initializer) previously failed to COMPILE at
+    /// all (`aivm_codegen.rs`'s `Literal::BigNumber` arm hard-errored
+    /// "too large for u64"). The compiler now falls back to this opcode
+    /// for any literal that doesn't fit `u64`; small literals still use
+    /// the cheaper `PushU64` unchanged.
+    PushU256 = 0x95,
     /// Pop [key, map] (key on top -- pushed after the map), look up
     /// `map_key_bytes(key)` in the map, push the found value, or -- if the
     /// map slot isn't a `Value::Map` yet (never written) or doesn't
@@ -125,6 +135,7 @@ impl Opcode {
             0x92 => Some(Opcode::ArraySet),
             0x93 => Some(Opcode::PushString),
             0x94 => Some(Opcode::PushBool),
+            0x95 => Some(Opcode::PushU256),
             0xa0 => Some(Opcode::MapGetVal),
             0xa1 => Some(Opcode::MapSetVal),
             _ => None,
@@ -154,6 +165,7 @@ impl Opcode {
             Opcode::ArraySet => 1,
             Opcode::PushString => 4, // length prefix, same framing as PushBytes
             Opcode::PushBool => 1,
+            Opcode::PushU256 => 32,
             Opcode::MapSetVal => 0,
             // One-byte "miss default type" tag -- see MapGetVal(u8) doc on
             // the Instruction enum below.
@@ -200,6 +212,9 @@ pub enum Instruction {
     PushString(String),
     /// Push a real boolean literal as Value::Bool (see Opcode::PushBool doc)
     PushBool(bool),
+    /// Push a real Value::U256 literal (see Opcode::PushU256 doc). Operand
+    /// is the literal's raw 32-byte big-endian representation.
+    PushU256([u8; 32]),
     /// See Opcode::MapGetVal doc. u8 operand = miss-default type tag.
     MapGetVal(u8),
     /// See Opcode::MapSetVal doc.
@@ -294,6 +309,10 @@ impl Instruction {
             Instruction::PushBool(b) => {
                 buf.push(Opcode::PushBool as u8);
                 buf.push(if *b { 1 } else { 0 });
+            }
+            Instruction::PushU256(bytes) => {
+                buf.push(Opcode::PushU256 as u8);
+                buf.extend_from_slice(bytes);
             }
             Instruction::MapGetVal(tag) => {
                 buf.push(Opcode::MapGetVal as u8);
@@ -444,6 +463,15 @@ impl Instruction {
                 Opcode::PushBool => {
                     let b = read_u8(bytes, &mut offset)?;
                     instructions.push(Instruction::PushBool(b != 0));
+                }
+                Opcode::PushU256 => {
+                    if offset + 32 > bytes.len() {
+                        return Err(AivmError::OperandOutOfBounds { offset, needed: 32, available: bytes.len() - offset });
+                    }
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&bytes[offset..offset+32]);
+                    offset += 32;
+                    instructions.push(Instruction::PushU256(arr));
                 }
                 Opcode::MapGetVal => {
                     let tag = read_u8(bytes, &mut offset)?;

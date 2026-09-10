@@ -157,18 +157,29 @@ fn test_state_rollback_on_trap() {
     assert_eq!(val, Value::U64(42)); // original value preserved
 }
 
+// U256 support (2026-09-09): AddU64/SubU64/MulU64/DivU64/ModU64 now widen
+// to a real 256-bit accumulator internally before computing (see vm.rs's
+// doc comment on those opcodes) instead of capping every operand at
+// u64::MAX. `u64::MAX + 1` is therefore no longer an overflow AT ALL --
+// it's a perfectly ordinary number that just doesn't fit in 64 bits, and
+// the AIVM numeric model has always had wider variants (U128, now U256)
+// for exactly that. This test used to assert the OLD, narrower ceiling;
+// it now asserts the CORRECT one: `u64::MAX + 1` succeeds and produces the
+// exact right value (narrowed to Value::U128, per Value::from_u256_shrink
+// -- it fits u128 but not u64), and only a value that overflows the true
+// 256-bit width traps (see aivm/tests/u256_test.rs's
+// test_add_u256_max_overflows for that case).
 #[test]
-fn test_arithmetic_overflow_traps() {
+fn test_u64_max_plus_one_no_longer_overflows() {
     let instructions = vec![
-        // overflow_fn at offset 0
         Instruction::PushU64(u64::MAX),  // 0
         Instruction::PushU64(1),         // 1
-        Instruction::AddU64,              // 2 — overflow!
+        Instruction::AddU64,              // 2 — widens to U256, computes, narrows to U128
         Instruction::Ret,                // 3
     ];
 
     let functions = vec![FunctionEntry {
-        name: "overflow_fn".to_string(),
+        name: "no_overflow_fn".to_string(),
         instruction_offset: 0,
         param_count: 0,
         visibility: FunctionVisibility::Public,
@@ -179,12 +190,8 @@ fn test_arithmetic_overflow_traps() {
     let ctx = make_ctx();
     let mut state = StateOverlay::new();
 
-    let result = avm.execute(0, vec![], &ctx, &mut state);
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        AivmError::ArithmeticOverflow => {}
-        other => panic!("expected ArithmeticOverflow, got {:?}", other),
-    }
+    let result = avm.execute(0, vec![], &ctx, &mut state).expect("u64::MAX + 1 must succeed now that arithmetic is widened");
+    assert_eq!(result.return_value, Some(aivm::host::Value::U128(u64::MAX as u128 + 1)));
 }
 
 #[test]

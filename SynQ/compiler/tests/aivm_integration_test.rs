@@ -498,3 +498,73 @@ fn test_aivm_aegis_call_ml_kem_decaps_rejected_deterministic() {
     assert_eq!(r.receipt.status, ReceiptStatus::Success);
     assert_eq!(r.return_value, Some(Value::Bool(false)));
 }
+
+// ── U256 support (2026-09-09) ──────────────────────────────────────────
+// A SynQ source literal bigger than u64::MAX used to fail to COMPILE at
+// all ("big number ... too large for u64") -- aivm_codegen.rs's
+// Literal::BigNumber arm had no fallback. It now falls back to the new
+// PushU256 opcode. These tests exercise that through the real
+// parse -> compile_to_aivm -> execute pipeline, plus the ABI type mapping
+// that was silently mislabeling every `u256` field/param as `u128`.
+
+const BIG_LITERAL_SOURCE: &str = "contract BigLiteral {\n  impl {\n    @public\n    function getMax() -> u256 {\n      return 115792089237316195423570985008687907853269984665640564039457584007913129639935;\n    }\n  }\n}\n";
+
+#[test]
+fn test_u256_literal_above_u64_max_compiles_and_executes() {
+    let ast = parse(BIG_LITERAL_SOURCE).unwrap();
+    let contract = extract_contract(&ast);
+    // This used to fail at compile_to_aivm() with "big number ... too
+    // large for u64" -- now it succeeds via the PushU256 fallback.
+    let result = compile_to_aivm(contract, &[]).unwrap();
+
+    let host = HostFunctions::default_v01();
+    let avm = Avm::new(result.instructions, result.functions, host);
+    let ctx = ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    let mut state = StateOverlay::new();
+
+    let idx = avm.find_function("getMax").expect("getMax not found");
+    let r = avm.execute(idx, vec![], &ctx, &mut state).unwrap();
+    assert_eq!(r.receipt.status, ReceiptStatus::Success);
+    assert_eq!(
+        r.return_value,
+        Some(Value::U256(ruint::aliases::U256::MAX)),
+        "u256::MAX literal must round-trip exactly, not truncate"
+    );
+}
+
+const U256_STATE_SOURCE: &str = "contract U256State {\n  state {\n    total: u256;\n    amount: u256;\n  }\n  impl {\n    @public\n    function setAmount(v: u256) -> bool {\n      amount = v;\n      return true;\n    }\n\n    @public\n    function addToTotal() -> u256 {\n      total = total + amount;\n      return total;\n    }\n  }\n}\n";
+
+#[test]
+fn test_u256_state_var_abi_mapping() {
+    let ast = parse(U256_STATE_SOURCE).unwrap();
+    let contract = extract_contract(&ast);
+    let result = compile_to_aivm(contract, &[]).unwrap();
+
+    // Both u256 state vars must map to AbiType::U256 in the ABI schema,
+    // not AbiType::U128 (the old mislabeling).
+    let total_field = result.abi.state_schema.iter().find(|f| f.name == "total").unwrap();
+    assert_eq!(total_field.field_type, aivm::abi::AbiType::U256);
+    let amount_field = result.abi.state_schema.iter().find(|f| f.name == "amount").unwrap();
+    assert_eq!(amount_field.field_type, aivm::abi::AbiType::U256);
+}
+
+#[test]
+fn test_u256_state_var_arithmetic_above_u128_max() {
+    let ast = parse(U256_STATE_SOURCE).unwrap();
+    let contract = extract_contract(&ast);
+    let result = compile_to_aivm(contract, &[]).unwrap();
+
+    let host = HostFunctions::default_v01();
+    let avm = Avm::new(result.instructions, result.functions, host);
+    let ctx = ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    let mut state = StateOverlay::new();
+
+    // Seed `amount` (state index 1) directly above u128::MAX.
+    let big = ruint::aliases::U256::from(1u128) << 200;
+    state.write(1, Value::U256(big));
+
+    let idx = avm.find_function("addToTotal").expect("addToTotal not found");
+    let r = avm.execute(idx, vec![], &ctx, &mut state).unwrap();
+    assert_eq!(r.receipt.status, ReceiptStatus::Success);
+    assert_eq!(r.return_value, Some(Value::from_u256_shrink(big)));
+}
