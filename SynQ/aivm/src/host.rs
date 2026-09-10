@@ -539,7 +539,12 @@ pub struct AssetRecord {
     /// truncation (see `Value::as_address` doc comment for the history of
     /// why this used to be a lossy `u128`).
     pub owner: [u8; 41],
-    pub value: u64,
+    /// Full 256-bit value (2026-09-10: widened from `u64`, matching the
+    /// language spec's `value: u256` / `asset_balance(...) -> u256`
+    /// signature above -- a `u64` cap silently broke any realistic
+    /// 18-decimal token amount, the same class of bug as the state-var
+    /// u256 arithmetic gap fixed in `vm.rs`'s Add/Sub/Mul/Div/Mod).
+    pub value: U256,
     pub type_tag: String,
     pub active: bool,
 }
@@ -910,7 +915,7 @@ McEliece, or HQC operation slot exists yet)", builtin
         // Args are pushed by aivm_codegen.rs in source-written order, so the
         // LAST-listed parameter ends up on top of the stack (popped first).
         "asset.create" => {
-            let value = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
+            let value = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
             let type_tag_val = stack.pop().ok_or(AivmError::StackUnderflow)?;
             let type_tag = match &type_tag_val {
                 Value::String(s) => s.clone(),
@@ -965,12 +970,12 @@ McEliece, or HQC operation slot exists yet)", builtin
             if let Some(existing) = assets.records.get_mut(&asset_id) {
                 existing.active = false;
             }
-            stack.push(Value::U64(record.value));
+            stack.push(Value::from_u256_shrink(record.value));
         }
         "asset.balance" => {
             let asset_id = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;
-            let value = assets.records.get(&asset_id).filter(|r| r.active).map(|r| r.value).unwrap_or(0);
-            stack.push(Value::U64(value));
+            let value = assets.records.get(&asset_id).filter(|r| r.active).map(|r| r.value).unwrap_or(U256::ZERO);
+            stack.push(Value::from_u256_shrink(value));
         }
         "asset.owner" => {
             let asset_id = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u64()?;

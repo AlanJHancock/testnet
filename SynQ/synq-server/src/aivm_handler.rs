@@ -204,13 +204,38 @@ pub async fn compile_aivm_handler(
 /// u128 string, switched when `AssetRecord::owner` widened from a lossy
 /// truncated u128 to the full address so `asset_owner(id) == caller()`
 /// compares byte-for-byte (see aivm::host::AssetRecord doc comment).
+/// Accepts a JSON number OR a decimal string for an asset's `value` --
+/// old callers sending a small amount as a bare number (the pre-U256
+/// wire shape) keep working unchanged, while a value that needs the full
+/// U256 range (beyond a JS-safe integer) can be sent as a string.
+fn deserialize_asset_value<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<U256, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumberOrString {
+        Number(u64),
+        String(String),
+    }
+    match NumberOrString::deserialize(deserializer)? {
+        NumberOrString::Number(n) => Ok(U256::from(n)),
+        NumberOrString::String(s) => s.parse::<U256>().map_err(|e| {
+            serde::de::Error::custom(format!("bad asset value (expected decimal string, up to u256): {}: {}", s, e))
+        }),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetRecordWire {
     pub id: u64,
     pub owner: String,
-    pub value: u64,
+    #[serde(deserialize_with = "deserialize_asset_value")]
+    #[serde(serialize_with = "serialize_asset_value")]
+    pub value: U256,
     pub type_tag: String,
     pub active: bool,
+}
+
+fn serialize_asset_value<S: serde::Serializer>(value: &U256, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&value.to_string())
 }
 
 fn default_next_asset_id() -> u64 { 1 }
@@ -1444,6 +1469,62 @@ mod estimate_gas_handler_tests {
             bal_body.return_value, Some(serde_json::json!(12)),
             "balance of the asset minted in the previous call must carry through, not reset to 0: {bal_body:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn asset_value_above_u64_max_survives_full_lifecycle() {
+        // Regression guard for the AssetRecord.value: u64 -> U256 widening
+        // (2026-09-10): the language spec has always declared
+        // `asset_create(type_name, value: u256) -> u256` /
+        // `asset_balance(asset_id) -> u256`, but AssetRecord.value was
+        // hard-capped at u64::MAX via .as_u64() -- any realistic
+        // 18-decimal token amount (or anything else above ~1.8e19) failed
+        // outright with TypeMismatch. Uses a literal above u64::MAX (but
+        // within u128) through the exact same create -> balance ->
+        // transfer -> burn chain as the existing lifecycle test above.
+        let big: u128 = (u64::MAX as u128) + 12345;
+        let src = format!(
+            "contract BigAssetTest {{ state {{ dummy: u256; }} impl {{ @public function run_ops() -> u256 {{ let id: u256 = asset_create(\"Widget\", {big}); let bal: u256 = asset_balance(id); dummy = bal; let new_id: u256 = asset_transfer(id, 999); let burned: u256 = asset_burn(new_id); return burned; }} }} }}"
+        );
+        let state = test_state();
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(req(&src, "run_ops")),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.success, "asset lifecycle with a value above u64::MAX should succeed: {body:?}");
+        assert!(body.errors.is_empty(), "unexpected errors: {:?}", body.errors);
+        // Above u64::MAX narrows to Value::U128, which serializes as a
+        // decimal STRING (see aivm_value_to_json), not a bare JSON number.
+        assert_eq!(body.return_value, Some(serde_json::json!(big.to_string())));
+    }
+
+    #[tokio::test]
+    async fn asset_value_above_u128_max_survives_create_and_balance() {
+        // Same gap, exercised at the true 256-bit ceiling: a value that
+        // doesn't even fit u128 (needs the real Value::U256 variant, not
+        // just the u64->u128 widening AssetRecord already had informally
+        // via casts) must still round-trip through asset_create/asset_balance
+        // exactly, and serialize as the correct full decimal string.
+        let big = "115792089237316195423570985008687907853269984665640564039457584007913129639935"; // U256::MAX
+        let src = format!(
+            "contract HugeAssetTest {{ impl {{ @public function run_ops() -> u256 {{ let id: u256 = asset_create(\"Widget\", {big}); return asset_balance(id); }} }} }}"
+        );
+        let state = test_state();
+        let (status, RespJson(body)) = estimate_gas_handler(
+            ConnectInfo(test_addr()),
+            State(state),
+            Json(req(&src, "run_ops")),
+        ).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.success, "asset lifecycle with a value above u128::MAX should succeed: {body:?}");
+        assert!(body.errors.is_empty(), "unexpected errors: {:?}", body.errors);
+        assert_eq!(body.return_value, Some(serde_json::json!(big)));
+        // final_assets must carry the exact same full-width value back out
+        // through the AssetRecordWire decimal-string wire format.
+        assert_eq!(body.final_assets.len(), 1);
+        assert_eq!(body.final_assets[0].value.to_string(), big);
     }
 
     #[tokio::test]

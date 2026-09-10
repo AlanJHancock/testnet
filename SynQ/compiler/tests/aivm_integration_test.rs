@@ -507,6 +507,39 @@ fn test_aivm_aegis_call_ml_kem_decaps_rejected_deterministic() {
 // parse -> compile_to_aivm -> execute pipeline, plus the ABI type mapping
 // that was silently mislabeling every `u256` field/param as `u128`.
 
+// U256 support, part 2 (2026-09-10): a literal strictly between u64::MAX
+// and u128::MAX arrives from the parser as `Literal::Number(u128)`, NOT
+// `Literal::BigNumber` (that variant is reserved for values that don't
+// even fit u128 -- see ast.rs's doc comment). aivm_codegen.rs's
+// `Literal::Number` arm used to do an unconditional `*n as u64`, a SILENT
+// WRAPPING truncation with no error at all -- worse than the BigNumber
+// gap fixed just above (which at least hard-errored before that fix).
+// Found via `asset_create("Widget", 18446744073709563960)` silently
+// becoming `asset_create("Widget", 12344)`.
+const MID_RANGE_LITERAL_SOURCE: &str = "contract MidRangeLiteral {\n  impl {\n    @public\n    function getBig() -> u256 {\n      return 18446744073709563960;\n    }\n  }\n}\n";
+
+#[test]
+fn test_literal_number_between_u64_and_u128_max_does_not_wrap() {
+    let ast = parse(MID_RANGE_LITERAL_SOURCE).unwrap();
+    let contract = extract_contract(&ast);
+    let result = compile_to_aivm(contract, &[]).unwrap();
+
+    let host = HostFunctions::default_v01();
+    let avm = Avm::new(result.instructions, result.functions, host);
+    let ctx = ExecutionContext::testnet([0u8; 41], [0u8; 41]);
+    let mut state = StateOverlay::new();
+
+    let idx = avm.find_function("getBig").expect("getBig not found");
+    let r = avm.execute(idx, vec![], &ctx, &mut state).unwrap();
+    assert_eq!(r.receipt.status, ReceiptStatus::Success);
+    // Must carry the exact literal value -- NOT wrapped modulo 2^64 down
+    // to 12344. A bare literal return pushes straight through as
+    // Value::U256 (PushU256 does not itself narrow; narrowing only
+    // happens on arithmetic results via from_u256_shrink), so compare
+    // against the U256 form rather than asserting a specific variant.
+    assert_eq!(r.return_value, Some(Value::U256(ruint::aliases::U256::from(18446744073709563960u128))));
+}
+
 const BIG_LITERAL_SOURCE: &str = "contract BigLiteral {\n  impl {\n    @public\n    function getMax() -> u256 {\n      return 115792089237316195423570985008687907853269984665640564039457584007913129639935;\n    }\n  }\n}\n";
 
 #[test]

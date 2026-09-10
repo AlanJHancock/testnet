@@ -639,7 +639,11 @@ impl<'a> CodegenContext<'a> {
             Expression::Literal(lit) => {
                 match lit {
                     Literal::Number(n) => {
-                        self.emit(Instruction::PushU64(*n as u64));
+                        if *n <= u64::MAX as u128 {
+                            self.emit(Instruction::PushU64(*n as u64));
+                        } else {
+                            self.emit(Instruction::PushU256(U256::from(*n).to_be_bytes::<32>()));
+                        }
                     }
                     Literal::BigNumber(s) => {
                         // U256 support (2026-09-09): small-enough BigNumber
