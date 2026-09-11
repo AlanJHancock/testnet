@@ -607,13 +607,44 @@ pub fn compile_synq_ide(source: &str) -> JsValue {
         }
         Err(e) => {
             ok = false;
-            diagnostics.push(serde_json::json!({
-                "severity": "error",
-                "message": e,
-                "line": null,
-                "column": null,
-                "source": "synq-compiler",
-            }));
+            // compile_ir() joins every accumulated error with '\n', one
+            // "<message> --> <line>:<column>" (or a bare message with no
+            // position) per line -- see check_undefined_refs in
+            // SynQ/compiler/src/lib.rs. This used to be pushed as ONE
+            // diagnostic with the whole multi-line string as its message
+            // and line/column hardcoded to null, which meant: (1) two+
+            // real errors in one compile always collapsed into a single
+            // diagnostic entry (the "count" looked wrong), and (2) any
+            // jump-to-source link had nothing to jump to (the "position"
+            // looked wrong) even though the message text itself already
+            // carried a real "--> line:col" suffix per error. Split on
+            // newline and parse that suffix per line so every error the
+            // IR backend found becomes its own diagnostic with a real
+            // position, matching the native /compile server path.
+            for line in e.lines().filter(|l| !l.is_empty()) {
+                let (message, pos) = match line.rfind(" --> ") {
+                    Some(idx) => {
+                        let (msg, rest) = (&line[..idx], &line[idx + 5..]);
+                        match rest.split_once(':') {
+                            Some((l, c)) => {
+                                match (l.trim().parse::<u64>(), c.trim().parse::<u64>()) {
+                                    (Ok(l), Ok(c)) => (msg.to_string(), Some((l, c))),
+                                    _ => (line.to_string(), None),
+                                }
+                            }
+                            None => (line.to_string(), None),
+                        }
+                    }
+                    None => (line.to_string(), None),
+                };
+                diagnostics.push(serde_json::json!({
+                    "severity": "error",
+                    "message": message,
+                    "line": pos.map(|(l, _)| l),
+                    "column": pos.map(|(_, c)| c),
+                    "source": "synq-compiler",
+                }));
+            }
         }
     }
 
