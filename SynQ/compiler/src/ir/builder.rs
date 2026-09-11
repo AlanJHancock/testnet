@@ -18,6 +18,21 @@ use super::instructions::*;
 use super::function::*;
 use super::module::*;
 
+/// Appends a real "--> LINE:COL" span to an IR-build error, using the
+/// enclosing statement's parsed position (`Block.spans`, parallel to
+/// `Block.statements`). Errors bubbling up from `build_statement` (e.g.
+/// "undefined variable: x") otherwise carry no location at all, which
+/// previously forced the ForgeIDE/Playground diagnostic UI to fall back
+/// to a fake "1:1". `(0, 0)` spans (no position captured) and messages
+/// that already carry a more specific "-->" span are left untouched.
+fn attach_span(err: String, span: Span) -> String {
+    if (span.line == 0 && span.column == 0) || err.contains("-->") {
+        err
+    } else {
+        format!("{} --> {}:{}", err, span.line, span.column)
+    }
+}
+
 /// Builds SSA IR from the parsed AST.
 pub struct IrBuilder {
     /// State variable name → (type, memory address)
@@ -222,8 +237,8 @@ impl IrBuilder {
             last_value: None,
         };
 
-        for stmt in &f.body.statements {
-            ctx.build_statement(stmt)?;
+        for (stmt, span) in f.body.statements.iter().zip(&f.body.spans) {
+            ctx.build_statement(stmt).map_err(|e| attach_span(e, *span))?;
         }
 
         // Ensure the current block is terminated
@@ -598,8 +613,8 @@ impl<'a> BuildContext<'a> {
 
                 // Build then block
                 self.current_block = then_block_id;
-                for stmt in &then_block.statements {
-                    self.build_statement(stmt)?;
+                for (stmt, span) in then_block.statements.iter().zip(&then_block.spans) {
+                    self.build_statement(stmt).map_err(|e| attach_span(e, *span))?;
                 }
                 if !self.current_block_terminated() {
                     let jump = Instruction::effect(IrOp::Jump(merge_block_id));
@@ -610,8 +625,8 @@ impl<'a> BuildContext<'a> {
                 // Build else block
                 self.current_block = else_block_id;
                 if let Some(eb) = else_block {
-                    for stmt in &eb.statements {
-                        self.build_statement(stmt)?;
+                    for (stmt, span) in eb.statements.iter().zip(&eb.spans) {
+                        self.build_statement(stmt).map_err(|e| attach_span(e, *span))?;
                     }
                 }
                 if !self.current_block_terminated() {
@@ -648,8 +663,8 @@ impl<'a> BuildContext<'a> {
                 self.current_block = body_id;
                 self.break_targets.push(exit_id);
                 self.continue_targets.push(header_id);
-                for stmt in &body.statements {
-                    self.build_statement(stmt)?;
+                for (stmt, span) in body.statements.iter().zip(&body.spans) {
+                    self.build_statement(stmt).map_err(|e| attach_span(e, *span))?;
                 }
                 self.break_targets.pop();
                 self.continue_targets.pop();

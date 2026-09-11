@@ -35,10 +35,26 @@ pub fn compile_ir(source: &str) -> Result<CompileResult, String> {
     // 1. Parse
     let ast = parser::parse(source)?;
 
-    // 2. Semantic checks per contract
+    // 2. Semantic checks per contract. check_undefined_refs now collects
+    // every undefined-variable/-function error it finds (see its own doc
+    // comment) instead of stopping at the first one -- gather those across
+    // ALL contracts in the file before failing, so e.g. two unrelated typos
+    // in two different functions both come back in one compile instead of
+    // only ever surfacing the first (line-order-wise) one. check_call_graph
+    // only runs once every contract's refs are clean.
+    let mut semantic_errors: Vec<String> = Vec::new();
     for unit in &ast {
         if let SourceUnit::Contract(ref c) = unit {
-            check_undefined_refs(c, &mut warnings)?;
+            if let Err(errs) = check_undefined_refs(c, &mut warnings) {
+                semantic_errors.extend(errs);
+            }
+        }
+    }
+    if !semantic_errors.is_empty() {
+        return Err(semantic_errors.join("\n"));
+    }
+    for unit in &ast {
+        if let SourceUnit::Contract(ref c) = unit {
             check_call_graph(c)?;
         }
     }
@@ -185,7 +201,14 @@ const PQC_BUILTINS: &[&str] = &[
     "extern_call",
 ];
 
-fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String>) -> Result<(), String> {
+fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String>) -> Result<(), Vec<String>> {
+    // Accumulates every undefined-variable/-function error found across the
+    // whole contract. Previously this function returned on the FIRST bad
+    // identifier via `return Err(...)`, so a second, unrelated typo later in
+    // the file (even in a different function) was invisible until the first
+    // one was fixed and the file recompiled. Now every statement is still
+    // checked and all errors are collected, so ForgeIDE/Playground can list
+    // them all in one compile.
     let state_names: HashSet<&str> = contract.parts.iter().filter_map(|p| {
         if let ContractPart::StateVariable(sv) = p { Some(sv.name.as_str()) } else { None }
     }).collect();
@@ -193,6 +216,8 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
     let fn_names: HashSet<&str> = contract.parts.iter().filter_map(|p| {
         if let ContractPart::Function(f) = p { Some(f.name.as_str()) } else { None }
     }).collect();
+
+    let mut errors: Vec<String> = Vec::new();
 
     for part in &contract.parts {
         if let ContractPart::Function(f) = part {
@@ -248,7 +273,7 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                             && !PQC_BUILTINS.contains(&id.as_str())
                             && id != "caller"
                         {
-                            return Err(format!(
+                            errors.push(format!(
                                 "undefined variable '{}' in function '{}' of contract '{}' --> {}:{}",
                                 id, f.name, contract.name, span.line, span.column
                             ));
@@ -261,7 +286,7 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                         if !fn_names.contains(callee.as_str())
                             && !PQC_BUILTINS.contains(&callee.as_str())
                         {
-                            return Err(format!(
+                            errors.push(format!(
                                 "undefined function '{}' called in '{}' of contract '{}' --> {}:{}",
                                 callee, f.name, contract.name, span.line, span.column
                             ));
@@ -273,7 +298,7 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
             }
         }
     }
-    Ok(())
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
 fn check_negative_literal(expr: &Expression, fn_name: &str, warnings: &mut Vec<String>) {

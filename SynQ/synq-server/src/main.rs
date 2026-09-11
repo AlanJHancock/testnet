@@ -1203,7 +1203,8 @@ async fn compile_handler(
         Ok(r)  => r,
         Err(e) => return (StatusCode::OK, RespJson(CompileResponse {
             success: false, bytecode: None, signature_sidecar: None, state_vars: vec![], contract_name: None, contract_address: None, extern_contracts: vec![],
-            errors: vec![format!("Compile error: {}", e)], warnings: vec![],
+            errors: e.lines().map(|line| format!("Compile error: {}", line)).collect(),
+            warnings: vec![],
             functions:        Vec::new(),
             state_var_types:  std::collections::HashMap::new(),
             manifest:           None,
