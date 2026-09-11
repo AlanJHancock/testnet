@@ -207,8 +207,17 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                 }
             }).collect();
 
-            let all_stmts: Vec<&Statement> = f.body.statements.iter().collect();
-            for stmt in all_stmts {
+            // f.body.spans is parallel to f.body.statements (see Block's
+            // doc comment) -- every statement the parser produced carries
+            // its real source line/column. Undefined-variable/-function
+            // errors previously reported no position at all, so Forge's
+            // Problems tab and Contracts panel both fell back to a fake
+            // "line 1" location for these. Zip statements with their span
+            // and append it in the same "--> LINE:COL" form the pest parse
+            // errors already use, so the existing frontend regex that
+            // extracts a diagnostic's real position picks it up for free.
+            for (stmt_idx, stmt) in f.body.statements.iter().enumerate() {
+                let span = f.body.spans.get(stmt_idx).copied().unwrap_or_default();
                 let exprs: Vec<&Expression> = match stmt {
                     Statement::Expression(e) => vec![e],
                     Statement::Require(e, _) => vec![e],
@@ -240,8 +249,8 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                             && id != "caller"
                         {
                             return Err(format!(
-                                "undefined variable '{}' in function '{}' of contract '{}'",
-                                id, f.name, contract.name
+                                "undefined variable '{}' in function '{}' of contract '{}' --> {}:{}",
+                                id, f.name, contract.name, span.line, span.column
                             ));
                         }
                     }
@@ -253,8 +262,8 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                             && !PQC_BUILTINS.contains(&callee.as_str())
                         {
                             return Err(format!(
-                                "undefined function '{}' called in '{}' of contract '{}'",
-                                callee, f.name, contract.name
+                                "undefined function '{}' called in '{}' of contract '{}' --> {}:{}",
+                                callee, f.name, contract.name, span.line, span.column
                             ));
                         }
                     }
