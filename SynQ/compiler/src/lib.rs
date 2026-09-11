@@ -262,6 +262,36 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                     Statement::While { condition, .. } => vec![condition],
                     Statement::Break | Statement::Continue => vec![],
                 };
+                // Assignment-style statements carry a target name
+                // (state var / local / map / set) that lives OUTSIDE the
+                // `exprs` list above, so it was never run through the same
+                // undefined-identifier check as everything else. That
+                // meant a typo'd assignment target (e.g. `nonExistent = 5;`)
+                // slipped past this accumulating pass entirely and only
+                // surfaced later as a single, position-less, fail-fast
+                // "assignment to undefined variable" error out of the IR
+                // builder -- silently swallowing any other errors in the
+                // same compile and breaking the "list every error" guarantee
+                // this function exists to provide. Check it here too, with
+                // the same accumulation and the same real span.
+                let target_name: Option<&str> = match stmt {
+                    Statement::Assignment(name, _) => Some(name.as_str()),
+                    Statement::FieldAssignment { object, .. } => Some(object.as_str()),
+                    Statement::MapAssignment { map, .. } => Some(map.as_str()),
+                    Statement::SetOp { set, .. } => Some(set.as_str()),
+                    _ => None,
+                };
+                if let Some(name) = target_name {
+                    if !state_names.contains(name)
+                        && !param_names.contains(name)
+                        && !let_names.contains(&name.to_string())
+                    {
+                        errors.push(format!(
+                            "undefined variable '{}' in function '{}' of contract '{}' --> {}:{}",
+                            name, f.name, contract.name, span.line, span.column
+                        ));
+                    }
+                }
                 for expr in exprs {
                     // Check identifiers
                     let mut idents = Vec::new();
