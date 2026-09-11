@@ -201,6 +201,59 @@ const PQC_BUILTINS: &[&str] = &[
     "extern_call",
 ];
 
+/// Recursively walks a function body block and returns every statement
+/// paired with its own span, including statements nested inside if/else
+/// and while bodies. check_undefined_refs previously only walked
+/// `f.body.statements` directly -- an If/While's `condition` expression was
+/// checked, but everything inside its `then_block`/`else_block`/loop `body`
+/// was invisible to this pass entirely. A typo'd identifier nested inside
+/// an if-block (or worse, several of them across a longer, more nested
+/// contract) never surfaced here at all; it only ever showed up later, one
+/// at a time with no position, via the IR builder's separate fail-fast
+/// check -- if the compile even got that far. Flatten every nesting level
+/// up front so the existing per-statement checks below run against ALL of
+/// them, not just the top-level ones.
+fn flatten_block_statements<'a>(block: &'a Block, out: &mut Vec<(&'a Statement, Span)>) {
+    for (idx, stmt) in block.statements.iter().enumerate() {
+        let span = block.spans.get(idx).copied().unwrap_or_default();
+        out.push((stmt, span));
+        match stmt {
+            Statement::If { then_block, else_block, .. } => {
+                flatten_block_statements(then_block, out);
+                if let Some(eb) = else_block {
+                    flatten_block_statements(eb, out);
+                }
+            }
+            Statement::While { body, .. } => {
+                flatten_block_statements(body, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Same nested-block blind spot as flatten_block_statements, but for
+/// let-bindings: a `let` declared inside an if/while body was never added
+/// to `let_names`, so once nested statements start being checked at all
+/// (see flatten_block_statements), using that variable later in the same
+/// nested block would otherwise look like an undefined reference. Collect
+/// let-bound names at every nesting depth, function-scoped like the
+/// existing (relaxed, not block-scoped) behavior for top-level lets.
+fn collect_let_names(block: &Block, out: &mut HashSet<String>) {
+    for stmt in &block.statements {
+        match stmt {
+            Statement::Let { name, .. } => { out.insert(name.clone()); }
+            Statement::LetDestructure { names, .. } => { out.extend(names.iter().cloned()); }
+            Statement::If { then_block, else_block, .. } => {
+                collect_let_names(then_block, out);
+                if let Some(eb) = else_block { collect_let_names(eb, out); }
+            }
+            Statement::While { body, .. } => collect_let_names(body, out),
+            _ => {}
+        }
+    }
+}
+
 fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String>) -> Result<(), Vec<String>> {
     // Accumulates every undefined-variable/-function error found across the
     // whole contract. Previously this function returned on the FIRST bad
@@ -223,26 +276,25 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
         if let ContractPart::Function(f) = part {
             let param_names: HashSet<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
 
-            // Collect let-bound variable names (function-scoped)
-            let let_names: HashSet<String> = f.body.statements.iter().flat_map(|s| {
-                match s {
-                    Statement::Let { name, .. } => vec![name.clone()],
-                    Statement::LetDestructure { names, .. } => names.clone(),
-                    _ => vec![],
-                }
-            }).collect();
+            // Collect let-bound variable names (function-scoped, including
+            // ones declared inside nested if/while blocks -- see
+            // collect_let_names's doc comment).
+            let mut let_names: HashSet<String> = HashSet::new();
+            collect_let_names(&f.body, &mut let_names);
 
             // f.body.spans is parallel to f.body.statements (see Block's
             // doc comment) -- every statement the parser produced carries
             // its real source line/column. Undefined-variable/-function
             // errors previously reported no position at all, so Forge's
             // Problems tab and Contracts panel both fell back to a fake
-            // "line 1" location for these. Zip statements with their span
-            // and append it in the same "--> LINE:COL" form the pest parse
-            // errors already use, so the existing frontend regex that
-            // extracts a diagnostic's real position picks it up for free.
-            for (stmt_idx, stmt) in f.body.statements.iter().enumerate() {
-                let span = f.body.spans.get(stmt_idx).copied().unwrap_or_default();
+            // "line 1" location for these. flatten_block_statements zips
+            // every statement (at any nesting depth) with its own span in
+            // the same "--> LINE:COL" form the pest parse errors already
+            // use, so the existing frontend regex that extracts a
+            // diagnostic's real position picks it up for free.
+            let mut flat_statements: Vec<(&Statement, Span)> = Vec::new();
+            flatten_block_statements(&f.body, &mut flat_statements);
+            for (stmt, span) in flat_statements {
                 let exprs: Vec<&Expression> = match stmt {
                     Statement::Expression(e) => vec![e],
                     Statement::Require(e, _) => vec![e],

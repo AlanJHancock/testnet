@@ -120,3 +120,191 @@ contract Counter {
 "#;
     compile_ir(source).expect("valid contract should compile cleanly");
 }
+
+// Bug fixed here: check_undefined_refs only ever walked
+// `f.body.statements` directly. An If/While statement's `condition`
+// expression was checked, but everything inside its `then_block` /
+// `else_block` / loop `body` was completely invisible to this pass --
+// those nested statements were never even visited, let alone checked for
+// undefined identifiers. In practice this meant undefined-reference
+// errors nested inside if/else or while blocks (more common the longer
+// and more branchy a contract gets) went unreported by this accumulating
+// pass entirely, and only ever surfaced later -- one at a time, with no
+// position -- via the IR builder's separate fail-fast check, if the
+// compile even got that far. flatten_block_statements() now recurses into
+// every nesting level so these are collected exactly like top-level ones.
+
+#[test]
+fn undefined_identifier_inside_if_block_is_reported() {
+    let source = r#"pragma synq ^0.9;
+contract Counter {
+    state {
+        counter: u256;
+    }
+    impl {
+        @public
+        function bump(flag: bool) -> u256 {
+            if (flag) {
+                counter = counter + insideIfUndefined;
+            }
+            return counter;
+        }
+    }
+}
+"#;
+    let err = compile_ir(source).expect_err("expected compile failure");
+    assert!(err.contains("insideIfUndefined"), "nested if-block error missing: {err}");
+    assert!(err.contains("-->"), "expected a real source position: {err}");
+}
+
+#[test]
+fn undefined_identifier_inside_else_block_is_reported() {
+    let source = r#"pragma synq ^0.9;
+contract Counter {
+    state {
+        counter: u256;
+    }
+    impl {
+        @public
+        function bump(flag: bool) -> u256 {
+            if (flag) {
+                counter = counter + 1;
+            } else {
+                counter = counter + insideElseUndefined;
+            }
+            return counter;
+        }
+    }
+}
+"#;
+    let err = compile_ir(source).expect_err("expected compile failure");
+    assert!(err.contains("insideElseUndefined"), "nested else-block error missing: {err}");
+}
+
+#[test]
+fn undefined_identifier_inside_while_block_is_reported() {
+    let source = r#"pragma synq ^0.9;
+contract Counter {
+    state {
+        counter: u256;
+    }
+    impl {
+        @public
+        function loopIt(n: u256) -> u256 {
+            while (counter < n) {
+                counter = counter + insideWhileUndefined;
+            }
+            return counter;
+        }
+    }
+}
+"#;
+    let err = compile_ir(source).expect_err("expected compile failure");
+    assert!(err.contains("insideWhileUndefined"), "nested while-block error missing: {err}");
+}
+
+#[test]
+fn undefined_identifiers_top_level_and_nested_all_accumulate_together() {
+    // The exact "long contract, some errors go missing" scenario: one
+    // undefined identifier at the top level of the function plus another
+    // nested two levels deep (while inside if). Both must come back from
+    // a single compile_ir() call, not just the top-level one.
+    let source = r#"pragma synq ^0.9;
+contract Counter {
+    state {
+        counter: u256;
+    }
+    impl {
+        @public
+        function run(flag: bool, n: u256) -> u256 {
+            counter = counter + topLevelUndefined;
+            if (flag) {
+                while (counter < n) {
+                    counter = counter + deeplyNestedUndefined;
+                }
+            }
+            return counter;
+        }
+    }
+}
+"#;
+    let err = compile_ir(source).expect_err("expected compile failure");
+    assert!(err.contains("topLevelUndefined"), "top-level error missing: {err}");
+    assert!(err.contains("deeplyNestedUndefined"), "deeply nested error missing: {err}");
+}
+
+#[test]
+fn undefined_assignment_target_inside_if_block_is_reported() {
+    // Same assignment-target blind spot as the top-level fix above, but
+    // for a target nested inside an if-block.
+    let source = r#"pragma synq ^0.9;
+contract Counter {
+    state {
+        counter: u256;
+    }
+    impl {
+        @public
+        function bump(flag: bool) -> u256 {
+            if (flag) {
+                nestedBadTarget = 5;
+            }
+            return counter;
+        }
+    }
+}
+"#;
+    let err = compile_ir(source).expect_err("expected compile failure");
+    assert!(err.contains("nestedBadTarget"), "nested assignment-target error missing: {err}");
+}
+
+#[test]
+fn let_bound_inside_if_block_is_recognized_as_defined() {
+    // Sanity guard: a `let` declared inside an if-block must not be
+    // falsely flagged as undefined now that nested statements are checked.
+    let source = r#"pragma synq ^0.9;
+contract Counter {
+    state {
+        counter: u256;
+    }
+    impl {
+        @public
+        function bump(flag: bool) -> u256 {
+            if (flag) {
+                let extra: u256 = 1;
+                counter = counter + extra;
+            }
+            return counter;
+        }
+    }
+}
+"#;
+    compile_ir(source).expect("valid contract with nested let should compile cleanly");
+}
+
+#[test]
+fn valid_nested_if_while_contract_still_compiles_clean() {
+    // Sanity guard: a contract with legitimate if/else/while nesting and
+    // no undefined references anywhere must still compile clean -- the
+    // new recursive walk must not introduce false positives.
+    let source = r#"pragma synq ^0.9;
+contract Counter {
+    state {
+        counter: u256;
+    }
+    impl {
+        @public
+        function run(flag: bool, n: u256) -> u256 {
+            if (flag) {
+                while (counter < n) {
+                    counter = counter + 1;
+                }
+            } else {
+                counter = counter + 2;
+            }
+            return counter;
+        }
+    }
+}
+"#;
+    compile_ir(source).expect("valid nested contract should compile cleanly");
+}
