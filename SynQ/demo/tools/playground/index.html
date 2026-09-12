@@ -106,7 +106,7 @@
   .evidence .kv{display:flex;justify-content:space-between;gap:12px;padding:2px 0;border-bottom:1px dashed var(--line-soft);}
   .evidence .kv span:first-child{color:var(--muted-2)}
   .evidence .kv span:last-child{color:#e7f0ea;word-break:break-all;text-align:right}
-  .evidence .warn{color:#e8c766}
+  .evidence .warn{color:#e8c766;white-space:pre-wrap;word-break:break-word;padding:3px 0;}
   .evidence .fn-row{display:flex;justify-content:space-between;padding:4px 0;}
   .evidence .fn-row .name{color:var(--green-bright)}
   .evidence .hash{font-size:11px;color:var(--muted-2)}
@@ -817,8 +817,9 @@ async function compile(){
     const data = await res.json();
     const elapsedMs = Math.round(performance.now() - startedAt);
     if (!data.success) {
-      evidenceEl.innerHTML = '<h4>Compile error</h4>' +
-        '<div class="warn">' + escapeHtml((data.errors||['Unknown error']).join('\n')) + '</div>';
+      const errList = (data.errors && data.errors.length) ? data.errors : ['Unknown error'];
+      evidenceEl.innerHTML = '<h4>Compile error' + (errList.length > 1 ? 's (' + errList.length + ')' : '') + '</h4>' +
+        errList.map(e => '<div class="warn">&middot; ' + escapeHtml(e) + '</div>').join('');
       return;
     }
 
