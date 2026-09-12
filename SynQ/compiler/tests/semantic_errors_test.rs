@@ -308,3 +308,188 @@ contract Counter {
 "#;
     compile_ir(source).expect("valid nested contract should compile cleanly");
 }
+
+// Bug fixed here: check_call_graph had the exact same nested-block blind
+// spot as check_undefined_refs above -- it only ever walked
+// `f.body.statements` at the top level, and for If/While it only fed the
+// `condition` expression into the call-graph adjacency builder, never the
+// statements inside `then_block`/`else_block`/loop `body`. That's not just
+// a missed diagnostic: check_call_graph is what enforces the max static
+// call-chain depth and detects recursive cycles at compile time, so a real
+// self-call or cycle hidden inside a nested if/while could slip past this
+// check entirely and only misbehave at runtime. Fixed by reusing
+// flatten_block_statements to walk every nesting level.
+
+#[test]
+fn recursive_call_nested_inside_if_block_is_detected() {
+    // `looper` calls itself, but only from inside an if-block -- not at
+    // the function's top level. Before the fix, check_call_graph's
+    // adjacency builder only looked at the if's condition, never inside
+    // the then_block, so this self-call was invisible to cycle detection.
+    let source = r#"pragma synq ^0.9;
+contract Looper {
+    state {
+        counter: u256;
+    }
+    impl {
+        @public
+        function looper(flag: bool) -> u256 {
+            if (flag) {
+                counter = looper(flag);
+            }
+            return counter;
+        }
+    }
+}
+"#;
+    let err = compile_ir(source).expect_err("expected recursive call to be detected");
+    assert!(err.contains("recursive call detected"), "expected cycle detection error: {err}");
+    assert!(err.contains("looper"), "expected cycle to name 'looper': {err}");
+}
+
+#[test]
+fn recursive_call_nested_inside_while_block_is_detected() {
+    // Same as above, but the self-call is nested inside a while-loop body.
+    let source = r#"pragma synq ^0.9;
+contract Looper {
+    state {
+        counter: u256;
+    }
+    impl {
+        @public
+        function looper(n: u256) -> u256 {
+            while (counter < n) {
+                counter = looper(n);
+            }
+            return counter;
+        }
+    }
+}
+"#;
+    let err = compile_ir(source).expect_err("expected recursive call to be detected");
+    assert!(err.contains("recursive call detected"), "expected cycle detection error: {err}");
+}
+
+#[test]
+fn call_chain_cycle_hidden_two_levels_deep_is_detected() {
+    // A -> B -> A cycle where the call back to A is nested two levels
+    // deep (while inside if) inside B. Exercises the same recursive
+    // flatten used by the undefined-ref fix, applied to the call graph.
+    let source = r#"pragma synq ^0.9;
+contract Chain {
+    state {
+        counter: u256;
+    }
+    impl {
+        @public
+        function a(flag: bool, n: u256) -> u256 {
+            counter = b(flag, n);
+            return counter;
+        }
+        @public
+        function b(flag: bool, n: u256) -> u256 {
+            if (flag) {
+                while (counter < n) {
+                    counter = a(flag, n);
+                }
+            }
+            return counter;
+        }
+    }
+}
+"#;
+    let err = compile_ir(source).expect_err("expected recursive call to be detected");
+    assert!(err.contains("recursive call detected"), "expected cycle detection error: {err}");
+}
+
+#[test]
+fn non_recursive_calls_nested_in_if_while_still_compile_clean() {
+    // Sanity guard: ordinary (non-cyclic) function calls nested inside
+    // if/while blocks must not be falsely flagged as recursive now that
+    // check_call_graph looks inside those blocks.
+    let source = r#"pragma synq ^0.9;
+contract Chain {
+    state {
+        counter: u256;
+    }
+    impl {
+        @public
+        function helper(x: u256) -> u256 {
+            return x + 1;
+        }
+        @public
+        function run(flag: bool, n: u256) -> u256 {
+            if (flag) {
+                while (counter < n) {
+                    counter = helper(counter);
+                }
+            }
+            return counter;
+        }
+    }
+}
+"#;
+    compile_ir(source).expect("non-recursive nested calls should compile cleanly");
+}
+
+// Bug fixed here: collect_extern_contracts_stmt already recursed into an
+// If's then_block/else_block, but had NO arm for While at all -- an
+// extern_call made inside a while-loop body was silently never added to
+// CompileResult::extern_contracts (used to drive cross-contract wiring,
+// e.g. the EVM workspace deploy path's _set<Dep>Addr() calls).
+
+#[test]
+fn extern_call_inside_while_block_is_collected() {
+    let source = r#"pragma synq ^0.9;
+contract Caller {
+    state {
+        counter: u256;
+    }
+    impl {
+        @public
+        function run(n: u256) -> u256 {
+            while (counter < n) {
+                extern_call("Other", "bump", counter);
+                counter = counter + 1;
+            }
+            return counter;
+        }
+    }
+}
+"#;
+    let result = compile_ir(source).expect("contract should compile cleanly");
+    assert!(
+        result.extern_contracts.iter().any(|c| c == "Other"),
+        "expected 'Other' in extern_contracts, got: {:?}", result.extern_contracts
+    );
+}
+
+#[test]
+fn extern_call_inside_if_nested_in_while_block_is_collected() {
+    // Two levels deep (if inside while) -- confirms the While arm's
+    // recursion into its body correctly revisits nested If statements too.
+    let source = r#"pragma synq ^0.9;
+contract Caller {
+    state {
+        counter: u256;
+    }
+    impl {
+        @public
+        function run(flag: bool, n: u256) -> u256 {
+            while (counter < n) {
+                if (flag) {
+                    extern_call("DeepOther", "bump", counter);
+                }
+                counter = counter + 1;
+            }
+            return counter;
+        }
+    }
+}
+"#;
+    let result = compile_ir(source).expect("contract should compile cleanly");
+    assert!(
+        result.extern_contracts.iter().any(|c| c == "DeepOther"),
+        "expected 'DeepOther' in extern_contracts, got: {:?}", result.extern_contracts
+    );
+}

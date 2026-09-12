@@ -1407,15 +1407,17 @@ async fn compile_handler(
         contract_name:    contract_name.clone(),
         contract_address: contract_address.clone(),
         extern_contracts: {
+            // Delegate to the compiler crate's own recursive walk (handles
+            // extern_calls nested inside if/else/while bodies, not just
+            // top-level statements) instead of maintaining a separate,
+            // drift-prone copy here.
             let mut ec: Vec<String> = Vec::new();
             for unit in &ast {
                 if let synq_compiler::ast::SourceUnit::Contract(c) = unit {
                     for part in &c.parts {
                         if let synq_compiler::ast::ContractPart::Function(f) = part {
                             for stmt in &f.body.statements {
-                                if let synq_compiler::ast::Statement::ExternCall { contract, .. } = stmt {
-                                    if !ec.contains(contract) { ec.push(contract.clone()); }
-                                }
+                                synq_compiler::collect_extern_contracts_stmt(stmt, &mut ec);
                             }
                         }
                     }
@@ -3861,15 +3863,16 @@ async fn sign_source_handler(
     }
 
     // extern_contracts + optional tamper-check
+    // Same delegation as the other /compile endpoint above -- reuse the
+    // compiler crate's recursive walk instead of a separate copy that
+    // only ever saw top-level statements.
     let mut server_extern: Vec<String> = Vec::new();
     for unit in &ast {
         if let synq_compiler::ast::SourceUnit::Contract(c) = unit {
             for part in &c.parts {
                 if let synq_compiler::ast::ContractPart::Function(f) = part {
                     for stmt in &f.body.statements {
-                        if let synq_compiler::ast::Statement::ExternCall { contract, .. } = stmt {
-                            if !server_extern.contains(contract) { server_extern.push(contract.clone()); }
-                        }
+                        synq_compiler::collect_extern_contracts_stmt(stmt, &mut server_extern);
                     }
                 }
             }

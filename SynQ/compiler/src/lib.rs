@@ -419,7 +419,18 @@ fn check_call_graph(contract: &ContractDefinition) -> Result<(), String> {
     for part in &contract.parts {
         if let ContractPart::Function(f) = part {
             let mut calls: Vec<(String, usize)> = Vec::new();
-            for stmt in &f.body.statements {
+            // Same nested-block blind spot as check_undefined_refs had: a
+            // call made inside an if/else or while BODY (not just its
+            // condition) was never visited here, so it never entered the
+            // adjacency list below. That's not just a missed warning --
+            // check_call_graph enforces a max static call-chain depth of 8
+            // and cycle detection, so a real recursive cycle hidden inside
+            // a nested if/while could slip past this check entirely.
+            // flatten_block_statements (see its doc comment above
+            // check_undefined_refs) walks every nesting level.
+            let mut flat_statements: Vec<(&Statement, Span)> = Vec::new();
+            flatten_block_statements(&f.body, &mut flat_statements);
+            for (stmt, _span) in flat_statements {
                 let exprs: Vec<&Expression> = match stmt {
                     Statement::Expression(e) => vec![e],
                     Statement::Require(e, _) => vec![e],
@@ -503,7 +514,20 @@ fn dfs_check<'a>(
 }
 
 /// Recursively walk a statement collecting unique extern_call contract targets.
-fn collect_extern_contracts_stmt(stmt: &crate::ast::Statement, out: &mut Vec<String>) {
+///
+/// `pub` (not just crate-internal) so callers outside this crate -- e.g.
+/// synq-server's own tamper-detection cross-check and response field --
+/// can call this SAME implementation instead of maintaining their own
+/// separate copy. Two such copies drifted from this one and from each
+/// other: both scanned only `f.body.statements` at the top level with no
+/// recursion into nested blocks at all (this function, before its own
+/// fix below, at least recursed into If's then/else; the server copies
+/// didn't even do that), so an extern_call nested inside an if/while body
+/// was silently dropped from `extern_contracts` server-side while the
+/// (also-buggy, differently-buggy) WASM side could disagree, or both
+/// could simply omit it. Fixed at the source so there is exactly one
+/// implementation for every caller to share.
+pub fn collect_extern_contracts_stmt(stmt: &crate::ast::Statement, out: &mut Vec<String>) {
     use crate::ast::Statement;
     match stmt {
         Statement::ExternCall { contract, .. } => {
@@ -514,6 +538,15 @@ fn collect_extern_contracts_stmt(stmt: &crate::ast::Statement, out: &mut Vec<Str
             if let Some(eb) = else_block {
                 for s in &eb.statements { collect_extern_contracts_stmt(s, out); }
             }
+        }
+        // Same nested-block blind spot as the other two checks in this
+        // file: this function already recursed into If's then/else
+        // blocks, but had no While arm at all, so an extern_call made
+        // inside a while-loop body was silently never added to
+        // extern_contracts (used to drive cross-contract wiring, e.g. the
+        // EVM workspace deploy path's _set<Dep>Addr() calls).
+        Statement::While { body, .. } => {
+            for s in &body.statements { collect_extern_contracts_stmt(s, out); }
         }
         _ => {}
     }
