@@ -416,6 +416,41 @@ pub fn compile_synq_ide(source: &str) -> JsValue {
     let mut artifacts: Option<serde_json::Value> = None;
     let ok;
 
+    // Parse once up front, ahead of compile_ir(), and treat a parse
+    // failure as EXACTLY one diagnostic -- mirrors synq-server's
+    // compile_handler (main.rs), which does this same explicit
+    // pre-parse for the identical reason. A parse error's own Display
+    // already spans several lines (span marker, source snippet,
+    // "= expected ..."), unlike compile_ir()'s Err(e) in the semantic-
+    // check case below, where `e` is `semantic_errors.join("\n")` --
+    // each LINE there really is an independent error, safe to split.
+    // Before this check, a parse error (e.g. one missing brace) fell
+    // through to that same `for line in e.lines()` splitter and got
+    // shredded into 5-6 garbage diagnostics (one per line of pest's
+    // ASCII-art output), inflating/overriding the real error count and
+    // burying whatever the file's actual errors were once the brace
+    // was fixed and recompiled.
+    if let Err(e) = parser::parse(source) {
+        ok = false;
+        let message = format!("Parse error: {}", e);
+        let pos = message.find(" --> ").and_then(|i| {
+            let rest = &message[i + 5..];
+            let end = rest.find('\n').unwrap_or(rest.len());
+            rest[..end].split_once(':').and_then(|(l, c)| {
+                match (l.trim().parse::<u64>(), c.trim().parse::<u64>()) {
+                    (Ok(l), Ok(c)) => Some((l, c)),
+                    _ => None,
+                }
+            })
+        });
+        diagnostics.push(serde_json::json!({
+            "severity": "error",
+            "message": message,
+            "line": pos.map(|(l, _)| l),
+            "column": pos.map(|(_, c)| c),
+            "source": "synq-compiler",
+        }));
+    } else {
     match synq_compiler::compile_ir(source) {
         Ok(cr) => {
             ok = true;
@@ -646,6 +681,8 @@ pub fn compile_synq_ide(source: &str) -> JsValue {
                 }));
             }
         }
+    }
+
     }
 
     let result = serde_json::json!({
