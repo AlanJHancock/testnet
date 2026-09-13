@@ -44,6 +44,15 @@ pub enum AddressKind {
     /// (fixed 2026-08-27).
     Token,
     BurnAddress,
+    /// synf (FeeCollector) and syngrp* (ValidatorCluster) get their own
+    /// dedicated variants above; everything else that's protocol-controlled
+    /// infrastructure rather than a spendable/multisig-style user account
+    /// lands here, including the generic `syn`-prefixed fallthrough for
+    /// anything not yet given its own variant. Explicitly includes syndao/
+    /// syno/syny (DAO) and syntxn/synxxn/synixn (transaction identifiers)
+    /// as of the 13 Sep 2026 decision -- see address_kind() for the
+    /// rationale. Reserved synr/syni/synp also land here via the generic
+    /// fallthrough, deliberately left unclassified/future-use.
     System,
     Unknown,
 }
@@ -211,6 +220,27 @@ pub fn address_kind(address: &str) -> AddressKind {
         AddressKind::Contract
     } else if address.starts_with("synb") || address.starts_with("synn") || address.starts_with("synj") || address.starts_with("synk") {
         AddressKind::Token
+    } else if address.starts_with("syndao")
+        || address.starts_with("syno")
+        || address.starts_with("syny")
+        || address.starts_with("syntxn")
+        || address.starts_with("synxxn")
+        || address.starts_with("synixn")
+    {
+        // DAO (syndao/syno/syny) and transaction-identifier (syntxn/synxxn/
+        // synixn) namespaces per the SNTS v1.3 registry. Decision (13 Sep
+        // 2026, Alan): both families are protocol-controlled infrastructure,
+        // not spendable/multisig-style user accounts -- classified
+        // explicitly as System (the same protocol-controlled bucket as
+        // FeeCollector/ValidatorCluster/BurnAddress) rather than left as an
+        // implicit fallthrough. L1 doesn't generate either family yet, so
+        // this had no live behavior to break, but leaving it implicit meant
+        // an unrelated future change to the fallthrough branch could
+        // silently flip this call without anyone deciding to. Reserved
+        // synr/syni/synp intentionally stay on the generic fallthrough
+        // below -- they're unclassified/future-use by design and don't need
+        // an explicit decision yet.
+        AddressKind::System
     } else if address.starts_with("syn") {
         AddressKind::System
     } else {
@@ -231,6 +261,10 @@ pub fn registry_entry_for_prefix(prefix: &str) -> Option<AddressRegistryEntry> {
         "synv1" | "synv2" | "synv3" | "synv4" | "synv5" => AddressKind::Validator,
         "synq" | "sync" => AddressKind::Contract,
         "synb1" | "synb2" | "synb3" | "synn1" | "synn2" | "synj" | "synk" => AddressKind::Token,
+        // DAO / transaction-identifier namespaces -- explicit System
+        // classification per the 13 Sep 2026 decision above (address_kind()
+        // doc comment has the full rationale).
+        "syndao" | "syno" | "syny" | "syntxn" | "synxxn" | "synixn" => AddressKind::System,
         _ => return None,
     };
 
@@ -542,6 +576,56 @@ mod tests {
             assert_eq!(address_kind(&addr), AddressKind::ValidatorCluster);
             assert!(is_protocol_controlled_address(&addr));
             assert!(!is_spendable_user_address(&addr));
+        }
+    }
+
+    #[test]
+    fn dao_and_transaction_id_namespaces_are_system_not_spendable() {
+        // Decision (13 Sep 2026, Alan): syndao/syno/syny (DAO) and
+        // syntxn/synxxn/synixn (transaction identifiers) are
+        // protocol-controlled infrastructure, not spendable/multisig-style
+        // user accounts. Previously both families reached this same System
+        // classification only via the generic implicit fallthrough; this
+        // locks the decision in as an explicit, tested classification so it
+        // can't silently change if the fallthrough branch is ever touched
+        // for an unrelated reason. L1 doesn't generate either family yet,
+        // so there is no live behavior change here -- see
+        // address-engine-migration-scope.md open question #4.
+        for prefix in ["syndao", "syno", "syny", "syntxn", "synxxn", "synixn"] {
+            let addr = generate_generic_address(prefix, ZERO_KEY_HEX);
+            assert_eq!(
+                address_kind(&addr),
+                AddressKind::System,
+                "{} must classify as System",
+                prefix
+            );
+            assert!(
+                is_protocol_controlled_address(&addr),
+                "{} must be protocol-controlled",
+                prefix
+            );
+            assert!(
+                !is_spendable_user_address(&addr),
+                "{} must not be reported as a spendable user address",
+                prefix
+            );
+            let entry = registry_entry_for_prefix(prefix)
+                .unwrap_or_else(|| panic!("{} registry entry", prefix));
+            assert_eq!(entry.address_type, AddressKind::System);
+        }
+    }
+
+    #[test]
+    fn reserved_namespaces_remain_unclassified_by_design() {
+        // synr/syni/synp are explicitly future-use per SNTS v1.3 and were
+        // deliberately left off the DAO/transaction-id decision above --
+        // they still land on the generic fallthrough (reported as System,
+        // same protocol-controlled bucket) without a dedicated registry
+        // entry, since there's nothing to decide about them yet.
+        for prefix in ["synr", "syni", "synp"] {
+            let addr = generate_generic_address(prefix, ZERO_KEY_HEX);
+            assert_eq!(address_kind(&addr), AddressKind::System);
+            assert!(registry_entry_for_prefix(prefix).is_none());
         }
     }
 }
