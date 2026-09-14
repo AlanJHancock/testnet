@@ -6,8 +6,9 @@ use crate::synq_admission::{
     SynQVerificationSummary,
 };
 use aivm_core::execution::{
-    AivmSecurityPolicyRef, ContractArtifact, ContractFormat, ExecutionContext, ExecutionRequest,
-    ExecutionStatus, StsHostContext, StsHostCredential, StsHostFungibleToken, StsHostNft,
+    execution_context_for_manifest, synq_execution_profile_for_manifest, ContractArtifact,
+    ContractFormat, ExecutionContext, ExecutionRequest, ExecutionStatus, StsHostContext,
+    StsHostCredential, StsHostFungibleToken, StsHostNft,
 };
 use aivm_core::state::ContractState;
 use aivm_core::synq_runtime::{
@@ -341,7 +342,13 @@ fn execute_deploy(
     let request = synq_execution_request(
         contract_address.clone(),
         artifact.to_aivm_artifact(),
-        aivm_context(tx, verification, &contract_address, execution_context)?,
+        aivm_context(
+            tx,
+            verification,
+            &contract_address,
+            &artifact.manifest_json,
+            execution_context,
+        )?,
         Vec::new(),
     );
     let receipt = deploy_synq_contract(&request, aivm_state);
@@ -482,7 +489,13 @@ fn execute_call(
     let request = synq_execution_request(
         contract_address.clone(),
         artifact.to_aivm_artifact(),
-        aivm_context(tx, verification, &contract_address, execution_context)?,
+        aivm_context(
+            tx,
+            verification,
+            &contract_address,
+            &artifact.manifest_json,
+            execution_context,
+        )?,
         calldata,
     );
     let receipt = call_synq_contract(&request, aivm_state);
@@ -526,11 +539,18 @@ fn validate_artifact_hashes(
     let contract_id = artifact
         .manifest_contract_name()
         .unwrap_or_else(|| "Counter".to_string());
+    // Build the context for whichever profile this artifact's own manifest
+    // declares (v1/chain 1264/ML-DSA-65 or v2/chain 1266/ML-DSA-87) -- see
+    // execution_context_for_manifest. Hardcoding one profile here would
+    // reject every legitimately-v2 (or a future v3) artifact before it ever
+    // reached validate_synq_artifact's own profile check.
+    let context = execution_context_for_manifest(&artifact.manifest_json, &contract_id, 150_000)
+        .map_err(|error| format!("AIVM artifact validation failed: {error}"))?;
     let request = ExecutionRequest {
         contract_id: contract_id.clone(),
         artifact: artifact.to_aivm_artifact(),
         calldata: Vec::new(),
-        context: ExecutionContext::testnet_1264_for_contract(&contract_id, 150_000),
+        context,
     };
     aivm_core::execution::validate_synq_artifact(&request)
         .map_err(|error| format!("AIVM artifact validation failed: {error}"))?;
@@ -544,12 +564,24 @@ fn aivm_context(
     tx: &Transaction,
     _verification: &SynQVerificationSummary,
     contract_address: &str,
+    manifest_json: &str,
     execution_context: SynQExecutionContext,
 ) -> Result<ExecutionContext, String> {
+    // chain_id/security_policy come from the deployed artifact's OWN
+    // manifest profile (v1/1264/ML-DSA-65 or v2/1266/ML-DSA-87), never from
+    // the outer Aegis tx's chain_id -- the outer tx is always signed for
+    // SYNERGY_TESTNET_V2_CHAIN_ID (1264) regardless of which SynQ profile
+    // the contract itself was compiled/signed under (see the AEGIS-CHAIN
+    // fix in synq_admission.rs for the same principle on the admission
+    // side). Hardcoding tx.chain_id.0 / a single security_policy here made
+    // every v2 (chain 1266) contract fail AIVM execution even after its
+    // admission carrier verified correctly.
+    let (chain_id, security_policy) = synq_execution_profile_for_manifest(manifest_json)
+        .map_err(|error| format!("AIVM artifact validation failed: {error}"))?;
     Ok(ExecutionContext {
         admission_pq_gas_used: GasSchedule::default().pqc_signature_verify_gas,
         runtime_block_height: execution_context.runtime_block_height,
-        chain_id: tx.chain_id.0,
+        chain_id,
         network_id: tx.network_id.0.clone(),
         block_height: 0,
         block_timestamp_unix: execution_context.runtime_block_timestamp_unix,
@@ -558,10 +590,7 @@ fn aivm_context(
         contract_address: contract_address.as_bytes().to_vec(),
         gas_limit: tx.gas_limit,
         pq_gas_limit: 300_000,
-        security_policy: AivmSecurityPolicyRef {
-            policy_id: "synq-testnet-1264-v1".to_string(),
-            required_signature_policy: "ml-dsa-65".to_string(),
-        },
+        security_policy,
         sts_host: execution_context.sts_host.clone(),
     })
 }
