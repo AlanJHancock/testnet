@@ -9833,12 +9833,12 @@ mod tests {
 
     impl RpcCounterSynQFixture {
         fn new() -> Option<Self> {
-            let signer = Sign::mldsa65();
-            let (public_key_bytes, private_key) = signer.keygen().expect("ML-DSA-65 keygen");
+            let signer = Sign::mldsa87();
+            let (public_key_bytes, private_key) = signer.keygen().expect("ML-DSA-87 keygen");
             let public_key = SynQPublicKey::new(public_key_bytes);
             let address = derive_synq_address(
                 &public_key,
-                AlgorithmId::MlDsa65,
+                AlgorithmId::MlDsa87,
                 &PqSynQNetworkId(
                     crate::synq_admission::SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string(),
                 ),
@@ -9908,7 +9908,7 @@ mod tests {
             let deploy = self.deploy_envelope();
             let pqsynq_bytes = serde_json::to_vec(&deploy).expect("deploy JSON");
             crate::synq_admission::build_deploy_admission_carrier_from_pqsynq_bytes_with_artifacts(
-                crate::synergy_types::SYNERGY_TESTNET_V2_CHAIN_ID,
+                crate::synergy_types::SYNERGY_SYNQ_ADMISSION_CHAIN_ID,
                 crate::synergy_types::SYNERGY_TESTNET_V2_NETWORK_ID,
                 &pqsynq_bytes,
                 self.bytecode.clone(),
@@ -9948,7 +9948,7 @@ mod tests {
                 encoded_args_hash,
             };
             crate::synq_admission::build_call_admission_carrier_from_pqsynq_bytes(
-                crate::synergy_types::SYNERGY_TESTNET_V2_CHAIN_ID,
+                crate::synergy_types::SYNERGY_SYNQ_ADMISSION_CHAIN_ID,
                 crate::synergy_types::SYNERGY_TESTNET_V2_NETWORK_ID,
                 &serde_json::to_vec(&call).expect("call JSON"),
                 crate::synq_admission::test_support::TEST_NOW,
@@ -9965,12 +9965,12 @@ mod tests {
         ) -> SynQSigningPayload {
             SynQSigningPayload {
                 domain_tag,
-                chain_id: PqSynQChainId(crate::synergy_types::SYNERGY_TESTNET_V2_CHAIN_ID),
+                chain_id: PqSynQChainId(crate::synergy_types::SYNERGY_SYNQ_ADMISSION_CHAIN_ID),
                 network_id: PqSynQNetworkId(
                     crate::synq_admission::SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string(),
                 ),
                 protocol_version: 1,
-                algorithm_id: AlgorithmId::MlDsa65,
+                algorithm_id: AlgorithmId::MlDsa87,
                 signature_purpose,
                 nonce,
                 not_before_unix: 0,
@@ -9982,9 +9982,9 @@ mod tests {
 
         fn sign_payload(&self, payload: &SynQSigningPayload) -> Vec<u8> {
             let canonical = canonicalize_signing_payload(payload).expect("canonical payload");
-            Sign::mldsa65()
+            Sign::mldsa87()
                 .detached_sign(&canonical, &self.private_key)
-                .expect("ML-DSA-65 sign")
+                .expect("ML-DSA-87 sign")
         }
     }
 
@@ -10580,7 +10580,7 @@ mod tests {
             receipt["synq_verification"]["domain"],
             "SYNQ_CONTRACT_CALL_V1"
         );
-        assert_eq!(receipt["synq_verification"]["algorithm"], "ML-DSA-65");
+        assert_eq!(receipt["synq_verification"]["algorithm"], "ML-DSA-87");
         assert_eq!(receipt["synq_aivm"]["status"], "succeeded");
         assert_eq!(receipt["synq_aivm"]["operation"], "call");
         assert_eq!(

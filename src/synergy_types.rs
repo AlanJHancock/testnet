@@ -6,6 +6,17 @@ use std::fmt;
 pub const SYNERGY_TESTNET_V2_CHAIN_ID: u64 = 1264;
 pub const SYNERGY_TESTNET_V2_NETWORK_ID: &str = "synergy-testnet-v2";
 
+/// Chain id required by the SynQ contract-admission path specifically
+/// (deploy/call carriers verified through `synq_admission::normalize_synq_network`
+/// and `pqsynq::AegisSynQVerifier::testnet_1266()`). This is intentionally a
+/// separate constant from `SYNERGY_TESTNET_V2_CHAIN_ID`/`ChainId::default()`,
+/// which remain 1264 for every other subsystem (consensus, token, general
+/// transactions) pending the broader V2->V3 chain-id cutover. Only the SynQ
+/// admission-carrier gate has been moved to 1266 here, to match the
+/// already-migrated `pqsynq` crate (whose `AegisSynQVerifier` no longer offers
+/// a 1264 policy at all -- see `pqsynq::domain::SYNERGY_TESTNET_CHAIN_ID`).
+pub const SYNERGY_SYNQ_ADMISSION_CHAIN_ID: u64 = 1266;
+
 pub trait CanonicalSerialize: Serialize + DeserializeOwned + Sized + PartialEq {
     fn canonical_bytes(&self) -> Result<Vec<u8>, String> {
         serde_json::to_vec(self).map_err(|error| format!("canonical serialize failed: {error}"))
@@ -31,6 +42,12 @@ pub struct ChainId(pub u64);
 impl ChainId {
     pub const fn synergy_testnet_v2() -> Self {
         Self(SYNERGY_TESTNET_V2_CHAIN_ID)
+    }
+
+    /// Chain id for building/verifying SynQ contract deploy/call admission
+    /// carriers specifically -- see `SYNERGY_SYNQ_ADMISSION_CHAIN_ID`.
+    pub const fn synq_admission_testnet() -> Self {
+        Self(SYNERGY_SYNQ_ADMISSION_CHAIN_ID)
     }
 
     pub fn require_testnet_v2(self) -> Result<(), String> {

@@ -1776,7 +1776,7 @@ fn synq_deploy_payload_from_args(args: &[String]) -> Result<Vec<u8>, String> {
     let abi_json = fs::read_to_string(&abi_path)
         .map_err(|error| format!("failed to read {abi_path}: {error}"))?;
     synergy_testnet::synq_admission::build_deploy_admission_carrier_from_pqsynq_bytes_with_artifacts(
-        ChainId::synergy_testnet_v2().0,
+        ChainId::synq_admission_testnet().0,
         &NetworkId::synergy_testnet_v2().0,
         &pqsynq_bytes,
         bytecode,
@@ -1795,7 +1795,7 @@ fn synq_deploy_payload_from_args(args: &[String]) -> Result<Vec<u8>, String> {
 fn synq_call_payload_from_path(path: &str) -> Result<Vec<u8>, String> {
     let pqsynq_bytes = fs::read(path).map_err(|error| format!("failed to read {path}: {error}"))?;
     synergy_testnet::synq_admission::build_call_admission_carrier_from_pqsynq_bytes(
-        ChainId::synergy_testnet_v2().0,
+        ChainId::synq_admission_testnet().0,
         &NetworkId::synergy_testnet_v2().0,
         &pqsynq_bytes,
         current_timestamp(),
@@ -2004,7 +2004,7 @@ fn apply_payload_args(
             + synq_abi.is_some() as u8;
         options.payload = if artifact_arg_count == 0 {
             synergy_testnet::synq_admission::build_deploy_admission_carrier_from_pqsynq_bytes(
-                ChainId::synergy_testnet_v2().0,
+                ChainId::synq_admission_testnet().0,
                 &NetworkId::synergy_testnet_v2().0,
                 &pqsynq_bytes,
                 current_timestamp(),
@@ -2026,7 +2026,7 @@ fn apply_payload_args(
             let abi_json = fs::read_to_string(&abi_path)
                 .map_err(|error| format!("failed to read {abi_path}: {error}"))?;
             synergy_testnet::synq_admission::build_deploy_admission_carrier_from_pqsynq_bytes_with_artifacts(
-                ChainId::synergy_testnet_v2().0,
+                ChainId::synq_admission_testnet().0,
                 &NetworkId::synergy_testnet_v2().0,
                 &pqsynq_bytes,
                 bytecode,
@@ -2057,7 +2057,7 @@ fn apply_payload_args(
             fs::read(&path).map_err(|error| format!("failed to read {path}: {error}"))?;
         options.payload =
             synergy_testnet::synq_admission::build_call_admission_carrier_from_pqsynq_bytes(
-                ChainId::synergy_testnet_v2().0,
+                ChainId::synq_admission_testnet().0,
                 &NetworkId::synergy_testnet_v2().0,
                 &pqsynq_bytes,
                 current_timestamp(),

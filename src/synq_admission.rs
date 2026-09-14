@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::synergy_types::{
-    Hash, Transaction, SYNERGY_TESTNET_V2_CHAIN_ID, SYNERGY_TESTNET_V2_NETWORK_ID,
+    Hash, Transaction, SYNERGY_SYNQ_ADMISSION_CHAIN_ID, SYNERGY_TESTNET_V2_NETWORK_ID,
 };
 use pqsynq::{
     AegisSynQVerifier, AlgorithmId, ChainId, ContractCallEnvelope, ContractDeployEnvelope,
@@ -115,7 +115,7 @@ impl SynQAdmissionError {
             Self::Decode { code, .. } => code,
             Self::UnsupportedVersion { .. } => "SYNQ-VERSION",
             Self::UnsupportedKind { .. } => "SYNQ-KIND",
-            Self::NetworkMismatch { chain_id, .. } if *chain_id != SYNERGY_TESTNET_V2_CHAIN_ID => {
+            Self::NetworkMismatch { chain_id, .. } if *chain_id != SYNERGY_SYNQ_ADMISSION_CHAIN_ID => {
                 "AEGIS-CHAIN"
             }
             Self::NetworkMismatch { .. } => "AEGIS-NETWORK",
@@ -161,7 +161,7 @@ pub fn normalize_synq_network(
     chain_id: u64,
     network_id: &str,
 ) -> Result<NormalizedSynQNetwork, SynQAdmissionError> {
-    if chain_id != SYNERGY_TESTNET_V2_CHAIN_ID {
+    if chain_id != SYNERGY_SYNQ_ADMISSION_CHAIN_ID {
         return Err(SynQAdmissionError::NetworkMismatch {
             chain_id,
             network_id: network_id.to_string(),
@@ -437,15 +437,24 @@ pub fn verify_transaction_payload_for_chain_admission(
     let Some(envelope) = decode_synq_admission_carrier(&tx.payload)? else {
         return Ok(None);
     };
-    if envelope.chain_id != tx.chain_id.0 {
-        return Err(SynQAdmissionError::NetworkMismatch {
-            chain_id: envelope.chain_id,
-            network_id: envelope.network_id,
-        });
-    }
+    // NOTE: the outer Aegis-signed transaction and the inner SynQ admission
+    // carrier are intentionally allowed to declare *different* chain ids
+    // during this migration window. Aegis PQVM transaction signing/
+    // verification hard-requires chain_id == SYNERGY_TESTNET_V2_CHAIN_ID
+    // (1264) for every transaction (see crypto/aegis_pqvm.rs), while the
+    // pqsynq AegisSynQVerifier that authenticates SynQ deploy/call carriers
+    // has already migrated to SYNERGY_SYNQ_ADMISSION_CHAIN_ID (1266) with no
+    // 1264 policy at all. Requiring `envelope.chain_id == tx.chain_id.0` here
+    // would therefore make every SynQ carrier unadmittable no matter what it
+    // contains -- both chain ids are independently authenticated by their
+    // own signature layer (Aegis for the outer tx, pqsynq/ML-DSA-87 for the
+    // inner carrier), so cross-equality between them adds no real security;
+    // it was only ever true incidentally, back when both subsystems shared
+    // one chain id. `envelope.chain_id`'s own validity is still enforced
+    // below via `normalize_synq_network` inside verify_synq_*_for_chain_admission.
     if envelope.network_id != tx.network_id.0
         && normalize_synq_network(envelope.chain_id, &envelope.network_id)?.pqsynq_network_id
-            != normalize_synq_network(tx.chain_id.0, &tx.network_id.0)?.pqsynq_network_id
+            != normalize_synq_network(envelope.chain_id, &tx.network_id.0)?.pqsynq_network_id
     {
         return Err(SynQAdmissionError::NetworkMismatch {
             chain_id: envelope.chain_id,
@@ -1427,7 +1436,7 @@ pub(crate) mod test_support {
         SynQAdmissionEnvelope {
             version: SYNQ_ADMISSION_VERSION,
             kind: SynQAdmissionKind::Deploy,
-            chain_id: SYNERGY_TESTNET_V2_CHAIN_ID,
+            chain_id: SYNERGY_SYNQ_ADMISSION_CHAIN_ID,
             network_id: network_id.to_string(),
             signer: deploy
                 .signing_payload
@@ -1477,7 +1486,7 @@ pub(crate) mod test_support {
         SynQAdmissionEnvelope {
             version: SYNQ_ADMISSION_VERSION,
             kind: SynQAdmissionKind::Call,
-            chain_id: SYNERGY_TESTNET_V2_CHAIN_ID,
+            chain_id: SYNERGY_SYNQ_ADMISSION_CHAIN_ID,
             network_id: network_id.to_string(),
             signer: call
                 .signing_payload
@@ -1497,12 +1506,12 @@ pub(crate) mod test_support {
     }
 
     fn test_identity() -> (SynQPublicKey, Vec<u8>, SynQAddress) {
-        let signer = Sign::mldsa65();
-        let (public_key, private_key) = signer.keygen().expect("ML-DSA-65 keygen");
+        let signer = Sign::mldsa87();
+        let (public_key, private_key) = signer.keygen().expect("ML-DSA-87 keygen");
         let public_key = SynQPublicKey::new(public_key);
         let address = derive_synq_address(
             &public_key,
-            AlgorithmId::MlDsa65,
+            AlgorithmId::MlDsa87,
             &NetworkId(SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string()),
         )
         .expect("derive SynQ address");
@@ -1518,10 +1527,10 @@ pub(crate) mod test_support {
     ) -> SynQSigningPayload {
         SynQSigningPayload {
             domain_tag,
-            chain_id: ChainId(SYNERGY_TESTNET_V2_CHAIN_ID),
+            chain_id: ChainId(SYNERGY_SYNQ_ADMISSION_CHAIN_ID),
             network_id: NetworkId(SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string()),
             protocol_version: 1,
-            algorithm_id: AlgorithmId::MlDsa65,
+            algorithm_id: AlgorithmId::MlDsa87,
             signature_purpose,
             nonce,
             not_before_unix: 0,
@@ -1533,9 +1542,9 @@ pub(crate) mod test_support {
 
     fn sign_payload(payload: &SynQSigningPayload, private_key: &[u8]) -> Vec<u8> {
         let canonical = canonicalize_signing_payload(payload).expect("canonical payload");
-        Sign::mldsa65()
+        Sign::mldsa87()
             .detached_sign(&canonical, private_key)
-            .expect("ML-DSA-65 sign")
+            .expect("ML-DSA-87 sign")
     }
 }
 
@@ -1545,9 +1554,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn network_alias_normalization_accepts_testnet_names_for_chain_1264() {
+    fn network_alias_normalization_accepts_testnet_names_for_chain_1266() {
         let canonical = normalize_synq_network(
-            SYNERGY_TESTNET_V2_CHAIN_ID,
+            SYNERGY_SYNQ_ADMISSION_CHAIN_ID,
             SYNQ_CANONICAL_TESTNET_NETWORK_ID,
         )
         .expect("canonical testnet accepted");
@@ -1557,7 +1566,7 @@ mod tests {
         );
 
         let node_alias =
-            normalize_synq_network(SYNERGY_TESTNET_V2_CHAIN_ID, SYNERGY_TESTNET_V2_NETWORK_ID)
+            normalize_synq_network(SYNERGY_SYNQ_ADMISSION_CHAIN_ID, SYNERGY_TESTNET_V2_NETWORK_ID)
                 .expect("node testnet alias accepted");
         assert_eq!(
             node_alias.pqsynq_network_id,
@@ -1571,7 +1580,7 @@ mod tests {
             .expect_err("wrong chain rejected");
         assert_eq!(wrong_chain.code(), "AEGIS-CHAIN");
 
-        let wrong_network = normalize_synq_network(SYNERGY_TESTNET_V2_CHAIN_ID, "mainnet")
+        let wrong_network = normalize_synq_network(SYNERGY_SYNQ_ADMISSION_CHAIN_ID, "mainnet")
             .expect_err("wrong network rejected");
         assert_eq!(wrong_network.code(), "AEGIS-NETWORK");
     }
@@ -1584,7 +1593,7 @@ mod tests {
         )
         .expect("SynQ deploy carrier verified");
         assert_eq!(summary.domain, "SYNQ_CONTRACT_DEPLOY_V1");
-        assert_eq!(summary.algorithm, "ML-DSA-65");
+        assert_eq!(summary.algorithm, "ML-DSA-87");
         assert!(summary.verified_at_admission);
         assert_eq!(summary.bytecode_hash, Some(hash(1)));
     }
@@ -1597,7 +1606,7 @@ mod tests {
         )
         .expect("SynQ call carrier verified");
         assert_eq!(summary.domain, "SYNQ_CONTRACT_CALL_V1");
-        assert_eq!(summary.algorithm, "ML-DSA-65");
+        assert_eq!(summary.algorithm, "ML-DSA-87");
         assert!(summary.verified_at_admission);
     }
 
@@ -1656,7 +1665,7 @@ mod tests {
     fn pqsynq_deploy_bytes_wrap_into_versioned_admission_carrier() {
         let source = deploy_carrier(SYNERGY_TESTNET_V2_NETWORK_ID);
         let bytes = build_deploy_admission_carrier_from_pqsynq_bytes(
-            SYNERGY_TESTNET_V2_CHAIN_ID,
+            SYNERGY_SYNQ_ADMISSION_CHAIN_ID,
             SYNERGY_TESTNET_V2_NETWORK_ID,
             &source.encoded_pqsynq_envelope,
             TEST_NOW,
@@ -1675,7 +1684,7 @@ mod tests {
     fn pqsynq_call_bytes_wrap_into_versioned_admission_carrier() {
         let source = call_carrier(SYNERGY_TESTNET_V2_NETWORK_ID);
         let bytes = build_call_admission_carrier_from_pqsynq_bytes(
-            SYNERGY_TESTNET_V2_CHAIN_ID,
+            SYNERGY_SYNQ_ADMISSION_CHAIN_ID,
             SYNERGY_TESTNET_V2_NETWORK_ID,
             &source.encoded_pqsynq_envelope,
             TEST_NOW,
