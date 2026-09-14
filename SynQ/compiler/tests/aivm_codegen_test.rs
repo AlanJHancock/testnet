@@ -103,3 +103,77 @@ fn test_aivm_codegen_function_call_resolution() {
         assert!(has_call, "No Call instruction found in output");
     }
 }
+
+/// Bitwise/shift operators (2026-09-14, bitwise/shift support): previously
+/// hard-errored at compile time on the AIVM backend ("use the IR/VM
+/// compilation path for u256 bitwise ops"). Now compiles to real BitAnd/
+/// BitOr/BitXor/Shl/Shr opcodes, with `~` synthesized as `x XOR 0xFF..FF`
+/// (PushU256 + BitXor, no dedicated BitNot opcode needed).
+#[test]
+fn test_aivm_codegen_bitwise_ops_no_longer_error() {
+    let source = r#"contract Bitwise {
+    state {
+        result: u256;
+    }
+    impl {
+        @public
+        function init() -> bool {
+            result = 0;
+            return true;
+        }
+
+        @public
+        function bit_and(a: u256, b: u256) -> u256 {
+            return a & b;
+        }
+
+        @public
+        function bit_or(a: u256, b: u256) -> u256 {
+            return a | b;
+        }
+
+        @public
+        function bit_xor(a: u256, b: u256) -> u256 {
+            return a ^ b;
+        }
+
+        @public
+        function shift_left(a: u256, b: u256) -> u256 {
+            return a << b;
+        }
+
+        @public
+        function shift_right(a: u256, b: u256) -> u256 {
+            return a >> b;
+        }
+
+        @public
+        function bit_not(a: u256) -> u256 {
+            return ~a;
+        }
+    }
+}"#;
+
+    let units = parse(source).unwrap();
+    if let SourceUnit::Contract(def) = &units[0] {
+        let result = compile_to_aivm(def, &[])
+            .expect("bitwise/shift ops must compile on the AIVM backend now");
+
+        let instr_dbg: Vec<String> = result.instructions.iter()
+            .map(|i| format!("{:?}", i))
+            .collect();
+
+        let has = |needle: &str| instr_dbg.iter().any(|s| s.contains(needle));
+
+        assert!(has("BitAnd"), "BitAnd opcode missing: {:?}", instr_dbg);
+        assert!(has("BitOr"), "BitOr opcode missing: {:?}", instr_dbg);
+        assert!(has("BitXor"), "BitXor opcode missing: {:?}", instr_dbg);
+        assert!(has("Shl"), "Shl opcode missing: {:?}", instr_dbg);
+        assert!(has("Shr"), "Shr opcode missing: {:?}", instr_dbg);
+        // bit_not() has no dedicated opcode -- verify it synthesizes as
+        // PushU256(all-ones) + BitXor instead.
+        assert!(has("PushU256"), "PushU256 (for ~ synthesis) missing: {:?}", instr_dbg);
+    } else {
+        panic!("expected a contract");
+    }
+}

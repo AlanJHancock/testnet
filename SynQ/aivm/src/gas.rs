@@ -30,6 +30,8 @@ pub mod gas_cost {
     pub const LOAD_LOCAL: u64 = 2;
     pub const STORE_LOCAL: u64 = 2;
     pub const ARITHMETIC: u64 = 5;
+    /// BitAnd/BitOr/BitXor/Shl/Shr (2026-09-14, bitwise/shift support) -- priced the same as ARITHMETIC.
+    pub const BITWISE: u64 = 5;
     pub const DIVISION: u64 = 10;
     pub const COMPARISON: u64 = 3;
     pub const JUMP: u64 = 5;

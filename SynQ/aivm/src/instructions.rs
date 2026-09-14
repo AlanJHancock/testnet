@@ -21,6 +21,25 @@ pub enum Opcode {
     MulU64 = 0x22,
     DivU64 = 0x23,
     ModU64 = 0x24,
+    /// Bitwise AND, full 256-bit width (2026-09-14, bitwise/shift
+    /// support). Pops [b, a] (b on top), pushes a & b -- same
+    /// widen-to-U256-then-narrow pattern as AddU64/SubU64/etc.
+    BitAnd = 0x25,
+    /// Bitwise OR, full 256-bit width. See BitAnd doc.
+    BitOr = 0x26,
+    /// Bitwise XOR, full 256-bit width. See BitAnd doc. The compiler
+    /// also uses this to synthesize `~x` (bitwise complement) as
+    /// `x XOR 0xFF..FF` -- no dedicated BitNot opcode needed, mirrors
+    /// the IR/VM path's own approach (compiler/src/ir/lower.rs).
+    BitXor = 0x27,
+    /// Logical left shift, full 256-bit width. Pops [b, a] (b on top,
+    /// shift amount), pushes a << b. Shift amounts >= 256 saturate to
+    /// zero (ruint's Shl impl already implements this -- same type
+    /// used by the IR/VM path's identical BitAnd/.../Shr ops).
+    Shl = 0x28,
+    /// Logical right shift, full 256-bit width. Same operand order and
+    /// saturation behavior as Shl.
+    Shr = 0x29,
     Eq = 0x30,
     Lt = 0x31,
     Gt = 0x32,
@@ -131,6 +150,11 @@ impl Opcode {
             0x22 => Some(Opcode::MulU64),
             0x23 => Some(Opcode::DivU64),
             0x24 => Some(Opcode::ModU64),
+            0x25 => Some(Opcode::BitAnd),
+            0x26 => Some(Opcode::BitOr),
+            0x27 => Some(Opcode::BitXor),
+            0x28 => Some(Opcode::Shl),
+            0x29 => Some(Opcode::Shr),
             0x30 => Some(Opcode::Eq),
             0x31 => Some(Opcode::Lt),
             0x32 => Some(Opcode::Gt),
@@ -168,6 +192,7 @@ impl Opcode {
             Opcode::LoadLocal => 2,
             Opcode::StoreLocal => 2,
             Opcode::AddU64 | Opcode::SubU64 | Opcode::MulU64 | Opcode::DivU64 | Opcode::ModU64 => 0,
+            Opcode::BitAnd | Opcode::BitOr | Opcode::BitXor | Opcode::Shl | Opcode::Shr => 0,
             Opcode::Eq | Opcode::Lt | Opcode::Gt | Opcode::Ne | Opcode::Le | Opcode::Ge => 0,
             Opcode::Jmp | Opcode::JmpIf => 4,
             Opcode::Call => 4,
@@ -205,6 +230,16 @@ pub enum Instruction {
     MulU64,
     DivU64,
     ModU64,
+    /// See Opcode::BitAnd doc.
+    BitAnd,
+    /// See Opcode::BitOr doc.
+    BitOr,
+    /// See Opcode::BitXor doc.
+    BitXor,
+    /// See Opcode::Shl doc.
+    Shl,
+    /// See Opcode::Shr doc.
+    Shr,
     Eq,
     Lt,
     Gt,
@@ -275,6 +310,11 @@ impl Instruction {
             Instruction::MulU64 => buf.push(Opcode::MulU64 as u8),
             Instruction::DivU64 => buf.push(Opcode::DivU64 as u8),
             Instruction::ModU64 => buf.push(Opcode::ModU64 as u8),
+            Instruction::BitAnd => buf.push(Opcode::BitAnd as u8),
+            Instruction::BitOr => buf.push(Opcode::BitOr as u8),
+            Instruction::BitXor => buf.push(Opcode::BitXor as u8),
+            Instruction::Shl => buf.push(Opcode::Shl as u8),
+            Instruction::Shr => buf.push(Opcode::Shr as u8),
             Instruction::Eq => buf.push(Opcode::Eq as u8),
             Instruction::Lt => buf.push(Opcode::Lt as u8),
             Instruction::Gt => buf.push(Opcode::Gt as u8),
@@ -422,6 +462,11 @@ impl Instruction {
                 Opcode::MulU64 => instructions.push(Instruction::MulU64),
                 Opcode::DivU64 => instructions.push(Instruction::DivU64),
                 Opcode::ModU64 => instructions.push(Instruction::ModU64),
+                Opcode::BitAnd => instructions.push(Instruction::BitAnd),
+                Opcode::BitOr => instructions.push(Instruction::BitOr),
+                Opcode::BitXor => instructions.push(Instruction::BitXor),
+                Opcode::Shl => instructions.push(Instruction::Shl),
+                Opcode::Shr => instructions.push(Instruction::Shr),
                 Opcode::Eq => instructions.push(Instruction::Eq),
                 Opcode::Lt => instructions.push(Instruction::Lt),
                 Opcode::Gt => instructions.push(Instruction::Gt),

@@ -735,10 +735,18 @@ impl<'a> CodegenContext<'a> {
                     BinaryOperator::Gt => self.emit(Instruction::Gt),
                     BinaryOperator::Ge => self.emit(Instruction::Ge),
                     BinaryOperator::And | BinaryOperator::Or => {} // handled above
-                    BinaryOperator::BitAnd | BinaryOperator::BitOr | BinaryOperator::BitXor
-                    | BinaryOperator::Shl | BinaryOperator::Shr => {
-                        return Err("Bitwise/shift operators (&, |, ^, <<, >>) are not supported on the AIVM backend (64-bit words only) — use the IR/VM compilation path for u256 bitwise ops".to_string());
-                    }
+                    // Bitwise/shift ops (2026-09-14, bitwise/shift support):
+                    // previously hard-errored here, telling callers to use
+                    // the IR/VM path instead. AIVM now has real BitAnd/
+                    // BitOr/BitXor/Shl/Shr opcodes (aivm/src/instructions.rs,
+                    // aivm/src/vm.rs) operating at full 256-bit width via
+                    // the same as_u256()/from_u256_shrink widening the
+                    // arithmetic opcodes already use.
+                    BinaryOperator::BitAnd => self.emit(Instruction::BitAnd),
+                    BinaryOperator::BitOr => self.emit(Instruction::BitOr),
+                    BinaryOperator::BitXor => self.emit(Instruction::BitXor),
+                    BinaryOperator::Shl => self.emit(Instruction::Shl),
+                    BinaryOperator::Shr => self.emit(Instruction::Shr),
                 }
             }
             Expression::UnaryOp(op, expr) => {
@@ -754,7 +762,14 @@ impl<'a> CodegenContext<'a> {
                         self.emit(Instruction::SubU64);
                     }
                     UnaryOperator::BitNot => {
-                        return Err("Bitwise complement (~) is not supported on the AIVM backend (64-bit words only) — use the IR/VM compilation path for u256 bitwise ops".to_string());
+                        // ~x = x XOR all-ones, evaluated at full 256-bit
+                        // width -- mirrors the IR/VM path's own approach
+                        // (compiler/src/ir/lower.rs) since there's no
+                        // dedicated BitNot opcode in AIVM either (2026-09-14,
+                        // bitwise/shift support).
+                        self.gen_expr(expr)?;
+                        self.emit(Instruction::PushU256([0xFFu8; 32]));
+                        self.emit(Instruction::BitXor);
                     }
                 }
             }

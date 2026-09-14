@@ -372,6 +372,51 @@ impl Avm {
                     }
                     stack.push(Value::from_u256_shrink(a % b));
                 }
+                // BitAnd/BitOr/BitXor/Shl/Shr (2026-09-14, bitwise/shift
+                // support): AIVM previously had no bitwise/shift opcodes at
+                // all -- aivm_codegen.rs hard-errored "not supported on the
+                // AIVM backend, use the IR/VM path" for `& | ^ << >>` (and
+                // `~`, synthesized by the compiler as `x XOR 0xFF..FF` --
+                // see UnaryOperator::BitNot in aivm_codegen.rs, no dedicated
+                // opcode needed). Same widen-to-U256-then-narrow pattern as
+                // the AddU64/SubU64/etc arithmetic fix: both operands go
+                // through as_u256(), the op runs at full 256-bit width via
+                // ruint::aliases::U256's own bit ops (the exact same type
+                // and operators the IR/VM path already used at
+                // vm/src/vm.rs's BitAnd/BitOr/BitXor/Shl/Shr), result
+                // narrows back via Value::from_u256_shrink. Shift amounts
+                // >= 256 saturate to zero (ruint's Shl/Shr impls already
+                // implement this -- no separate check needed here).
+                Instruction::BitAnd => {
+                    gas.charge(gas_cost::BITWISE)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    stack.push(Value::from_u256_shrink(a & b));
+                }
+                Instruction::BitOr => {
+                    gas.charge(gas_cost::BITWISE)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    stack.push(Value::from_u256_shrink(a | b));
+                }
+                Instruction::BitXor => {
+                    gas.charge(gas_cost::BITWISE)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    stack.push(Value::from_u256_shrink(a ^ b));
+                }
+                Instruction::Shl => {
+                    gas.charge(gas_cost::BITWISE)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    stack.push(Value::from_u256_shrink(a << b));
+                }
+                Instruction::Shr => {
+                    gas.charge(gas_cost::BITWISE)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
+                    stack.push(Value::from_u256_shrink(a >> b));
+                }
                 Instruction::Eq => {
                     gas.charge(gas_cost::COMPARISON)?;
                     let b = stack.pop().ok_or(AivmError::StackUnderflow)?;
