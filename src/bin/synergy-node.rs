@@ -22,6 +22,7 @@ fn run() -> Result<(), String> {
         "tx" => run_tx_command(&args)?,
         "dag" => run_dag_command(&args)?,
         "synq" => run_synq_command(&args)?,
+        "rpc-serve" => run_rpc_serve_command(&args)?,
         "recovery" => run_recovery_command(&args)?,
         "validator" => run_validator_command(&args)?,
         "fleet" => run_fleet_command(&args)?,
@@ -1620,9 +1621,15 @@ fn run_synq_command(args: &[String]) -> Result<(), String> {
             require_testnet_args(args)?;
             print_json(synq_replay_flow_report(args)?)?;
         }
+        "build-carrier" => {
+            require_testnet_args(args)?;
+            print_json(synq_build_carrier_report(args)?)?;
+        }
         _ => {
             println!("Commands:");
             println!("  synergy-node synq replay-flow --chain-id 1264 --network-id synergy-testnet-v2 --synq-deploy-envelope <ContractDeployEnvelope.json> --synq-bytecode <Counter.compiled.synq> --synq-manifest <Counter.manifest.json> --synq-abi <Counter.abi.json> [--synq-call-envelope <ContractCallEnvelope.json> ...] [--base-nonce <n>]");
+            println!("  synergy-node synq build-carrier --chain-id 1264 --network-id synergy-testnet-v2 --synq-deploy-envelope <ContractDeployEnvelope.json> --synq-bytecode <Counter.compiled.synq> --synq-manifest <Counter.manifest.json> --synq-abi <Counter.abi.json> [--synq-call-envelope <ContractCallEnvelope.json> ...] [--base-nonce <n>]   # signs without local execution; prints each step's submission_envelope ready to POST to synergy_submitAegisTransaction");
+            println!("  synergy-node rpc-serve --bind 127.0.0.1:5641   # loopback-only RPC server for local testing -- no p2p/consensus/bootnodes, mempool-level only (no block production)");
         }
     }
     Ok(())
@@ -1698,6 +1705,88 @@ fn synq_replay_flow_report(args: &[String]) -> Result<serde_json::Value, String>
             "post_state_roots": second.post_state_roots,
             "final_state_root": second.final_state_root,
         }
+    }))
+}
+
+fn run_rpc_serve_command(args: &[String]) -> Result<(), String> {
+    // Loopback-only, standalone RPC HTTP listener for local testing -- no p2p
+    // thread, no consensus thread, no bootnode dialing, no contact with the
+    // real Synergy network whatsoever. Exists purely so a real client (curl,
+    // Forge, etc.) can exercise the live synergy_submitAegisTransaction /
+    // mempool RPC surface against an isolated in-process node instead of the
+    // in-process-only "synq replay-flow" simulation. Block production/mining
+    // still requires the real multi-validator V3 network -- synergy_mine has
+    // no handler in rpc_server.rs today, so a submitted tx can be proven
+    // accepted into mempool here, but not mined into a receipt. That gap is
+    // the genuine prelaunch "on-chain execution blocked" boundary, not
+    // something this harness works around.
+    let bind = arg_value(args, "--bind").unwrap_or_else(|| "127.0.0.1:5641".to_string());
+    if !bind.starts_with("127.0.0.1:") && !bind.starts_with("localhost:") {
+        return Err(format!(
+            "--bind must be a loopback address (127.0.0.1:<port>) -- this is a local-only test harness, not a network-facing node: got {bind}"
+        ));
+    }
+    println!(
+        "synergy-node rpc-serve: starting loopback-only RPC server on {bind} (no p2p, no consensus, no bootnodes -- mempool-level testing only)"
+    );
+    synergy_testnet::rpc::rpc_server::start_rpc_server(&bind, None, false, Vec::new());
+    Ok(())
+}
+
+fn synq_build_carrier_report(args: &[String]) -> Result<serde_json::Value, String> {
+    // Same carrier-building setup as synq_replay_flow_report, but stops after
+    // signing instead of executing locally -- each step's submission_envelope
+    // is the exact JSON body to POST as params[0] of a live
+    // synergy_submitAegisTransaction RPC call (see AegisTxSubmissionEnvelope).
+    let base_nonce = optional_u64_arg(args, "--base-nonce")?.unwrap_or(0);
+    let mut labels = Vec::new();
+    let mut options = Vec::new();
+    let schedule = GasSchedule::default();
+
+    let deploy_payload = synq_deploy_payload_from_args(args)?;
+    let deploy_write_hint = synq_write_hint("deploy", &deploy_payload);
+    labels.push("deploy".to_string());
+    options.push(AegisTxBuildOptions {
+        nonce: base_nonce,
+        payload: deploy_payload,
+        gas_limit: schedule.synq_contract_deploy_base_gas,
+        write_set_hint: vec![deploy_write_hint],
+        ..AegisTxBuildOptions::default()
+    });
+
+    for (index, path) in arg_values(args, "--synq-call-envelope")
+        .into_iter()
+        .enumerate()
+    {
+        let payload = synq_call_payload_from_path(&path)?;
+        let write_hint = synq_write_hint("call", &payload);
+        labels.push(format!("call:{}", path));
+        options.push(AegisTxBuildOptions {
+            nonce: base_nonce + index as u64 + 1,
+            payload,
+            gas_limit: schedule.synq_contract_call_base_gas,
+            write_set_hint: vec![write_hint],
+            ..AegisTxBuildOptions::default()
+        });
+    }
+
+    let reports = sign_aegis_transaction_sequence_with_new_key(options, true)?;
+    let mut steps = Vec::new();
+    for (label, report) in labels.into_iter().zip(reports) {
+        let submission_envelope = serde_json::to_value(&report.submission_envelope)
+            .map_err(|error| format!("serialize submission_envelope for {label}: {error}"))?;
+        steps.push(serde_json::json!({
+            "label": label,
+            "tx_id": report.tx_id.0,
+            "synq_contract_address": synq_contract_address_from_payload(&report.transaction.payload),
+            "submission_envelope": submission_envelope,
+        }));
+    }
+
+    Ok(serde_json::json!({
+        "command": "synq build-carrier",
+        "note": "Signs Aegis-wrapped SynQ deploy/call carriers WITHOUT executing them locally. POST each step's submission_envelope as params[0] of synergy_submitAegisTransaction on a live RPC node (e.g. one started via 'synergy-node rpc-serve') to prove real mempool-level acceptance.",
+        "steps": steps,
     }))
 }
 

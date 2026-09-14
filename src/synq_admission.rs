@@ -1505,6 +1505,113 @@ pub(crate) mod test_support {
         }
     }
 
+    pub(crate) fn deploy_carrier_with_artifact_hashes(
+        network_id: &str,
+        bytecode_hash: [u8; 32],
+        manifest_hash: [u8; 32],
+        abi_hash: [u8; 32],
+    ) -> SynQAdmissionEnvelope {
+        let (public_key, private_key, signer) = test_identity();
+        let constructor_args_hash = sha256_array(&[]);
+        let payload_hash = hash_contract_deploy_body(
+            &bytecode_hash,
+            &manifest_hash,
+            &abi_hash,
+            signer.as_bytes(),
+            &constructor_args_hash,
+        );
+        let signing_payload = signing_payload(
+            DomainTag::SynqContractDeployV1,
+            SignaturePurpose::ContractDeploy,
+            signer,
+            payload_hash,
+            41,
+        );
+        let signature = sign_payload(&signing_payload, &private_key);
+        let deploy = ContractDeployEnvelope {
+            signing_payload,
+            public_key,
+            signature: SynQSignature::new(signature),
+            bytecode_hash,
+            manifest_hash,
+            abi_hash,
+            constructor_args_hash,
+        };
+
+        SynQAdmissionEnvelope {
+            version: SYNQ_ADMISSION_VERSION,
+            kind: SynQAdmissionKind::Deploy,
+            chain_id: SYNERGY_SYNQ_ADMISSION_CHAIN_ID,
+            network_id: network_id.to_string(),
+            signer: deploy
+                .signing_payload
+                .signer_address
+                .to_execution_signer_id(),
+            payload_hash,
+            bytecode_hash: Some(bytecode_hash),
+            manifest_hash: Some(manifest_hash),
+            abi_hash: Some(abi_hash),
+            encoded_pqsynq_envelope: serde_json::to_vec(&deploy).unwrap(),
+            bytecode: None,
+            abi_json: None,
+            manifest_json: None,
+            encoded_args: None,
+            sts9_verification_json: None,
+        }
+    }
+
+    pub(crate) fn call_carrier_with_selector(
+        network_id: &str,
+        method_selector: [u8; 4],
+    ) -> SynQAdmissionEnvelope {
+        let (public_key, private_key, signer) = test_identity();
+        let contract_address = signer;
+        let encoded_args_hash = sha256_array(&[]);
+        let payload_hash = hash_contract_call_body(
+            contract_address.as_bytes(),
+            &method_selector,
+            &encoded_args_hash,
+            signer.as_bytes(),
+        );
+        let signing_payload = signing_payload(
+            DomainTag::SynqContractCallV1,
+            SignaturePurpose::ContractCall,
+            signer,
+            payload_hash,
+            42,
+        );
+        let signature = sign_payload(&signing_payload, &private_key);
+        let call = ContractCallEnvelope {
+            signing_payload,
+            public_key,
+            signature: SynQSignature::new(signature),
+            contract_address,
+            method_selector,
+            encoded_args_hash,
+        };
+
+        SynQAdmissionEnvelope {
+            version: SYNQ_ADMISSION_VERSION,
+            kind: SynQAdmissionKind::Call,
+            chain_id: SYNERGY_SYNQ_ADMISSION_CHAIN_ID,
+            network_id: network_id.to_string(),
+            signer: call
+                .signing_payload
+                .signer_address
+                .to_execution_signer_id(),
+            payload_hash,
+            bytecode_hash: None,
+            manifest_hash: None,
+            abi_hash: None,
+            encoded_pqsynq_envelope: serde_json::to_vec(&call).unwrap(),
+            bytecode: None,
+            abi_json: None,
+            manifest_json: None,
+            encoded_args: None,
+            sts9_verification_json: None,
+        }
+    }
+
     fn test_identity() -> (SynQPublicKey, Vec<u8>, SynQAddress) {
         let signer = Sign::mldsa87();
         let (public_key, private_key) = signer.keygen().expect("ML-DSA-87 keygen");
@@ -1696,5 +1803,58 @@ mod tests {
         assert_eq!(decoded.kind, SynQAdmissionKind::Call);
         assert_eq!(decoded.payload_hash, source.payload_hash);
         assert_eq!(decoded.signer, source.signer);
+    }
+
+    #[test]
+    fn write_real_counter_pqsynq_envelopes_for_rpc_harness() {
+        // Not a correctness assertion -- this test's job is to produce real,
+        // properly ML-DSA-87-signed pqsynq deploy/call envelopes for the
+        // ACTUAL checked-in Counter fixture (real sha256 artifact hashes,
+        // real "increment()" selector from Counter.abi.json), and write them
+        // to /tmp so `synergy-node synq build-carrier` can wrap them into a
+        // full Aegis submission_envelope for a live RPC test against the
+        // loopback-only `synergy-node rpc-serve` harness. See notes on the
+        // mempool-level RPC proof (no block producer exists outside the real
+        // V3 validator network, so this stops at mempool acceptance).
+        let bytecode = std::fs::read("../synq-language/contracts/Counter.compiled.synq")
+            .expect("read Counter.compiled.synq fixture");
+        let manifest_json = std::fs::read_to_string("../synq-language/contracts/Counter.manifest.json")
+            .expect("read Counter.manifest.json fixture");
+        let abi_json = std::fs::read_to_string("../synq-language/contracts/Counter.abi.json")
+            .expect("read Counter.abi.json fixture");
+
+        let bytecode_hash = sha256_array(&bytecode);
+        let manifest_hash = sha256_array(manifest_json.as_bytes());
+        let abi_hash = sha256_array(abi_json.as_bytes());
+
+        let deploy_envelope = test_support::deploy_carrier_with_artifact_hashes(
+            SYNERGY_TESTNET_V2_NETWORK_ID,
+            bytecode_hash,
+            manifest_hash,
+            abi_hash,
+        );
+        // increment() selector from Counter.abi.json ("0x5842f1be").
+        let call_envelope =
+            test_support::call_carrier_with_selector(SYNERGY_TESTNET_V2_NETWORK_ID, [0x58, 0x42, 0xf1, 0xbe]);
+
+        std::fs::write(
+            "/tmp/ContractDeployEnvelope.real.json",
+            &deploy_envelope.encoded_pqsynq_envelope,
+        )
+        .expect("write deploy envelope");
+        std::fs::write(
+            "/tmp/ContractCallEnvelope.real.json",
+            &call_envelope.encoded_pqsynq_envelope,
+        )
+        .expect("write call envelope");
+
+        // Sanity: these must independently verify through the real admission
+        // path before we bother submitting them over RPC.
+        verify_synq_deploy_for_chain_admission(&deploy_envelope, test_support::TEST_NOW)
+            .expect("real deploy envelope verifies through pqsynq admission");
+        verify_synq_call_for_chain_admission(&call_envelope, test_support::TEST_NOW)
+            .expect("real call envelope verifies through pqsynq admission");
+
+        println!("wrote /tmp/ContractDeployEnvelope.real.json and /tmp/ContractCallEnvelope.real.json");
     }
 }
