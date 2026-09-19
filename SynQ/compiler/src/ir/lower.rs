@@ -956,15 +956,36 @@ impl IrLowerer {
             }
 
             // ── Field store ──
-            IrOp::FieldStore(obj, _field, val) => {
-                load_val!(self, *val);
+            // Fixed 20 Sep 2026: this previously (a) hardcoded field index 0
+            // regardless of which field was actually being assigned, and (b)
+            // pushed operands in the wrong order for TupleSet. TupleSet pops
+            // idx (top), then val, then the tuple itself (bottom) -- see
+            // vm.rs's OpCode::TupleSet and the correctly-ordered
+            // IrOp::TupleSet lowering just above (push t, push val, push
+            // idx). This arm pushed val first, then Load'd the tuple, then
+            // pushed idx -- so TupleSet's "val" pop actually got the OLD
+            // tuple and its "t" pop actually got the new scalar/struct
+            // value. For a scalar field (e.g. `corner.x = newX`) that new
+            // value isn't a Value::Tuple at all, so the VM's `if let
+            // Value::Tuple(..) = t` match failed outright with "TupleSet:
+            // not a Tuple" (StructValue.setCornerX). For a struct-typed
+            // field (e.g. `box_val.origin = p`) both operands happened to be
+            // Tuples, so it didn't error -- it silently wrote the OLD outer
+            // tuple into the target field slot instead of the new value,
+            // producing a nested, wrong-shaped struct that only surfaced
+            // later as a bogus read from getBoxOriginX(). Field index is now
+            // resolved at build time in builder.rs (see the Statement::
+            // FieldAssignment branch there) and threaded through as this
+            // op's 4th field instead of a "TODO" constant 0.
+            IrOp::FieldStore(obj, _field, val, field_idx) => {
                 let addr = self.state_var_addrs.get(obj)
                     .ok_or_else(|| format!("unknown state var for field store: {}", obj))?;
                 self.asm.emit_op(OpCode::Push);
                 self.asm.emit_i32(*addr as i32);
                 self.asm.emit_op(OpCode::Load);
+                load_val!(self, *val);
                 self.asm.emit_op(OpCode::Push);
-                self.asm.emit_i32(0); // TODO: resolve field index
+                self.asm.emit_i32(*field_idx as i32);
                 self.asm.emit_op(OpCode::TupleSet);
                 self.asm.emit_op(OpCode::Push);
                 self.asm.emit_i32(*addr as i32);

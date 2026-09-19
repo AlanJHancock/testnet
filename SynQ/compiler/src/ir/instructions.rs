@@ -141,7 +141,10 @@ pub enum IrOp {
     /// Store to state variable: state_var = value.
     Store(String, ValueId),
     /// Store to struct field: obj.field = value (via TupleSet + Store).
-    FieldStore(String, String, ValueId),
+    /// 4th field is the resolved field index within the struct (was
+    /// hardcoded to 0 in lower.rs before the 2026-09-20 field-store fix --
+    /// resolved here at build time from the struct definition instead).
+    FieldStore(String, String, ValueId, u32),
     /// Map assignment: map[key] = value.
     MapSet(String, ValueId, ValueId),
     /// Nested map read: takes a map Value (from previous MapGet) + key -> result
@@ -226,7 +229,7 @@ impl Instruction {
             | IrOp::AssetBurn(v) | IrOp::AssetBalance(v) | IrOp::AssetOwner(v)
             | IrOp::Print(v) | IrOp::AiVerifyProof(v) => vec![*v],
             IrOp::StrConcat(a, b) | IrOp::StrEq(a, b) | IrOp::AssetTransfer(a, b) | IrOp::AiInfer(a, b) => vec![*a, *b],
-            IrOp::Store(_, v) | IrOp::FieldStore(_, _, v) => vec![*v],
+            IrOp::Store(_, v) | IrOp::FieldStore(_, _, v, _) => vec![*v],
             IrOp::Emit(_, args) => args.clone(),
             IrOp::MapSet(_, k, v) => vec![*k, *v],
             IrOp::MapGetVal(map, key) => vec![*map, *key],

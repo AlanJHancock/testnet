@@ -85,7 +85,7 @@ fn analyze_function(func: &mut IrFunction, report: &mut AnalysisReport) -> Funct
         if !block.reachable { continue; }
         for inst in &block.insts {
             match &inst.op {
-                IrOp::Store(name, _) | IrOp::FieldStore(name, _, _) | IrOp::MapSet(name, _, _) | IrOp::SetOp(name, _, _) => {
+                IrOp::Store(name, _) | IrOp::FieldStore(name, _, _, _) | IrOp::MapSet(name, _, _) | IrOp::SetOp(name, _, _) => {
                     stats.effects.push(EffectKind::Write(name.clone()));
                 }
                 IrOp::Load(name) if !name.starts_with("__param_") => {

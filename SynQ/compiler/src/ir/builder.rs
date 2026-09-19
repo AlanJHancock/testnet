@@ -414,8 +414,20 @@ impl<'a> BuildContext<'a> {
             Statement::FieldAssignment { object, field, value } => {
                 let val = self.build_expression(value)?;
 
+                // Resolve the field's position within its struct definition
+                // (was hardcoded to 0 for the state-var branch below, and
+                // looked up incorrectly -- keyed struct_defs, which is
+                // struct-TYPE-name -> def, by the VARIABLE name instead --
+                // for the local branch; both silently defaulted to index 0
+                // for any field, fixed 20 Sep 2026). get_field_index()
+                // already does this resolution correctly for expression-
+                // based field READS (Expression::FieldAccess above), so
+                // reuse it here for both assignment branches too, via a
+                // synthetic Identifier expression wrapping the object name.
+                let field_idx = self.get_field_index(&Expression::Identifier(object.clone()), field);
+
                 if self.state_vars.contains_key(object) {
-                    self.push_effect(IrOp::FieldStore(object.clone(), field.clone(), val));
+                    self.push_effect(IrOp::FieldStore(object.clone(), field.clone(), val, field_idx));
                     self.ir_fn.collected_effects.push(EffectKind::Write(object.clone()));
                 } else {
                     // Local struct field assignment
@@ -425,15 +437,6 @@ impl<'a> BuildContext<'a> {
                             Some(&v) => v,
                             None => return Err(format!("field assignment on undefined: {}", object)),
                         }
-                    };
-
-                    // Get field index from struct def
-                    let field_idx = if let Some(def) = self.struct_defs.get(object) {
-                        def.fields.iter().position(|f| f.name == *field)
-                            .map(|i| i as u32)
-                            .unwrap_or(0)
-                    } else {
-                        0
                     };
 
                     let idx_val = self.push_value(IrOp::Const(Literal::Number(field_idx as u128)), IrType::I32);

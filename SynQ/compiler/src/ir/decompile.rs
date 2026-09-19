@@ -200,7 +200,7 @@ fn decompile_instruction(inst: &Instruction, names: &[String]) -> String {
         IrOp::AssetBurn(a) => format!("{}asset_burn({})", r, v(names, *a)),
         IrOp::AssetBalance(a) => format!("{}asset_balance({})", r, v(names, *a)),
         IrOp::AssetOwner(a) => format!("{}asset_owner({})", r, v(names, *a)),
-        IrOp::FieldStore(o, f, val) => format!("{}.{} = {}", o, f, v(names, *val)),
+        IrOp::FieldStore(o, f, val, idx) => format!("{}.{}[{}] = {}", o, f, idx, v(names, *val)),
         IrOp::MapSet(n, key, val) => format!("map_set {}[{}] = {}", n, v(names, *key), v(names, *val)),
         IrOp::SetOp(n, kind, val) => {
             let op = match kind { SetOpKind::Add => "add", SetOpKind::Remove => "remove" };

@@ -317,7 +317,7 @@ impl Writer {
             }
             IrOp::SetOp(name, op, v) => { self.u8(0x10); self.str(name); self.setop(op); self.u32(*v); }
             IrOp::FieldAccess(obj, idx) => { self.u8(0x11); self.u32(*obj); self.u32(*idx); }
-            IrOp::FieldStore(struct_name, field_name, v) => { self.u8(0x12); self.str(struct_name); self.str(field_name); self.u32(*v); }
+            IrOp::FieldStore(struct_name, field_name, v, idx) => { self.u8(0x12); self.str(struct_name); self.str(field_name); self.u32(*v); self.u32(*idx); }
             IrOp::EnumAccess(enum_name, variant) => { self.u8(0x13); self.str(enum_name); self.str(variant); }
             IrOp::StructLiteral(name, fields) => {
                 self.u8(0x14); self.str(name);
@@ -818,7 +818,7 @@ impl<'a> Reader<'a> {
             }
             0x10 => { let name = self.str()?; let op = self.setop()?; let v = self.u32()?; Ok(IrOp::SetOp(name, op, v)) }
             0x11 => { let obj = self.u32()?; let idx = self.u32()?; Ok(IrOp::FieldAccess(obj, idx)) }
-            0x12 => { let struct_name = self.str()?; let field_name = self.str()?; let v = self.u32()?; Ok(IrOp::FieldStore(struct_name, field_name, v)) }
+            0x12 => { let struct_name = self.str()?; let field_name = self.str()?; let v = self.u32()?; let idx = self.u32()?; Ok(IrOp::FieldStore(struct_name, field_name, v, idx)) }
             0x13 => { let e = self.str()?; let v = self.str()?; Ok(IrOp::EnumAccess(e, v)) }
             0x14 => {
                 let name = self.str()?;

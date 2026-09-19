@@ -327,7 +327,7 @@ fn apply_substitution(inst: &mut Instruction, subs: &HashMap<ValueId, ValueId>) 
         IrOp::MapMethod(name, m, args) => IrOp::MapMethod(name, m, args.into_iter().map(apply).collect()),
         IrOp::SetMethod(name, m, args) => IrOp::SetMethod(name, m, args.into_iter().map(apply).collect()),
         IrOp::FieldAccess(obj, field) => IrOp::FieldAccess(apply(obj), field),
-        IrOp::FieldStore(name, field, v) => IrOp::FieldStore(name, field, apply(v)),
+        IrOp::FieldStore(name, field, v, idx) => IrOp::FieldStore(name, field, apply(v), idx),
         IrOp::StructLiteral(name, fields) => IrOp::StructLiteral(
             name,
             fields.into_iter().map(|(f, v)| (f, apply(v))).collect(),
@@ -588,7 +588,7 @@ pub fn dead_code_elimination(func: &mut IrFunction) -> usize {
 fn has_side_effects(op: &IrOp) -> bool {
     matches!(
         op,
-        IrOp::Store(_, _) | IrOp::FieldStore(_, _, _) | IrOp::MapSet(_, _, _)
+        IrOp::Store(_, _) | IrOp::FieldStore(_, _, _, _) | IrOp::MapSet(_, _, _)
         | IrOp::SetOp(_, _, _) | IrOp::Emit(_, _) | IrOp::Require(_, _)
         | IrOp::Revert(_) | IrOp::RevertNamed(_, _, _) | IrOp::Print(_)
         | IrOp::ExternCall(_, _, _) | IrOp::AegisCall(_)
@@ -779,7 +779,7 @@ pub fn copy_propagation(func: &mut IrFunction) -> usize {
                     IrOp::SetMethod(name, m, new_args)
                 }
                 IrOp::FieldAccess(obj, field) => { let na = resolve(&copy_map, obj); changed = na != obj; IrOp::FieldAccess(na, field) }
-                IrOp::FieldStore(name, field, v) => { let na = resolve(&copy_map, v); changed = na != v; IrOp::FieldStore(name, field, na) }
+                IrOp::FieldStore(name, field, v, idx) => { let na = resolve(&copy_map, v); changed = na != v; IrOp::FieldStore(name, field, na, idx) }
                 IrOp::StructLiteral(name, fields) => {
                     let new_fields: Vec<(String, ValueId)> = fields.iter()
                         .map(|(f, v)| (f.clone(), resolve(&copy_map, *v)))
