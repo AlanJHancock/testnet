@@ -1,9 +1,19 @@
 {
   "version": 1,
-  "contract": "contracts/TokenVault.synq",
+  "contract": "examples/TokenVault.synq",
+  "companion": {
+    "contract": "examples/SimpleToken.synq",
+    "label": "SimpleToken",
+    "setup": [
+      {
+        "call": "init",
+        "args": ["SimpleToken", "SIM", 0]
+      }
+    ]
+  },
   "scenarios": [
     {
-      "name": "init -> deposit -> withdraw -- vault-side flow accounting (tokenBalance()/assertSync() reflect the dry-run's stubbed extern_call, see note)",
+      "name": "init -> deposit -> withdraw -- vault-side flow accounting, now backed by a real SimpleToken via extern_call (21 Sept 2026)",
       "steps": [
         {
           "call": "init",
@@ -77,7 +87,7 @@
         {
           "call": "tokenBalance",
           "args": [],
-          "expectReturn": 0
+          "expectReturn": 70
         },
         {
           "call": "assertSync",

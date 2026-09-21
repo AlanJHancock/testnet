@@ -40,6 +40,10 @@ pub mod gas_cost {
     pub const EMIT: u64 = 20;
     pub const TRAP: u64 = 1;
     pub const HOST_CALL: u64 = 15;
+    /// Real cross-contract call (21 Sept 2026) -- costs more than a
+    /// plain HOST_CALL since it actually invokes another contract's
+    /// function body, not just a single host-native operation.
+    pub const EXTERN_CALL: u64 = 25;
     pub const PACK_BASE: u64 = 3;
     pub const PACK_PER_FIELD: u64 = 2;
     pub const ARRAY_GET: u64 = 3;

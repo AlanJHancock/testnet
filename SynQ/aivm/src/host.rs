@@ -753,9 +753,23 @@ pub fn execute_host_call(
             // HOST_CALL gas only.
             let secret_key = value_as_bytes(&stack.pop().ok_or(AivmError::StackUnderflow)?);
             let ciphertext = value_as_bytes(&stack.pop().ok_or(AivmError::StackUnderflow)?);
+            // 21 Sept 2026 fix: a malformed/invalid ciphertext or secret key
+            // (e.g. too short to be real ML-KEM-768 material) used to be
+            // silently swallowed here, pushing an empty Value::Bytes(vec![])
+            // as if decapsulation had "succeeded" with a zero-length shared
+            // secret -- a dummy-return stub, not real error handling. That
+            // let a contract observe fabricated success on structurally
+            // invalid PQC input, exactly the case QuantumVM's AEG1
+            // deterministic dispatcher correctly rejects
+            // ("AEG1: OperationNotSupported ... ACTS-15 §3"). Now propagates
+            // the real decoder error as a genuine execution failure instead
+            // (surfaces as success:false via estimate_gas_handler's
+            // execute_with_assets Err path), matching QuantumVM's behavior.
             match synq_pqc_shims::kyber::decaps(&ciphertext, &secret_key) {
                 Ok(shared_secret) => stack.push(Value::Bytes(shared_secret)),
-                Err(_) => stack.push(Value::Bytes(vec![])),
+                Err(e) => return Err(AivmError::HostFunctionFailed(
+                    format!("kyber_decaps: ML-KEM-768 decapsulate failed: {}", e)
+                )),
             }
         }
         // ── AEG1 generic frame dispatch (2026-09-01 follow-up) ─────────────

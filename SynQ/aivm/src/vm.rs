@@ -175,6 +175,17 @@ pub struct Avm {
     stack_limit: usize,
     /// Call depth limit
     call_depth_limit: usize,
+    /// Handler for `Instruction::ExternCall` (21 Sept 2026 -- real
+    /// cross-contract call support). Mirrors the primary IR/VM backend's
+    /// `QuantumVM::extern_call_handler` (vm/src/vm.rs) -- `None` by
+    /// default (a bare `Avm::new()` behaves exactly as before: any
+    /// `extern_call(...)` fails closed with a clear error instead of
+    /// silently faking success). A caller that needs real cross-contract
+    /// calls (e.g. synq-server's dry-run handler, wiring a per-request
+    /// multi-contract workspace) sets this via `set_extern_call_handler`
+    /// after construction, same opt-in shape as QuantumVM's mutable
+    /// field, but via a setter since this struct's fields are private.
+    extern_call_handler: Option<std::sync::Arc<dyn Fn(&str, &str, &[Value]) -> Result<Option<Value>, AivmError> + Send + Sync>>,
 }
 
 impl Avm {
@@ -190,7 +201,19 @@ impl Avm {
             host,
             stack_limit: 1024,
             call_depth_limit: 64,
+            extern_call_handler: None,
         }
+    }
+
+    /// Wire a real cross-contract call handler for `extern_call(...)` --
+    /// see the `extern_call_handler` field doc. Opt-in; a plain `Avm::new`
+    /// (no call to this) keeps today's fail-closed "no workspace active"
+    /// behavior for any ExternCall instruction.
+    pub fn set_extern_call_handler(
+        &mut self,
+        handler: std::sync::Arc<dyn Fn(&str, &str, &[Value]) -> Result<Option<Value>, AivmError> + Send + Sync>,
+    ) {
+        self.extern_call_handler = Some(handler);
     }
 
     /// Execute a function by index. Uses a fresh, throwaway asset ledger --
@@ -706,6 +729,29 @@ impl Avm {
                     };
                     m.insert(key.map_key_bytes(), value);
                     stack.push(Value::Map(m));
+                }
+                Instruction::ExternCall(contract, function, arg_count) => {
+                    // Real cross-contract call (21 Sept 2026), ported from
+                    // vm/src/vm.rs's OpCode::ExternCall -- see
+                    // Instruction::ExternCall's doc and
+                    // Avm::extern_call_handler's doc for the full design.
+                    gas.charge(gas_cost::EXTERN_CALL)?;
+                    let n = *arg_count as usize;
+                    if stack.len() < n {
+                        return Err(AivmError::StackUnderflow);
+                    }
+                    let mut args: Vec<Value> = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        args.push(stack.pop().ok_or(AivmError::StackUnderflow)?);
+                    }
+                    args.reverse(); // restore original push/source order
+                    let result = match &self.extern_call_handler {
+                        Some(h) => h(contract, function, &args)?,
+                        None => return Err(AivmError::HostFunctionFailed(format!(
+                            "extern_call: no workspace active — '{}' not reachable", contract
+                        ))),
+                    };
+                    stack.push(result.unwrap_or(Value::U64(0)));
                 }
             }
         }

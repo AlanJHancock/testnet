@@ -132,6 +132,23 @@ pub enum Opcode {
     /// the updated map back so the caller can StoreState/chain it into an
     /// outer map's MapSetVal for nested writes.
     MapSetVal = 0xA1,
+    /// Call a function on another contract within the current dry-run
+    /// workspace (21 Sept 2026 -- real cross-contract call support, ported
+    /// from the primary IR/VM backend's `OpCode::ExternCall` in
+    /// `vm/src/vm.rs`). Unlike `HostCall`, whose single u16 operand is
+    /// just an index into a fixed, named import table, this opcode bakes
+    /// the target contract name, function name, and arg_count directly
+    /// into the instruction as compile-time-known operands -- mirroring
+    /// vm.rs's inline (len-prefixed name, len-prefixed name, arg_count)
+    /// bytecode layout exactly, since `extern_call("Contract", "fn", ...)`
+    /// always has a literal contract/function name in SynQ source (see
+    /// `synq.pest`'s `extern_call_statement` grammar rule -- both are
+    /// `string_literal`s, never a variable). Previously this had NO
+    /// dedicated opcode at all: `aivm_codegen.rs` threw the contract/
+    /// function name away and emitted a bare `HostCall(8)` ("extern.call"),
+    /// which just popped one arg and pushed back `Value::U64(0)` --
+    /// a permanent stub with no way to even know which contract to call.
+    ExternCall = 0xA2,
 }
 
 impl Opcode {
@@ -176,6 +193,7 @@ impl Opcode {
             0x95 => Some(Opcode::PushU256),
             0xa0 => Some(Opcode::MapGetVal),
             0xa1 => Some(Opcode::MapSetVal),
+            0xa2 => Some(Opcode::ExternCall),
             0x71 => Some(Opcode::TrapMsg),
             _ => None,
         }
@@ -211,6 +229,11 @@ impl Opcode {
             // One-byte "miss default type" tag -- see MapGetVal(u8) doc on
             // the Instruction enum below.
             Opcode::MapGetVal => 1,
+            // Not a fixed size (two length-prefixed strings + a u8 count
+            // follow) -- like PushBytes/PushString/TrapMsg above, this is
+            // unused by decode_all (which parses ExternCall's real operands
+            // manually) and exists only so this match stays exhaustive.
+            Opcode::ExternCall => 0,
         }
     }
 }
@@ -272,6 +295,19 @@ pub enum Instruction {
     MapGetVal(u8),
     /// See Opcode::MapSetVal doc.
     MapSetVal,
+    /// Call `function` on `contract` within the current dry-run workspace,
+    /// passing the top `arg_count` stack values (in push order -- popped
+    /// in reverse, then un-reversed, same convention as vm.rs's
+    /// OpCode::ExternCall). Pushes the callee's return value (or
+    /// `Value::U64(0)` if it returned nothing), so the result can either
+    /// be discarded (mid-body `extern_call(...)` statement) or become a
+    /// function's implicit return value if it's the LAST statement of a
+    /// function body -- see aivm_codegen.rs's `emit_extern_call` and the
+    /// AST's `extern_call_statement` grammar rule, which is the ONLY way
+    /// to invoke this (extern_call is not a general expression). See
+    /// Opcode::ExternCall's doc for why this needs its own opcode rather
+    /// than going through HostCall.
+    ExternCall(String, String, u8),
 }
 
 impl Instruction {
@@ -385,6 +421,16 @@ impl Instruction {
             }
             Instruction::MapSetVal => {
                 buf.push(Opcode::MapSetVal as u8);
+            }
+            Instruction::ExternCall(contract, function, arg_count) => {
+                buf.push(Opcode::ExternCall as u8);
+                let cbytes = contract.as_bytes();
+                buf.extend_from_slice(&(cbytes.len() as u32).to_be_bytes());
+                buf.extend_from_slice(cbytes);
+                let fbytes = function.as_bytes();
+                buf.extend_from_slice(&(fbytes.len() as u32).to_be_bytes());
+                buf.extend_from_slice(fbytes);
+                buf.push(*arg_count);
             }
         }
         buf
@@ -573,6 +619,44 @@ impl Instruction {
                     instructions.push(Instruction::MapGetVal(tag));
                 }
                 Opcode::MapSetVal => instructions.push(Instruction::MapSetVal),
+                Opcode::ExternCall => {
+                    if offset + 4 > bytes.len() {
+                        return Err(AivmError::OperandOutOfBounds { offset, needed: 4, available: bytes.len() - offset });
+                    }
+                    let clen = u32::from_be_bytes([
+                        bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    ]) as usize;
+                    offset += 4;
+                    if offset + clen > bytes.len() {
+                        return Err(AivmError::OperandOutOfBounds { offset, needed: clen, available: bytes.len() - offset });
+                    }
+                    let contract = String::from_utf8(bytes[offset..offset+clen].to_vec()).map_err(|_| {
+                        AivmError::MalformedSection {
+                            section_type: crate::bytecode::section_type::INSTRUCTIONS,
+                            reason: format!("ExternCall contract-name operand at offset {} is not valid UTF-8", offset),
+                        }
+                    })?;
+                    offset += clen;
+                    if offset + 4 > bytes.len() {
+                        return Err(AivmError::OperandOutOfBounds { offset, needed: 4, available: bytes.len() - offset });
+                    }
+                    let flen = u32::from_be_bytes([
+                        bytes[offset], bytes[offset+1], bytes[offset+2], bytes[offset+3],
+                    ]) as usize;
+                    offset += 4;
+                    if offset + flen > bytes.len() {
+                        return Err(AivmError::OperandOutOfBounds { offset, needed: flen, available: bytes.len() - offset });
+                    }
+                    let function = String::from_utf8(bytes[offset..offset+flen].to_vec()).map_err(|_| {
+                        AivmError::MalformedSection {
+                            section_type: crate::bytecode::section_type::INSTRUCTIONS,
+                            reason: format!("ExternCall function-name operand at offset {} is not valid UTF-8", offset),
+                        }
+                    })?;
+                    offset += flen;
+                    let arg_count = read_u8(bytes, &mut offset)?;
+                    instructions.push(Instruction::ExternCall(contract, function, arg_count));
+                }
             }
         }
 

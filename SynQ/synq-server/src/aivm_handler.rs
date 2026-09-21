@@ -13,6 +13,7 @@ use synq_compiler::aivm_codegen::compile_to_aivm;
 use aivm::bytecode::{BytecodeArtifact, Section, section_type};
 use aivm::manifest::Manifest;
 use aivm::instructions::Instruction;
+use aivm::Value as AivmValue;
 use ruint::aliases::U256;
 
 use crate::{AppState, check_rate_limit, RespJson, MAX_SOURCE_BYTES};
@@ -139,6 +140,51 @@ pub async fn compile_aivm_handler(
     );
     let final_bytecode = artifact.encode();
     let code_hash = format!("0x{}", hex::encode(&artifact.header.code_hash));
+
+    // Protocol attestation (added 19 Sep 2026): record this dry-run compile
+    // and self-check AIVM's own compile determinism by independently
+    // recompiling the same source a second time and comparing bytecode
+    // hashes. See protocol_attestation module doc comment for why this is
+    // scoped to AIVM's own determinism rather than a cross-backend hash
+    // match against the QuantumVM deploy path -- those two backends are
+    // not byte-comparable.
+    let source_hash = crate::protocol_attestation::content_hash_hex(req.source.as_bytes());
+    let protocol_hint = crate::protocol_attestation::classify_protocol_hint(&req.source);
+    let bytecode_hash_hex = hex::encode(&artifact.header.code_hash);
+    crate::protocol_attestation::record_stage(
+        &source_hash,
+        protocol_hint,
+        "aivm_compiled",
+        crate::protocol_attestation::BACKEND_AIVM,
+        Some(&bytecode_hash_hex),
+        serde_json::json!({
+            "contract_name": contract.name,
+            "bytecode_bytes": final_bytecode.len(),
+        }),
+    );
+    if let Ok(second_result) = compile_to_aivm(contract, &struct_defs) {
+        let second_abi_canonical = second_result.abi.canonical_json();
+        let second_manifest = Manifest::testnet_default(&contract.name, "0.1.0");
+        let second_manifest_canonical = second_manifest.canonical_json();
+        let second_instruction_bytes = Instruction::encode_all(&second_result.instructions);
+        let second_artifact = BytecodeArtifact::build(
+            &second_abi_canonical,
+            &second_manifest_canonical,
+            &second_instruction_bytes,
+            vec![
+                Section { section_type: section_type::CONSTANTS, data: vec![] },
+                Section { section_type: section_type::FUNCTIONS, data: vec![] },
+                Section { section_type: section_type::EXPORTS, data: vec![] },
+            ],
+        );
+        let second_bytecode_hash_hex = hex::encode(&second_artifact.header.code_hash);
+        let matched = second_bytecode_hash_hex == bytecode_hash_hex;
+        crate::protocol_attestation::record_determinism_check(
+            &source_hash,
+            crate::protocol_attestation::BACKEND_AIVM,
+            matched,
+        );
+    }
 
     // Build function info
     let functions: Vec<AivmFunctionInfo> = result.functions.iter().map(|f| {
@@ -292,6 +338,33 @@ pub struct EstimateGasRequest {
     /// AssetLedger::new()) if omitted.
     #[serde(default = "default_next_asset_id")]
     pub next_asset_id: u64,
+    /// Optional extra contract sources so `extern_call("Name", "fn", ...)`
+    /// inside the primary contract under test can resolve to a real
+    /// function call instead of failing with "no workspace active" (21
+    /// Sept 2026 -- real cross-contract call support, see
+    /// aivm::vm::Avm::extern_call_handler doc). Keyed by a caller-chosen
+    /// label; each source is compiled and, if its own `contract Name {}`
+    /// declaration can be parsed out, that NAME (not the JSON key) is what
+    /// `extern_call`'s first argument must match, exactly mirroring
+    /// `/quantumvm/dry-run`'s `contracts` field and its `extra_name`
+    /// fallback-to-label logic in main.rs -- kept as a plain HashMap
+    /// (defaulting empty) rather than `Option` for the same reason `state`
+    /// above is: omitting it entirely is indistinguishable from an empty
+    /// map, so there's no third state worth an Option.
+    #[serde(default)]
+    pub contracts: std::collections::HashMap<String, String>,
+    /// Optional pre-seeded state for each entry in `contracts`, same JSON
+    /// shape as the top-level `state` field, keyed by the SAME label used
+    /// in `contracts`. This dry-run endpoint is single-call and stateless
+    /// across requests (state/final_state chaining is the caller's job --
+    /// see `state`'s doc) -- this is the workspace-contract counterpart of
+    /// that same chaining discipline, so a caller replaying a multi-step
+    /// scenario (e.g. TokenVault.deposit() then a later tokenBalance())
+    /// can carry SimpleToken's own state forward the exact same way it
+    /// already carries the primary contract's, via
+    /// `contract_final_states` in the response.
+    #[serde(default)]
+    pub contract_states: std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>>,
 }
 
 /// Backlog item 9's target canonical `synergy_estimateGas` response shape
@@ -366,6 +439,12 @@ pub struct EstimateGasResponse {
     pub final_assets: Vec<AssetRecordWire>,
     #[serde(default)]
     pub next_asset_id: u64,
+    /// Snapshot of every workspace contract's state after this call, same
+    /// shape/keying as the request's `contract_states` -- the multi-
+    /// contract counterpart of `final_state` above. Empty whenever the
+    /// request had no `contracts`. See `EstimateGasRequest::contracts` doc.
+    #[serde(default)]
+    pub contract_final_states: std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>>,
     /// Backlog item 9 preview -- see `CanonicalEstimate` doc comment.
     /// `None` whenever there's no real execution result to compute it from
     /// (validation/rate-limit/compile-error responses via `err_resp`).
@@ -414,6 +493,29 @@ fn parse_caller_address(s: &str) -> Result<[u8; 41], String> {
             .map_err(|e| format!("invalid network caller address: {}", e))?;
         let addr = SynqAddress::from_20_bytes(&id20, ALGO_ML_DSA_65, NETWORK_ID_TESTNET);
         return Ok(addr.to_bytes());
+    }
+    // Plain base-10 identity literal (e.g. "192170797366540410941708280559169430532611650798",
+    // or a small test identity like "2") -- the same numeric-literal
+    // convention `Value::U256::as_address()` already uses everywhere else
+    // a number is passed where an address/caller is expected (map-key
+    // identities, `mint(to: u256, ...)`, etc -- see aivm/src/host.rs's
+    // as_address doc): values <= u128::MAX go in the 16-byte identity slot
+    // [5..21]; larger values (up to 256 bits) go in the 20-byte identity
+    // slot [5..25]. Checked BEFORE the raw-hex fallback below because a
+    // bare all-digit string (no "0x") is also technically valid hex -- but
+    // only when its length is exactly 82 chars (41 bytes) does that hex
+    // reading actually succeed, so a non-82-char all-digit string is
+    // unambiguously meant as decimal, not hex the same digits happen to be
+    // a subset of. Without this branch, e.g. a 48-digit decimal identity
+    // silently mis-decoded as 24 bytes of raw hex and failed with a
+    // confusing "caller address must be 41 bytes, got 24".
+    if !trimmed.is_empty() && trimmed.len() != 82 && trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        let value: U256 = trimmed
+            .parse()
+            .map_err(|e| format!("invalid decimal caller literal: {}", e))?;
+        return AivmValue::U256(value)
+            .as_address()
+            .map_err(|e| format!("invalid decimal caller literal: {}", e));
     }
     // Fall back to raw hex (0x-prefixed or bare), the original format.
     let hex_str = trimmed.strip_prefix("0x").unwrap_or(trimmed);
@@ -490,7 +592,7 @@ fn json_to_aivm_value(v: &serde_json::Value) -> Result<aivm::host::Value, String
 /// Look up a function's (or the constructor's, for "init") declared
 /// parameter types, in order — used to decode struct-shaped JSON args
 /// (`{"x": 12, "y": 14}`) into the right field order instead of guessing.
-fn find_function_param_types(
+pub(crate) fn find_function_param_types(
     contract: &synq_compiler::ast::ContractDefinition,
     name: &str,
 ) -> Option<Vec<synq_compiler::ast::Type>> {
@@ -778,6 +880,7 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
             final_state: std::collections::HashMap::new(),
             final_assets: vec![],
             next_asset_id: 1,
+            contract_final_states: std::collections::HashMap::new(),
             canonical: None,
             note: note.clone(),
             revert_reason: None,
@@ -822,7 +925,7 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
     };
 
     let host = aivm::host::HostFunctions::default_v01();
-    let avm = aivm::vm::Avm::new(compiled.instructions, compiled.functions, host);
+    let mut avm = aivm::vm::Avm::new(compiled.instructions, compiled.functions, host);
 
     let func_idx = match avm.find_function(&req.function) {
         Some(i) => i,
@@ -912,6 +1015,102 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
     }
     let mut asset_ledger = aivm::host::AssetLedger::with_records(seeded_assets, req.next_asset_id);
 
+    // ── Optional workspace: compile + load any extra named contracts so
+    // extern_call("Name", "fn", ...) inside the primary contract can
+    // resolve to a real cross-contract call within this one dry-run
+    // request (21 Sept 2026 -- real cross-contract call support, see
+    // EstimateGasRequest::contracts doc and aivm::vm::Avm::
+    // extern_call_handler doc). Mirrors /quantumvm/dry-run's identical
+    // req.contracts wiring in main.rs, adapted to this endpoint's single-
+    // call-per-request shape: each workspace contract's state round-trips
+    // through req.contract_states / response.contract_final_states, the
+    // same JSON chaining discipline the primary contract's state/
+    // final_state already uses.
+    let workspace: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (aivm::vm::Avm, aivm::vm::StateOverlay, aivm::host::AssetLedger)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    for (label, extra_source) in &req.contracts {
+        let extra_ast = match parser::parse(extra_source) {
+            Ok(a) => a,
+            Err(e) => return err_resp(vec![format!("workspace contract '{}': parse error: {}", label, e)]),
+        };
+        let extra_contract = match extra_ast.iter().find_map(|u| if let SourceUnit::Contract(c) = u { Some(c) } else { None }) {
+            Some(c) => c,
+            None => return err_resp(vec![format!("workspace contract '{}': no contract found in source", label)]),
+        };
+        // Key the workspace by the contract's OWN declared name (what
+        // extern_call's first argument actually refers to at the SynQ
+        // language level), falling back to the request's label if for
+        // some reason it can't be read -- same fallback-to-label
+        // convention as /quantumvm/dry-run's extra_name handling.
+        let extra_name = if extra_contract.name.is_empty() { label.clone() } else { extra_contract.name.clone() };
+        let extra_struct_defs: Vec<synq_compiler::ast::StructDefinition> = extra_ast.iter()
+            .filter_map(|u| if let SourceUnit::Struct(s) = u { Some(s.clone()) } else { None })
+            .collect();
+        let extra_struct_map: std::collections::HashMap<String, &synq_compiler::ast::StructDefinition> =
+            extra_struct_defs.iter().map(|s| (s.name.clone(), s)).collect();
+        let extra_compiled = match compile_to_aivm(extra_contract, &extra_struct_defs) {
+            Ok(r) => r,
+            Err(e) => return err_resp(vec![format!("workspace contract '{}': AIVM compilation error: {}", extra_name, e)]),
+        };
+        let mut extra_seeded: std::collections::HashMap<u16, aivm::host::Value> = std::collections::HashMap::new();
+        if let Some(seed) = req.contract_states.get(label) {
+            for (k, v) in seed {
+                let key: u16 = match k.parse() {
+                    Ok(n) => n,
+                    Err(_) => return err_resp(vec![format!("workspace contract '{}': bad state key: {}", extra_name, k)]),
+                };
+                let expected_ty = extra_compiled.state_var_types.iter().find(|(idx, _)| *idx == key).map(|(_, ty)| ty);
+                match json_to_aivm_value_typed(v, expected_ty, &extra_struct_map) {
+                    Ok(val) => { extra_seeded.insert(key, val); }
+                    Err(e) => return err_resp(vec![format!("workspace contract '{}': bad state value: {}", extra_name, e)]),
+                }
+            }
+        }
+        for (idx, ty) in &extra_compiled.state_var_types {
+            extra_seeded.entry(*idx).or_insert_with(|| default_aivm_value_for_type(ty, &extra_struct_map));
+        }
+        let extra_overlay = aivm::vm::StateOverlay::with_state(extra_seeded);
+        let extra_host = aivm::host::HostFunctions::default_v01();
+        let extra_avm = aivm::vm::Avm::new(extra_compiled.instructions, extra_compiled.functions, extra_host);
+        let extra_assets = aivm::host::AssetLedger::new();
+        workspace.lock().unwrap().insert(extra_name, (extra_avm, extra_overlay, extra_assets));
+    }
+
+    // Wire extern_call on the primary VM whenever a workspace was supplied.
+    // Unlike /quantumvm/dry-run's multi-call design (which needs a shared
+    // mutable "current top-level caller" tracker across several calls per
+    // request), this endpoint only ever runs ONE top-level call per
+    // request, so the already-parsed `caller` can just be moved into the
+    // closure directly -- the callee sees the SAME caller identity the
+    // primary contract's own top-level call is running as, matching
+    // vm.rs's qvm_call_context_for_caller propagation semantics.
+    if !req.contracts.is_empty() {
+        let ws = workspace.clone();
+        let propagated_caller = caller;
+        avm.set_extern_call_handler(std::sync::Arc::new(move |contract: &str, function: &str, call_args: &[AivmValue]| {
+            let mut guard = ws.lock().unwrap();
+            let (target_avm, target_overlay, target_assets) = guard.get_mut(contract).ok_or_else(|| {
+                aivm::AivmError::HostFunctionFailed(format!(
+                    "extern_call: contract '{}' not in workspace", contract
+                ))
+            })?;
+            let func_idx = target_avm.find_function(function).ok_or_else(|| {
+                aivm::AivmError::HostFunctionFailed(format!(
+                    "extern_call: function '{}' not found on '{}'", function, contract
+                ))
+            })?;
+            let target_ctx = aivm::ExecutionContext::testnet(propagated_caller, [0u8; 41]);
+            let result = target_avm.execute_with_assets(func_idx, call_args.to_vec(), &target_ctx, target_overlay, target_assets)?;
+            match result.receipt.status {
+                aivm::ReceiptStatus::Success => Ok(result.return_value),
+                _ => Err(aivm::AivmError::HostFunctionFailed(format!(
+                    "extern_call: {}.{} reverted: {}", contract, function,
+                    result.revert_message.unwrap_or_else(|| "no revert message".to_string())
+                ))),
+            }
+        }));
+    }
+
     match avm.execute_with_assets(func_idx, args, &ctx, &mut overlay, &mut asset_ledger) {
         Ok(result) => {
             let status = match result.receipt.status {
@@ -945,6 +1144,43 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
                     active: rec.active,
                 })
                 .collect();
+            // Protocol attestation (added 19 Sep 2026): this is the real
+            // pre-submission EXECUTION phase (Forge's Test Results / Run &
+            // Debug / scenario runner) -- record it against the same
+            // source-hash key compile_aivm_handler and submit_mempool_handler
+            // use, so a later /protocol-attestation/:source_hash query can
+            // show whether a deploy was actually dry-run tested first.
+            let source_hash = crate::protocol_attestation::content_hash_hex(req.source.as_bytes());
+            let protocol_hint = crate::protocol_attestation::classify_protocol_hint(&req.source);
+            crate::protocol_attestation::record_stage(
+                &source_hash,
+                protocol_hint,
+                "aivm_dry_run_executed",
+                crate::protocol_attestation::BACKEND_AIVM,
+                None,
+                serde_json::json!({
+                    "function": req.function,
+                    "status": status,
+                    "gas_used": result.receipt.gas_used,
+                    "return_value": result.return_value.as_ref().map(aivm_value_to_json),
+                }),
+            );
+
+            // Snapshot every workspace contract's state after this call --
+            // the multi-contract counterpart of `final_state` above. See
+            // EstimateGasRequest::contracts / contract_final_states doc.
+            let contract_final_states: std::collections::HashMap<String, std::collections::HashMap<String, serde_json::Value>> = {
+                let guard = workspace.lock().unwrap();
+                guard.iter().map(|(name, (_, overlay, _))| {
+                    let snap: std::collections::HashMap<String, serde_json::Value> = overlay
+                        .committed_snapshot()
+                        .iter()
+                        .map(|(slot, val)| (slot.to_string(), aivm_value_to_json(val)))
+                        .collect();
+                    (name.clone(), snap)
+                }).collect()
+            };
+
             let canonical = CanonicalEstimate {
                 gas_used: result.receipt.gas_used.to_string(),
                 pq_gas_used: pq_gas_used.to_string(),
@@ -969,6 +1205,7 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
                 final_state,
                 final_assets,
                 next_asset_id,
+                contract_final_states,
                 canonical: Some(canonical),
                 note: match &caller_warning {
                     Some(w) => format!("{} {}", note, w),
@@ -1031,6 +1268,8 @@ mod estimate_gas_handler_tests {
             caller: None,
             assets: vec![],
             next_asset_id: 1,
+            contracts: HashMap::new(),
+            contract_states: HashMap::new(),
         }
     }
 

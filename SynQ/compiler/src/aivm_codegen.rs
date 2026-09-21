@@ -180,8 +180,43 @@ pub fn compile_to_aivm(contract: &ContractDefinition, structs: &[StructDefinitio
         }
         ctx.next_local = fbody.params().len() as u16;
 
-        // Generate body
-        for stmt in &fbody.body().statements {
+        // 21 Sept 2026: authority/caller prologue, ported from the primary
+        // IR/VM backend's ir/lower.rs::emit_authority_prologue (see that
+        // function's doc comment for the canonical semantics this mirrors).
+        // Previously this codegen path had NO equivalent -- a function
+        // guarded only by `as caller` or `@authority(Scope)` (no explicit
+        // require()) compiled with zero enforcement on AIVM, while the
+        // IR/VM backend correctly checked and reverted. Constructors have
+        // no attributes/requires_caller field in the AST, so this only
+        // applies to FuncBody::Function.
+        if let FuncBody::Function(f) = fbody {
+            ctx.emit_authority_prologue(f);
+        }
+
+        // Generate body. A trailing `extern_call(...)` statement is
+        // special-cased: unlike every other statement, its result is left
+        // on the stack instead of discarded, so the "Ensure RET at end"
+        // step just below consumes it as the function's IMPLICIT return
+        // value. This is the ONLY way to get an extern_call's return value
+        // out of a function -- `extern_call` is a statement, not an
+        // expression, in the grammar (synq.pest's extern_call_statement),
+        // so `return extern_call(...);` can never be written. Mirrors
+        // ir/builder.rs's identical "Track for implicit return (functions
+        // ending with extern_call)" convention on the QuantumVM/IR side
+        // (see build_expression's Statement::ExternCall arm there) --
+        // without this, e.g. TokenVault.tokenBalance() (whose entire body
+        // is `extern_call("SimpleToken", "balanceOf", caller);` with a
+        // declared `-> u256` return type) would always return void/0
+        // regardless of what balanceOf() actually returned.
+        let body_stmts = &fbody.body().statements;
+        let last_idx = body_stmts.len().checked_sub(1);
+        for (i, stmt) in body_stmts.iter().enumerate() {
+            if Some(i) == last_idx {
+                if let Statement::ExternCall { contract, function, args } = stmt {
+                    ctx.gen_extern_call(contract, function, args)?;
+                    continue;
+                }
+            }
             ctx.gen_statement(stmt)?;
         }
 
@@ -333,6 +368,85 @@ impl<'a> CodegenContext<'a> {
 
     fn emit(&mut self, instr: Instruction) {
         self.instructions.push(instr);
+    }
+
+    /// Emit `args` followed by a real `Instruction::ExternCall` for
+    /// `extern_call(contract, function, args...)` (21 Sept 2026 -- real
+    /// cross-contract call support, replacing the old HostCall(8) stub
+    /// that discarded contract/function entirely). Leaves the callee's
+    /// return value on top of the stack; callers decide whether to
+    /// discard it (Statement::ExternCall's ordinary-statement-position
+    /// arm) or leave it as a function's implicit return (the trailing-
+    /// statement special case in compile_to_aivm's body-generation loop).
+    fn gen_extern_call(&mut self, contract: &str, function: &str, args: &[Expression]) -> Result<(), String> {
+        if args.len() > u8::MAX as usize {
+            return Err(format!(
+                "extern_call to {}.{}: too many arguments ({}) -- max {}",
+                contract, function, args.len(), u8::MAX
+            ));
+        }
+        for arg in args {
+            self.gen_expr(arg)?;
+        }
+        self.emit(Instruction::ExternCall(contract.to_string(), function.to_string(), args.len() as u8));
+        Ok(())
+    }
+
+    /// Authority/caller prologue -- ported from ir/lower.rs's
+    /// emit_authority_prologue (see that function's doc comment for the
+    /// canonical cross-backend semantics). Two independent checks, each
+    /// using the same compact "push condition, JmpIf +2, TrapMsg" idiom
+    /// already used by Statement::Require above (instruction-INDEX jump
+    /// targets, not byte offsets, so "skip exactly one TrapMsg" is always
+    /// self.instructions.len() + 2 at the point the JmpIf is emitted --
+    /// no placeholder/patch machinery needed, unlike the byte-addressed
+    /// IR/VM assembler this mirrors):
+    ///
+    /// 1. `as caller` (requires_caller, when NOT also @public): caller
+    ///    must be non-zero. HostCall(5) = context.caller (pushes
+    ///    Value::Address), compared via Ne against a zero PushU256 --
+    ///    Value::Address has a numeric projection (as_u256()) precisely so
+    ///    comparisons like this widen correctly (see host.rs doc on the
+    ///    U256 numeric-projection fix).
+    /// 2. `@authority(Scope)`: caller's signed authority envelope must
+    ///    carry the matching scope. HostCall(22) = auth.envelope (pushes
+    ///    ctx.authority_envelope), then PushBytes(scope_hash) -- pushed in
+    ///    that order to match auth.require's pop order (envelope pushed
+    ///    first/bottom, scope_hash second/top) -- then HostCall(20) =
+    ///    auth.require pops both and pushes Bool(authorized). scope_hash
+    ///    is computed identically to the IR/VM backend
+    ///    (SHA3-256("SYNQ-AUTHORITY-SCOPE-v1:" + scope_name)) so the same
+    ///    @authority(Scope) name resolves to the same on-wire scope hash
+    ///    on both backends.
+    fn emit_authority_prologue(&mut self, f: &FunctionDefinition) {
+        let has_attr_public = f.attributes.iter().any(|a| matches!(a, Attribute::Public));
+
+        if f.requires_caller && !has_attr_public {
+            self.emit(Instruction::HostCall(5)); // context.caller
+            self.emit(Instruction::PushU256([0u8; 32]));
+            self.emit(Instruction::Ne); // caller != 0
+            self.emit(Instruction::JmpIf(self.instructions.len() as u32 + 2));
+            self.emit(Instruction::TrapMsg(5, format!("{}: unauthenticated call", f.name))); // Unauthorized
+        }
+
+        for attr in &f.attributes {
+            if let Attribute::Authority(scope_name) = attr {
+                let scope_hash: Vec<u8> = if scope_name.is_empty() {
+                    vec![0u8; 32]
+                } else {
+                    use sha3::Digest;
+                    let mut hasher = sha3::Sha3_256::new();
+                    hasher.update(b"SYNQ-AUTHORITY-SCOPE-v1:");
+                    hasher.update(scope_name.as_bytes());
+                    hasher.finalize().to_vec()
+                };
+                self.emit(Instruction::HostCall(22)); // auth.envelope
+                self.emit(Instruction::PushBytes(scope_hash));
+                self.emit(Instruction::HostCall(20)); // auth.require
+                self.emit(Instruction::JmpIf(self.instructions.len() as u32 + 2));
+                self.emit(Instruction::TrapMsg(5, format!("{}: authority scope denied", f.name))); // Unauthorized
+            }
+        }
     }
 
     fn gen_statement(&mut self, stmt: &Statement) -> Result<(), String> {
@@ -524,11 +638,14 @@ impl<'a> CodegenContext<'a> {
                 self.emit(Instruction::Ret);
             }
             Statement::ExternCall { contract, function, args } => {
-                for arg in args {
-                    self.gen_expr(arg)?;
-                }
-                self.warnings.push(format!("ExternCall {}.{} — mapped to HostCall(extern.call)", contract, function));
-                self.emit(Instruction::HostCall(8));
+                // Mid-body extern_call (not the function's last statement)
+                // -- the same semantics as any other expression-statement:
+                // evaluate for effect, discard the value. See
+                // gen_extern_call and the trailing-statement special case
+                // in compile_to_aivm's body-generation loop for the other
+                // half of this (implicit-return) story.
+                self.gen_extern_call(contract, function, args)?;
+                self.emit(Instruction::StoreLocal(255)); // discard result
             }
             Statement::Emit { event, args } => {
                 if let Some(arg) = args.first() {
