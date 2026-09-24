@@ -2953,6 +2953,90 @@ fn handle_json_rpc(
 
         "synergy_getSxcpStatus" => sxcp::get_sxcp_status(),
 
+        // ---------------------------------------------------------------------
+        // SCETP (Same-Chain External Transfer Protocol) + combined protocol
+        // activity analysis -- added 19 Sep 2026. Read-only: derived live from
+        // the existing finalized chain + pending pool, no new mutable state,
+        // so it carries no consensus/settlement risk. Reuses
+        // Transaction::gas_activity_type(), the single already-authoritative
+        // classifier for which protocol a native transaction belongs to.
+        // ---------------------------------------------------------------------
+        "synergy_getScetpStatus" => {
+            let pool_guard = tx_pool.lock().unwrap();
+            let chain_guard = chain.lock().unwrap();
+            let mut total_finalized: u64 = 0;
+            let mut total_pending: u64 = 0;
+            let mut recent: Vec<Value> = Vec::new();
+            for block in chain_guard.chain.iter() {
+                for tx in block.transactions.iter() {
+                    if matches!(tx.gas_activity_type(), crate::gas::GasActivityType::ScetpSameChainTransfer) {
+                        total_finalized += 1;
+                        if recent.len() < 10 {
+                            recent.push(json!({
+                                "tx_hash": tx.hash(),
+                                "sender": tx.sender,
+                                "receiver": tx.receiver,
+                                "amount": tx.amount,
+                                "status": "finalized",
+                                "block_height": block.header().number,
+                            }));
+                        }
+                    }
+                }
+            }
+            for tx in pool_guard.iter() {
+                if matches!(tx.gas_activity_type(), crate::gas::GasActivityType::ScetpSameChainTransfer) {
+                    total_pending += 1;
+                    if recent.len() < 20 {
+                        recent.push(json!({
+                            "tx_hash": tx.hash(),
+                            "sender": tx.sender,
+                            "receiver": tx.receiver,
+                            "amount": tx.amount,
+                            "status": "pending",
+                        }));
+                    }
+                }
+            }
+            json!({
+                "protocol": "SCETP",
+                "description": "Same-Chain External Transfer Protocol: identity-routed, natively-executed same-chain transfers (token_transfer: payloads). No relayer/quorum layer, unlike SXCP -- consistency here means every token_transfer tx classifies correctly and settles deterministically in-chain.",
+                "total_finalized_transfers": total_finalized,
+                "total_pending_transfers": total_pending,
+                "recent": recent,
+            })
+        }
+
+        "synergy_getProtocolActivitySummary" => {
+            let pool_guard = tx_pool.lock().unwrap();
+            let chain_guard = chain.lock().unwrap();
+            use crate::gas::GasActivityType;
+            let mut counts: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+            let mut tally = |activity: GasActivityType| {
+                let key = format!("{:?}", activity);
+                *counts.entry(key).or_insert(0) += 1;
+            };
+            for block in chain_guard.chain.iter() {
+                for tx in block.transactions.iter() {
+                    tally(tx.gas_activity_type());
+                }
+            }
+            for tx in pool_guard.iter() {
+                tally(tx.gas_activity_type());
+            }
+            let sxcp_count: u64 = counts.get("SxcpIntentCreation").copied().unwrap_or(0)
+                + counts.get("SxcpProofVerification").copied().unwrap_or(0)
+                + counts.get("SxcpRelayerAttestation").copied().unwrap_or(0);
+            let scetp_count: u64 = counts.get("ScetpSameChainTransfer").copied().unwrap_or(0);
+            json!({
+                "activity_counts_by_type": counts,
+                "sxcp_native_tx_count": sxcp_count,
+                "scetp_native_tx_count": scetp_count,
+                "sxcp_relayer_status": sxcp::get_sxcp_status(),
+                "note": "Native-transaction counts cover SXCP intent/proof/attestation and SCETP token_transfer txs only. SynQ contracts that consume SXCP attestations or perform SCETP-style transfers internally are a separate surface -- see GET /protocol-attestation/status on synq-server for that side (AIVM dry-run vs QuantumVM deploy consistency, keyed by contract source and tagged with a protocol_hint heuristic).",
+            })
+        }
+
         "synergy_submitAttestation" => {
             if let (Some(submitted_by), Some(event_hash), Some(aggregate_sig)) = (
                 params.get(0).and_then(|v| v.as_str()),
@@ -5821,6 +5905,8 @@ fn rpc_method_exposure(method: &str) -> Option<RpcMethodExposure> {
         | "synergy_getRelayerSet"
         | "synergy_getRelayerHealth"
         | "synergy_getSxcpStatus"
+        | "synergy_getScetpStatus"
+        | "synergy_getProtocolActivitySummary"
         | "synergy_getEventAttestation"
         | "synergy_getAttestations"
         | "synergy_nodeInfo"

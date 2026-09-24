@@ -9,6 +9,7 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
 use std::time::{SystemTime, UNIX_EPOCH};
+use crate::crypto::pqc::{PQCAlgorithm, PQCManager, PQCPrivateKey, PQCPublicKey};
 
 pub const AEGIS_TX_CARRIER_PREFIX: &str = "aegis-pqvm-tx-v1:";
 
@@ -133,6 +134,106 @@ pub fn sign_aegis_transaction_sequence_with_new_key(
 
     for mut options in options {
         options.signer_uma_id = signer_uma_id.clone();
+        if link_explicit_dependencies {
+            if let Some(tx_id) = previous_tx_id.as_ref() {
+                options.explicit_dependencies.push(tx_id.0.clone());
+            }
+        }
+        apply_generated_address_defaults(&signer, &key_id, &mut options)?;
+        let tx = sign_with_existing_aegis_transaction_key(&mut signer, &key_id, options)?;
+        let report =
+            report_for_transaction_in_mempool(&verifier, &mut mempool, tx, key_id.clone())?;
+        previous_tx_id = Some(report.tx_id.clone());
+        reports.push(report);
+    }
+
+    Ok(reports)
+}
+
+/// A persistable Aegis outer-layer wallet identity (FN-DSA keypair), so a
+/// repeatable demo (e.g. the SynQ compiler benchmark page's mempool-submit
+/// step) can reuse the SAME funded wallet address across many runs instead
+/// of every `build-carrier` invocation minting a brand new, unfunded
+/// throwaway address. Added 18 Sep 2026.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedAegisSignerKey {
+    pub uma_id: String,
+    pub public_key: PQCPublicKey,
+    pub private_key: PQCPrivateKey,
+}
+
+/// Generates a brand new persistable Aegis signer identity. Call this ONCE
+/// to mint a durable demo/test wallet, save the result to disk, then fund
+/// its derived address via the existing test-only profile.json allocation
+/// overlay. Every later call should load the saved file and pass it to
+/// `sign_aegis_transaction_sequence_with_existing_key` instead of calling
+/// this again -- calling it again mints a different, unfunded address.
+pub fn generate_persisted_aegis_signer_key(
+    uma_id: &str,
+) -> Result<PersistedAegisSignerKey, String> {
+    let mut manager = PQCManager::new();
+    let (public_key, private_key) = manager
+        .generate_keypair(PQCAlgorithm::FNDSA)
+        .map_err(|error| format!("aegis signer key generation failed: {error}"))?;
+    Ok(PersistedAegisSignerKey {
+        uma_id: uma_id.to_string(),
+        public_key,
+        private_key,
+    })
+}
+
+/// Derives the Aegis wallet address for a persisted signer key without
+/// needing to sign anything -- useful for printing "fund this address"
+/// during one-time setup.
+pub fn address_for_persisted_aegis_signer_key(
+    persisted: &PersistedAegisSignerKey,
+) -> Result<String, String> {
+    let mut signer = AegisPqvmSigner::initialize_required().map_err(|error| error.to_string())?;
+    let key_id = signer
+        .register_existing_keypair(
+            &persisted.uma_id,
+            persisted.public_key.clone(),
+            persisted.private_key.clone(),
+            vec![AegisPqKeyRole::Transaction],
+            Epoch(0),
+        )
+        .map_err(|error| error.to_string())?;
+    address_for_aegis_key(&signer, &key_id)
+}
+
+/// Same as `sign_aegis_transaction_sequence_with_new_key`, but signs with a
+/// previously-generated, persisted Aegis wallet identity instead of minting
+/// a fresh throwaway key every call. This is what lets a repeated demo
+/// (e.g. one benchmark-page click after another) keep submitting real
+/// signed carriers from the SAME funded sender address rather than a new,
+/// zero-balance address each time. Added 18 Sep 2026.
+pub fn sign_aegis_transaction_sequence_with_existing_key(
+    options: Vec<AegisTxBuildOptions>,
+    link_explicit_dependencies: bool,
+    persisted: &PersistedAegisSignerKey,
+) -> Result<Vec<AegisSignedTxReport>, String> {
+    if options.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let epoch = Epoch(options.first().map(|options| options.epoch).unwrap_or(0));
+    let mut signer = AegisPqvmSigner::initialize_required().map_err(|error| error.to_string())?;
+    let key_id = signer
+        .register_existing_keypair(
+            &persisted.uma_id,
+            persisted.public_key.clone(),
+            persisted.private_key.clone(),
+            vec![AegisPqKeyRole::Transaction],
+            epoch.clone(),
+        )
+        .map_err(|error| error.to_string())?;
+    let verifier = signer.verifier();
+    let mut mempool = DagMempool::new(&verifier, epoch, Height(0));
+    let mut previous_tx_id: Option<TxId> = None;
+    let mut reports = Vec::new();
+
+    for mut options in options {
+        options.signer_uma_id = persisted.uma_id.clone();
         if link_explicit_dependencies {
             if let Some(tx_id) = previous_tx_id.as_ref() {
                 options.explicit_dependencies.push(tx_id.0.clone());

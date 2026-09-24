@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 use std::fs;
 use synergy_testnet::aegis_tx_tool::{
-    build_fixture_report, sign_aegis_transaction_sequence_with_new_key,
+    build_fixture_report, sign_aegis_transaction_sequence_with_existing_key,
+    sign_aegis_transaction_sequence_with_new_key,
     sign_with_new_aegis_transaction_key, AegisSignedTxReport, AegisTxBuildOptions,
 };
 use synergy_testnet::gas::GasSchedule;
@@ -1621,6 +1622,30 @@ fn run_synq_command(args: &[String]) -> Result<(), String> {
             require_testnet_args(args)?;
             print_json(synq_replay_flow_report(args)?)?;
         }
+        "gen-signer-key" => {
+            let uma_id = args
+                .get(2)
+                .cloned()
+                .unwrap_or_else(|| "synq-benchmark-demo-signer".to_string());
+            let out_path = args.get(3).cloned().ok_or_else(|| {
+                "usage: synergy-node synq gen-signer-key <uma_id> <out.json>".to_string()
+            })?;
+            let persisted =
+                synergy_testnet::aegis_tx_tool::generate_persisted_aegis_signer_key(&uma_id)?;
+            let address =
+                synergy_testnet::aegis_tx_tool::address_for_persisted_aegis_signer_key(&persisted)?;
+            let json = serde_json::to_string_pretty(&persisted)
+                .map_err(|error| format!("serialize signer key: {error}"))?;
+            fs::write(&out_path, json)
+                .map_err(|error| format!("failed to write {out_path}: {error}"))?;
+            print_json(serde_json::json!({
+                "command": "synq gen-signer-key",
+                "uma_id": uma_id,
+                "address": address,
+                "key_file": out_path,
+                "note": "Fund this address via the profile.json test-only genesis_mints overlay, then pass --signer-key-file <this file> to 'synq build-carrier' to keep reusing it.",
+            }))?;
+        }
         "build-carrier" => {
             require_testnet_args(args)?;
             print_json(synq_build_carrier_report(args)?)?;
@@ -1770,7 +1795,21 @@ fn synq_build_carrier_report(args: &[String]) -> Result<serde_json::Value, Strin
         });
     }
 
-    let reports = sign_aegis_transaction_sequence_with_new_key(options, true)?;
+    // --signer-key-file <path> (added 18 Sep 2026): reuse a persisted Aegis
+    // wallet identity (see PersistedAegisSignerKey) instead of minting a
+    // fresh, unfunded throwaway address every call. Omit the flag to keep
+    // the original one-off-proof behaviour exactly as before.
+    let reports = match arg_value(args, "--signer-key-file") {
+        Some(key_path) => {
+            let key_json = fs::read_to_string(&key_path)
+                .map_err(|error| format!("failed to read {key_path}: {error}"))?;
+            let persisted: synergy_testnet::aegis_tx_tool::PersistedAegisSignerKey =
+                serde_json::from_str(&key_json)
+                    .map_err(|error| format!("invalid --signer-key-file {key_path}: {error}"))?;
+            sign_aegis_transaction_sequence_with_existing_key(options, true, &persisted)?
+        }
+        None => sign_aegis_transaction_sequence_with_new_key(options, true)?,
+    };
     let mut steps = Vec::new();
     for (label, report) in labels.into_iter().zip(reports) {
         let submission_envelope = serde_json::to_value(&report.submission_envelope)
@@ -1848,22 +1887,41 @@ fn execute_synq_replay_once(steps: &[SynqReplayStep]) -> Result<SynqReplayRun, S
 }
 
 fn synq_deploy_payload_from_args(args: &[String]) -> Result<Vec<u8>, String> {
-    let deploy_path = arg_value(args, "--synq-deploy-envelope")
-        .ok_or_else(|| "synq replay-flow requires --synq-deploy-envelope <path>".to_string())?;
     let bytecode_path = arg_value(args, "--synq-bytecode")
         .ok_or_else(|| "synq replay-flow requires --synq-bytecode <path>".to_string())?;
     let manifest_path = arg_value(args, "--synq-manifest")
         .ok_or_else(|| "synq replay-flow requires --synq-manifest <path>".to_string())?;
     let abi_path = arg_value(args, "--synq-abi")
         .ok_or_else(|| "synq replay-flow requires --synq-abi <path>".to_string())?;
-    let pqsynq_bytes =
-        fs::read(&deploy_path).map_err(|error| format!("failed to read {deploy_path}: {error}"))?;
     let bytecode = fs::read(&bytecode_path)
         .map_err(|error| format!("failed to read {bytecode_path}: {error}"))?;
     let manifest_json = fs::read_to_string(&manifest_path)
         .map_err(|error| format!("failed to read {manifest_path}: {error}"))?;
     let abi_json = fs::read_to_string(&abi_path)
         .map_err(|error| format!("failed to read {abi_path}: {error}"))?;
+    // --synq-deploy-envelope is now OPTIONAL (added 18 Sep 2026): if omitted,
+    // auto-build and sign a real pqsynq deploy envelope from the actual
+    // bytecode/manifest/abi bytes just read above, using a fresh throwaway
+    // inner ML-DSA-87 signer (see build_real_deploy_pqsynq_envelope). This
+    // lets callers (e.g. the compiler benchmark page's mempool-submit step)
+    // skip the separate envelope-preparation step entirely.
+    let pqsynq_bytes = match arg_value(args, "--synq-deploy-envelope") {
+        Some(deploy_path) => fs::read(&deploy_path)
+            .map_err(|error| format!("failed to read {deploy_path}: {error}"))?,
+        None => {
+            let constructor_args = match arg_value(args, "--synq-constructor-args-hex") {
+                Some(hex_str) => hex::decode(hex_str.trim())
+                    .map_err(|error| format!("invalid --synq-constructor-args-hex: {error}"))?,
+                None => Vec::new(),
+            };
+            synergy_testnet::synq_admission::build_real_deploy_pqsynq_envelope(
+                &bytecode,
+                manifest_json.as_bytes(),
+                abi_json.as_bytes(),
+                &constructor_args,
+            )?
+        }
+    };
     synergy_testnet::synq_admission::build_deploy_admission_carrier_from_pqsynq_bytes_with_artifacts(
         ChainId::synq_admission_testnet().0,
         &NetworkId::synergy_testnet_v2().0,

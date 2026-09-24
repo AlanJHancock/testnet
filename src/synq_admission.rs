@@ -26,6 +26,97 @@ const SYNQ_CONTRACT_ADDRESS_VERSION: u8 = 1;
 const SYNQ_CONTRACT_ADDRESS_CLASS: u16 = 0xC001;
 const SYNQ_ADDRESS_LEN: usize = 41;
 
+
+/// Builds and signs a REAL (non-test-fixture) pqsynq deploy envelope from
+/// actual compiled artifacts, using a freshly generated ML-DSA-87 inner
+/// signer identity. This inner pqsynq-layer signer is independent of the
+/// outer Aegis wallet identity used for account balance/nonce -- it only
+/// needs to pass the pqsynq-layer signature checks, so generating a brand
+/// new one per call is safe, requires no funding, and never needs replay
+/// tracking (each key is used exactly once). Returns the JSON-serialized
+/// `ContractDeployEnvelope` bytes -- this is exactly the byte format
+/// `synq build-carrier --synq-deploy-envelope <path>` expects to read.
+/// Added 18 Sep 2026 to let the SynQ compiler benchmark page submit a real
+/// signed deploy straight to the loopback mempool harness, not just a
+/// hand-built one-off proof.
+pub fn build_real_deploy_pqsynq_envelope(
+    bytecode: &[u8],
+    manifest_json: &[u8],
+    abi_json: &[u8],
+    constructor_args: &[u8],
+) -> Result<Vec<u8>, String> {
+    use pqsynq::{
+        canonicalize_signing_payload, derive_synq_address, hash_contract_deploy_body,
+        DigitalSignature, Sign, SynQPublicKey, SynQSignature, SynQSigningPayload,
+    };
+    use sha2::{Digest, Sha256};
+
+    fn sha256_bytes(bytes: &[u8]) -> [u8; 32] {
+        let digest = Sha256::digest(bytes);
+        let mut out = [0_u8; 32];
+        out.copy_from_slice(&digest);
+        out
+    }
+
+    let signer = Sign::mldsa87();
+    let (raw_public_key, private_key) = signer
+        .keygen()
+        .map_err(|error| format!("ML-DSA-87 keygen: {error}"))?;
+    let public_key = SynQPublicKey::new(raw_public_key);
+    let network_id = NetworkId(SYNQ_CANONICAL_TESTNET_NETWORK_ID.to_string());
+    let signer_address = derive_synq_address(&public_key, AlgorithmId::MlDsa87, &network_id)
+        .map_err(|error| format!("derive SynQ address: {error}"))?;
+
+    let bytecode_hash = sha256_bytes(bytecode);
+    let manifest_hash = sha256_bytes(manifest_json);
+    let abi_hash = sha256_bytes(abi_json);
+    let constructor_args_hash = sha256_bytes(constructor_args);
+
+    let payload_hash = hash_contract_deploy_body(
+        &bytecode_hash,
+        &manifest_hash,
+        &abi_hash,
+        signer_address.as_bytes(),
+        &constructor_args_hash,
+    );
+
+    let signing_payload = SynQSigningPayload {
+        domain_tag: DomainTag::SynqContractDeployV1,
+        chain_id: ChainId(SYNERGY_SYNQ_ADMISSION_CHAIN_ID),
+        network_id: network_id.clone(),
+        protocol_version: 1,
+        algorithm_id: AlgorithmId::MlDsa87,
+        signature_purpose: SignaturePurpose::ContractDeploy,
+        // Must be non-zero: the pqsynq verifier's testnet security policy
+        // enforces require_nonce and treats 0 as "missing" (AEGIS-NONCE).
+        // Since this inner signer key is freshly generated and used exactly
+        // once, any non-zero value is safe -- no replay tracking needed.
+        nonce: 1,
+        not_before_unix: 0,
+        expiration_unix: 4_102_444_800,
+        signer_address,
+        payload_hash,
+    };
+
+    let canonical = canonicalize_signing_payload(&signing_payload)
+        .map_err(|error| format!("canonicalize signing payload: {error}"))?;
+    let signature = signer
+        .detached_sign(&canonical, &private_key)
+        .map_err(|error| format!("ML-DSA-87 sign: {error}"))?;
+
+    let deploy = ContractDeployEnvelope {
+        signing_payload,
+        public_key,
+        signature: SynQSignature::new(signature),
+        bytecode_hash,
+        manifest_hash,
+        abi_hash,
+        constructor_args_hash,
+    };
+
+    serde_json::to_vec(&deploy).map_err(|error| format!("serialize deploy envelope: {error}"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedSynQNetwork {
     pub chain_id: u64,
