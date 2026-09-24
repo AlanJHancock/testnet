@@ -28,16 +28,19 @@ contract V3Types {
     return true;
   }
 
-  // Returns owner address as tsynq... Bech32 string.
+  // Returns owner address as synw... Bech32 string (to_syna/to_tsynq both
+  // encode via the current synw-wallet algorithm -- see aivm/src/addr.rs;
+  // to_tsynq is the deprecated name per SNTS-01 v1.3, which drops the
+  // tsynq/synq testnet HRPs entirely -- use to_syna in new code).
   @public
   function getOwnerSyna() -> str {
-    return to_tsynq(owner);
+    return to_syna(owner);
   }
 
-  // Returns current caller as tsynq... Bech32 string.
+  // Returns current caller as synw... Bech32 string (see to_syna note above).
   @public
   function getCallerSyna() as caller -> str {
-    return to_tsynq(caller);
+    return to_syna(caller);
   }
 
   // Returns the UMA identity stored during init.
@@ -81,7 +84,7 @@ contract V3Types {
   // Decodes a syna... string back to a u256 address.
   @public
   function parseSyna(s: str) -> u256 {
-    return from_tsynq(s);
+    return from_syna(s);
   }
 
   @public

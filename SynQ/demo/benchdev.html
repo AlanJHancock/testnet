@@ -70,6 +70,8 @@
   <button class="btn btn-stop" onclick="stopBench()">■ Stop</button>
   <button class="btn-mock bad" id="flipBtn" onclick="toggleFlip()">Flip mid-byte: OFF</button>
   <button class="btn-mock warn" id="rtFaultBtn" onclick="runRuntimeFault()">⚡ Runtime Fault Demo</button>
+  <button class="btn-mock" id="mempoolBtn" onclick="runMempoolSubmit()" style="background:#1f6feb;border-color:#1f6feb;color:#fff;">🚀 Submit to Mempool</button>
+  <button class="btn-mock" id="mempoolViewBtn" onclick="viewMempool()" style="background:#30363d;border-color:#8b949e;color:#c9d1d9;">👁 View Mempool</button>
 </div>
 
 <div class="file-row">
@@ -121,6 +123,17 @@
   <h3 style="font-size:14px;color:#c9d1d9;margin:12px 0 8px;">⚙ Execution Phase</h3>
   <div id="execLog" style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;font-family:monospace;font-size:12px;white-space:pre-wrap;max-height:400px;overflow-y:auto;color:#8b949e;"></div>
   <div id="execResults" style="margin-top:8px;"></div>
+</div>
+<div id="mempoolPanel" style="display:none;margin-top:16px;">
+  <h3 style="font-size:14px;color:#c9d1d9;margin:12px 0 8px;">🚀 Live Mempool Submission</h3>
+  <p style="font-size:12px;color:#8b949e;margin:0 0 8px;">Compiles the currently-loaded contract, builds a real two-layer signed carrier (inner ML-DSA-87 deploy envelope + outer Aegis PQVM signature) from a persistent funded demo wallet, and submits it straight to the live Synergy Testnet mempool harness. This is a real signed transaction, not a simulation -- it lands in the node's actual mempool.</p>
+  <div id="mempoolLog" style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;font-family:monospace;font-size:12px;white-space:pre-wrap;max-height:300px;overflow-y:auto;color:#8b949e;"></div>
+</div>
+<div id="mempoolViewPanel" style="display:none;margin-top:16px;">
+  <h3 style="font-size:14px;color:#c9d1d9;margin:12px 0 8px;">👁 Live Mempool Contents</h3>
+  <p style="font-size:12px;color:#8b949e;margin:0 0 8px;">Reads the node's actual pending-transaction pool right now via <code>synergy_getPendingTransactions</code>. Not a simulation -- this is whatever is really queued for the next block.</p>
+  <div style="margin-bottom:8px;"><button class="btn-mock" onclick="viewMempool()" style="background:#30363d;border-color:#8b949e;color:#c9d1d9;">↻ Refresh</button></div>
+  <div id="mempoolViewLog" style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px;font-family:monospace;font-size:12px;white-space:pre-wrap;max-height:300px;overflow-y:auto;color:#8b949e;"></div>
 </div>
 <div id="faultPanel"></div>
 
@@ -912,6 +925,132 @@ function buildFnReturnTypes(fns) {
     if (fns[i].return_type) m[fns[i].name] = fns[i].return_type;
   }
   return m;
+}
+
+function fmtMs(ms) {
+  if (ms === null || ms === undefined) return 'n/a';
+  return ms.toFixed(1) + 'ms';
+}
+
+async function runMempoolSubmit() {
+  var btn = document.getElementById('mempoolBtn');
+  if (btn.disabled) return; // already in flight -- ignore repeat clicks
+  var panel = document.getElementById('mempoolPanel');
+  var logEl = document.getElementById('mempoolLog');
+  panel.style.display = 'block';
+  logEl.textContent = '';
+  function mlog(msg) { logEl.textContent += msg + '\n'; logEl.scrollTop = logEl.scrollHeight; }
+
+  var source = _benchSource;
+  var name = _benchName;
+
+  if (!source || !source.trim()) {
+    mlog('No source loaded. Click a contract button or load a .synq file first.');
+    return;
+  }
+
+  btn.disabled = true;
+  var origLabel = btn.textContent;
+  btn.textContent = '⏳ Submitting...';
+  btn.style.opacity = '0.6';
+  btn.style.cursor = 'wait';
+
+  mlog('Contract: ' + (name || 'unnamed') + ' (' + source.length + ' chars)');
+  mlog('Compiling, signing (persistent demo wallet), and submitting to live mempool...');
+  mlog('');
+
+  try {
+    var resp;
+    try {
+      resp = await fetch('/synq/submit-mempool', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: source })
+      }).then(r => r.json());
+    } catch (ex) {
+      mlog('ERROR: request failed: ' + ex);
+      return;
+    }
+
+    mlog('Stage reached: ' + resp.stage);
+    if (!resp.success) {
+      mlog('FAILED: ' + (resp.error || 'unknown error'));
+      mlog('');
+      mlog('Timing (separate from the Run Benchmark WASM/Loopback/HTTP/Wasmtime ms and fuel above -- those');
+      mlog('only measure compilation. This is the real compile+sign+submit chain path):');
+      mlog('  compile: ' + fmtMs(resp.compile_ms) + '  determine-nonce (RPC): ' + fmtMs(resp.nonce_lookup_ms) +
+           '  build-carrier: ' + fmtMs(resp.build_carrier_ms) + '  submit (RPC): ' + fmtMs(resp.submit_ms) +
+           '  total: ' + fmtMs(resp.total_ms));
+      return;
+    }
+
+    mlog('✓ Compiled: ' + resp.bytecode_bytes + ' bytes bytecode');
+    mlog('✓ Signed by: ' + resp.sender + ' (nonce ' + resp.nonce + ')');
+    mlog('✓ Contract address: ' + resp.synq_contract_address);
+    mlog('✓ Aegis PQVM verification: ' + resp.aegis_pqvm_verification);
+    mlog('✓ Mempool status: ' + resp.mempool_status + ' (' + resp.dag_admission_status + ')');
+    mlog('✓ tx_id: ' + resp.tx_id);
+    mlog('✓ tx_hash: ' + resp.tx_hash);
+    mlog('');
+    mlog('This transaction is now sitting in the live testnet mempool, verified and queued for block proposal.');
+    mlog('');
+    mlog('Timing (separate from the Run Benchmark figures above -- those only measure compilation;');
+    mlog('this covers the full compile -> sign -> submit chain path, including the two RPC calls to the live node):');
+    mlog('  compile: ' + fmtMs(resp.compile_ms) + '  determine-nonce (RPC): ' + fmtMs(resp.nonce_lookup_ms) +
+         '  build-carrier: ' + fmtMs(resp.build_carrier_ms) + '  submit (RPC): ' + fmtMs(resp.submit_ms) +
+         '  total: ' + fmtMs(resp.total_ms));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = origLabel;
+    btn.style.opacity = '1';
+    btn.style.cursor = 'pointer';
+  }
+}
+
+async function viewMempool() {
+  var btn = document.getElementById('mempoolViewBtn');
+  var panel = document.getElementById('mempoolViewPanel');
+  var logEl = document.getElementById('mempoolViewLog');
+  panel.style.display = 'block';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Loading...'; btn.style.opacity = '0.6'; }
+  logEl.textContent = 'Fetching live mempool contents...';
+
+  try {
+    var resp = await fetch('/synq/mempool').then(r => r.json());
+    if (!resp.success) {
+      logEl.textContent = 'FAILED: ' + (resp.error || 'unknown error');
+      return;
+    }
+    if (resp.count === 0) {
+      logEl.textContent = 'Mempool is empty -- no pending transactions right now (' + new Date().toLocaleTimeString() + ').';
+      return;
+    }
+    var lines = [];
+    lines.push(resp.count + ' pending transaction(s) as of ' + new Date().toLocaleTimeString() + ':');
+    lines.push('');
+    // Oldest first, most recent last -- so the listing number (highest = most recent)
+    // tracks recency directly instead of being an arbitrary RPC return order.
+    var sortedTxs = resp.transactions.slice().sort(function(a, b) {
+      var an = (typeof a.nonce === 'number') ? a.nonce : -Infinity;
+      var bn = (typeof b.nonce === 'number') ? b.nonce : -Infinity;
+      if (an !== bn) return an - bn;
+      return (a.timestamp || 0) - (b.timestamp || 0);
+    });
+    sortedTxs.forEach(function(tx, i) {
+      lines.push((i + 1) + '. ' + (tx.is_contract_deploy ? '[contract deploy] ' : '') + (tx.hash || '(no hash)'));
+      lines.push('   sender: ' + tx.sender + '  nonce: ' + tx.nonce + '  status: ' + tx.status);
+      var tsDisplay = (typeof tx.timestamp === 'number')
+        ? new Date(tx.timestamp * 1000).toISOString().replace('T', ' ').replace('Z', ' UTC')
+        : String(tx.timestamp);
+      lines.push('   gas_price: ' + tx.gas_price + '  timestamp: ' + tsDisplay + ' (' + tx.timestamp + ')');
+      lines.push('');
+    });
+    logEl.textContent = lines.join('\n');
+  } catch (ex) {
+    logEl.textContent = 'ERROR: request failed: ' + ex;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '👁 View Mempool'; btn.style.opacity = '1'; }
+  }
 }
 
 async function runExecPhaseFresh(source, name) {

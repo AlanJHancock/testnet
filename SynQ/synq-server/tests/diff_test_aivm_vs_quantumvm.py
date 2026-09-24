@@ -270,6 +270,8 @@ def run_aivm_sequence(server, source, steps, companion=None):
             "next_asset_id": next_asset_id,
             "caller": step.get("caller", DEFAULT_CALLER),
         }
+        if step.get("authority_envelope"):
+            payload["authority_envelope"] = step["authority_envelope"]
         if companion is not None:
             payload["contracts"] = {companion["label"]: companion["source"]}
             payload["contract_states"] = contract_states
@@ -317,6 +319,8 @@ def run_qvm_sequence(server, source, steps, companion=None):
     def build_call(step, captured):
         call = {"function": step["call"], "args": substitute_args(step.get("args", []), captured)}
         call["caller"] = step.get("caller", DEFAULT_CALLER)
+        if step.get("authority_envelope"):
+            call["authority_envelope"] = step["authority_envelope"]
         return call
 
     def companion_extra_fields():

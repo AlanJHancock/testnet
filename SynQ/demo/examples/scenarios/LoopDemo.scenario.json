@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "contract": "contracts/LoopDemo.synq",
+  "contract": "examples/LoopDemo.synq",
   "scenarios": [
     {
       "name": "pure loop functions -- no state required",

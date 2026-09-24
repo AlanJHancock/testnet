@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "contract": "contracts/DomainRegistry.synq",
+  "contract": "examples/DomainRegistry.synq",
   "scenarios": [
     {
       "name": "3-level nested map lifecycle: default-zero read -> set -> sibling isolation at all three levels -> update -> delete -> sibling survives",

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "contract": "contracts/V3Types.synq",
+  "contract": "examples/V3Types.synq",
   "scenarios": [
     {
       "name": "session id, stored value, and block height round-trip (uma/owner/caller/address builtins skipped -- see note below)",
@@ -27,7 +27,10 @@
           "args": [
             777
           ],
-          "expectReturn": true
+          "expectReturn": true,
+          "authority_envelope": {
+            "scope": "AdminScope"
+          }
         },
         {
           "call": "getValue",

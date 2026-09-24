@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "contract": "contracts/ComprehensiveToken.synq",
+  "contract": "examples/ComprehensiveToken.synq",
   "scenarios": [
     {
       "name": "init -> metadata (str_len/str_concat/str_eq) -> delegated roles -> delegated mint -> party-to-party transfer -> burn -> labels -> revokes. All caller identities use the canonical 16-byte big-endian identity slot at bytes[5..21], matching Value::as_address()'s own numeric-literal encoding -- this is required since the 2026-08-25 map-key fix (aivm-scenario-testing-backlog.md item 7) canonicalizes Value::Address map keys through that exact slot.",

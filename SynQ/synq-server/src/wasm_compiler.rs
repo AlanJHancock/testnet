@@ -45,7 +45,7 @@ impl WasmRuntime {
         // and new wasm-bindgen module name (./synq_compiler_wasm_bg.js)
         let mut linker = Linker::new(&self.engine);
 
-        // ── Old-style module names (backward compat) ──────────────────────
+        // -- Old-style module names (backward compat) --------------------
         linker.func_wrap("__wbindgen_placeholder__", "__wbindgen_describe", |_: i32| {})
             .map_err(|e| format!("linker: {}", e))?;
         linker.func_wrap("__wbindgen_externref_xform__", "__wbindgen_externref_table_set_null", |_: i32| {})
@@ -53,12 +53,29 @@ impl WasmRuntime {
         linker.func_wrap("__wbindgen_externref_xform__", "__wbindgen_externref_table_grow", |d: i32| -> i32 { d })
             .map_err(|e| format!("linker: {}", e))?;
 
-        // ── New-style module name from wasm-pack/wasm-bindgen 0.2.100+ ─────
-        // Only import: __wbindgen_init_externref_table — signature () -> ()
+        // -- New-style module name from wasm-pack/wasm-bindgen 0.2.100+ --
+        // Only import: __wbindgen_init_externref_table -- signature () -> ()
         // All other wbindgen functions are exported by the WASM binary itself.
         let wbmod = "./synq_compiler_wasm_bg.js";
         linker.func_wrap(wbmod, "__wbindgen_init_externref_table", || {})
             .map_err(|e| format!("linker init_externref: {}", e))?;
+
+        // -- Catch-all for any other wasm-bindgen glue imports -----------
+        // The .wasm binary is built from a crate that also exposes a
+        // browser-facing wasm-bindgen API (compile_synq/synq_version) alongside
+        // the C-ABI exports we actually call here (compile_synq_c/synq_wasm_alloc).
+        // Every wasm-bindgen rebuild can add new hashed setter/getter-style
+        // JS-glue imports for that browser API (e.g. js_sys::Reflect::set shims);
+        // since WASM requires ALL declared imports to be satisfied at
+        // instantiation time even for code paths that never call them,
+        // hardcoding each hash by name is a losing game that breaks on every
+        // wasm-bindgen rebuild (this incident: a fresh hashed setter import had
+        // no matching stub above, so instantiation failed outright).
+        // Fill in anything not already defined above with a stub that returns
+        // default values -- safe because the C-ABI path exercised here never
+        // touches JS interop, so these stubs are never actually invoked.
+        linker.define_unknown_imports_as_default_values(&self.module)
+            .map_err(|e| format!("linker define_unknown_imports: {}", e))?;
 
         let instance = linker.instantiate(&mut store, &self.module)
             .map_err(|e| format!("Instantiate: {}", e))?;
@@ -89,7 +106,7 @@ impl WasmRuntime {
             return Err("WASM alloc returned null for output".to_string());
         }
 
-        // Execute compilation — will trap if fuel runs out
+        // Execute compilation -- will trap if fuel runs out
         let written = compile_fn.call(&mut store, (src_ptr, src_len, out_ptr, out_len))
             .map_err(|e| {
                 let msg = format!("{}", e);
@@ -129,7 +146,7 @@ impl WasmRuntime {
 
 }
 
-// POST /compile-wasm — compile via server-side wasmtime execution with fuel metering
+// POST /compile-wasm -- compile via server-side wasmtime execution with fuel metering
 pub async fn compile_wasm_handler(
     axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<SocketAddr>,
     axum::extract::State(state): axum::extract::State<crate::AppState>,

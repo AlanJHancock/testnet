@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "contract": "contracts/StructValue.synq",
+  "contract": "examples/StructValue.synq",
   "scenarios": [
     {
       "name": "read-only struct helpers -- no state mutation",

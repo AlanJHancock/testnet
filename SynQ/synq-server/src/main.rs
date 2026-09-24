@@ -77,6 +77,7 @@ use synq_vm::verify;
 mod wasm_compiler;
 mod aivm_handler;
 mod sqb;
+mod protocol_attestation;
 
 // ─── Security constants ───────────────────────────────────────────────────────
 
@@ -102,12 +103,99 @@ fn governance_scope_hash(scope_name: &str) -> [u8; 32] {
 
 /// Derive a V3 authority scope hash (SHA3-256) from a scope name.
 /// This must match the compiler's codegen for @authority(ScopeName).
-fn authority_scope_hash(scope_name: &str) -> [u8; 32] {
+/// pub(crate): also used by aivm_handler.rs's estimate-gas path (see
+/// AuthorityEnvelopeInput/build_authority_envelope below) so both dry-run
+/// backends compute the SAME scope hash from the same scope name.
+pub(crate) fn authority_scope_hash(scope_name: &str) -> [u8; 32] {
     use sha3::Digest;
     let mut hasher = sha3::Sha3_256::new();
     hasher.update(b"SYNQ-AUTHORITY-SCOPE-v1:");
     hasher.update(scope_name.as_bytes());
     hasher.finalize().into()
+}
+
+// 2026-09-24: request-side convenience authority envelope for the two
+// dry-run endpoints (/aivm/estimate-gas, /quantumvm/dry-run). Before this,
+// ctx.authority_envelope/call_context.authority_envelope defaulted to an
+// empty Vec on both backends with NO request field to populate a real one,
+// so an @authority(Scope)-gated function (e.g. V3Types.setValue's
+// @authority(AdminScope)) could only ever be exercised through its denial
+// path via either dry-run endpoint -- the SUCCESS path was untestable
+// even though the real /run endpoint already auto-injects a passing
+// devnet envelope for these (see the auth_envelope construction a few
+// hundred lines below /run's handler). This is the dry-run-side
+// equivalent, but opt-in and per-call: omitting it keeps today's
+// behavior (empty envelope -> @authority-gated calls revert), so none of
+// the existing revert-guard-rail scenarios change.
+#[derive(Debug, serde::Deserialize, Clone, Default)]
+pub(crate) struct AuthorityEnvelopeInput {
+    /// UMA identity: 0x-prefixed hex (<=32 bytes, right-aligned) or a plain
+    /// decimal string. Omitted/unparseable -> a fixed non-zero devnet
+    /// identity (SHA3-256("SYNQ-DEVNET-AUTHORITY")) -- same devnet
+    /// convention /run already uses -- just enough for AuthRequire's
+    /// identity_is_set check to pass; this is a test-harness identity, not
+    /// a real UMA.
+    #[serde(default)]
+    pub identity: Option<String>,
+    /// Scope name matching the target function's @authority(Name).
+    /// Omitted/empty -> all-zero scope, which AuthRequire treats as a
+    /// wildcard matching ANY requested scope (the same "devnet wildcard"
+    /// vm/src/vm.rs's OpCode::AuthRequire and aivm/src/host.rs's
+    /// "auth.require" both already implement).
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Big-endian expiry height. Omitted/0 -> never expires.
+    #[serde(default)]
+    pub expiry: Option<u64>,
+}
+
+/// Build an 80-byte authority envelope from the convenience input above,
+/// matching the EXACT layout both backends' AuthRequire/auth.require
+/// already expect (see vm/src/vm.rs's OpCode::AuthRequire /
+/// aivm/src/host.rs's "auth.require"):
+///   [0..32)  identity
+///   [32..64) scope hash (all-zero = wildcard)
+///   [64..72) nonce (unused by AuthRequire's own checks here; left zero)
+///   [72..80) expiry, big-endian u64 (0 = never expires)
+pub(crate) fn build_authority_envelope(input: &AuthorityEnvelopeInput) -> Vec<u8> {
+    use sha3::Digest;
+    let devnet_identity = || -> [u8; 32] { sha3::Sha3_256::digest(b"SYNQ-DEVNET-AUTHORITY").into() };
+
+    let mut env = vec![0u8; 80];
+
+    let identity: [u8; 32] = match input.identity.as_deref() {
+        Some(s) if s.starts_with("0x") || s.starts_with("0X") => {
+            match hex::decode(&s[2..]) {
+                Ok(bytes) if !bytes.is_empty() && bytes.len() <= 32 => {
+                    let mut id = [0u8; 32];
+                    id[32 - bytes.len()..].copy_from_slice(&bytes);
+                    id
+                }
+                _ => devnet_identity(),
+            }
+        }
+        Some(s) if !s.is_empty() => match s.parse::<u128>() {
+            Ok(n) => {
+                let mut id = [0u8; 32];
+                id[16..32].copy_from_slice(&n.to_be_bytes());
+                id
+            }
+            Err(_) => devnet_identity(),
+        },
+        _ => devnet_identity(),
+    };
+    env[0..32].copy_from_slice(&identity);
+
+    if let Some(ref scope_name) = input.scope {
+        if !scope_name.is_empty() {
+            env[32..64].copy_from_slice(&authority_scope_hash(scope_name));
+        }
+    }
+
+    let expiry = input.expiry.unwrap_or(0);
+    env[72..80].copy_from_slice(&expiry.to_be_bytes());
+
+    env
 }
 
 /// Derive a canonical event topic hash (SHA3-256) from an event name, using the
@@ -220,7 +308,7 @@ const V3_DOMAIN_GRANT: &str = "SYNQ-GRANT-v3";
 #[derive(Clone)]
 struct SessionGrant {
     caller_addr: [u8; 20],
-    display_tsynq: Option<String>,
+    display_synw: Option<String>,
     allowed_functions: std::collections::HashSet<String>,
     expiry: u64,
     // NOTE: replay protection for the nonce that created this grant is
@@ -684,7 +772,15 @@ fn value_to_json(v: &Value) -> serde_json::Value {
         Value::Bool(b)  => json!({"type": "Bool", "value": if *b { "true" } else { "false" }}),
         Value::Bytes(b) => {
             if let Ok(s) = std::str::from_utf8(b) { json!({"type": "String", "value": s}) }
-            else { json!({"type": "Bytes", "value": hex_encode(b)}) }
+            // 2026-09-23: prefix with "0x" to match AIVM's aivm_value_to_json
+            // convention (always 0x-prefixed hex for Bytes/Bytes32/Address) --
+            // was the sole remaining cause of the two "purely cosmetic"
+            // V3Types diff-test diffs (getSessionId/getUmaId), and also
+            // silently broke forge-v3's formatPossibleAddress() synw-address
+            // resolution for QVM-side Bytes returns, since that helper
+            // requires the leading "0x" to even attempt decoding
+            // (app/lib/ide/address-format.ts).
+            else { json!({"type": "Bytes", "value": format!("0x{}", hex_encode(b))}) }
         },
         Value::Str(s) => json!({"type": "String", "value": s}),
         Value::Map(_)        => json!({"type": "Map",   "value": "[map]"}),
@@ -710,6 +806,36 @@ fn value_to_json_typed(v: &Value, ret_type: Option<&str>) -> serde_json::Value {
         // Promote I32(n)→Bool when declared bool and n==1 (shouldn't happen but be safe)
         (Value::I32(1), Some("bool")) =>
             json!({"type": "Bool", "value": "true"}),
+        // 2026-09-23: a value stored as raw Value::Bytes but declared u256
+        // at the language level (e.g. Hash32/UMAIdentity-aliased state vars
+        // like V3Types.sessionId) must NOT go through value_to_json's
+        // generic Bytes arm -- that arm's "valid UTF-8 -> treat as String"
+        // heuristic misfires whenever every byte happens to be < 0x80 (a
+        // real hash can easily satisfy that by chance, e.g. 32x 0x11),
+        // producing garbled raw control-character text instead of hex.
+        // Bypass it entirely for these and always emit 0x-prefixed hex,
+        // matching AIVM's aivm_value_to_json convention (and what
+        // forge-v3's formatPossibleAddress() requires to even attempt
+        // synw-address decoding). See getSessionId() diff-test finding.
+        (Value::Bytes(b), Some(rt)) if matches!(rt.to_lowercase().as_str(), "u256" | "uint256") =>
+            json!({"type": "Bytes", "value": format!("0x{}", hex_encode(b))}),
+        // 2026-09-23: UMAIdentity getters (hinted "umaidentity" -- see the
+        // is_uma_passthrough detection above). Two cases:
+        //  - real assigned identity bytes -> hex, same convention as the
+        //    u256/Bytes arm just above (and AIVM's aivm_value_to_json).
+        //  - never-initialised slot: the VM's Load opcode has one universal
+        //    type-erased zero-default (Value::I32(0)) for every state
+        //    variable regardless of declared type, so an untouched
+        //    UMAIdentity reads back as plain I32(0) here. AIVM already
+        //    defaults the same never-initialised UMAIdentity to empty bytes
+        //    ("0x"); mapping I32(0) to the same "0x" here (instead of
+        //    falling through to value_to_json's generic UInt256 "0") makes
+        //    that default consistent on both backends, per the explicit
+        //    "make UMAIdentity default to 0x on both backends" direction.
+        (Value::Bytes(b), Some("umaidentity")) =>
+            json!({"type": "Bytes", "value": format!("0x{}", hex_encode(b))}),
+        (Value::I32(0), Some("umaidentity")) =>
+            json!({"type": "Bytes", "value": "0x"}),
         _ => value_to_json(v),
     }
 }
@@ -900,6 +1026,59 @@ fn parse_arg_typed(v: &serde_json::Value, ty_hint: &str) -> Result<Value, String
         }
         other => Err(format!("Expected number or string, got {}", other)),
     }
+}
+
+/// Best-effort string type-hint derived from an `ast::Type`, for the leaf
+/// (non-struct) case of `parse_arg_typed_with_structs` below -- keeps
+/// `parse_arg_typed`'s existing string-hint dispatch (u256/bool/str/bytes/
+/// tuple-string) as the single source of truth for scalar decoding instead
+/// of duplicating it, while still letting struct FIELDS get a real type
+/// hint derived from the struct definition rather than an empty "".
+fn type_to_hint_str(ty: &synq_compiler::ast::Type) -> String {
+    use synq_compiler::ast::Type;
+    match ty {
+        Type::UInt8 | Type::UInt16 | Type::UInt32 | Type::UInt64 | Type::UInt128 | Type::UInt256 => "u256".to_string(),
+        Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128 | Type::Int256 => "i256".to_string(),
+        Type::Bool => "bool".to_string(),
+        Type::Bytes | Type::BytesN(_) => "bytes".to_string(),
+        Type::Address => "address".to_string(),
+        Type::Str => "str".to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Type-aware arg decoder for `/quantumvm/dry-run`: like `parse_arg_typed`,
+/// but when the declared param type is a known struct (`Type::Named`),
+/// decodes a JSON object (`{"x": 1, "y": 2}`) into a `Value::Tuple` in the
+/// struct's DECLARED field order -- instead of `parse_arg_typed`'s
+/// catch-all `Expected number or string, got {...}` rejection. Mirrors
+/// `aivm_handler.rs`'s `json_to_aivm_value_typed`, just targeting
+/// `synq_vm::Value::Tuple` (this VM's tuple representation, per
+/// `TupleSet`/`TupleGet`) instead of AIVM's `Value::Array`. Recurses so a
+/// struct-typed field nested inside another struct also decodes correctly.
+fn parse_arg_typed_with_structs(
+    v: &serde_json::Value,
+    ty: Option<&synq_compiler::ast::Type>,
+    structs: &std::collections::HashMap<String, &synq_compiler::ast::StructDefinition>,
+) -> Result<Value, String> {
+    use synq_compiler::ast::Type;
+    if let serde_json::Value::Object(map) = v {
+        let sname = match ty {
+            Some(Type::Named(n)) => n.clone(),
+            _ => return Err(format!(
+                "arg is an object {{...}} but its declared param type ({:?}) isn't a known struct -- object literals are only supported for struct-typed parameters", ty
+            )),
+        };
+        let sdef = structs.get(sname.as_str()).ok_or_else(|| format!("unknown struct type '{}' for object arg", sname))?;
+        let mut vals = Vec::with_capacity(sdef.fields.len());
+        for f in &sdef.fields {
+            let fv = map.get(&f.name).ok_or_else(|| format!("struct '{}' missing field '{}'", sname, f.name))?;
+            vals.push(parse_arg_typed_with_structs(fv, Some(&f.ty), structs)?);
+        }
+        return Ok(Value::Tuple(vals));
+    }
+    let hint = ty.map(type_to_hint_str).unwrap_or_default();
+    parse_arg_typed(v, &hint)
 }
 
 // ─── POST /compile ────────────────────────────────────────────────────────────
@@ -4259,6 +4438,21 @@ struct NewSessionRequest {
     /// into the wallet's workspace afterward, overwriting the old pointer.
     #[serde(default)]
     force_new: bool,
+    /// Optional constructor arguments for init() (matches EVM constructor-args
+    /// behavior). Without these, the auto-init below always calls init() with
+    /// zero arguments -- fine for a parameterless init(), but a guaranteed
+    /// arity-mismatch failure for any contract whose init() takes parameters
+    /// (e.g. ComprehensiveToken's init(name: str, symbol: str)). When
+    /// provided, decoded the same way session/run decodes `args`/`param_types`
+    /// (see parse_arg_typed below) and passed to the auto-call instead of &[].
+    #[serde(default)]
+    init_args: Option<Vec<serde_json::Value>>,
+    /// Declared type per init_args[i] ("str", "u256", "bool", ...) -- same
+    /// convention as session/run's `param_types`. Required for init_args to
+    /// decode correctly (large u256 values in particular need the type hint
+    /// to parse as a full-precision decimal string instead of a JSON number).
+    #[serde(default)]
+    init_param_types: Option<Vec<String>>,
 }
 
 #[derive(serde::Serialize)]
@@ -4289,6 +4483,13 @@ struct NewSessionResponse {
     /// Whether init() was auto-called on session creation (matches EVM constructor behavior).
     #[serde(skip_serializing_if = "Option::is_none")]
     init_called: Option<bool>,
+    /// Real error message when init_called is false -- e.g. "Function 'init'
+    /// expects 2 argument(s), got 0" for a parameterized constructor that
+    /// wasn't given init_args. Previously this was only eprintln!'d
+    /// server-side and silently dropped from the response, so callers had no
+    /// way to tell an arity mismatch apart from any other init() failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    init_error: Option<String>,
     /// True if an existing wallet session was handed back instead of creating a new one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     resumed: bool,
@@ -4715,7 +4916,7 @@ async fn session_new_handler(
     Json(req): Json<NewSessionRequest>,
 ) -> (StatusCode, RespJson<NewSessionResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, contract_name: None, error: Some("rate limit exceeded — retry later".into()), layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None, sqb_verified: None, init_called: None, resumed: false, workspace_id: None }));
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(NewSessionResponse { success: false, session_id: None, contract_name: None, error: Some("rate limit exceeded — retry later".into()), layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None, sqb_verified: None, init_called: None, init_error: None, resumed: false, workspace_id: None }));
     }
 
     // ── Wallet-addressed session resume ────────────────────────────────────
@@ -4753,7 +4954,7 @@ async fn session_new_handler(
                     return (StatusCode::OK, RespJson(NewSessionResponse {
                         success: true, session_id: Some(sid), contract_name: Some(cname.clone()), error: None,
                         layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
-                        sqb_verified: None, init_called: None,
+                        sqb_verified: None, init_called: None, init_error: None,
                         resumed: true, workspace_id: Some(wid),
                     }));
                 } else {
@@ -4790,7 +4991,7 @@ async fn session_new_handler(
                 error: Some(format!("SQB base64 decode failed: {}", e)),
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
                 sqb_verified: None,
-            init_called: None,
+            init_called: None, init_error: None,
         resumed: false, workspace_id: None,
             })),
         };
@@ -4802,7 +5003,7 @@ async fn session_new_handler(
                 error: Some(format!("SQB decode failed: {}", e)),
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
                 sqb_verified: None,
-            init_called: None,
+            init_called: None, init_error: None,
         resumed: false, workspace_id: None,
             })),
         };
@@ -4815,7 +5016,7 @@ async fn session_new_handler(
                 error: Some("SQB artifact has no CODE section".into()),
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
                 sqb_verified: None,
-            init_called: None,
+            init_called: None, init_error: None,
         resumed: false, workspace_id: None,
             })),
         };
@@ -4855,7 +5056,7 @@ async fn session_new_handler(
                 error: Some("SQB signature verification failed — artifact may be tampered".into()),
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
                 sqb_verified: Some(false),
-            init_called: None,
+            init_called: None, init_error: None,
         resumed: false, workspace_id: None,
             }));
         }
@@ -4899,7 +5100,7 @@ async fn session_new_handler(
                 success: false, session_id: None, contract_name: None, error: Some("no bytecode or SQB artifact provided".into()),
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
                 sqb_verified: None,
-            init_called: None,
+            init_called: None, init_error: None,
         resumed: false, workspace_id: None,
             })),
         }
@@ -4912,7 +5113,7 @@ async fn session_new_handler(
             error: Some(format!("Bytecode verification failed: {}", e)),
             layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
             sqb_verified,
-        init_called: None,
+        init_called: None, init_error: None,
         resumed: false, workspace_id: None,
         }));
     }
@@ -4932,7 +5133,7 @@ async fn session_new_handler(
                 error: Some("SQB artifact missing manifest — L3 verification mandatory for SQB deployments".into()),
                 layer3: None, fuel_budget: None, max_steps: None, steps_used: None,
                 steps_remaining: None, sqb_verified,
-                init_called: None,
+                init_called: None, init_error: None,
         resumed: false, workspace_id: None,
             })),
         }
@@ -4966,7 +5167,7 @@ async fn session_new_handler(
                     error: Some(format!("L3 verification FAILED: {}", reason)),
                     layer3: layer3_result.clone(), fuel_budget: None, max_steps: None,
                     steps_used: None, steps_remaining: None, sqb_verified,
-                init_called: None,
+                init_called: None, init_error: None,
         resumed: false, workspace_id: None,
                 }));
             }
@@ -4979,7 +5180,7 @@ async fn session_new_handler(
             success: false, session_id: None, contract_name: None, error: Some(format!("Load error: {}", e)),
             layer3: None, fuel_budget: None, max_steps: None, steps_used: None, steps_remaining: None,
             sqb_verified,
-        init_called: None,
+        init_called: None, init_error: None,
         resumed: false, workspace_id: None,
         }));
     }
@@ -5096,11 +5297,33 @@ async fn session_new_handler(
 
     // ── Auto-call init() if present (matches EVM constructor behavior) ────────
     let mut init_called = None;
+    let mut init_error: Option<String> = None;
+    // Decode init_args up front (same convention as session/run's args/param_types
+    // -- see parse_arg_typed) so a parameterized init() (e.g. ComprehensiveToken's
+    // init(name: str, symbol: str)) can actually be auto-called instead of always
+    // failing with an arity mismatch against a hardcoded empty arg list.
+    let init_param_types_hint: Vec<String> = req.init_param_types.clone().unwrap_or_default();
+    let mut init_vm_args: Vec<Value> = Vec::new();
+    let mut init_args_decode_error: Option<String> = None;
+    for (i, raw) in req.init_args.clone().unwrap_or_default().iter().enumerate() {
+        let ty_hint = init_param_types_hint.get(i).map(|s| s.as_str()).unwrap_or("");
+        match parse_arg_typed(raw, ty_hint) {
+            Ok(v) => init_vm_args.push(v),
+            Err(e) => {
+                init_args_decode_error = Some(format!("init_args[{}]: {}", i, e));
+                break;
+            }
+        }
+    }
     {
         let mut map = state.sessions.lock().unwrap();
         if let Some(session) = map.get_mut(&id) {
             let has_init = session.vm.list_functions().iter().any(|f| f == "init");
-            if has_init {
+            if has_init && init_args_decode_error.is_some() {
+                eprintln!("[SESSION] init_args decode failed for session {}: {}", id, init_args_decode_error.as_deref().unwrap_or(""));
+                init_called = Some(false);
+                init_error = init_args_decode_error.clone();
+            } else if has_init {
                 // Use caller_address from the request if provided (user wallet),
                 // otherwise fall back to the devnet authority identity.
                 let init_caller = if let Some(ref addr_hex) = req.caller_address {
@@ -5148,14 +5371,15 @@ async fn session_new_handler(
                     None,
                     vec![0u8; 104],
                 );
-                match session.vm.call_function("init", &[]) {
+                match session.vm.call_function("init", &init_vm_args) {
                     Ok(_) => {
-                        eprintln!("[SESSION] Auto-called init() for session {}", id);
+                        eprintln!("[SESSION] Auto-called init({}) for session {}", init_vm_args.len(), id);
                         init_called = Some(true);
                     }
                     Err(e) => {
                         eprintln!("[SESSION] init() auto-call failed for session {}: {}", id, e);
                         init_called = Some(false);
+                        init_error = Some(e.to_string());
                     }
                 }
             }
@@ -5169,6 +5393,7 @@ async fn session_new_handler(
         steps_remaining: if FUEL_REPORTING { Some(effective_max_steps) } else { None },
         sqb_verified,
         init_called,
+        init_error,
         resumed: false,
         workspace_id: effective_workspace_id.clone(),
     }))
@@ -5184,7 +5409,7 @@ struct SessionGrantRequest {
     allowed_functions: Vec<String>,
     expiry:            u64,
     #[serde(default)]
-    display_tsynq:      Option<String>,
+    display_synw:      Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -5194,7 +5419,7 @@ struct SessionGrantResponse {
     error:      Option<String>,
     grant_expiry: Option<u64>,
     allowed_functions: Option<Vec<String>>,
-    caller_tsynq:  Option<String>,
+    caller_synw:  Option<String>,
 }
 
 const GRANT_MAX_LIFETIME_SECS: u64 = 3600;
@@ -5210,7 +5435,7 @@ async fn session_grant_handler(
             Some(s) => s,
             None => return (StatusCode::NOT_FOUND, RespJson(SessionGrantResponse {
                 success: false, session_id: None, error: Some("Session not found".into()),
-                grant_expiry: None, allowed_functions: None, caller_tsynq: None,
+                grant_expiry: None, allowed_functions: None, caller_synw: None,
             })),
         }
     };
@@ -5222,7 +5447,7 @@ async fn session_grant_handler(
             return (StatusCode::UNAUTHORIZED, RespJson(SessionGrantResponse {
                 success: false, session_id: None,
                 error: Some("no pending nonce -- call GET /session/:id/nonce first".into()),
-                grant_expiry: None, allowed_functions: None, caller_tsynq: None,
+                grant_expiry: None, allowed_functions: None, caller_synw: None,
             }));
         }
         Some(pn) if pn != &req.grant_nonce => {
@@ -5230,7 +5455,7 @@ async fn session_grant_handler(
             return (StatusCode::UNAUTHORIZED, RespJson(SessionGrantResponse {
                 success: false, session_id: None,
                 error: Some("nonce mismatch -- nonces are single-use, request a new one".into()),
-                grant_expiry: None, allowed_functions: None, caller_tsynq: None,
+                grant_expiry: None, allowed_functions: None, caller_synw: None,
             }));
         }
         _ => {}
@@ -5240,7 +5465,7 @@ async fn session_grant_handler(
         return (StatusCode::UNAUTHORIZED, RespJson(SessionGrantResponse {
             success: false, session_id: None,
             error: Some("nonce already used -- replay attack rejected".into()),
-            grant_expiry: None, allowed_functions: None, caller_tsynq: None,
+            grant_expiry: None, allowed_functions: None, caller_synw: None,
         }));
     }
 
@@ -5254,7 +5479,7 @@ async fn session_grant_handler(
         return (StatusCode::BAD_REQUEST, RespJson(SessionGrantResponse {
             success: false, session_id: None,
             error: Some("grant expiry must be in the future".into()),
-            grant_expiry: None, allowed_functions: None, caller_tsynq: None,
+            grant_expiry: None, allowed_functions: None, caller_synw: None,
         }));
     }
     if req.expiry > now_secs + GRANT_MAX_LIFETIME_SECS {
@@ -5262,7 +5487,7 @@ async fn session_grant_handler(
         return (StatusCode::BAD_REQUEST, RespJson(SessionGrantResponse {
             success: false, session_id: None,
             error: Some(format!("grant expiry exceeds maximum lifetime of {} seconds", GRANT_MAX_LIFETIME_SECS)),
-            grant_expiry: None, allowed_functions: None, caller_tsynq: None,
+            grant_expiry: None, allowed_functions: None, caller_synw: None,
         }));
     }
 
@@ -5287,7 +5512,7 @@ async fn session_grant_handler(
             return (StatusCode::BAD_REQUEST, RespJson(SessionGrantResponse {
                 success: false, session_id: None,
                 error: Some(format!("evm_signature hex invalid: {}", e)),
-                grant_expiry: None, allowed_functions: None, caller_tsynq: None,
+                grant_expiry: None, allowed_functions: None, caller_synw: None,
             }));
         }
     };
@@ -5298,7 +5523,7 @@ async fn session_grant_handler(
             return (StatusCode::UNAUTHORIZED, RespJson(SessionGrantResponse {
                 success: false, session_id: None,
                 error: Some(format!("ecrecover failed: {}", e)),
-                grant_expiry: None, allowed_functions: None, caller_tsynq: None,
+                grant_expiry: None, allowed_functions: None, caller_synw: None,
             }));
         }
     };
@@ -5310,7 +5535,7 @@ async fn session_grant_handler(
         return (StatusCode::UNAUTHORIZED, RespJson(SessionGrantResponse {
             success: false, session_id: None,
             error: Some("signature does not match claimed evm_address".into()),
-            grant_expiry: None, allowed_functions: None, caller_tsynq: None,
+            grant_expiry: None, allowed_functions: None, caller_synw: None,
         }));
     }
 
@@ -5318,7 +5543,7 @@ async fn session_grant_handler(
     session.pending_nonce = None;
     session.used_nonces.insert(req.grant_nonce.clone());
 
-    let caller_tsynq = synq_vm::bech32::encode_wallet_address(&recovered)
+    let caller_synw = synq_vm::bech32::encode_wallet_address(&recovered)
         .unwrap_or_else(|_| hex_encode(&recovered));
     let allowed_set: std::collections::HashSet<String> =
         req.allowed_functions.iter().cloned().collect();
@@ -5328,7 +5553,7 @@ async fn session_grant_handler(
 
     session.session_grant = Some(SessionGrant {
         caller_addr: recovered,
-        display_tsynq: req.display_tsynq.clone(),
+        display_synw: req.display_synw.clone(),
         allowed_functions: allowed_set,
         expiry: req.expiry,
     });
@@ -5339,7 +5564,7 @@ async fn session_grant_handler(
         success: true, session_id: Some(session_id), error: None,
         grant_expiry: Some(req.expiry),
         allowed_functions: Some(req.allowed_functions),
-        caller_tsynq: Some(caller_tsynq),
+        caller_synw: Some(caller_synw),
     }))
 }
 // ─── POST /session/run ────────────────────────────────────────────────────────
@@ -5354,7 +5579,7 @@ struct SessionRunRequest {
     call_nonce:     Option<String>,
     call_signature: Option<String>,  // "functionName(arg0, arg1, ...)" — must match frontend
     param_types:    Option<Vec<String>>,  // declared types per arg ("str","u256","bool")
-    display_tsynq:   Option<String>,  // Manual synw address override (devnet only)
+    display_synw:   Option<String>,  // Manual synw address override (devnet only)
     // ── Runtime fault injection (cosmic ray simulation) ──
     fault_step:       Option<usize>,
     fault_byte_offset: Option<usize>,
@@ -5382,7 +5607,7 @@ struct RunResponse {
     events:  Vec<EventLog>,
     error:   Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    caller_tsynq: Option<String>,
+    caller_synw: Option<String>,
     /// Structured error code from named revert (RevertCode opcode).
     #[serde(skip_serializing_if = "Option::is_none")]
     error_code: Option<u32>,
@@ -5446,7 +5671,7 @@ async fn session_run_handler(
     Json(mut req): Json<SessionRunRequest>,
 ) -> (StatusCode, RespJson<RunResponse>) {
     if let Err(_) = check_rate_limit(&state.rate_limiter, addr.ip()) {
-        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), events: Vec::new(), error: Some("rate limit exceeded — retry later".into()), caller_tsynq: None, error_code: None, error_name: None,
+        return (StatusCode::TOO_MANY_REQUESTS, RespJson(RunResponse { success: false, result: None, output: String::new(), events: Vec::new(), error: Some("rate limit exceeded — retry later".into()), caller_synw: None, error_code: None, error_name: None,
             revert_reason: None, fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None }));
     }
     let mut vm_args: Vec<Value> = Vec::new();
@@ -5475,7 +5700,7 @@ async fn session_run_handler(
                 success: false, result: None, output: String::new(),
                 events: Vec::new(),
                 error: Some(format!("arg[{}]: {}", i, e)),
-            caller_tsynq: None,
+            caller_synw: None,
             error_code: None,
             error_name: None,
             revert_reason: None,
@@ -5492,7 +5717,7 @@ async fn session_run_handler(
                 success: false, result: None, output: String::new(),
                 events: Vec::new(),
                 error: Some(format!("Session '{}' not found or expired", req.session_id)),
-            caller_tsynq: None,
+            caller_synw: None,
             error_code: None,
             error_name: None,
             revert_reason: None,
@@ -5520,15 +5745,15 @@ async fn session_run_handler(
                     success: false, result: None, output: String::new(),
                     events: Vec::new(),
                     error: Some(format!("session grant does not allow function '{}'", req.function)),
-                    caller_tsynq: None, error_code: None, error_name: None,
+                    caller_synw: None, error_code: None, error_name: None,
             revert_reason: None,
                     fuel_used: None, fuel_remaining: None, steps_used: None, steps_remaining: None,
                 }));
             }
             eprintln!("[GRANT] using grant for '{}' (caller={}, expires in {}s)",
                 req.function, hex_encode(&grant.caller_addr), grant.expiry.saturating_sub(now_secs));
-            if let Some(ref synw) = grant.display_tsynq {
-                if req.display_tsynq.is_none() { req.display_tsynq = Some(synw.clone()); }
+            if let Some(ref synw) = grant.display_synw {
+                if req.display_synw.is_none() { req.display_synw = Some(synw.clone()); }
             }
         }
     }
@@ -5550,7 +5775,7 @@ async fn session_run_handler(
                     success: false, result: None, output: String::new(),
                     events: Vec::new(),
                     error: Some("caller auth: no pending nonce — call GET /session/:id/nonce first".into()),
-                caller_tsynq: None,
+                caller_synw: None,
                 error_code: None,
                 error_name: None,
             revert_reason: None,
@@ -5563,7 +5788,7 @@ async fn session_run_handler(
                     success: false, result: None, output: String::new(),
                     events: Vec::new(),
                     error: Some("caller auth: nonce mismatch — nonces are single-use, request a new one".into()),
-                caller_tsynq: None,
+                caller_synw: None,
                 error_code: None,
                 error_name: None,
             revert_reason: None,
@@ -5579,7 +5804,7 @@ async fn session_run_handler(
                 success: false, result: None, output: String::new(),
                 events: Vec::new(),
                 error: Some("caller auth: nonce already used — replay attack rejected".into()),
-            caller_tsynq: None,
+            caller_synw: None,
             error_code: None,
             error_name: None,
             revert_reason: None,
@@ -5611,7 +5836,7 @@ async fn session_run_handler(
                 { state.sessions.lock().unwrap().insert(req.session_id.clone(), session); }
                 return (StatusCode::BAD_REQUEST, RespJson(RunResponse {
                     success: false, result: None, output: String::new(), events: Vec::new(), error: Some(e),
-                caller_tsynq: None,
+                caller_synw: None,
                 error_code: None,
                 error_name: None,
             revert_reason: None,
@@ -5630,7 +5855,7 @@ async fn session_run_handler(
                     success: false, result: None, output: String::new(),
                     events: Vec::new(),
                     error: Some(format!("caller auth: ecrecover failed: {}", e)),
-                caller_tsynq: None,
+                caller_synw: None,
                 error_code: None,
                 error_name: None,
             revert_reason: None,
@@ -5647,7 +5872,7 @@ async fn session_run_handler(
                 success: false, result: None, output: String::new(),
                 events: Vec::new(),
                 error: Some("caller auth: signature does not match claimed evm_address".into()),
-            caller_tsynq: None,
+            caller_synw: None,
             error_code: None,
             error_name: None,
             revert_reason: None,
@@ -5665,7 +5890,7 @@ async fn session_run_handler(
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some("caller auth: evm_address, evm_signature, and call_nonce must all be provided together".into()),
-        caller_tsynq: None,
+        caller_synw: None,
         error_code: None,
         error_name: None,
             revert_reason: None,
@@ -5748,21 +5973,21 @@ async fn session_run_handler(
     let copy_len = domain_tag_bytes.len().min(16);
     auth_envelope[88..88 + copy_len].copy_from_slice(&domain_tag_bytes[..copy_len]);
 
-    // Devnet: if display_tsynq is provided, override caller_addr with the synw address.
+    // Devnet: if display_synw is provided, override caller_addr with the synw address.
     // The EVM signature still authenticates the request (nonce + ephemeral key),
     // but the contract sees the user's synw identity as the caller.
     let mut effective_caller = caller_addr;
-    if let Some(ref synw) = req.display_tsynq {
+    if let Some(ref synw) = req.display_synw {
         // from_any_network_address handles both the wallet extension's
         // real-world synw/syna/sync addresses AND legacy tsynq/synq input --
         // from_any_synq alone only understood the latter, so a real
         // connected-wallet address here used to silently fail this decode
         // and fall through to the devnet placeholder caller with no error.
         if let Ok(decoded) = synq_vm::bech32::from_any_network_address(synw) {
-            eprintln!("[RUN] display_tsynq override: {} -> {}", synw, hex_encode(&decoded));
+            eprintln!("[RUN] display_synw override: {} -> {}", synw, hex_encode(&decoded));
             effective_caller = decoded;
         } else {
-            eprintln!("[RUN] display_tsynq decode failed for: {}", synw);
+            eprintln!("[RUN] display_synw decode failed for: {}", synw);
         }
     }
     // Devnet: if no wallet connected (caller is all-zeros), inject a non-zero
@@ -5835,13 +6060,13 @@ async fn session_run_handler(
         }));
     }
 
-    // If display_tsynq was provided, show it as the caller; otherwise encode the EVM address
-    let caller_tsynq = if let Some(ref synw) = req.display_tsynq {
+    // If display_synw was provided, show it as the caller; otherwise encode the EVM address
+    let caller_synw = if let Some(ref synw) = req.display_synw {
         synw.clone()
     } else {
         synq_vm::bech32::encode_wallet_address(&effective_caller).unwrap_or_else(|_| hex_encode(&effective_caller))
     };
-    eprintln!("[RUN] sid={} caller={} fn={} args_len={}", &req.session_id, caller_tsynq, req.function, vm_args.len());
+    eprintln!("[RUN] sid={} caller={} fn={} args_len={}", &req.session_id, caller_synw, req.function, vm_args.len());
 
     // ── Runtime fault injection (cosmic ray / Rowhammer simulation) ────────
     if let (Some(step), Some(offset), Some(mask)) = (req.fault_step, req.fault_byte_offset, req.fault_xor_mask) {
@@ -5881,16 +6106,16 @@ async fn session_run_handler(
                 None    => (None, "Function completed (no return value)".to_string()),
             };
             {
-        let caller_tsynq = if let Some(ref synw) = req.display_tsynq { Some(synw.clone()) } else { synq_vm::bech32::encode_wallet_address(&effective_caller).ok() };
+        let caller_synw = if let Some(ref synw) = req.display_synw { Some(synw.clone()) } else { synq_vm::bech32::encode_wallet_address(&effective_caller).ok() };
         (StatusCode::OK, RespJson(RunResponse { success: true, result: result_json, output, events: event_logs, error: None, error_code: None, error_name: None,
-            revert_reason: None, caller_tsynq, fuel_used, fuel_remaining, steps_used, steps_remaining }))
+            revert_reason: None, caller_synw, fuel_used, fuel_remaining, steps_used, steps_remaining }))
     }
         }
         Err(synq_vm::VMError::RevertedNamed { code, message }) => (StatusCode::OK, RespJson(RunResponse {
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("revert: {}", message)),
-            caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_wallet_address(&effective_caller).ok()),
+            caller_synw: req.display_synw.clone().or_else(|| synq_vm::bech32::encode_wallet_address(&effective_caller).ok()),
             error_code: Some(code),
             error_name: Some(message.split('(').next().unwrap_or(&message).split("::").last().unwrap_or(&message).to_string()),
             fuel_used, fuel_remaining, steps_used, steps_remaining,
@@ -5900,7 +6125,7 @@ async fn session_run_handler(
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("require failed: {}", msg)),
-        caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_wallet_address(&effective_caller).ok()),
+        caller_synw: req.display_synw.clone().or_else(|| synq_vm::bech32::encode_wallet_address(&effective_caller).ok()),
         error_code: None,
         error_name: None,
             revert_reason: Some(msg.clone()),
@@ -5910,7 +6135,7 @@ async fn session_run_handler(
             success: false, result: None, output: String::new(),
             events: Vec::new(),
             error: Some(format!("{}", e)),
-        caller_tsynq: req.display_tsynq.clone().or_else(|| synq_vm::bech32::encode_wallet_address(&effective_caller).ok()),
+        caller_synw: req.display_synw.clone().or_else(|| synq_vm::bech32::encode_wallet_address(&effective_caller).ok()),
         error_code: None,
         error_name: None,
             revert_reason: None,
@@ -6084,6 +6309,925 @@ struct BenchCompileResponse {
     error:          Option<String>,
 }
 
+// ─── POST /submit-mempool ─────────────────────────────────────────────────
+//
+// Added 18 Sep 2026. Compiles real SynQ source, builds a REAL two-layer
+// signed carrier (inner pqsynq ML-DSA-87 deploy envelope + outer Aegis
+// PQVM FN-DSA transaction), and submits it straight to the loopback
+// synergy-node mempool harness (127.0.0.1:5641) over its live
+// synergy_submitAegisTransaction RPC -- the same pipeline proved by hand in
+// earlier sessions, now automated so the compiler benchmark page can offer
+// a real "submit to mempool" step, not just a compile-timing bench.
+//
+// Uses a persistent, pre-funded demo wallet (see
+// data/benchmark-demo-signer-key.json on the node host) so repeated clicks
+// reuse the SAME funded sender address instead of minting a fresh, unfunded
+// throwaway address every time. Nonce is looked up live from the mempool's
+// own pending-transaction list for that sender, so this is safe to call
+// concurrently/repeatedly without any server-side counter state.
+//
+// This shells out to the `synergy-node` CLI binary and to `curl` rather
+// than linking the node crate directly -- synq-server and synergy-node are
+// separate Cargo workspaces/binaries, and shelling out keeps this additive
+// and avoids pulling a whole second blockchain-node dependency tree into
+// the compiler service.
+
+const SYNERGY_NODE_BIN: &str = "/root/Downloads/synergy-testnet/target/release/synergy-node";
+const SYNERGY_NODE_RPC_URL: &str = "http://127.0.0.1:5641";
+const DEMO_SIGNER_KEY_FILE: &str =
+    "/root/Downloads/synergy-testnet/data/benchmark-demo-signer-key.json";
+const DEMO_SIGNER_ADDRESS: &str = "synw1f0pn72mrpl8d37hdvmasjzq7vak8q66ldrxm";
+
+#[derive(serde::Deserialize)]
+struct SubmitMempoolRequest {
+    source: String,
+}
+
+#[derive(serde::Serialize, Default)]
+struct SubmitMempoolResponse {
+    success: bool,
+    stage: String,
+    error: Option<String>,
+    sender: Option<String>,
+    nonce: Option<u64>,
+    synq_contract_address: Option<String>,
+    tx_id: Option<String>,
+    tx_hash: Option<String>,
+    mempool_status: Option<String>,
+    aegis_pqvm_verification: Option<String>,
+    dag_admission_status: Option<String>,
+    bytecode_bytes: Option<usize>,
+    // Per-stage wall-clock timing in ms. NOT part of the Run Benchmark
+    // WASM/Loopback/HTTP/Wasmtime figures above -- those only measure
+    // compilation. This is the separate, real chain-submission path:
+    // compile -> determine-nonce (RPC) -> build-carrier (signs, shells
+    // out to synergy-node) -> submit-to-mempool (RPC). nonce_lookup_ms
+    // and submit_ms are the two stages that shell out to  against
+    // the live node RPC and are the ones that can time out under load.
+    compile_ms: Option<f64>,
+    nonce_lookup_ms: Option<f64>,
+    build_carrier_ms: Option<f64>,
+    submit_ms: Option<f64>,
+    total_ms: Option<f64>,
+    // Protocol attestation fields (added 19 Sep 2026) -- see
+    // protocol_attestation module doc comment. source_hash is the
+    // correlation key shared with /compile-aivm and /aivm/estimate-gas for
+    // this same source text; qvm_deterministic reflects an independent
+    // second compile_ir() of this same source compared by bytecode hash;
+    // dry_run_tested_before_deploy is true only if /aivm/estimate-gas was
+    // already called for this exact source_hash before this submission.
+    // cross_backend_gap_note is always populated (not just on a detected
+    // gap) so callers always see the AIVM-vs-QuantumVM caveat.
+    source_hash: Option<String>,
+    qvm_bytecode_hash: Option<String>,
+    qvm_deterministic: Option<bool>,
+    protocol_hint: Option<String>,
+    dry_run_tested_before_deploy: Option<bool>,
+    cross_backend_gap_note: Option<String>,
+}
+
+fn run_curl_json_rpc(body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    // Some of these RPC bodies embed multi-KB PQC signatures, which can blow
+    // past the OS argv size limit (E2BIG) if passed inline with `-d`. Write
+    // the body to a temp file and use `-d @<path>` instead, same as the
+    // manual testing that first proved this pipeline.
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let body_path = std::env::temp_dir().join(format!("synq-demo-rpc-body-{unique}.json"));
+    std::fs::write(&body_path, body.to_string())
+        .map_err(|error| format!("failed to write RPC body temp file: {error}"))?;
+    let mut data_arg = std::ffi::OsString::from("@");
+    data_arg.push(&body_path);
+    let output = std::process::Command::new("curl")
+        .args(["-s", "-m", "15", "-X", "POST", SYNERGY_NODE_RPC_URL, "-H"])
+        .arg("Content-Type: application/json")
+        .arg("-d")
+        .arg(&data_arg)
+        .output();
+    let _ = std::fs::remove_file(&body_path);
+    let output = output.map_err(|error| format!("failed to invoke curl: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "curl exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("RPC response was not valid JSON: {error}"))
+}
+
+fn next_demo_signer_nonce() -> Result<u64, String> {
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "synergy_getPendingTransactions",
+        "params": []
+    });
+    let response = run_curl_json_rpc(&request)?;
+    let pending = response
+        .get("result")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "getPendingTransactions: unexpected response shape".to_string())?;
+    let mut next_nonce = 0_u64;
+    for tx in pending {
+        let sender = tx.get("sender").and_then(|value| value.as_str());
+        if sender == Some(DEMO_SIGNER_ADDRESS) {
+            if let Some(nonce) = tx.get("nonce").and_then(|value| value.as_u64()) {
+                next_nonce = next_nonce.max(nonce + 1);
+            }
+        }
+    }
+    Ok(next_nonce)
+}
+
+// ── POST /quantumvm/dry-run ─────────────────────────────────────────────────
+//
+// Added 19 Sep 2026 for AIVM-vs-QuantumVM behavioral diff testing (see the
+// cross_backend_gap doc comment at the top of protocol_attestation.rs).
+// AIVM's dry-run path (`/aivm/estimate-gas`) and the real deploy backend
+// (QuantumVM, via `synq_compiler::compile_ir()`) are two independently
+// implemented compiler backends for the same SynQ language, targeting
+// incompatible bytecode formats. Passing AIVM scenario tests gives no
+// bytecode-level guarantee about the QuantumVM artifact that actually gets
+// deployed by /submit-mempool.
+//
+// This endpoint runs a SEQUENCE of calls against a freshly loaded, ephemeral
+// QuantumVM instance -- the exact backend /submit-mempool deploys to -- with
+// NOTHING persisted: no session, no workspace, no chain write, no auth/grant
+// machinery (unlike /session/new + /session/run, which carry the full
+// wallet-resume/EIP-712/grant stack for real interactive use). It exists so
+// a diff-test runner can execute the same call sequence used for AIVM
+// scenario testing (demo/examples/scenarios/*.scenario.json) against
+// QuantumVM and compare results call-for-call. See
+// SynQ/synq-server/tests/diff_test_aivm_vs_quantumvm.py.
+//
+// State carries naturally across the calls array within this one ephemeral
+// VM instance (QuantumVM's normal in-memory execution model) and is
+// discarded entirely when the request returns -- there is no need to
+// manually seed/extract state between steps the way AIVM's stateless
+// per-call overlay in estimate_gas_handler requires, because this is the
+// SAME VM instance for the whole sequence, exactly like a real deployed
+// contract's session.
+
+#[derive(serde::Deserialize)]
+struct QvmDryRunCall {
+    function: String,
+    #[serde(default)]
+    args: Vec<serde_json::Value>,
+    #[serde(default)]
+    caller: Option<String>,
+    #[serde(default)]
+    param_types: Option<Vec<String>>,
+    /// Declared return type (e.g. "bool"), passed through to
+    /// value_to_json_typed so a bool-returning function decodes as
+    /// {"type":"Bool",...} instead of the raw UInt256 the VM represents
+    /// it as internally -- same purpose as session_run_handler's
+    /// fn_return_types lookup, but supplied directly per-call since this
+    /// endpoint has no session/manifest to read it from.
+    #[serde(default)]
+    return_type: Option<String>,
+    /// Optional per-call authority envelope -- see AuthorityEnvelopeInput
+    /// doc above. Omitted -> empty envelope (today's behavior; an
+    /// @authority(Scope)-gated function reverts). Needed to exercise the
+    /// SUCCESS path of e.g. V3Types.setValue's @authority(AdminScope).
+    #[serde(default)]
+    authority_envelope: Option<AuthorityEnvelopeInput>,
+}
+
+#[derive(serde::Deserialize)]
+struct QvmDryRunRequest {
+    source: String,
+    calls: Vec<QvmDryRunCall>,
+    /// Optional extra named contracts for cross-contract extern_call
+    /// resolution within this one dry-run request (e.g. TokenVault's
+    /// `extern_call("SimpleToken", ...)`). Keyed by an arbitrary label
+    /// (not read for lookups) -> that contract's full source; each
+    /// source's OWN declared `contract Name { ... }` name is what
+    /// extern_call actually resolves against, mirroring how the real
+    /// workspace/session store keys contracts by their compiled name,
+    /// not the caller's label. Nothing persisted -- these extra VMs live
+    /// only for this request's duration, exactly like `source` does.
+    #[serde(default)]
+    contracts: Option<std::collections::HashMap<String, String>>,
+    /// Optional setup calls run on a workspace contract (keyed by the SAME
+    /// label used in `contracts`, e.g. "SimpleToken") immediately after it
+    /// compiles and loads, before it's placed into the workspace and made
+    /// reachable via extern_call -- typically just `init()`. Needed because
+    /// this endpoint performs REAL QuantumVM execution of the target
+    /// contract (unlike AIVM's dry-run, whose `extern.call` host function
+    /// is a permanent stub -- see aivm/src/host.rs: it unconditionally pops
+    /// one arg and pushes U64(0), never actually running the target contract
+    /// at all), so a real target genuinely needs to be initialised first,
+    /// exactly like a real deployed contract would.
+    #[serde(default)]
+    contract_setup_calls: Option<std::collections::HashMap<String, Vec<QvmDryRunCall>>>,
+}
+
+#[derive(serde::Serialize)]
+struct QvmDryRunStepResult {
+    function: String,
+    success: bool,
+    return_value: Option<serde_json::Value>,
+    error: Option<String>,
+    revert_reason: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct QvmDryRunResponse {
+    success: bool,
+    backend: &'static str,
+    bytecode_size: Option<usize>,
+    steps: Vec<QvmDryRunStepResult>,
+    errors: Vec<String>,
+    note: String,
+}
+
+/// Best-effort caller normalization: QuantumVM's CallContext takes a 20-byte
+/// EVM-style address. The AIVM scenario files this endpoint is meant to be
+/// diffed against use AIVM's 41-byte SynQ address hex for `caller`. Accept
+/// either shape: a 20-byte hex is used directly, a 41-byte (or longer) hex
+/// takes the trailing 20 bytes, anything else falls back to anonymous() --
+/// this is a best-effort bridge for diff testing, not a claim that the two
+/// address encodings are equivalent identities.
+fn qvm_addr20_for_caller(caller: &Option<String>) -> [u8; 20] {
+    let Some(raw) = caller else { return [0u8; 20]; };
+    let hex_str = raw.trim_start_matches("0x");
+    let Ok(bytes) = hex_decode_strict(hex_str) else { return [0u8; 20]; };
+    if bytes.len() == 20 {
+        let mut a = [0u8; 20];
+        a.copy_from_slice(&bytes);
+        a
+    } else if bytes.len() == 41 {
+        // AIVM's 41-byte SynQ caller encoding carries the actual numeric
+        // identity in a 16-byte big-endian slot at bytes[5..21] (see
+        // Value::as_address() / aivm-scenario-testing-backlog.md item 7),
+        // NOT in the trailing 20 bytes. demo/examples/scenarios/*.scenario.json
+        // is deliberately authored against that one slot only (see each
+        // file's own scenario-name comment), so right-truncating to the
+        // last 20 bytes made every distinct scenario caller (identity 1,
+        // 2, 3, ...) alias to the SAME all-zero address -- qvm_call_context_for_caller
+        // below then maps that to the SAME CallContext::anonymous() for
+        // every one of them, regardless of which identity the scenario
+        // file actually named. That silently collapsed distinct callers
+        // (e.g. an admin and an unprivileged address) into one shared
+        // identity for the whole call sequence and hid real per-caller
+        // guard-rail divergence: ComprehensiveToken's "mint() reverts for
+        // a caller with no admin/minter role" scenario looked like a
+        // QuantumVM enforcement bug (mint succeeding when it should
+        // revert) but was actually this bridge running init() AND the
+        // supposedly-unprivileged mint() call as the exact same anonymous
+        // identity that init() had just made admin. Map the identity into
+        // a QVM address by right-aligning it into the low 16 bytes instead
+        // (left-padded with 4 zero bytes), so distinct scenario identities
+        // produce distinct, stable QVM addresses and per-caller guard
+        // rails are actually testable through this endpoint.
+        let mut a = [0u8; 20];
+        a[4..20].copy_from_slice(&bytes[5..21]);
+        a
+    } else if bytes.len() > 20 {
+        let mut a = [0u8; 20];
+        a.copy_from_slice(&bytes[bytes.len() - 20..]);
+        a
+    } else {
+        [0u8; 20]
+    }
+}
+
+fn qvm_call_context_for_caller(caller: &Option<String>) -> synq_vm::CallContext {
+    let addr = qvm_addr20_for_caller(caller);
+    if addr == [0u8; 20] {
+        synq_vm::CallContext::anonymous()
+    } else {
+        synq_vm::CallContext::from_address(addr)
+    }
+}
+
+async fn qvm_dry_run_handler(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<AppState>,
+    Json(req): Json<QvmDryRunRequest>,
+) -> (StatusCode, RespJson<QvmDryRunResponse>) {
+    let note = "Dry-run only: real QuantumVM execution (the same backend /submit-mempool \
+deploys to), nothing persisted -- no session, no workspace, no chain write. State carries \
+naturally across the calls array within this one ephemeral VM instance and is discarded when \
+the request returns. Built for AIVM-vs-QuantumVM diff testing, not for interactive use -- see \
+/session/new + /session/run for that.".to_string();
+
+    let err_resp = |errors: Vec<String>, bytecode_size: Option<usize>| -> (StatusCode, RespJson<QvmDryRunResponse>) {
+        (StatusCode::OK, RespJson(QvmDryRunResponse {
+            success: false, backend: "quantumvm", bytecode_size, steps: vec![], errors, note: note.clone(),
+        }))
+    };
+
+    if let Err(wait) = check_rate_limit(&state.rate_limiter, addr.ip()) {
+        return err_resp(vec![format!("rate limit exceeded — retry in {}s", wait)], None);
+    }
+    if req.source.len() > MAX_SOURCE_BYTES {
+        return err_resp(vec![format!("Source too large: {} bytes (max {})", req.source.len(), MAX_SOURCE_BYTES)], None);
+    }
+
+    // Best-effort return-type hints, auto-derived from the AST (bool/str
+    // are the only two value_to_json_typed cares about -- see that fn's
+    // doc). Mirrors what aivm_handler.rs's estimate_gas_handler does with
+    // find_function_param_types, but for return types instead of params,
+    // so a diff-test caller doesn't have to hand-annotate every call with
+    // return_type just to get bool decoded as Bool instead of raw UInt256.
+    // An explicit per-call return_type in the request still overrides this.
+    //
+    // The same AST parse also drives two other zero-config features added
+    // alongside it: struct-typed args (a JSON object like {"x":1,"y":2}
+    // decodes into a Value::Tuple in the struct's declared field order,
+    // using each function's declared param types -- see
+    // parse_arg_typed_with_structs) and an optional multi-contract
+    // workspace so extern_call("OtherContract", ...) can resolve against
+    // any sources supplied in req.contracts, scoped to this one request.
+    let mut auto_return_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut auto_param_types: std::collections::HashMap<String, Vec<synq_compiler::ast::Type>> = std::collections::HashMap::new();
+    let mut struct_defs: Vec<synq_compiler::ast::StructDefinition> = Vec::new();
+    if let Ok(ast) = synq_compiler::parser::parse(&req.source) {
+        use synq_compiler::ast::{SourceUnit, ContractPart, Type, Statement, Expression};
+        struct_defs = ast.iter().filter_map(|u| if let SourceUnit::Struct(s) = u { Some(s.clone()) } else { None }).collect();
+        if let Some(contract) = ast.iter().find_map(|u| if let SourceUnit::Contract(c) = u { Some(c) } else { None }) {
+            // 2026-09-23: state var name -> declared type, so a trivial
+            // passthrough getter ("function getX() -> u256 { return x; }")
+            // can be traced back to x's REAL declared type even when the
+            // getter's own signature widens it to u256 (the language's
+            // generic wire type for identity/hash-shaped values). Needed
+            // below to give UMAIdentity-typed getters like V3Types's
+            // getUmaId() a "umaidentity" hint instead of "u256".
+            let state_var_types: std::collections::HashMap<String, Type> = contract.parts.iter()
+                .filter_map(|p| if let ContractPart::StateVariable(sv) = p { Some((sv.name.clone(), sv.ty.clone())) } else { None })
+                .collect();
+            for part in &contract.parts {
+                let (name, ret, params, body) = match part {
+                    ContractPart::Function(f) => (f.name.clone(), f.returns.clone(), f.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(), Some(&f.body)),
+                    ContractPart::Constructor(c) => ("init".to_string(), Some(Type::Bool), c.params.iter().map(|p| p.ty.clone()).collect::<Vec<_>>(), Some(&c.body)),
+                    _ => continue,
+                };
+                // A getter whose entire body is `return <state_var>;` where
+                // that state var is declared UMAIdentity: its true shape is
+                // bytes-like (32-byte identity), not a plain integer -- the
+                // "-> u256" on the function itself is just this language's
+                // wire-type convention for identity/hash values. AIVM's own
+                // codegen already treats an uninitialised UMAIdentity slot
+                // as empty bytes ("0x"); QVM's VM has a single type-erased
+                // zero-default (Value::I32(0)) for every uninitialised
+                // state slot regardless of declared type, so without this
+                // hint getUmaId() rendered that same zero as UInt256 "0"
+                // instead of "0x", the last real (non-cosmetic) diff in the
+                // V3Types diff-test scenario.
+                let is_uma_passthrough = if let Some(b) = body {
+                    b.statements.len() == 1 && matches!(
+                        &b.statements[0],
+                        Statement::Return(Some(Expression::Identifier(var_name)))
+                            if state_var_types.get(var_name) == Some(&Type::UMAIdentity)
+                    )
+                } else { false };
+                let hint = if is_uma_passthrough {
+                    Some("umaidentity".to_string())
+                } else {
+                    match ret {
+                        Some(Type::Bool) => Some("bool".to_string()),
+                        Some(Type::Str) => Some("str".to_string()),
+                        // 2026-09-23: also hint UInt256 returns. Needed so
+                        // value_to_json_typed can tell a genuinely-bytes-shaped
+                        // u256 return (e.g. V3Types.getSessionId(), where the
+                        // underlying state var is Hash32-aliased and stored as
+                        // raw Value::Bytes) apart from an ordinary numeric one --
+                        // without this hint, ret_hint was always None for every
+                        // numeric-returning function, silently skipping that
+                        // formatter's Bytes-vs-String disambiguation arm.
+                        Some(Type::UInt256) => Some("u256".to_string()),
+                        _ => None,
+                    }
+                };
+                if let Some(h) = hint {
+                    auto_return_types.insert(name.clone(), h);
+                }
+                auto_param_types.insert(name, params);
+            }
+        }
+    }
+    let struct_map: std::collections::HashMap<String, &synq_compiler::ast::StructDefinition> =
+        struct_defs.iter().map(|s| (s.name.clone(), s)).collect();
+
+    // ── Optional workspace: compile+load any extra named contracts so
+    // extern_call("Name", ...) can resolve within this one dry-run
+    // request. Mirrors session_run_handler's real workspace/
+    // extern_call_handler wiring (see the qvm_call_context_for_caller doc
+    // comment above and the real handler's wiring around line 5794), just
+    // scoped to this single stateless request instead of the persistent
+    // session/workspace stores -- each extra VM lives only as long as
+    // this request; nothing is written to the real workspace/session
+    // maps and nothing here is visible to /session/run or /submit-mempool.
+    let workspace: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, QuantumVM>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(extra) = &req.contracts {
+        for (label, extra_source) in extra {
+            let extra_compiled = match synq_compiler::compile_ir(extra_source) {
+                Ok(c) => c,
+                Err(e) => return err_resp(vec![format!("workspace contract '{}': QuantumVM IR compile error: {}", label, e)], None),
+            };
+            let extra_name = synq_compiler::parser::parse(extra_source).ok()
+                .and_then(|ast| ast.iter().find_map(|u| if let synq_compiler::ast::SourceUnit::Contract(c) = u { Some(c.name.clone()) } else { None }))
+                .unwrap_or_else(|| label.clone());
+            let mut extra_vm = QuantumVM::new();
+            if let Err(e) = extra_vm.load_bytecode(&extra_compiled.bytecode) {
+                return err_resp(vec![format!("workspace contract '{}': QuantumVM load error: {}", extra_name, e)], None);
+            }
+            if let Some(setup_calls) = req.contract_setup_calls.as_ref().and_then(|m| m.get(label)) {
+                for setup in setup_calls {
+                    let mut setup_args: Vec<Value> = Vec::with_capacity(setup.args.len());
+                    let mut setup_err = None;
+                    for (i, raw) in setup.args.iter().enumerate() {
+                        let hint = setup.param_types.as_ref().and_then(|h| h.get(i)).map(|s| s.as_str()).unwrap_or("");
+                        match parse_arg_typed(raw, hint) {
+                            Ok(v) => setup_args.push(v),
+                            Err(e) => { setup_err = Some(e); break; }
+                        }
+                    }
+                    if let Some(e) = setup_err {
+                        return err_resp(vec![format!("workspace contract '{}': setup call '{}' arg error: {}", extra_name, setup.function, e)], None);
+                    }
+                    extra_vm.call_context = qvm_call_context_for_caller(&setup.caller);
+                    if let Err(e) = extra_vm.call_function(&setup.function, &setup_args) {
+                        return err_resp(vec![format!("workspace contract '{}': setup call '{}' failed: {}", extra_name, setup.function, e)], None);
+                    }
+                    extra_vm.call_context = synq_vm::CallContext::anonymous();
+                }
+            }
+            workspace.lock().unwrap().insert(extra_name, extra_vm);
+        }
+    }
+
+    let compiled = match synq_compiler::compile_ir(&req.source) {
+        Ok(c) => c,
+        Err(e) => return err_resp(vec![format!("QuantumVM IR compile error: {}", e)], None),
+    };
+    let mut vm = QuantumVM::new();
+    if let Err(e) = vm.load_bytecode(&compiled.bytecode) {
+        return err_resp(vec![format!("QuantumVM load error: {}", e)], Some(compiled.bytecode.len()));
+    }
+
+    // Wire extern_call on the primary VM whenever a workspace was
+    // supplied, so e.g. TokenVault's extern_call("SimpleToken", "mint",
+    // ...) resolves against req.contracts instead of failing with "no
+    // workspace active". Same remove-then-reinsert discipline as the real
+    // session-based handler: the TARGET contract is taken out of the
+    // shared map for the duration of its own call_function() (so it
+    // isn't double-borrowed), then put back -- this supports any acyclic
+    // extern_call chain (A->B, A->B->C, ...) but, like the real
+    // implementation, a genuine call CYCLE back into a contract that's
+    // still mid-call will fail to find it (removed, not deadlocked)
+    // rather than recursing.
+    // Tracks the ORIGINAL caller of the current top-level `req.calls` step,
+    // so a nested extern_call propagates that same caller into the target
+    // contract (matching the real session-based handler's `caller_clone`/
+    // `CallContext::from_address(caller_clone)` -- see main.rs's real
+    // extern_call wiring) instead of calling the target anonymously, which
+    // made e.g. TokenVault's extern_call into SimpleToken.mint() fail with
+    // a false "unauthenticated call" even though a real caller was set.
+    let current_caller: std::sync::Arc<std::sync::Mutex<[u8; 20]>> = std::sync::Arc::new(std::sync::Mutex::new([0u8; 20]));
+    if req.contracts.is_some() {
+        let ws = workspace.clone();
+        let current_caller_for_closure = current_caller.clone();
+        vm.extern_call_handler = Some(std::sync::Arc::new(move |contract: &str, func: &str, args: &[Value]| {
+            let mut target = {
+                let mut guard = ws.lock().unwrap();
+                guard.remove(contract)
+            }.ok_or_else(|| synq_vm::VMError::RuntimeError(format!("extern_call: contract '{}' not in workspace", contract)))?;
+            let caller_addr = *current_caller_for_closure.lock().unwrap();
+            target.call_context = if caller_addr == [0u8; 20] {
+                synq_vm::CallContext::anonymous()
+            } else {
+                synq_vm::CallContext::from_address(caller_addr)
+            };
+            let result = target.call_function(func, args);
+            target.call_context = synq_vm::CallContext::anonymous();
+            ws.lock().unwrap().insert(contract.to_string(), target);
+            result
+        }));
+    }
+
+    let mut steps = Vec::with_capacity(req.calls.len());
+    let mut any_error = false;
+    for call in &req.calls {
+        let param_types_hint = call.param_types.clone();
+        let declared_params = auto_param_types.get(&call.function);
+        let mut vm_args: Vec<Value> = Vec::with_capacity(call.args.len());
+        let mut arg_err = None;
+        for (i, raw) in call.args.iter().enumerate() {
+            // An explicit per-call param_types[i] string hint always wins
+            // (back-compat with existing callers); otherwise use the
+            // function's declared AST param type, which is what makes
+            // struct-typed ({"x":1,"y":2}) args decode correctly with no
+            // per-call configuration -- same zero-config spirit as
+            // auto_return_types above.
+            let explicit_hint = param_types_hint.as_ref().and_then(|h| h.get(i)).map(|s| s.as_str());
+            let arg_result = if let Some(h) = explicit_hint {
+                parse_arg_typed(raw, h)
+            } else {
+                let declared_ty = declared_params.and_then(|p| p.get(i));
+                parse_arg_typed_with_structs(raw, declared_ty, &struct_map)
+            };
+            match arg_result {
+                Ok(v) => vm_args.push(v),
+                Err(e) => { arg_err = Some(format!("arg[{}]: {}", i, e)); break; }
+            }
+        }
+        if let Some(e) = arg_err {
+            any_error = true;
+            steps.push(QvmDryRunStepResult {
+                function: call.function.clone(), success: false, return_value: None,
+                error: Some(e), revert_reason: None,
+            });
+            continue;
+        }
+
+        *current_caller.lock().unwrap() = qvm_addr20_for_caller(&call.caller);
+        vm.call_context = qvm_call_context_for_caller(&call.caller);
+        if let Some(ref env_input) = call.authority_envelope {
+            vm.call_context.authority_envelope = build_authority_envelope(env_input);
+        }
+        let call_result = vm.call_function(&call.function, &vm_args);
+        vm.call_context = synq_vm::CallContext::anonymous();
+
+        match call_result {
+            Ok(maybe_val) => {
+                let ret_hint = call.return_type.clone().or_else(|| auto_return_types.get(&call.function).cloned());
+                let return_value = maybe_val.as_ref().map(|v| value_to_json_typed(v, ret_hint.as_deref()));
+                steps.push(QvmDryRunStepResult {
+                    function: call.function.clone(), success: true, return_value,
+                    error: None, revert_reason: None,
+                });
+            }
+            Err(synq_vm::VMError::RevertedNamed { code: _, message }) => {
+                any_error = true;
+                steps.push(QvmDryRunStepResult {
+                    function: call.function.clone(), success: false, return_value: None,
+                    error: Some(format!("revert: {}", message)), revert_reason: Some(message),
+                });
+            }
+            Err(synq_vm::VMError::Reverted(msg)) => {
+                any_error = true;
+                steps.push(QvmDryRunStepResult {
+                    function: call.function.clone(), success: false, return_value: None,
+                    error: Some(format!("require failed: {}", msg)), revert_reason: Some(msg),
+                });
+            }
+            Err(e) => {
+                any_error = true;
+                steps.push(QvmDryRunStepResult {
+                    function: call.function.clone(), success: false, return_value: None,
+                    error: Some(format!("{}", e)), revert_reason: None,
+                });
+            }
+        }
+    }
+
+    (StatusCode::OK, RespJson(QvmDryRunResponse {
+        success: !any_error,
+        backend: "quantumvm",
+        bytecode_size: Some(compiled.bytecode.len()),
+        steps,
+        errors: vec![],
+        note,
+    }))
+}
+
+async fn submit_mempool_handler(
+    Json(req): Json<SubmitMempoolRequest>,
+) -> RespJson<SubmitMempoolResponse> {
+    use std::time::Instant;
+    let t_total = Instant::now();
+
+    let mut resp = SubmitMempoolResponse {
+        success: false,
+        stage: "compile".to_string(),
+        ..Default::default()
+    };
+
+    let t_compile = Instant::now();
+    let bench_result = match synq_compiler::compile_ir(&req.source) {
+        Ok(result) => result,
+        Err(error) => {
+            resp.error = Some(format!("Compile error: {error}"));
+            resp.compile_ms = Some(t_compile.elapsed().as_nanos() as f64 / 1e6);
+            resp.total_ms = Some(t_total.elapsed().as_nanos() as f64 / 1e6);
+            return RespJson(resp);
+        }
+    };
+    let bytecode = bench_result.bytecode;
+    resp.bytecode_bytes = Some(bytecode.len());
+    resp.compile_ms = Some(t_compile.elapsed().as_nanos() as f64 / 1e6);
+
+    // Protocol attestation: this is the real deploy backend (QuantumVM, via
+    // compile_ir()) -- record it under the same source-hash key the AIVM
+    // dry-run endpoints use, and self-check this backend's own compile
+    // determinism by compiling the same source a second, independent time.
+    let source_hash = protocol_attestation::content_hash_hex(req.source.as_bytes());
+    let protocol_hint = protocol_attestation::classify_protocol_hint(&req.source);
+    let qvm_bytecode_hash = protocol_attestation::content_hash_hex(&bytecode);
+    resp.source_hash = Some(source_hash.clone());
+    resp.qvm_bytecode_hash = Some(qvm_bytecode_hash.clone());
+    resp.protocol_hint = Some(protocol_hint.to_string());
+    resp.cross_backend_gap_note = Some(
+        "Dry-run (Test Results / Run & Debug / estimate-gas) executes on the AIVM engine; this deploy compiles and will execute on the separate QuantumVM engine. Their bytecode is not byte-comparable -- see dry_run_tested_before_deploy and qvm_deterministic for what is actually verified, or GET /protocol-attestation/{source_hash} for the full stage chain.".to_string()
+    );
+    protocol_attestation::record_stage(
+        &source_hash,
+        protocol_hint,
+        "qvm_deploy_envelope_built",
+        protocol_attestation::BACKEND_QUANTUMVM,
+        Some(&qvm_bytecode_hash),
+        serde_json::json!({"bytecode_bytes": bytecode.len()}),
+    );
+    if let Ok(second_compile) = synq_compiler::compile_ir(&req.source) {
+        let second_hash = protocol_attestation::content_hash_hex(&second_compile.bytecode);
+        let matched = second_hash == qvm_bytecode_hash;
+        resp.qvm_deterministic = Some(matched);
+        protocol_attestation::record_determinism_check(
+            &source_hash,
+            protocol_attestation::BACKEND_QUANTUMVM,
+            matched,
+        );
+    }
+    {
+        let report = protocol_attestation::get_report(&source_hash);
+        resp.dry_run_tested_before_deploy = report.get("tested_before_deploy").and_then(|v| v.as_bool());
+    }
+
+    resp.stage = "prepare-artifacts".to_string();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_dir = std::env::temp_dir().join(format!("synq-demo-deploy-{unique}"));
+    if let Err(error) = std::fs::create_dir_all(&tmp_dir) {
+        resp.error = Some(format!("failed to create temp dir: {error}"));
+        return RespJson(resp);
+    }
+    let bytecode_path = tmp_dir.join("contract.bytecode");
+    let manifest_path = tmp_dir.join("contract.manifest.json");
+    let abi_path = tmp_dir.join("contract.abi.json");
+    let manifest_json = json!({
+        "name": "SynQBenchmarkDemoContract",
+        "compiled_with": "synq-compiler (benchmark page)",
+        "bytecode_bytes": bytecode.len(),
+        "note": "auto-generated manifest for the live compiler benchmark page's mempool-submit demo",
+    })
+    .to_string();
+    let abi_json = json!({
+        "note": "auto-generated placeholder ABI for the live compiler benchmark page's mempool-submit demo",
+    })
+    .to_string();
+    if let Err(error) = std::fs::write(&bytecode_path, &bytecode) {
+        resp.error = Some(format!("failed to write bytecode temp file: {error}"));
+        return RespJson(resp);
+    }
+    if let Err(error) = std::fs::write(&manifest_path, &manifest_json) {
+        resp.error = Some(format!("failed to write manifest temp file: {error}"));
+        return RespJson(resp);
+    }
+    if let Err(error) = std::fs::write(&abi_path, &abi_json) {
+        resp.error = Some(format!("failed to write abi temp file: {error}"));
+        return RespJson(resp);
+    }
+
+    resp.stage = "determine-nonce".to_string();
+    let t_nonce = Instant::now();
+    let nonce = match next_demo_signer_nonce() {
+        Ok(nonce) => nonce,
+        Err(error) => {
+            resp.nonce_lookup_ms = Some(t_nonce.elapsed().as_nanos() as f64 / 1e6);
+            resp.total_ms = Some(t_total.elapsed().as_nanos() as f64 / 1e6);
+            resp.error = Some(format!("failed to determine next nonce: {error}"));
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return RespJson(resp);
+        }
+    };
+    resp.nonce_lookup_ms = Some(t_nonce.elapsed().as_nanos() as f64 / 1e6);
+    resp.sender = Some(DEMO_SIGNER_ADDRESS.to_string());
+    resp.nonce = Some(nonce);
+
+    resp.stage = "build-carrier".to_string();
+    let t_carrier = Instant::now();
+    let carrier_output = std::process::Command::new(SYNERGY_NODE_BIN)
+        .args([
+            "synq",
+            "build-carrier",
+            "--chain-id",
+            "1264",
+            "--network-id",
+            "synergy-testnet-v2",
+            "--synq-bytecode",
+        ])
+        .arg(&bytecode_path)
+        .arg("--synq-manifest")
+        .arg(&manifest_path)
+        .arg("--synq-abi")
+        .arg(&abi_path)
+        .arg("--signer-key-file")
+        .arg(DEMO_SIGNER_KEY_FILE)
+        .arg("--base-nonce")
+        .arg(nonce.to_string())
+        .output();
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    resp.build_carrier_ms = Some(t_carrier.elapsed().as_nanos() as f64 / 1e6);
+    let carrier_output = match carrier_output {
+        Ok(output) => output,
+        Err(error) => {
+            resp.total_ms = Some(t_total.elapsed().as_nanos() as f64 / 1e6);
+            resp.error = Some(format!("failed to invoke synergy-node: {error}"));
+            return RespJson(resp);
+        }
+    };
+    if !carrier_output.status.success() {
+        resp.total_ms = Some(t_total.elapsed().as_nanos() as f64 / 1e6);
+        resp.error = Some(format!(
+            "build-carrier failed: {}",
+            String::from_utf8_lossy(&carrier_output.stderr).trim()
+        ));
+        return RespJson(resp);
+    }
+    let carrier_json: serde_json::Value = match serde_json::from_slice(&carrier_output.stdout) {
+        Ok(value) => value,
+        Err(error) => {
+            resp.error = Some(format!("build-carrier produced invalid JSON: {error}"));
+            return RespJson(resp);
+        }
+    };
+    let step = match carrier_json.get("steps").and_then(|s| s.get(0)) {
+        Some(step) => step,
+        None => {
+            resp.error = Some("build-carrier report had no steps".to_string());
+            return RespJson(resp);
+        }
+    };
+    resp.synq_contract_address = step
+        .get("synq_contract_address")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    resp.tx_id = step
+        .get("tx_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let envelope = match step.get("submission_envelope") {
+        Some(envelope) => envelope.clone(),
+        None => {
+            resp.error = Some("build-carrier report had no submission_envelope".to_string());
+            return RespJson(resp);
+        }
+    };
+
+    resp.stage = "submit-to-mempool".to_string();
+    let t_submit = Instant::now();
+    let rpc_request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "synergy_submitAegisTransaction",
+        "params": [envelope]
+    });
+    let rpc_response = match run_curl_json_rpc(&rpc_request) {
+        Ok(response) => response,
+        Err(error) => {
+            resp.submit_ms = Some(t_submit.elapsed().as_nanos() as f64 / 1e6);
+            resp.total_ms = Some(t_total.elapsed().as_nanos() as f64 / 1e6);
+            resp.error = Some(format!("RPC submit failed: {error}"));
+            return RespJson(resp);
+        }
+    };
+    resp.submit_ms = Some(t_submit.elapsed().as_nanos() as f64 / 1e6);
+    if let Some(rpc_error) = rpc_response.get("error") {
+        resp.total_ms = Some(t_total.elapsed().as_nanos() as f64 / 1e6);
+        resp.error = Some(format!("node rejected the carrier: {rpc_error}"));
+        return RespJson(resp);
+    }
+    let result = rpc_response.get("result").cloned().unwrap_or(json!({}));
+    resp.success = result
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    resp.stage = "done".to_string();
+    resp.tx_hash = result
+        .get("tx_hash")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    resp.mempool_status = result
+        .get("mempool_status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    resp.aegis_pqvm_verification = result
+        .get("aegis_pqvm_verification")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    resp.dag_admission_status = result
+        .get("dag_admission_status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    if !resp.success {
+        resp.error = result
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| Some("node did not accept the transaction".to_string()));
+    }
+    if resp.success {
+        if let Some(ref source_hash) = resp.source_hash {
+            protocol_attestation::record_stage(
+                source_hash,
+                resp.protocol_hint.as_deref().unwrap_or("generic"),
+                "mempool_admitted",
+                protocol_attestation::BACKEND_QUANTUMVM,
+                None,
+                serde_json::json!({
+                    "tx_id": resp.tx_id,
+                    "tx_hash": resp.tx_hash,
+                    "sender": resp.sender,
+                    "nonce": resp.nonce,
+                }),
+            );
+        }
+    }
+    resp.total_ms = Some(t_total.elapsed().as_nanos() as f64 / 1e6);
+
+    RespJson(resp)
+}
+
+async fn protocol_attestation_status_handler() -> RespJson<serde_json::Value> {
+    RespJson(protocol_attestation::get_status())
+}
+
+async fn protocol_attestation_report_handler(
+    axum::extract::Path(source_hash): axum::extract::Path<String>,
+) -> RespJson<serde_json::Value> {
+    RespJson(protocol_attestation::get_report(&source_hash))
+}
+
+async fn mempool_view_handler() -> RespJson<serde_json::Value> {
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "synergy_getPendingTransactions",
+        "params": [50, "timestamp"]
+    });
+    let response = match run_curl_json_rpc(&request) {
+        Ok(response) => response,
+        Err(error) => {
+            return RespJson(json!({
+                "success": false,
+                "error": format!("failed to reach node RPC: {error}"),
+            }));
+        }
+    };
+    let pending = match response.get("result").and_then(|value| value.as_array()) {
+        Some(pending) => pending,
+        None => {
+            return RespJson(json!({
+                "success": false,
+                "error": "getPendingTransactions: unexpected response shape",
+            }));
+        }
+    };
+    let txs: Vec<serde_json::Value> = pending
+        .iter()
+        .map(|tx| {
+            // The "data" field is "aegis-pqvm-tx-v1:<base64>" -- the interesting
+            // write_set_hint (e.g. "synq-deploy:...") is JSON inside that base64
+            // payload, not a literal substring of the encoded blob itself.
+            let data_str = tx.get("data").and_then(|v| v.as_str()).unwrap_or("");
+            let is_contract_deploy = data_str
+                .split_once(':')
+                .and_then(|(_, b64)| {
+                    use base64::{Engine, engine::general_purpose::STANDARD};
+                    STANDARD.decode(b64).ok()
+                })
+                .map(|decoded| {
+                    String::from_utf8_lossy(&decoded).contains("synq-deploy")
+                })
+                .unwrap_or(false);
+            json!({
+                "hash": tx.get("hash").cloned().unwrap_or(json!(null)),
+                "sender": tx.get("sender").cloned().unwrap_or(json!(null)),
+                "receiver": tx.get("receiver").cloned().unwrap_or(json!(null)),
+                "nonce": tx.get("nonce").cloned().unwrap_or(json!(null)),
+                "timestamp": tx.get("timestamp").cloned().unwrap_or(json!(null)),
+                "gas_price": tx.get("gas_price").cloned().unwrap_or(json!(null)),
+                "status": tx.get("status").cloned().unwrap_or(json!(null)),
+                "is_contract_deploy": is_contract_deploy,
+            })
+        })
+        .collect();
+    RespJson(json!({
+        "success": true,
+        "count": txs.len(),
+        "transactions": txs,
+    }))
+}
+
 async fn bench_compile_handler(
     Json(req): Json<BenchCompileRequest>,
 ) -> RespJson<BenchCompileResponse> {
@@ -6231,6 +7375,21 @@ fn validate_contract_name(name: &str) -> Result<String, String> {
 fn contracts_base_dir() -> String {
     std::env::var("SYNQ_CONTRACTS_DIR")
         .unwrap_or_else(|_| "/var/www/synq-demo/contracts".to_string())
+}
+
+/// Resolve the curated example-contracts directory -- the SAME directory
+/// ForgeIDE's "Open Example SynQ Contracts" picker reads from (see
+/// forge-v3/app/lib/environment.ts's examplesBaseUrl, served statically
+/// from this same path). load_contract_handler's "shared template"
+/// fallback used to read a separate, unmaintained flat copy at
+/// contracts_base_dir()'s root (contracts/<name>.synq) instead of here --
+/// that copy silently drifted out of sync for AssetDemo/LoopDemo/PQCDemo/
+/// SimpleToken/TokenVault (missing functions, stale signatures) while
+/// ForgeIDE's own picker was already correctly reading this directory.
+/// Fixed so there is exactly one place example-contract source lives.
+fn examples_base_dir() -> String {
+    std::env::var("SYNQ_EXAMPLES_DIR")
+        .unwrap_or_else(|_| "/var/www/synq-demo/examples".to_string())
 }
 
 async fn save_contract_handler(
@@ -6396,7 +7555,24 @@ async fn load_contract_handler(
         }));
     }
 
-    // 2. Fall back to shared template
+    // 2. Fall back to the curated example-contracts directory -- the same
+    // source ForgeIDE's "Open Example SynQ Contracts" picker reads (see
+    // examples_base_dir's doc comment). Checked before the legacy shared
+    // path below so all 10 curated examples (Counter, AssetDemo, LoopDemo,
+    // PQCDemo, SimpleToken, TokenVault, ComprehensiveToken, DomainRegistry,
+    // StructValue, V3Types) always resolve to this one canonical copy.
+    let example_path = format!("{}/{}.synq", examples_base_dir(), name);
+    if let Ok(src) = std::fs::read_to_string(&example_path) {
+        return (StatusCode::OK, Json(LoadContractResponse {
+            success: true, source: Some(src), is_user_save: false, error: None,
+        }));
+    }
+
+    // 3. Legacy fallback: a handful of non-curated fixture contracts
+    // (Blank, NamedError, StackFailDemo, StructField, TypeTestContract)
+    // live only at contracts_base_dir()'s own root, not in the curated
+    // examples set, and may still be reachable via old deep links -- keep
+    // serving those from here so this stays backward compatible.
     let shared_path = format!("{}/{}.synq", base, name);
     if let Ok(src) = std::fs::read_to_string(&shared_path) {
         return (StatusCode::OK, Json(LoadContractResponse {
@@ -6824,6 +8000,8 @@ pub fn build_router(store: AppState, cors: CorsLayer) -> Router {
         .route("/compile",           post(compile_handler))
         .route("/compile-aivm",       post(aivm_handler::compile_aivm_handler))
         .route("/aivm/estimate-gas", post(aivm_handler::estimate_gas_handler))
+        .route("/protocol-attestation/status", get(protocol_attestation_status_handler))
+        .route("/protocol-attestation/:source_hash", get(protocol_attestation_report_handler))
         .route("/attest",            post(attest_handler))
         .route("/source-nonce",      post(source_nonce_handler))
         .route("/compile/sign-source", post(sign_source_handler))
@@ -6842,6 +8020,9 @@ pub fn build_router(store: AppState, cors: CorsLayer) -> Router {
     .route("/session/:id/state", get(session_state_handler))
         .route("/debug/ecrecover",   post(debug_ecrecover_handler))
         .route("/bench-compile",      post(bench_compile_handler))
+        .route("/submit-mempool",     post(submit_mempool_handler))
+        .route("/quantumvm/dry-run",  post(qvm_dry_run_handler))
+        .route("/mempool",            get(mempool_view_handler))
         .route("/compile-wasm",     post(wasm_compiler::compile_wasm_handler))
         .route("/diff-test",          post(diff_test_handler))
         .route("/decompile",         post(decompile_handler))

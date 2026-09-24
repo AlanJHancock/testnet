@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "contract": "contracts/SimpleToken.synq",
+  "contract": "examples/SimpleToken.synq",
   "scenarios": [
     {
       "name": "init -> mint -> checkBalance -> burn -> assertBalance (own-address flow; see note on transfer())",
@@ -22,19 +22,20 @@
         {
           "call": "getOwner",
           "args": [],
-          "expectReturn": "0x0000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+          "capture": "owner",
+          "expectReturn": 1
         },
         {
           "call": "balanceOf",
           "args": [
-            0
+            "$owner"
           ],
           "expectReturn": 1000
         },
         {
           "call": "mint",
           "args": [
-            0,
+            "$owner",
             200
           ],
           "expectReturn": true
@@ -42,7 +43,7 @@
         {
           "call": "balanceOf",
           "args": [
-            0
+            "$owner"
           ],
           "expectReturn": 1200
         },
@@ -54,7 +55,7 @@
         {
           "call": "checkBalance",
           "args": [
-            0,
+            "$owner",
             100
           ],
           "expectReturn": true
@@ -62,7 +63,7 @@
         {
           "call": "burn",
           "args": [
-            0,
+            "$owner",
             50
           ],
           "expectReturn": true
@@ -70,7 +71,7 @@
         {
           "call": "balanceOf",
           "args": [
-            0
+            "$owner"
           ],
           "expectReturn": 1150
         },

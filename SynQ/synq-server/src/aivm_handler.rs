@@ -16,7 +16,7 @@ use aivm::instructions::Instruction;
 use aivm::Value as AivmValue;
 use ruint::aliases::U256;
 
-use crate::{AppState, check_rate_limit, RespJson, MAX_SOURCE_BYTES};
+use crate::{AppState, check_rate_limit, RespJson, MAX_SOURCE_BYTES, AuthorityEnvelopeInput, build_authority_envelope};
 use synq_vm::bech32::{bech32m_decode, SynqAddress, HRP_TESTNET, HRP_MAINNET, ALGO_ML_DSA_65, NETWORK_ID_TESTNET, decode_network_address};
 
 /// Request for AIVM compilation
@@ -328,6 +328,12 @@ pub struct EstimateGasRequest {
     /// functions -- without this every dry-run executes as the zero address.
     #[serde(default)]
     pub caller: Option<String>,
+    /// Optional authority envelope -- see AuthorityEnvelopeInput doc in
+    /// main.rs. Omitted -> empty envelope (today's behavior; an
+    /// @authority(Scope)-gated function reverts). Needed to exercise the
+    /// SUCCESS path of e.g. V3Types.setValue's @authority(AdminScope).
+    #[serde(default)]
+    pub authority_envelope: Option<AuthorityEnvelopeInput>,
     /// Optional pre-seeded asset ledger, carried over from a previous dry
     /// run's `final_assets` -- the asset-lifecycle counterpart of `state`.
     /// Empty/omitted means "start with an empty ledger" (a fresh contract).
@@ -983,7 +989,10 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
         _ => [0u8; 41],
     };
     let caller_warning = caller_identity_slot_warning(&caller);
-    let ctx = aivm::context::ExecutionContext::testnet(caller, [0u8; 41]);
+    let mut ctx = aivm::context::ExecutionContext::testnet(caller, [0u8; 41]);
+    if let Some(ref env_input) = req.authority_envelope {
+        ctx.authority_envelope = build_authority_envelope(env_input);
+    }
     // This overlay is local to the request and is dropped at the end of this
     // function. avm.execute() may internally .commit() it on success — that
     // only merges staged writes into THIS in-memory overlay's own map, which
@@ -1266,6 +1275,7 @@ mod estimate_gas_handler_tests {
             args: vec![],
             state: HashMap::new(),
             caller: None,
+            authority_envelope: None,
             assets: vec![],
             next_asset_id: 1,
             contracts: HashMap::new(),

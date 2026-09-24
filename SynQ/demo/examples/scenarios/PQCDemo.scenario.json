@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "contract": "contracts/PQCDemo.synq",
+  "contract": "examples/PQCDemo.synq",
   "scenarios": [
     {
       "name": "store key material then verify/decapsulate with malformed inputs (correctly rejected)",
@@ -60,7 +60,7 @@
             "0x01",
             "0x02"
           ],
-          "expectReturn": "0x"
+          "expectStatus": "reverted"
         }
       ]
     }

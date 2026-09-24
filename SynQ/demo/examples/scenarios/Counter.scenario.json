@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "contract": "contracts/Counter.synq",
+  "contract": "examples/Counter.synq",
   "scenarios": [
     {
       "name": "init then accumulate via increment",
