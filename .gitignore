@@ -64,3 +64,13 @@ db.sqlite
 # Compiled Solidity artifacts
 artifacts/
 cache/
+
+# Standalone side-projects living inside this checkout (own repos / not submodules)
+/forge-v3/
+/sds-check/
+/network/
+
+# Stray timestamped backup files from manual editing sessions
+*.bak
+*.bak-*
+*.bak_*
