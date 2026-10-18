@@ -3653,6 +3653,9 @@ fn handle_json_rpc(
                                 == raw_hash_search)
                 };
 
+                // Lock order: chain before tx_pool (canonical order used throughout
+                // this file; consensus_algorithm.rs's block-production loop was fixed to
+                // match this rather than the other way around -- see AB-BA deadlock note).
                 // First, search in confirmed transactions (blocks)
                 let chain = chain.lock().unwrap();
                 for block in &chain.chain {
@@ -4323,6 +4326,8 @@ fn handle_json_rpc(
             if let Some(address) = params.get(0).and_then(|v| v.as_str()) {
                 let _block_tag = params.get(1).and_then(|v| v.as_str()).unwrap_or("latest");
 
+                // Lock order: chain before tx_pool (canonical order -- see the AB-BA
+                // deadlock note where consensus_algorithm.rs was aligned to match this).
                 // Count confirmed transactions sent by this address
                 let chain = chain.lock().unwrap();
                 let mut count: u64 = 0;

@@ -750,8 +750,13 @@ impl ProofOfSynergy {
                     .unwrap_or_default();
 
                 if elapsed >= Duration::from_secs(block_time_secs) {
-                    let pool = TX_POOL.lock().unwrap();
+                    // Lock order: always acquire `chain` before `tx_pool` here, matching
+                    // every nested chain->tx_pool acquisition in rpc/rpc_server.rs. The
+                    // reverse order previously used here (tx_pool then chain) was an AB-BA
+                    // deadlock risk against those RPC handlers, since both run as
+                    // concurrent threads sharing the same global TX_POOL/chain mutexes.
                     let chain_guard = chain.lock().unwrap();
+                    let pool = TX_POOL.lock().unwrap();
 
                     if let Some(latest_block) = chain_guard.last() {
                         if latest_block.block_index != last_committed_height {
