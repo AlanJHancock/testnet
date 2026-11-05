@@ -8053,7 +8053,10 @@ async fn main() {
     let cors = build_cors_layer();
     let app = build_router(store.clone(), cors);
 
-    let addr = "0.0.0.0:3030";
+    // Bind address is configurable (SYNQ_BIND). Default stays 0.0.0.0:3030 so
+    // the production service behaves exactly as before.
+    let addr_owned = std::env::var("SYNQ_BIND").unwrap_or_else(|_| "0.0.0.0:3030".to_string());
+    let addr = addr_owned.as_str();
     println!("SynQ server listening on {}", addr);
     println!("  Session TTL:     {} min", SESSION_TTL.as_secs() / 60);
     println!("  Max sessions:    {}", MAX_SESSIONS);
