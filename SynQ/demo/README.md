@@ -1,6 +1,6 @@
 # SynQ In-Browser IDE
 
-Live at: **https://hanksweb.co.uk/demo/**
+Live at: **retired** (hanksweb.co.uk was shut down in Nov 2026); API now at https://synq.synergy-network.io
 
 ## What it is
 

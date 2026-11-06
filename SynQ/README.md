@@ -3,8 +3,8 @@
 SynQ is a domain-specific language for writing **quantum-resistant smart contracts** on the Synergy Network testnet. It compiles to **QVM bytecode** — a stack-based instruction set executed by the QuantumVM — and every compiled artifact is signed with a real **ML-DSA-65 (FIPS 204)** post-quantum signature.
 
 > **Testnet status.** All components described here are live on the Synergy testnet.  
-> Compiler service: `https://hanksweb.co.uk/synq/`  
-> Interactive IDE: `https://hanksweb.co.uk/demo/`
+> Compiler service: `https://synq.synergy-network.io/`  
+> Interactive IDE: `https://synq.synergy-network.io/` (API only; the demo pages are in the `synq-playground` repo)
 
 ---
 
@@ -177,7 +177,7 @@ Verify output is explicit about this:
 
 See [`synq-server/README.md`](synq-server/README.md) for the full API reference.
 
-**Base URL (testnet):** `https://hanksweb.co.uk/synq/`
+**Base URL (testnet):** `https://synq.synergy-network.io/`
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|

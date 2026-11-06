@@ -2,7 +2,7 @@
 
 HTTP compile and execution server for the SynQ toolchain.
 
-**Testnet endpoint:** `https://hanksweb.co.uk/synq/`
+**Testnet endpoint:** `https://synq.synergy-network.io/`
 
 ---
 

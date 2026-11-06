@@ -595,7 +595,7 @@
   <div style="text-align:center;flex:1;">
     <h1>SynQ IDE</h1>
     <p>Post-Quantum Smart Contract Compiler &amp; Sandbox</p>
-    <div class="badge">Live Compiler &mdash; hanksweb.co.uk</div>
+    <div class="badge">Live Compiler &mdash; synq.synergy-network.io</div>
   </div>
 </div>
 
@@ -878,21 +878,21 @@
     return out;
   }
 
-  var COMPILE_URL       = 'https://hanksweb.co.uk/synq/compile';
-  var COMPILE_AIVM_URL  = 'https://hanksweb.co.uk/synq/compile-aivm';
-  var VERIFY_SOL_URL    = 'https://hanksweb.co.uk/synq/verify-sol';
-  var DEPLOY_EVM_URL    = 'https://hanksweb.co.uk/synq/deploy-evm';
-  var EVM_CALL_URL      = 'https://hanksweb.co.uk/synq/evm-call';
-  var DEPLOY_EVM_WS_URL  = 'https://hanksweb.co.uk/synq/deploy-evm-workspace';
-  var DIFF_TEST_URL     = 'https://hanksweb.co.uk/synq/diff-test';
-  var SYNQ_SERVER        = 'https://hanksweb.co.uk/synq';
-  var SIGN_SOURCE_URL   = 'https://hanksweb.co.uk/synq/compile/sign-source';
-  var SOURCE_NONCE_URL  = 'https://hanksweb.co.uk/synq/source-nonce';
-  var ATTEST_URL      = 'https://hanksweb.co.uk/synq/attest';
-  var SESSION_NEW_URL  = 'https://hanksweb.co.uk/synq/session/new';
+  var COMPILE_URL       = 'https://synq.synergy-network.io/compile';
+  var COMPILE_AIVM_URL  = 'https://synq.synergy-network.io/compile-aivm';
+  var VERIFY_SOL_URL    = 'https://synq.synergy-network.io/verify-sol';
+  var DEPLOY_EVM_URL    = 'https://synq.synergy-network.io/deploy-evm';
+  var EVM_CALL_URL      = 'https://synq.synergy-network.io/evm-call';
+  var DEPLOY_EVM_WS_URL  = 'https://synq.synergy-network.io/deploy-evm-workspace';
+  var DIFF_TEST_URL     = 'https://synq.synergy-network.io/diff-test';
+  var SYNQ_SERVER        = 'https://synq.synergy-network.io';
+  var SIGN_SOURCE_URL   = 'https://synq.synergy-network.io/compile/sign-source';
+  var SOURCE_NONCE_URL  = 'https://synq.synergy-network.io/source-nonce';
+  var ATTEST_URL      = 'https://synq.synergy-network.io/attest';
+  var SESSION_NEW_URL  = 'https://synq.synergy-network.io/session/new';
   var _autoInitCalled   = false;  // server auto-calls init() on session/new
-  var WORKSPACE_URL    = 'https://hanksweb.co.uk/synq/workspace';
-  var PUBKEY_URL      = 'https://hanksweb.co.uk/synq/pubkey';
+  var WORKSPACE_URL    = 'https://synq.synergy-network.io/workspace';
+  var PUBKEY_URL      = 'https://synq.synergy-network.io/pubkey';
 
   // PR-G: fetch compiler key info once on load and pre-fill the signing badge
   var compilerKeyId    = null;
@@ -919,10 +919,10 @@
       }
     }).catch(function() {});
   })();
-  var SESSION_RUN_URL = 'https://hanksweb.co.uk/synq/session/run';
-  var SESSION_GRANT_URL = 'https://hanksweb.co.uk/synq/session/';  // + sessionId + '/grant'
-  var SESSION_DEL_URL   = 'https://hanksweb.co.uk/synq/session/';
-  var SESSION_NONCE_URL = 'https://hanksweb.co.uk/synq/session/';
+  var SESSION_RUN_URL = 'https://synq.synergy-network.io/session/run';
+  var SESSION_GRANT_URL = 'https://synq.synergy-network.io/session/';  // + sessionId + '/grant'
+  var SESSION_DEL_URL   = 'https://synq.synergy-network.io/session/';
+  var SESSION_NONCE_URL = 'https://synq.synergy-network.io/session/';
 
   var currentBytecode         = null;
   var currentManifest          = null;  // V3 manifest from compile (for Layer 3 verification)
@@ -2751,9 +2751,9 @@
   window.saveToFile = saveToFile;
 
   // ── Save contract source back to the server (per-wallet) ────────────────
-  var SAVE_CONTRACT_URL  = 'https://hanksweb.co.uk/synq/save-contract';
-  var LOAD_CONTRACT_URL  = 'https://hanksweb.co.uk/synq/load-contract';
-  var LIST_USER_CONTRACTS_URL = 'https://hanksweb.co.uk/synq/list-user-contracts';
+  var SAVE_CONTRACT_URL  = 'https://synq.synergy-network.io/save-contract';
+  var LOAD_CONTRACT_URL  = 'https://synq.synergy-network.io/load-contract';
+  var LIST_USER_CONTRACTS_URL = 'https://synq.synergy-network.io/list-user-contracts';
   var _saveServerInFlight = false;
   var _userContractsLoaded = false;
   var userContractNames = {};  // names of contracts saved by this wallet

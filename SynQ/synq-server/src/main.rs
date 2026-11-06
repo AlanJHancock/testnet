@@ -7938,7 +7938,7 @@ pub fn build_app_state() -> AppState {
     store
 }
 
-/// nginx (see /etc/nginx/sites-enabled/hanksweb.co.uk, `location /synq/`)
+/// nginx (see the vhost that fronts this server, `location /` with the proxy snippet)
 /// reverse-proxies every browser request to this server over
 /// 127.0.0.1, setting `X-Real-IP: $remote_addr` with the true client IP.
 /// synq-server's per-IP rate limiter (`check_rate_limit`, PR-F Item 2)

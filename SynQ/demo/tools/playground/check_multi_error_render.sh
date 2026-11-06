@@ -12,12 +12,12 @@
 # error-rendering path, and before/after any deploy that touches it.
 #
 # Usage: ./check_multi_error_render.sh [base_url] [index_html_path]
-#   base_url         defaults to https://hanksweb.co.uk
+#   base_url         defaults to https://synq.synergy-network.io
 #   index_html_path  defaults to the file next to this script
 
 set -euo pipefail
 
-BASE_URL="${1:-https://hanksweb.co.uk}"
+BASE_URL="${1:-https://synq.synergy-network.io}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INDEX_HTML="${2:-$SCRIPT_DIR/index.html}"
 
