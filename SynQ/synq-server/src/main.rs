@@ -4453,7 +4453,18 @@ struct NewSessionRequest {
     /// to parse as a full-precision decimal string instead of a JSON number).
     #[serde(default)]
     init_param_types: Option<Vec<String>>,
+    /// Whether session/new runs init() itself when the session is created (the
+    /// "constructor" behaviour added 2026-08-08). Defaults to true so existing
+    /// clients are unchanged. Set false to get an untouched, empty-state session:
+    /// the caller then runs init() as an ordinary signed call, so the owner is the
+    /// wallet that signs it and the session matches the dry-run's empty state.
+    /// Intended direction: auto-init is deprecated and the default will flip to
+    /// false once Forge and the Sandbox IDE send false (or call init themselves).
+    #[serde(default = "default_auto_init")]
+    auto_init: bool,
 }
+
+fn default_auto_init() -> bool { true }
 
 #[derive(serde::Serialize)]
 struct NewSessionResponse {
@@ -5319,6 +5330,11 @@ async fn session_new_handler(
         let mut map = state.sessions.lock().unwrap();
         if let Some(session) = map.get_mut(&id) {
             let has_init = session.vm.list_functions().iter().any(|f| f == "init");
+            if !req.auto_init {
+                // Deprecated-path opt-out: leave the VM untouched. init_called stays None
+                // (not false) so clients do not read it as a failed auto-init.
+                eprintln!("[SESSION] auto_init=false for session {} -- init() not run at creation", id);
+            } else
             if has_init && init_args_decode_error.is_some() {
                 eprintln!("[SESSION] init_args decode failed for session {}: {}", id, init_args_decode_error.as_deref().unwrap_or(""));
                 init_called = Some(false);
