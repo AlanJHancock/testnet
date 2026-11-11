@@ -275,6 +275,18 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
     for part in &contract.parts {
         if let ContractPart::Function(f) = part {
             let param_names: HashSet<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+            // Declared type of every name a statement can assign to, so the
+            // negative-literal check can tell `i_val = -42` (i32 destination,
+            // perfectly valid) from `total = 0 - 5` (UInt256, a real underflow).
+            let mut name_types: HashMap<String, Type> = HashMap::new();
+            for p in &contract.parts {
+                if let ContractPart::StateVariable(sv) = p {
+                    name_types.insert(sv.name.clone(), sv.ty.clone());
+                }
+            }
+            for p in &f.params {
+                name_types.insert(p.name.clone(), p.ty.clone());
+            }
 
             // Collect let-bound variable names (function-scoped, including
             // ones declared inside nested if/while blocks -- see
@@ -375,7 +387,16 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
                         }
                     }
                     // Warn on negative literal pattern (0 - N for UInt256)
-                    check_negative_literal(expr, &f.name, warnings);
+                    // Destination type of this statement, when it is a plain
+                    // variable assignment or a typed `let`. Anything else
+                    // (maps, struct fields, bare expressions) stays untyped
+                    // and keeps the warning.
+                    let dest: Option<&Type> = match stmt {
+                        Statement::Assignment(name, _) => name_types.get(name.as_str()),
+                        Statement::Let { ty: Some(t), .. } => Some(t),
+                        _ => None,
+                    };
+                    check_negative_literal(expr, &f.name, dest, warnings);
                 }
             }
         }
@@ -383,25 +404,37 @@ fn check_undefined_refs(contract: &ContractDefinition, warnings: &mut Vec<String
     if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
-fn check_negative_literal(expr: &Expression, fn_name: &str, warnings: &mut Vec<String>) {
+fn is_signed_type(t: &Type) -> bool {
+    matches!(t, Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128 | Type::Int256)
+}
+
+/// Warn about `0 - N` (how a negative literal parses) where the value would
+/// land in an unsigned slot. `dest` is the declared type of the variable the
+/// whole expression is assigned to, when known: a signed destination
+/// (`i_val = -42` with `i_val: i32`) is valid, so the top-level literal is not
+/// reported. Nested uses, and anything with no known destination, still warn.
+fn check_negative_literal(expr: &Expression, fn_name: &str, dest: Option<&Type>, warnings: &mut Vec<String>) {
     if let Expression::BinaryOp(l, BinaryOperator::Sub, r) = expr {
         if let Expression::Literal(Literal::Number(0)) = l.as_ref() {
             if let Expression::Literal(Literal::Number(n)) = r.as_ref() {
-                warnings.push(format!(
-                    "negative literal (-{}) in function '{}': UInt256 has no sign; this will underflow at runtime",
-                    n, fn_name
-                ));
+                if !dest.map_or(false, is_signed_type) {
+                    warnings.push(format!(
+                        "negative literal (-{}) in function '{}': UInt256 has no sign; this will underflow at runtime",
+                        n, fn_name
+                    ));
+                }
             }
         }
     }
-    // Recurse
+    // Recurse. A sub-expression is no longer assigned straight to the
+    // destination, so it carries no destination type of its own.
     match expr {
         Expression::BinaryOp(l, _, r) => {
-            check_negative_literal(l, fn_name, warnings);
-            check_negative_literal(r, fn_name, warnings);
+            check_negative_literal(l, fn_name, None, warnings);
+            check_negative_literal(r, fn_name, None, warnings);
         }
         Expression::Call(_, args) => {
-            for a in args { check_negative_literal(a, fn_name, warnings); }
+            for a in args { check_negative_literal(a, fn_name, None, warnings); }
         }
         _ => {}
     }

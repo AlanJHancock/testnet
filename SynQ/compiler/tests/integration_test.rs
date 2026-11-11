@@ -713,6 +713,71 @@ contract T {
         "expected a warning about negative literal, got: {:?}", r.warnings);
 }
 
+fn neg_literal_warnings(src: &str) -> Vec<String> {
+    let r = synq_compiler::compile_ir(src).expect("should compile");
+    r.warnings.into_iter().filter(|w| w.contains("negative literal")).collect()
+}
+
+#[test]
+fn test_negative_literal_no_warning_for_signed_state_var() {
+    let src = r#"pragma synq ^0.9;
+contract T {
+    i_val: i32;
+    function init() as caller { i_val = -42; return i_val; }
+}"#;
+    assert!(neg_literal_warnings(src).is_empty(),
+        "i32 destination: a negative literal is valid, got {:?}", neg_literal_warnings(src));
+}
+
+#[test]
+fn test_negative_literal_no_warning_for_every_signed_width() {
+    for ty in ["i8", "i16", "i32", "i64", "i128", "i256"] {
+        let src = format!("pragma synq ^0.9;\ncontract T {{ v: {ty}; function init() as caller {{ v = -7; return v; }} }}");
+        assert!(neg_literal_warnings(&src).is_empty(), "{ty} should not warn, got {:?}", neg_literal_warnings(&src));
+    }
+}
+
+#[test]
+fn test_negative_literal_no_warning_for_signed_param_and_typed_let() {
+    let src = r#"pragma synq ^0.9;
+contract T {
+    total: i32;
+    function f(x: i32) as caller { x = -3; let y: i32 = -4; total = y; return total; }
+}"#;
+    assert!(neg_literal_warnings(src).is_empty(), "got {:?}", neg_literal_warnings(src));
+}
+
+#[test]
+fn test_negative_literal_still_warns_for_unsigned_destination() {
+    for ty in ["u8", "u32", "u128", "u256"] {
+        let src = format!("pragma synq ^0.9;\ncontract T {{ v: {ty}; function f() as caller {{ v = -5; return v; }} }}");
+        assert_eq!(neg_literal_warnings(&src).len(), 1, "{ty} should warn once");
+    }
+}
+
+#[test]
+fn test_negative_literal_still_warns_when_nested_in_arithmetic() {
+    // Even into an i32, `-5` buried in an expression is not the literal itself
+    // landing in the slot, and an unsigned operand can still be involved.
+    let src = r#"pragma synq ^0.9;
+contract T {
+    u: u256;
+    s: i32;
+    function f() as caller { u = 10 + -5; return s; }
+}"#;
+    assert_eq!(neg_literal_warnings(src).len(), 1, "got {:?}", neg_literal_warnings(src));
+}
+
+#[test]
+fn test_negative_literal_still_warns_for_untyped_let() {
+    let src = r#"pragma synq ^0.9;
+contract T {
+    t: u256;
+    function f() as caller { let x = -9; t = 1; return t; }
+}"#;
+    assert_eq!(neg_literal_warnings(src).len(), 1, "got {:?}", neg_literal_warnings(src));
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // PR-D: Cryptographic correctness tests
 // ════════════════════════════════════════════════════════════════════════════
