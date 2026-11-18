@@ -104,10 +104,16 @@ pub fn promote_to_ssa(func: &mut IrFunction) -> (usize, usize) {
     }
 
     // Only promote locals defined in 2+ blocks (need phi)
-    let promotable: Vec<String> = local_defs.iter()
+    let mut promotable: Vec<String> = local_defs.iter()
         .filter(|(_, blocks)| blocks.len() >= 2)
         .map(|(name, _)| name.clone())
         .collect();
+    // HashMap iteration order is randomised per process. Phi nodes take their
+    // ValueIds from alloc_value() in the order we visit variables, so without
+    // a stable order the same source compiled to different bytecode each run
+    // (loop variables swapped value ids, which cascaded into local slot
+    // addresses). Sort by name so output is a pure function of the source.
+    promotable.sort();
 
     if promotable.is_empty() {
         func.dom_tree = Some(dom_tree);
@@ -139,7 +145,10 @@ pub fn promote_to_ssa(func: &mut IrFunction) -> (usize, usize) {
 
         let ty = local_types.get(local_name).cloned().unwrap_or(IrType::U256);
 
-        for &block_id in &idf {
+        // HashSet order is randomised too: visit phi blocks in ascending id.
+        let mut idf_blocks: Vec<BlockId> = idf.iter().copied().collect();
+        idf_blocks.sort_unstable();
+        for block_id in idf_blocks {
             let block = &func.blocks[block_id as usize];
             let phi_pairs: Vec<(BlockId, ValueId)> = block.preds.iter()
                 .map(|&pred| (pred, 0u32))
