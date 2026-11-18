@@ -4438,6 +4438,12 @@ struct NewSessionRequest {
     /// into the wallet's workspace afterward, overwriting the old pointer.
     #[serde(default)]
     force_new: bool,
+    /// When false, do NOT run init() at session creation: the session starts with
+    /// the contract's state unwritten, so a caller (e.g. a scenario that tests
+    /// 'call before init must revert') can run init() itself. Absent or true keeps
+    /// the historical behaviour (init() is auto-called). init_called is then null.
+    #[serde(default)]
+    auto_init: Option<bool>,
     /// Optional constructor arguments for init() (matches EVM constructor-args
     /// behavior). Without these, the auto-init below always calls init() with
     /// zero arguments -- fine for a parameterless init(), but a guaranteed
@@ -5318,7 +5324,8 @@ async fn session_new_handler(
     {
         let mut map = state.sessions.lock().unwrap();
         if let Some(session) = map.get_mut(&id) {
-            let has_init = session.vm.list_functions().iter().any(|f| f == "init");
+            let has_init = req.auto_init != Some(false)
+                && session.vm.list_functions().iter().any(|f| f == "init");
             if has_init && init_args_decode_error.is_some() {
                 eprintln!("[SESSION] init_args decode failed for session {}: {}", id, init_args_decode_error.as_deref().unwrap_or(""));
                 init_called = Some(false);
