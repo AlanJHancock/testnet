@@ -33,6 +33,14 @@ fn attach_span(err: String, span: Span) -> String {
     }
 }
 
+/// True for the signed integer source types. IrType cannot tell these from the
+/// unsigned ones (u8/u16/u32 and i8/i16/i32 both become I32), so function
+/// parameters record this at build time for the function table.
+fn is_signed_int(t: &crate::ast::Type) -> bool {
+    use crate::ast::Type as T;
+    matches!(t, T::Int8 | T::Int16 | T::Int32 | T::Int64 | T::Int128 | T::Int256)
+}
+
 /// Builds SSA IR from the parsed AST.
 pub struct IrBuilder {
     /// State variable name → (type, memory address)
@@ -188,6 +196,7 @@ impl IrBuilder {
         let return_type = f.returns.as_ref().map(IrType::from_ast);
 
         let mut ir_fn = IrFunction::new(&f.name, params.clone(), return_type);
+        ir_fn.param_signed = f.params.iter().map(|p| is_signed_int(&p.ty)).collect();
         ir_fn.requires_caller = f.requires_caller;
         ir_fn.attributes = f.attributes.clone();
         ir_fn.requires_state = f.requires_state.clone();

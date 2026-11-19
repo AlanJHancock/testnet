@@ -136,7 +136,9 @@ impl IrLowerer {
                 &func.name,
                 entry,
                 &p_addrs,
-                &vec![false; p_addrs.len()],
+                &(0..p_addrs.len())
+                    .map(|i| func.param_signed.get(i).copied().unwrap_or(false))
+                    .collect::<Vec<bool>>(),
                 func.return_type.is_some(),
                 func.requires_caller,
                 &[],

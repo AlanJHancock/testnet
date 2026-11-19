@@ -14,6 +14,12 @@ pub struct IrFunction {
     pub name: String,
     /// Parameters: (name, type).
     pub params: Vec<(String, IrType)>,
+    /// Per-parameter signedness, parallel to `params`. IrType collapses
+    /// u8/u16/u32 and i8/i16/i32 into I32 (and u64/i64/i128 into I64), so the
+    /// source signedness is recorded here. Written into the function table so
+    /// the VM coerces each argument as signed or unsigned. Empty means "all
+    /// unsigned" (IR read back from an SQB, which predates this field).
+    pub param_signed: Vec<bool>,
     /// Return type (None for void).
     pub return_type: Option<IrType>,
     /// Basic blocks indexed by BlockId.
@@ -56,6 +62,7 @@ impl IrFunction {
         Self {
             name: name.to_string(),
             params,
+            param_signed: Vec::new(),
             return_type,
             blocks: vec![entry],
             entry: 0,

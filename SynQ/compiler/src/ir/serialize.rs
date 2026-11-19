@@ -979,6 +979,7 @@ impl<'a> Reader<'a> {
 
         Ok(IrFunction {
             name, params, return_type, blocks, entry,
+            param_signed: Vec::new(), // not stored in the SQB IR section: all unsigned, as before
             requires_caller, attributes, requires_state, modifies, is_public,
             next_block, next_value,
             collected_effects, host_profiles,
