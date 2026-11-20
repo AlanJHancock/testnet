@@ -571,7 +571,13 @@ fn json_to_aivm_value(v: &serde_json::Value) -> Result<aivm::host::Value, String
     match v {
         serde_json::Value::Bool(b) => Ok(Value::Bool(*b)),
         serde_json::Value::Number(n) => {
-            n.as_u64().map(Value::U64).ok_or_else(|| format!("unsupported number: {}", n))
+            // Non-negative integers stay U64 exactly as before. A negative
+            // integer is the round-trip of a signed (iN) state value written
+            // out by aivm_value_to_json as a plain JSON number, so read it
+            // back as I64 instead of rejecting it.
+            n.as_u64().map(Value::U64)
+                .or_else(|| n.as_i64().map(Value::I64))
+                .ok_or_else(|| format!("unsupported number: {}", n))
         }
         serde_json::Value::String(s) => {
             if let Some(hex_str) = s.strip_prefix("0x") {
@@ -1816,5 +1822,29 @@ mod estimate_gas_handler_tests {
         assert_eq!(status2, StatusCode::OK);
         assert!(body2.success, "{body2:?}");
         assert_eq!(body2.return_value, Some(serde_json::json!(false)), "expected JSON false, not 0: {body2:?}");
+    }
+
+    // A signed (iN) state value is written out by aivm_value_to_json as a plain
+    // JSON number, so it must read back in when the client chains `state`.
+    // Before the I64 fallback, `-42` failed with "unsupported number: -42" and
+    // every Dry Run call after TypeTestContract.init() broke.
+    #[test]
+    fn negative_json_number_reads_back_as_i64() {
+        use aivm::host::Value;
+        let v = json_to_aivm_value(&serde_json::json!(-42)).expect("negative must decode");
+        assert!(matches!(v, Value::I64(-42)), "got {v:?}");
+        // and it survives the full write -> read round trip
+        let back = json_to_aivm_value(&aivm_value_to_json(&Value::I64(-42))).unwrap();
+        assert!(matches!(back, Value::I64(-42)), "got {back:?}");
+    }
+
+    #[test]
+    fn non_negative_json_number_still_reads_as_u64() {
+        use aivm::host::Value;
+        // unchanged: existing unsigned contracts must keep decoding to U64
+        assert!(matches!(json_to_aivm_value(&serde_json::json!(42)).unwrap(), Value::U64(42)));
+        assert!(matches!(json_to_aivm_value(&serde_json::json!(0)).unwrap(), Value::U64(0)));
+        // a float is still rejected
+        assert!(json_to_aivm_value(&serde_json::json!(1.5)).is_err());
     }
 }
