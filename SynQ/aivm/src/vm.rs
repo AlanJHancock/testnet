@@ -440,6 +440,73 @@ impl Avm {
                     let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
                     stack.push(Value::from_u256_shrink(a >> b));
                 }
+                // Signed arithmetic/comparison (2026-11-20). The compiler emits
+                // these only when both operands are known signed ints (i8..i64),
+                // so u256 keeps AddU64..ModU64's strict underflow-reverts rule.
+                // Operands widen to i128 (exact), the result narrows to
+                // Value::I64 or ArithmeticOverflow. Gas matches the unsigned op.
+                Instruction::AddI => {
+                    gas.charge(gas_cost::ARITHMETIC)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    let r = a.checked_add(b).ok_or(AivmError::ArithmeticOverflow)?;
+                    stack.push(Value::from_i128_checked(r)?);
+                }
+                Instruction::SubI => {
+                    gas.charge(gas_cost::ARITHMETIC)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    let r = a.checked_sub(b).ok_or(AivmError::ArithmeticOverflow)?;
+                    stack.push(Value::from_i128_checked(r)?);
+                }
+                Instruction::MulI => {
+                    gas.charge(gas_cost::ARITHMETIC)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    let r = a.checked_mul(b).ok_or(AivmError::ArithmeticOverflow)?;
+                    stack.push(Value::from_i128_checked(r)?);
+                }
+                Instruction::DivI => {
+                    gas.charge(gas_cost::DIVISION)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    if b == 0 { return Err(AivmError::DivisionByZero); }
+                    // truncates toward zero, like the native vm's signed division
+                    let r = a.checked_div(b).ok_or(AivmError::ArithmeticOverflow)?;
+                    stack.push(Value::from_i128_checked(r)?);
+                }
+                Instruction::ModI => {
+                    gas.charge(gas_cost::DIVISION)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    if b == 0 { return Err(AivmError::DivisionByZero); }
+                    let r = a.checked_rem(b).ok_or(AivmError::ArithmeticOverflow)?;
+                    stack.push(Value::from_i128_checked(r)?);
+                }
+                Instruction::LtI => {
+                    gas.charge(gas_cost::COMPARISON)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    stack.push(Value::Bool(a < b));
+                }
+                Instruction::GtI => {
+                    gas.charge(gas_cost::COMPARISON)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    stack.push(Value::Bool(a > b));
+                }
+                Instruction::LeI => {
+                    gas.charge(gas_cost::COMPARISON)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    stack.push(Value::Bool(a <= b));
+                }
+                Instruction::GeI => {
+                    gas.charge(gas_cost::COMPARISON)?;
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_i128()?;
+                    stack.push(Value::Bool(a >= b));
+                }
                 Instruction::Eq => {
                     gas.charge(gas_cost::COMPARISON)?;
                     let b = stack.pop().ok_or(AivmError::StackUnderflow)?;

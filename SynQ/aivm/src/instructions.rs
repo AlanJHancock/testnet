@@ -40,12 +40,30 @@ pub enum Opcode {
     /// Logical right shift, full 256-bit width. Same operand order and
     /// saturation behavior as Shl.
     Shr = 0x29,
+    /// Signed arithmetic (i8..i128, 2026-11-20). Pops [b, a] (b on top), both
+    /// must be numeric; computes in i128 and pushes Value::I64 (errors with
+    /// ArithmeticOverflow if the result does not fit i64). The compiler emits
+    /// these only when it knows both operands are signed ints, so unsigned
+    /// (u256 etc.) arithmetic keeps its strict AddU64..ModU64 semantics
+    /// (underflow still reverts). Gas is the same as the unsigned op.
+    AddI = 0x2A,
+    SubI = 0x2B,
+    MulI = 0x2C,
+    DivI = 0x2D,
+    ModI = 0x2E,
     Eq = 0x30,
     Lt = 0x31,
     Gt = 0x32,
     Ne = 0x33,
     Le = 0x34,
     Ge = 0x35,
+    /// Signed comparisons (2026-11-20). Same operand order as Lt/Gt/Le/Ge but
+    /// numeric values are compared as i128, so -1 < 0. Eq/Ne need no signed
+    /// form (equal numbers are equal either way).
+    LtI = 0x36,
+    GtI = 0x37,
+    LeI = 0x38,
+    GeI = 0x39,
     Jmp = 0x40,
     JmpIf = 0x41,
     Call = 0x50,
@@ -172,12 +190,21 @@ impl Opcode {
             0x27 => Some(Opcode::BitXor),
             0x28 => Some(Opcode::Shl),
             0x29 => Some(Opcode::Shr),
+            0x2a => Some(Opcode::AddI),
+            0x2b => Some(Opcode::SubI),
+            0x2c => Some(Opcode::MulI),
+            0x2d => Some(Opcode::DivI),
+            0x2e => Some(Opcode::ModI),
             0x30 => Some(Opcode::Eq),
             0x31 => Some(Opcode::Lt),
             0x32 => Some(Opcode::Gt),
             0x33 => Some(Opcode::Ne),
             0x34 => Some(Opcode::Le),
             0x35 => Some(Opcode::Ge),
+            0x36 => Some(Opcode::LtI),
+            0x37 => Some(Opcode::GtI),
+            0x38 => Some(Opcode::LeI),
+            0x39 => Some(Opcode::GeI),
             0x40 => Some(Opcode::Jmp),
             0x41 => Some(Opcode::JmpIf),
             0x50 => Some(Opcode::Call),
@@ -211,6 +238,8 @@ impl Opcode {
             Opcode::StoreLocal => 2,
             Opcode::AddU64 | Opcode::SubU64 | Opcode::MulU64 | Opcode::DivU64 | Opcode::ModU64 => 0,
             Opcode::BitAnd | Opcode::BitOr | Opcode::BitXor | Opcode::Shl | Opcode::Shr => 0,
+            Opcode::AddI | Opcode::SubI | Opcode::MulI | Opcode::DivI | Opcode::ModI => 0,
+            Opcode::LtI | Opcode::GtI | Opcode::LeI | Opcode::GeI => 0,
             Opcode::Eq | Opcode::Lt | Opcode::Gt | Opcode::Ne | Opcode::Le | Opcode::Ge => 0,
             Opcode::Jmp | Opcode::JmpIf => 4,
             Opcode::Call => 4,
@@ -263,12 +292,22 @@ pub enum Instruction {
     Shl,
     /// See Opcode::Shr doc.
     Shr,
+    /// Signed arithmetic and comparison. See Opcode::AddI doc.
+    AddI,
+    SubI,
+    MulI,
+    DivI,
+    ModI,
     Eq,
     Lt,
     Gt,
     Ne,
     Le,
     Ge,
+    LtI,
+    GtI,
+    LeI,
+    GeI,
     Jmp(u32),
     JmpIf(u32),
     Call(u32),
@@ -351,12 +390,21 @@ impl Instruction {
             Instruction::BitXor => buf.push(Opcode::BitXor as u8),
             Instruction::Shl => buf.push(Opcode::Shl as u8),
             Instruction::Shr => buf.push(Opcode::Shr as u8),
+            Instruction::AddI => buf.push(Opcode::AddI as u8),
+            Instruction::SubI => buf.push(Opcode::SubI as u8),
+            Instruction::MulI => buf.push(Opcode::MulI as u8),
+            Instruction::DivI => buf.push(Opcode::DivI as u8),
+            Instruction::ModI => buf.push(Opcode::ModI as u8),
             Instruction::Eq => buf.push(Opcode::Eq as u8),
             Instruction::Lt => buf.push(Opcode::Lt as u8),
             Instruction::Gt => buf.push(Opcode::Gt as u8),
             Instruction::Ne => buf.push(Opcode::Ne as u8),
             Instruction::Le => buf.push(Opcode::Le as u8),
             Instruction::Ge => buf.push(Opcode::Ge as u8),
+            Instruction::LtI => buf.push(Opcode::LtI as u8),
+            Instruction::GtI => buf.push(Opcode::GtI as u8),
+            Instruction::LeI => buf.push(Opcode::LeI as u8),
+            Instruction::GeI => buf.push(Opcode::GeI as u8),
             Instruction::Jmp(target) => {
                 buf.push(Opcode::Jmp as u8);
                 buf.extend_from_slice(&target.to_be_bytes());
@@ -513,12 +561,21 @@ impl Instruction {
                 Opcode::BitXor => instructions.push(Instruction::BitXor),
                 Opcode::Shl => instructions.push(Instruction::Shl),
                 Opcode::Shr => instructions.push(Instruction::Shr),
+                Opcode::AddI => instructions.push(Instruction::AddI),
+                Opcode::SubI => instructions.push(Instruction::SubI),
+                Opcode::MulI => instructions.push(Instruction::MulI),
+                Opcode::DivI => instructions.push(Instruction::DivI),
+                Opcode::ModI => instructions.push(Instruction::ModI),
                 Opcode::Eq => instructions.push(Instruction::Eq),
                 Opcode::Lt => instructions.push(Instruction::Lt),
                 Opcode::Gt => instructions.push(Instruction::Gt),
                 Opcode::Ne => instructions.push(Instruction::Ne),
                 Opcode::Le => instructions.push(Instruction::Le),
                 Opcode::Ge => instructions.push(Instruction::Ge),
+                Opcode::LtI => instructions.push(Instruction::LtI),
+                Opcode::GtI => instructions.push(Instruction::GtI),
+                Opcode::LeI => instructions.push(Instruction::LeI),
+                Opcode::GeI => instructions.push(Instruction::GeI),
                 Opcode::Jmp => {
                     let target = read_u32(bytes, &mut offset)?;
                     instructions.push(Instruction::Jmp(target));

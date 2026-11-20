@@ -370,6 +370,37 @@ impl Value {
         }
     }
 
+    /// Signed view of any numeric value as an i128 (2026-11-20, signed
+    /// arithmetic). Mirrors the native vm crate's `as_i128`: signed and
+    /// unsigned values within range both widen, anything that does not fit
+    /// in i128 is a TypeMismatch. Used only by the AddI..GeI opcodes, which
+    /// the compiler emits when it knows both operands are signed ints;
+    /// the unsigned opcodes still go through `as_u256`, so u256 underflow
+    /// still reverts.
+    pub fn as_i128(&self) -> Result<i128, AivmError> {
+        match self {
+            Value::I64(v) => Ok(*v as i128),
+            Value::U64(v) => Ok(*v as i128),
+            Value::U128(v) if *v <= i128::MAX as u128 => Ok(*v as i128),
+            Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
+            Value::U256(v) => {
+                let max = U256::from(i128::MAX as u128);
+                if *v <= max { Ok(v.wrapping_to::<u128>() as i128) }
+                else { Err(AivmError::TypeMismatch { expected: "i128", got: "u256_out_of_range" }) }
+            }
+            other => Err(AivmError::TypeMismatch { expected: "i128", got: other.type_name() }),
+        }
+    }
+
+    /// Narrow an i128 result to the smallest signed carrier: Value::I64 when
+    /// it fits (it always does for i8..i64), else ArithmeticOverflow. SynQ's
+    /// i128/i256 do not fit a Value::I64 and report an overflow instead of
+    /// wrapping silently.
+    pub fn from_i128_checked(v: i128) -> Result<Value, AivmError> {
+        i64::try_from(v).map(Value::I64).map_err(|_| AivmError::ArithmeticOverflow)
+    }
+
+
     /// Narrow a computed U256 result back down to the smallest Value
     /// variant that still holds it exactly -- U64 for anything fitting in
     /// 64 bits, U128 for anything fitting in 128, U256 only when it

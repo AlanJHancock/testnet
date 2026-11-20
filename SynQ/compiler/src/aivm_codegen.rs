@@ -171,6 +171,11 @@ pub fn compile_to_aivm(contract: &ContractDefinition, structs: &[StructDefinitio
             event_name_map: &event_name_map,
             loop_stack: Vec::new(),
             next_scratch: 0,
+            signed_ctx: false,
+            ret_signed: match fbody {
+                FuncBody::Function(f) => f.returns.as_ref().map_or(false, CodegenContext::type_is_signed),
+                FuncBody::Constructor(_) => false,
+            },
         };
 
         // Map params to local slots (+ types, for struct field resolution)
@@ -291,9 +296,28 @@ struct CodegenContext<'a> {
     /// callsite gets its own disjoint set of local slots even within the
     /// same function (e.g. two separate nested-map writes in one body).
     next_scratch: u32,
+    /// True while generating an expression whose TARGET is a signed int (a
+    /// signed state var, an iN `let`, or a return in an iN function). The
+    /// parser desugars `-x` into `0 - x`, so `-42` is two bare literals with no
+    /// type of their own; the target is the only thing that says it is signed.
+    signed_ctx: bool,
+    /// True when the function being generated returns a signed int.
+    ret_signed: bool,
 }
 
 impl<'a> CodegenContext<'a> {
+    /// Run `f` with `signed_ctx` set to `signed`, restoring it afterwards.
+    fn with_signed_ctx<R>(&mut self, signed: bool, f: impl FnOnce(&mut Self) -> R) -> R {
+        let prev = self.signed_ctx;
+        self.signed_ctx = signed;
+        let r = f(self);
+        self.signed_ctx = prev;
+        r
+    }
+    fn type_is_signed(t: &Type) -> bool {
+        matches!(t, Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128 | Type::Int256)
+    }
+
     fn state_index(&self, name: &str) -> Option<u16> {
         self.state_var_map.iter()
             .find(|(n, _)| n == name)
@@ -363,6 +387,64 @@ impl<'a> CodegenContext<'a> {
             Expression::Call(name, _) => self.func_return_types.get(name).cloned(),
             Expression::TupleIndex { object, .. } => self.infer_type(object),
             _ => None,
+        }
+    }
+
+    /// True only when `expr` is PROVABLY a signed integer (i8..i256), from
+    /// declared types. Anything not provable is treated as unsigned, so a
+    /// contract with no signed values compiles exactly as before.
+    ///
+    /// The rule mirrors the native vm (where I32 is signed and a literal
+    /// adopts the type of the value it is combined with): an arithmetic
+    /// expression is signed when EITHER operand is, and a bare literal is
+    /// never signed on its own. Comparisons yield bool, never signed.
+    fn expr_is_signed(&self, expr: &Expression) -> bool {
+        fn signed_ty(t: &Type) -> bool {
+            matches!(t, Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 | Type::Int128 | Type::Int256)
+        }
+        match expr {
+            Expression::Identifier(name) => self.local_types.get(name)
+                .or_else(|| self.state_var_types.get(name))
+                .map_or(false, signed_ty),
+            Expression::FieldAccess { .. } | Expression::TupleIndex { .. } => {
+                self.infer_type(expr).map_or(false, |t| signed_ty(&t))
+            }
+            Expression::Call(name, _) => self.func_return_types.get(name).map_or(false, signed_ty),
+            Expression::MapIndex(map, _) => {
+                match self.state_var_types.get(map).or_else(|| self.local_types.get(map)) {
+                    Some(Type::Mapping(_, v)) => signed_ty(v),
+                    _ => false,
+                }
+            }
+            Expression::UnaryOp(UnaryOperator::Neg, inner) => {
+                // `-x` of a signed value is signed. A negated bare literal is
+                // also signed: only a signed type can hold a negative result.
+                self.expr_is_signed(inner) || matches!(**inner, Expression::Literal(Literal::Number(_)))
+            }
+            Expression::BinaryOp(l, op, r) => match op {
+                BinaryOperator::Add | BinaryOperator::Sub | BinaryOperator::Mul
+                | BinaryOperator::Div | BinaryOperator::Mod => {
+                    self.expr_is_signed(l) || self.expr_is_signed(r)
+                        // `0 - 42` (how the parser writes `-42`): two bare
+                        // literals carry no type, so take it from the target.
+                        || (self.signed_ctx && Self::is_literal_tree(expr))
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// True for an expression made only of numeric literals and + - * / %.
+    fn is_literal_tree(expr: &Expression) -> bool {
+        match expr {
+            Expression::Literal(Literal::Number(_)) => true,
+            Expression::BinaryOp(l, op, r) => {
+                matches!(op, BinaryOperator::Add | BinaryOperator::Sub | BinaryOperator::Mul
+                    | BinaryOperator::Div | BinaryOperator::Mod)
+                    && Self::is_literal_tree(l) && Self::is_literal_tree(r)
+            }
+            _ => false,
         }
     }
 
@@ -467,12 +549,15 @@ impl<'a> CodegenContext<'a> {
                 self.emit(Instruction::TrapMsg(0, format!("{}::{}", enum_name, error)));
             }
             Statement::Assignment(name, expr) => {
+                let target_signed = self.state_var_types.get(name)
+                    .or_else(|| self.local_types.get(name))
+                    .map_or(false, Self::type_is_signed);
                 if let Some(idx) = self.state_index(name) {
-                    self.gen_expr(expr)?;
+                    self.with_signed_ctx(target_signed, |c| c.gen_expr(expr))?;
                     self.emit(Instruction::StoreState(idx));
                 } else {
                     let local_idx = self.local_index(name);
-                    self.gen_expr(expr)?;
+                    self.with_signed_ctx(target_signed, |c| c.gen_expr(expr))?;
                     self.emit(Instruction::StoreLocal(local_idx));
                 }
             }
@@ -621,7 +706,8 @@ impl<'a> CodegenContext<'a> {
                 if let Some(t) = inferred {
                     self.local_types.insert(name.clone(), t);
                 }
-                self.gen_expr(value)?;
+                let target_signed = self.local_types.get(name).map_or(false, Self::type_is_signed);
+                self.with_signed_ctx(target_signed, |c| c.gen_expr(value))?;
                 self.emit(Instruction::StoreLocal(local_idx));
             }
             Statement::LetDestructure { names, value } => {
@@ -633,7 +719,8 @@ impl<'a> CodegenContext<'a> {
             }
             Statement::Return(expr) => {
                 if let Some(e) = expr {
-                    self.gen_expr(e)?;
+                    let ret_signed = self.ret_signed;
+                    self.with_signed_ctx(ret_signed, |c| c.gen_expr(e))?;
                 }
                 self.emit(Instruction::Ret);
             }
@@ -839,7 +926,26 @@ impl<'a> CodegenContext<'a> {
                 self.gen_expr(lhs)?;
                 self.gen_expr(rhs)?;
 
+                // Signed form only when an operand is provably a signed int
+                // (see expr_is_signed); everything else is byte-identical to
+                // before, so u256 keeps its strict underflow-reverts rule.
+                let signed = self.expr_is_signed(lhs) || self.expr_is_signed(rhs)
+                    // two bare literals (how `-42` is written, as `0 - 42`) take
+                    // their signedness from the assignment/return target
+                    || (self.signed_ctx
+                        && Self::is_literal_tree(lhs)
+                        && Self::is_literal_tree(rhs));
+
                 match op {
+                    BinaryOperator::Add if signed => self.emit(Instruction::AddI),
+                    BinaryOperator::Sub if signed => self.emit(Instruction::SubI),
+                    BinaryOperator::Mul if signed => self.emit(Instruction::MulI),
+                    BinaryOperator::Div if signed => self.emit(Instruction::DivI),
+                    BinaryOperator::Mod if signed => self.emit(Instruction::ModI),
+                    BinaryOperator::Lt if signed => self.emit(Instruction::LtI),
+                    BinaryOperator::Le if signed => self.emit(Instruction::LeI),
+                    BinaryOperator::Gt if signed => self.emit(Instruction::GtI),
+                    BinaryOperator::Ge if signed => self.emit(Instruction::GeI),
                     BinaryOperator::Add => self.emit(Instruction::AddU64),
                     BinaryOperator::Sub => self.emit(Instruction::SubU64),
                     BinaryOperator::Mul => self.emit(Instruction::MulU64),
@@ -869,9 +975,15 @@ impl<'a> CodegenContext<'a> {
             Expression::UnaryOp(op, expr) => {
                 match op {
                     UnaryOperator::Neg => {
+                        // 0 - x. Signed when x is a signed int or a bare literal
+                        // (a negated literal can only be a signed value); an
+                        // unsigned operand keeps SubU64, so `0 - x` on a u256
+                        // still reverts as an underflow.
+                        let signed = self.expr_is_signed(expr)
+                            || matches!(**expr, Expression::Literal(Literal::Number(_)));
                         self.emit(Instruction::PushU64(0));
                         self.gen_expr(expr)?;
-                        self.emit(Instruction::SubU64);
+                        self.emit(if signed { Instruction::SubI } else { Instruction::SubU64 });
                     }
                     UnaryOperator::Not => {
                         self.emit(Instruction::PushU64(1));
