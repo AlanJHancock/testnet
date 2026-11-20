@@ -28,6 +28,20 @@ contract S {
     @public
     function getI() -> i32 { return i; }
     @public
+    function neq(a: i32, b: i32) -> bool { return a != b; }
+    @public
+    function eq(a: i32, b: i32) -> bool { return a == b; }
+    @public
+    function roundTrip(x: i32, y: i32) -> i32 {
+      let s = x + y;
+      let d = x - y;
+      let p = x * y;
+      if (s - y != x) { return 1; }
+      if (d + y != x) { return 2; }
+      if (x != 0) { if (p / x != y) { return 3; } }
+      return 0;
+    }
+    @public
     function sub(a: i32, b: i32) -> i32 { return a - b; }
     @public
     function add(a: i32, b: i32) -> i32 { return a + b; }
@@ -165,4 +179,41 @@ fn unsigned_state_target_rejects_a_negative_literal() {
 fn return_type_decides_signedness_of_a_literal_expression() {
     assert_eq!(call("retNegLit", vec![]).unwrap(), i(-7));
     assert!(call("retUNegLit", vec![]).is_err(), "returning 0 - 7 as u256 must still fail");
+}
+
+// `!=` used to convert both sides to u256, so any negative operand failed with
+// TypeMismatch { expected: "u256", got: "i64_negative" } (TypeTestContract's
+// testSigned(-7, -3) and testSigned(-5, 2) scenario steps).
+#[test]
+fn not_equal_works_on_negative_values() {
+    assert_eq!(call("neq", vec![i(-7), i(0)]), Ok(Value::Bool(true)));
+    assert_eq!(call("neq", vec![i(-7), i(-3)]), Ok(Value::Bool(true)));
+    assert_eq!(call("neq", vec![i(-3), i(-3)]), Ok(Value::Bool(false)));
+    assert_eq!(call("neq", vec![i(-1), i(1)]), Ok(Value::Bool(true)));
+}
+
+#[test]
+fn not_equal_unchanged_for_non_negative_values() {
+    assert_eq!(call("neq", vec![i(5), i(5)]), Ok(Value::Bool(false)));
+    assert_eq!(call("neq", vec![i(5), i(6)]), Ok(Value::Bool(true)));
+    assert_eq!(call("neq", vec![Value::U64(5), i(5)]), Ok(Value::Bool(false)));
+    assert_eq!(call("neq", vec![i(0), i(0)]), Ok(Value::Bool(false)));
+}
+
+#[test]
+fn equal_and_not_equal_agree_on_negatives() {
+    for (a, b) in [(-7, -7), (-7, -3), (-1, 1), (0, -1), (-42, -42)] {
+        let e = call("eq", vec![i(a), i(b)]).unwrap();
+        let n = call("neq", vec![i(a), i(b)]).unwrap();
+        assert_ne!(e, n, "eq and neq must disagree for ({a}, {b})");
+    }
+}
+
+// The exact identity checks TypeTestContract.testSigned runs, on the exact
+// argument pairs the scenarios use. 0 means every identity holds.
+#[test]
+fn signed_identities_hold_for_scenario_arguments() {
+    for (x, y) in [(-7, -3), (-5, 2), (7, 3), (3, -9), (-100, 3), (0, -4), (-8, 0)] {
+        assert_eq!(call("roundTrip", vec![i(x), i(y)]), Ok(Value::U64(0)), "roundTrip({x},{y})");
+    }
 }

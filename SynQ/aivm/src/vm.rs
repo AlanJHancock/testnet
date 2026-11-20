@@ -557,9 +557,18 @@ impl Avm {
                 }
                 Instruction::Ne => {
                     gas.charge(gas_cost::COMPARISON)?;
-                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
-                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?.as_u256()?;
-                    stack.push(Value::Bool(a != b));
+                    let b = stack.pop().ok_or(AivmError::StackUnderflow)?;
+                    let a = stack.pop().ok_or(AivmError::StackUnderflow)?;
+                    // Mirrors Eq: numeric compare when both widen to u256,
+                    // otherwise structural. A negative (signed) operand does
+                    // not widen, so it used to fail with
+                    // TypeMismatch { expected: "u256", got: "i64_negative" }
+                    // on `x != 0` / `s - y != x` for any signed value < 0.
+                    let result = match (a.as_u256(), b.as_u256()) {
+                        (Ok(av), Ok(bv)) => av != bv,
+                        _ => a != b,
+                    };
+                    stack.push(Value::Bool(result));
                 }
                 Instruction::Le => {
                     gas.charge(gas_cost::COMPARISON)?;
