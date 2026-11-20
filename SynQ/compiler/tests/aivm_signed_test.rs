@@ -28,6 +28,14 @@ contract S {
     @public
     function getI() -> i32 { return i; }
     @public
+    function cat(a: str, b: str) -> str { return a + b; }
+    @public
+    function cat3(a: str, b: str, c: str) -> str { return a + b + c; }
+    @public
+    function catLit(a: str) -> str { return a + "!"; }
+    @public
+    function catLen(a: str, b: str) -> u256 { let c = a + b; return str_len(c); }
+    @public
     function neq(a: i32, b: i32) -> bool { return a != b; }
     @public
     function eq(a: i32, b: i32) -> bool { return a == b; }
@@ -216,4 +224,44 @@ fn signed_identities_hold_for_scenario_arguments() {
     for (x, y) in [(-7, -3), (-5, 2), (7, 3), (3, -9), (-100, 3), (0, -4), (-8, 0)] {
         assert_eq!(call("roundTrip", vec![i(x), i(y)]), Ok(Value::U64(0)), "roundTrip({x},{y})");
     }
+}
+
+// String `+` used to compile to a numeric add, which the VM rejects with
+// TypeMismatch { expected: "u256", got: "string" } (TypeTestContract.testString).
+// It now compiles to the existing string.concat host function.
+fn s(v: &str) -> Value { Value::String(v.to_string()) }
+
+#[test]
+fn string_plus_concatenates() {
+    assert_eq!(call("cat", vec![s("foo"), s("bar")]), Ok(s("foobar")));
+    assert_eq!(call("cat", vec![s(""), s("x")]), Ok(s("x")));
+    assert_eq!(call("cat", vec![s("x"), s("")]), Ok(s("x")));
+}
+
+#[test]
+fn string_plus_keeps_operand_order_and_chains() {
+    assert_eq!(call("cat", vec![s("ab"), s("cd")]), Ok(s("abcd")));
+    assert_eq!(call("cat3", vec![s("a"), s("b"), s("c")]), Ok(s("abc")));
+    assert_eq!(call("catLit", vec![s("hi")]), Ok(s("hi!")));
+}
+
+#[test]
+fn string_plus_result_works_with_str_len() {
+    assert_eq!(call("catLen", vec![s("foo"), s("bar")]), Ok(Value::U64(6)));
+}
+
+#[test]
+fn string_plus_handles_multibyte_text() {
+    assert_eq!(call("cat", vec![s("caf\u{e9}"), s("\u{2713}")]), Ok(s("caf\u{e9}\u{2713}")));
+}
+
+#[test]
+fn numeric_plus_is_unchanged_by_string_support() {
+    // No string anywhere: must still be the plain numeric add, never a host call.
+    let src = "contract N { state { t: u256; } impl { @public function f(a: u256, b: u256) -> u256 { return a + b; } } }";
+    let SourceUnit::Contract(c) = parse(src).unwrap().into_iter().next().unwrap() else { panic!() };
+    let out = compile_to_aivm(&c, &[]).unwrap();
+    assert!(!out.instructions.iter().any(|x| matches!(x, Instruction::HostCall(10))),
+        "a numeric + must not emit string.concat");
+    assert!(out.instructions.iter().any(|x| matches!(x, Instruction::AddU64)));
 }

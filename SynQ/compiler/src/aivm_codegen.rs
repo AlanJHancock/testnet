@@ -435,6 +435,43 @@ impl<'a> CodegenContext<'a> {
         }
     }
 
+    /// True when `expr` is provably a string (`str`). Used so `a + b` on two
+    /// strings compiles to the existing `string.concat` host function instead
+    /// of a numeric add, which the VM rejects with
+    /// `TypeMismatch { expected: "u256", got: "string" }`.
+    ///
+    /// Deliberately narrow, like `expr_is_signed`: only things whose type is
+    /// known (literals, typed names, str-returning calls, and `+` of those).
+    /// Anything unknown is not a string, so numeric contracts compile exactly
+    /// as before.
+    fn expr_is_string(&self, expr: &Expression) -> bool {
+        match expr {
+            Expression::Literal(Literal::String(_)) => true,
+            Expression::Identifier(name) => matches!(
+                self.local_types.get(name).or_else(|| self.state_var_types.get(name)),
+                Some(Type::Str)
+            ),
+            Expression::FieldAccess { .. } | Expression::TupleIndex { .. } => {
+                matches!(self.infer_type(expr), Some(Type::Str))
+            }
+            Expression::Call(name, _) => {
+                name == "str_concat" || matches!(self.func_return_types.get(name), Some(Type::Str))
+            }
+            Expression::MapIndex(map, _) => {
+                match self.state_var_types.get(map).or_else(|| self.local_types.get(map)) {
+                    Some(Type::Mapping(_, v)) => matches!(**v, Type::Str),
+                    _ => false,
+                }
+            }
+            // `a + b` is a string when either side is one (a str can't be
+            // added numerically, so there is no other valid reading).
+            Expression::BinaryOp(l, BinaryOperator::Add, r) => {
+                self.expr_is_string(l) || self.expr_is_string(r)
+            }
+            _ => false,
+        }
+    }
+
     /// True for an expression made only of numeric literals and + - * / %.
     fn is_literal_tree(expr: &Expression) -> bool {
         match expr {
@@ -935,6 +972,16 @@ impl<'a> CodegenContext<'a> {
                     || (self.signed_ctx
                         && Self::is_literal_tree(lhs)
                         && Self::is_literal_tree(rhs));
+
+                // String concatenation: `a + b` where an operand is a str uses
+                // the existing string.concat host function (id 10), which pops
+                // b then a, matching the order they were just pushed.
+                if matches!(op, BinaryOperator::Add)
+                    && (self.expr_is_string(lhs) || self.expr_is_string(rhs))
+                {
+                    self.emit(Instruction::HostCall(10)); // string.concat
+                    return Ok(());
+                }
 
                 match op {
                     BinaryOperator::Add if signed => self.emit(Instruction::AddI),
