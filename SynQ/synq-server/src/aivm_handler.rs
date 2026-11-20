@@ -1230,6 +1230,58 @@ This is an execution-cost estimate, not a gas price — Synergy testnet has no g
                 errors: vec![],
             }))
         }
+        // Contract-level arithmetic aborts (u256 underflow/overflow, divide by
+        // zero) end the call exactly like a failed require(): the transaction
+        // is rolled back and reported as a revert, not as an engine fault.
+        // Before this they came back as success:false with no status, so a
+        // scenario step saying `expectStatus: "reverted"` for `subU(1, 2)`
+        // could never match. Every OTHER error (bad bytecode, gas, type
+        // mismatch, host failures) is still reported as an execution error.
+        Err(e @ (aivm::AivmError::ArithmeticUnderflow
+            | aivm::AivmError::ArithmeticOverflow
+            | aivm::AivmError::DivisionByZero)) => {
+            // The overlay only merges staged writes on success, so what it
+            // holds here is the seeded state: the rolled-back state.
+            let final_state: std::collections::HashMap<String, serde_json::Value> = overlay
+                .committed_snapshot()
+                .iter()
+                .map(|(slot, val)| (slot.to_string(), aivm_value_to_json(val)))
+                .collect();
+            let (asset_records, next_asset_id) = asset_ledger.snapshot();
+            let final_assets: Vec<AssetRecordWire> = asset_records
+                .iter()
+                .map(|(id, rec)| AssetRecordWire {
+                    id: *id,
+                    owner: format!("0x{}", hex::encode(rec.owner)),
+                    value: rec.value,
+                    type_tag: rec.type_tag.clone(),
+                    active: rec.active,
+                })
+                .collect();
+            (StatusCode::OK, RespJson(EstimateGasResponse {
+                success: true,
+                function: Some(req.function.clone()),
+                caller: Some(format!("0x{}", hex::encode(caller))),
+                status: Some("reverted".to_string()),
+                // The engine returns an error rather than a receipt here, so
+                // there is no measured gas. None, not an invented figure.
+                gas_used: None,
+                pq_gas_used: None,
+                gas_limit: Some(ctx.gas_limit),
+                pq_gas_limit: Some(ctx.pq_gas_limit),
+                return_value: None,
+                events: vec![],
+                state_discarded: true,
+                final_state,
+                final_assets,
+                next_asset_id,
+                contract_final_states: std::collections::HashMap::new(),
+                canonical: None,
+                revert_reason: Some(format!("{}", e)),
+                note: note.clone(),
+                errors: vec![],
+            }))
+        }
         Err(e) => err_resp(vec![format!("execution error: {}", e)]),
     }
 }
@@ -1309,6 +1361,74 @@ mod estimate_gas_handler_tests {
         assert!(body.gas_used.unwrap() > 0);
         assert_eq!(body.pq_gas_used.unwrap(), ADMISSION_PQ_GAS_USED);
         assert!(body.state_discarded);
+    }
+
+    // Contract-level arithmetic aborts are reported as reverts (like a failed
+    // require), not as engine errors. See the Err arm in estimate_gas_handler.
+    const ARITH_SRC: &str = r#"
+contract A {
+  state { total: u256; }
+  impl {
+    @public
+    function bump() -> u256 { total = total + 1; return total; }
+    @public
+    function under(a: u256, b: u256) -> u256 { total = 99; return a - b; }
+    @public
+    function divz(a: u256, b: u256) -> u256 { return a / b; }
+    @public
+    function modz(a: u256, b: u256) -> u256 { return a % b; }
+  }
+}
+"#;
+
+    async fn run_arith(function: &str, args: Vec<serde_json::Value>, seed: HashMap<String, serde_json::Value>) -> EstimateGasResponse {
+        let mut r = req(ARITH_SRC, function);
+        r.args = args;
+        r.state = seed;
+        let (status, RespJson(body)) = estimate_gas_handler(ConnectInfo(test_addr()), State(test_state()), Json(r)).await;
+        assert_eq!(status, StatusCode::OK);
+        body
+    }
+
+    #[tokio::test]
+    async fn arithmetic_underflow_is_reported_as_a_revert() {
+        let b = run_arith("under", vec![serde_json::json!(1), serde_json::json!(2)], HashMap::new()).await;
+        assert!(b.success, "a revert is a successful dry run: {b:?}");
+        assert_eq!(b.status.as_deref(), Some("reverted"));
+        assert!(b.revert_reason.as_deref().unwrap_or("").contains("ArithmeticUnderflow"), "{b:?}");
+        assert!(b.errors.is_empty());
+        assert!(b.state_discarded);
+        assert_eq!(b.gas_used, None, "no receipt exists, so no gas figure is invented");
+    }
+
+    #[tokio::test]
+    async fn division_and_modulo_by_zero_are_reported_as_reverts() {
+        for f in ["divz", "modz"] {
+            let b = run_arith(f, vec![serde_json::json!(5), serde_json::json!(0)], HashMap::new()).await;
+            assert!(b.success, "{f}: {b:?}");
+            assert_eq!(b.status.as_deref(), Some("reverted"), "{f}: {b:?}");
+            assert!(b.revert_reason.is_some(), "{f}: {b:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn aborted_arithmetic_rolls_back_so_final_state_is_the_seed() {
+        // `under` writes total = 99 BEFORE it underflows; the revert must undo
+        // that, so a client chaining final_state sees the seeded value.
+        let mut seed = HashMap::new();
+        seed.insert("0".to_string(), serde_json::json!(7));
+        let b = run_arith("under", vec![serde_json::json!(1), serde_json::json!(2)], seed).await;
+        assert_eq!(b.status.as_deref(), Some("reverted"));
+        assert_eq!(b.final_state.get("0"), Some(&serde_json::json!(7)), "state must be rolled back: {b:?}");
+    }
+
+    #[tokio::test]
+    async fn successful_arithmetic_is_unchanged() {
+        let b = run_arith("under", vec![serde_json::json!(5), serde_json::json!(2)], HashMap::new()).await;
+        assert!(b.success);
+        assert_eq!(b.status.as_deref(), Some("success"));
+        assert!(b.gas_used.is_some());
+        assert_eq!(b.return_value, Some(serde_json::json!(3)));
     }
 
     #[tokio::test]
